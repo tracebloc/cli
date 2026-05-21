@@ -71,9 +71,15 @@ jobs:
       # were errcheck-catchable; gofmt -s drift was a recurring
       # nit). Going back to the action when #6 has a strategy.
 
+      # Tool versions are unpinned (@latest) because older tagged
+      # releases pulled stale golang.org/x/tools that fail to build
+      # against current Go ("invalid array length -delta * delta").
+      # Pinning is preferable for reproducibility but waiting on the
+      # upstream tools to ship newer tags. Track in #6.
+
       - name: errcheck
         run: |
-          go install github.com/kisielk/errcheck@v1.7.0
+          go install github.com/kisielk/errcheck@latest
           errcheck ./...
 
       - name: gofmt -s
@@ -88,12 +94,12 @@ jobs:
 
       - name: ineffassign
         run: |
-          go install github.com/gordonklaus/ineffassign@v0.1.0
+          go install github.com/gordonklaus/ineffassign@latest
           ineffassign ./...
 
       - name: misspell
         run: |
-          go install github.com/client9/misspell/cmd/misspell@v0.3.4
+          go install github.com/client9/misspell/cmd/misspell@latest
           misspell -error .
 
   build:
