@@ -127,11 +127,16 @@ func runClusterInfo(
 		return &exitError{code: 3, err: err}
 	}
 
-	fmt.Fprintf(out, "Kubeconfig:\n")
-	fmt.Fprintf(out, "  context:     %s\n", resolved.Context)
-	fmt.Fprintf(out, "  server:      %s\n", resolved.ServerURL)
-	fmt.Fprintf(out, "  namespace:   %s\n", resolved.Namespace)
-	fmt.Fprintln(out)
+	// Explicit-discard the writer errors: same rationale as
+	// internal/cli/ingest.go — the exit code is the contract, and a
+	// pipe-write failure shouldn't convert success into failure. If
+	// the downstream consumer disappears mid-write we still finish
+	// cleanly. errcheck wants this acknowledged.
+	_, _ = fmt.Fprintf(out, "Kubeconfig:\n")
+	_, _ = fmt.Fprintf(out, "  context:     %s\n", resolved.Context)
+	_, _ = fmt.Fprintf(out, "  server:      %s\n", resolved.ServerURL)
+	_, _ = fmt.Fprintf(out, "  namespace:   %s\n", resolved.Namespace)
+	_, _ = fmt.Fprintln(out)
 
 	// Discover the parent release.
 	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
@@ -143,18 +148,18 @@ func runClusterInfo(
 		return &exitError{code: 4, err: err}
 	}
 
-	fmt.Fprintf(out, "Parent release:\n")
-	fmt.Fprintf(out, "  name:          %s\n", release.ReleaseName)
-	fmt.Fprintf(out, "  chart version: %s\n", release.ChartVersion)
-	fmt.Fprintf(out, "  app version:   %s\n", release.AppVersion)
-	fmt.Fprintf(out, "  jobs-manager:  %s\n", release.JobsManagerService)
-	fmt.Fprintf(out, "  ingestor SA:   %s/%s\n", resolved.Namespace, release.IngestorSAName)
+	_, _ = fmt.Fprintf(out, "Parent release:\n")
+	_, _ = fmt.Fprintf(out, "  name:          %s\n", release.ReleaseName)
+	_, _ = fmt.Fprintf(out, "  chart version: %s\n", release.ChartVersion)
+	_, _ = fmt.Fprintf(out, "  app version:   %s\n", release.AppVersion)
+	_, _ = fmt.Fprintf(out, "  jobs-manager:  %s\n", release.JobsManagerService)
+	_, _ = fmt.Fprintf(out, "  ingestor SA:   %s/%s\n", resolved.Namespace, release.IngestorSAName)
 	digest := release.IngestorImageDigest
 	if digest == "" {
 		digest = "<not configured — admin must set images.ingestor.digest>"
 	}
-	fmt.Fprintf(out, "  ingestor img:  %s\n", digest)
-	fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "  ingestor img:  %s\n", digest)
+	_, _ = fmt.Fprintln(out)
 
 	// Mint a token (or fall back). The audience is intentionally
 	// nil today — jobs-manager's TokenReview accepts the default
@@ -169,16 +174,16 @@ func runClusterInfo(
 	}
 
 	hash := sha256.Sum256([]byte(tok.Token))
-	fmt.Fprintf(out, "Ingestor SA token:\n")
-	fmt.Fprintf(out, "  source:        %s\n", tok.Source)
-	fmt.Fprintf(out, "  sha256[:8]:    %s\n", hex.EncodeToString(hash[:8]))
+	_, _ = fmt.Fprintf(out, "Ingestor SA token:\n")
+	_, _ = fmt.Fprintf(out, "  source:        %s\n", tok.Source)
+	_, _ = fmt.Fprintf(out, "  sha256[:8]:    %s\n", hex.EncodeToString(hash[:8]))
 	if tok.ExpirationSeconds > 0 {
 		exp := time.Duration(tok.ExpirationSeconds) * time.Second
-		fmt.Fprintf(out, "  expires in:    ~%s (server may cap shorter)\n", exp)
+		_, _ = fmt.Fprintf(out, "  expires in:    ~%s (server may cap shorter)\n", exp)
 	} else {
-		fmt.Fprintf(out, "  expires in:    never (static-secret fallback)\n")
+		_, _ = fmt.Fprintf(out, "  expires in:    never (static-secret fallback)\n")
 	}
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Ready for `tracebloc dataset push` (coming in Phase 3).")
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Ready for `tracebloc dataset push` (coming in Phase 3).")
 	return nil
 }
