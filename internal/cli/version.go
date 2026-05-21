@@ -43,14 +43,19 @@ func newVersionCmd(info BuildInfo) *cobra.Command {
 			}
 
 			// Default human-readable line. Order matches the JSON
-			// output for grep-ability across modes.
-			fmt.Fprintf(
+			// output for grep-ability across modes. Propagate the
+			// Fprintf error (it returns one when the underlying
+			// writer fails — e.g. a closed pipe) so cobra surfaces
+			// it via the standard exit path; silently discarding
+			// would mask the rare-but-real "wrote to a dead pipe"
+			// case.
+			_, err := fmt.Fprintf(
 				cmd.OutOrStdout(),
 				"tracebloc %s (%s, built %s, %s on %s)\n",
 				payload.Version, payload.GitSHA, payload.BuildDate,
 				payload.GoVersion, payload.Platform,
 			)
-			return nil
+			return err
 		},
 	}
 
