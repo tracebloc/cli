@@ -92,15 +92,25 @@ func runIngestValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(violations) == 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: ok\n", path)
+		// Explicit discard: Fprintf returns an error when the
+		// underlying writer fails (closed pipe, etc.). For the
+		// success summary we'd rather still exit 0 even if the
+		// downstream consumer dropped the connection — they got
+		// what they needed (the exit code), and propagating a
+		// pipe-write error would convert success into failure for
+		// reasons unrelated to validation.
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s: ok\n", path)
 		return nil
 	}
 
 	// Print violations to stderr so success can be piped without
-	// interference; error lines are diagnostic, not data.
-	fmt.Fprintf(cmd.ErrOrStderr(), "%s: schema validation failed (%d issue%s)\n",
+	// interference; error lines are diagnostic, not data. Same
+	// pipe-write rationale as the ok-path above: don't let a
+	// stderr-write failure mask the real exit-2 schema-violation
+	// signal.
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s: schema validation failed (%d issue%s)\n",
 		path, len(violations), plural(len(violations)))
-	fmt.Fprintln(cmd.ErrOrStderr(), schema.FormatErrors(violations))
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), schema.FormatErrors(violations))
 	return &exitError{code: 2, err: nil} // err==nil so cobra doesn't print "Error: ..." on top
 }
 

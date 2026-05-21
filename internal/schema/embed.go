@@ -7,14 +7,14 @@
 //
 // Why embed? Two reasons.
 //
-//   1. Local validation. `tracebloc ingest validate <path>` runs
-//      entirely offline — no cluster, no network — which is the
-//      whole point of doing it on the CLI rather than waiting for
-//      jobs-manager's POST-time check.
-//   2. Drift detection. Bundling the schema makes drift between
-//      the CLI's view and data-ingestors' canonical source
-//      observable at build time, not at runtime. scripts/sync-schema.sh
-//      enforces parity in CI.
+//  1. Local validation. `tracebloc ingest validate <path>` runs
+//     entirely offline — no cluster, no network — which is the
+//     whole point of doing it on the CLI rather than waiting for
+//     jobs-manager's POST-time check.
+//  2. Drift detection. Bundling the schema makes drift between
+//     the CLI's view and data-ingestors' canonical source
+//     observable at build time, not at runtime. scripts/sync-schema.sh
+//     enforces parity in CI.
 package schema
 
 import _ "embed"
