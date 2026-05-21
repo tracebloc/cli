@@ -18,6 +18,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/tracebloc/cli/internal/cli"
@@ -41,6 +42,22 @@ func main() {
 	}).Execute()
 	if err == nil {
 		return
+	}
+
+	// Print the error to stderr before exiting. The root command
+	// sets SilenceErrors: true to keep cobra from prepending its
+	// own "Error: ..." line on top of structured handler output
+	// — but that puts the burden on us to surface the error
+	// message ourselves. Without this, every non-schema-violation
+	// failure (file-read errors, YAML parse errors, schema-compile
+	// errors) exits non-zero with NO message to the customer.
+	//
+	// Handlers that have already printed their own diagnostic
+	// (e.g. `ingest validate` prints per-violation lines) signal
+	// "silent" by returning an exitError with a nil inner — see
+	// cli.IsSilentError for the contract.
+	if !cli.IsSilentError(err) {
+		fmt.Fprintln(os.Stderr, "Error:", err)
 	}
 
 	// Map command-defined exit codes through. Handlers that want a

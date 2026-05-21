@@ -330,16 +330,48 @@ func TestFormatErrors_ContractShape(t *testing.T) {
 	}
 }
 
+// Pins that FormatErrors does NOT mutate its input. An earlier
+// version sorted in place, which made callers that wanted to
+// further process `violations` after formatting see a different
+// order from the one they passed in. Bugbot flagged this as a
+// hidden side effect; this test ensures the regression can't
+// silently come back.
+func TestFormatErrors_DoesNotMutateInput(t *testing.T) {
+	in := []ValidationError{
+		{Path: "z_field", Message: "bad"},
+		{Path: "a_field", Message: "bad"},
+	}
+	original := append([]ValidationError(nil), in...) // capture pre-call order
+
+	_ = FormatErrors(in)
+
+	if in[0] != original[0] || in[1] != original[1] {
+		t.Errorf("FormatErrors mutated input order.\nbefore: %v\nafter:  %v",
+			original, in)
+	}
+}
+
 // Round-trip test against the canonical example YAMLs in the
 // data-ingestors repo. If that checkout is missing, skip — we
 // don't want CI to fail for a local layout mismatch. CI runs the
 // test in the runner's filesystem where data-ingestors isn't
 // checked out alongside us, so this only fires for local devs.
+//
+// Opt in by setting TRACEBLOC_INGESTORS_EXAMPLES to the absolute
+// path of data-ingestors/examples/yaml (or any directory of
+// `.yaml` files that follow the v1 schema). Without the env var
+// the test skips silently — a hardcoded absolute path like
+// `/Volumes/VPPD/...` was bugbot-flagged as leaking one
+// developer's filesystem layout and being unusable by anyone else.
 func TestValidate_AgainstRealExamplesIfPresent(t *testing.T) {
-	examplesDir := "/Volumes/VPPD/projects/tracebloc/data-ingestors/examples/yaml"
+	examplesDir := os.Getenv("TRACEBLOC_INGESTORS_EXAMPLES")
+	if examplesDir == "" {
+		t.Skip("TRACEBLOC_INGESTORS_EXAMPLES not set; skipping the round-trip-against-real-examples test " +
+			"(point it at data-ingestors/examples/yaml to enable)")
+	}
 	entries, err := os.ReadDir(examplesDir)
 	if err != nil {
-		t.Skipf("examples dir not present, skipping (this test is for local dev): %v", err)
+		t.Skipf("TRACEBLOC_INGESTORS_EXAMPLES=%q is not readable, skipping: %v", examplesDir, err)
 	}
 
 	v := mustValidator(t)

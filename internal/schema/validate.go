@@ -59,16 +59,28 @@ func (e ValidationError) Format() string {
 // FormatErrors renders a slice of violations as one error per line,
 // deterministically ordered by Path then Message. Mirrors
 // _format_errors.
+//
+// Pure: the input slice's order is preserved. An earlier version
+// called sort.Slice directly on errs, which silently reordered the
+// caller's underlying array — bugbot caught this as a hidden side
+// effect that contradicted the function's name + doc. Copying the
+// slice header before sorting keeps FormatErrors a true formatter.
 func FormatErrors(errs []ValidationError) string {
-	sort.Slice(errs, func(i, j int) bool {
-		if errs[i].Path != errs[j].Path {
-			return errs[i].Path < errs[j].Path
+	// slices.Clone would be cleaner but it's Go 1.21+; the manual
+	// copy is portable and the allocation is tiny relative to the
+	// schema validation itself.
+	sorted := make([]ValidationError, len(errs))
+	copy(sorted, errs)
+
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Path != sorted[j].Path {
+			return sorted[i].Path < sorted[j].Path
 		}
-		return errs[i].Message < errs[j].Message
+		return sorted[i].Message < sorted[j].Message
 	})
 
 	var b strings.Builder
-	for i, e := range errs {
+	for i, e := range sorted {
 		if i > 0 {
 			b.WriteByte('\n')
 		}

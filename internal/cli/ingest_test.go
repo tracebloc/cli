@@ -144,3 +144,47 @@ func TestExitCodeFromError(t *testing.T) {
 		t.Errorf("outermost exitError wins, got %d", got)
 	}
 }
+
+// IsSilentError is the main()-side hook that decides whether to
+// print an "Error: ..." stderr line on the way out. Pin the
+// contract so main.go doesn't silently regress to swallowing
+// errors (the high-severity bugbot finding that led to this
+// being added in the first place).
+func TestIsSilentError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{
+			"exitError with nil inner (e.g. schema-violation already-printed)",
+			&exitError{code: 2, err: nil},
+			true,
+		},
+		{
+			"exitError with non-nil inner (e.g. file read failure)",
+			&exitError{code: 3, err: io_eof_or_similar()},
+			false,
+		},
+		{"plain error from cobra (e.g. unknown command)", errorString("unknown command"), false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsSilentError(c.err); got != c.want {
+				t.Errorf("IsSilentError(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// errorString is the simplest possible error implementation, used
+// in tests that need a "plain" error without any custom Unwrap
+// behavior. Same as the stdlib errors.New() result; defined inline
+// to keep the test file self-contained.
+type errorString string
+
+func (e errorString) Error() string { return string(e) }
+
+func io_eof_or_similar() error { return errorString("read: file does not exist") }
