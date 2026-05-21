@@ -34,13 +34,18 @@ var (
 )
 
 func main() {
-	if err := cli.NewRootCmd(cli.BuildInfo{
+	err := cli.NewRootCmd(cli.BuildInfo{
 		Version:   version,
 		GitSHA:    gitSHA,
 		BuildDate: buildDate,
-	}).Execute(); err != nil {
-		// cobra has already printed the error + usage to stderr by
-		// the time we get here; just propagate a non-zero exit.
-		os.Exit(1)
+	}).Execute()
+	if err == nil {
+		return
 	}
+
+	// Map command-defined exit codes through. Handlers that want a
+	// specific exit code (e.g. `ingest validate` returns 2 for
+	// schema violations, 3 for parse errors) return a *cli.ExitError
+	// the package exports; everything else gets the default 1.
+	os.Exit(cli.ExitCodeFromError(err))
 }

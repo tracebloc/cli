@@ -15,6 +15,20 @@ permissions:
   contents: read
 
 jobs:
+  schema-drift:
+    name: Schema drift check
+    # Verifies the embedded internal/schema/ingest.v1.json matches
+    # tracebloc/data-ingestors' master. A green PR that silently
+    # diverges from upstream is a real correctness hazard — a
+    # customer's YAML could pass `tracebloc ingest validate` locally
+    # but be rejected by jobs-manager (or vice versa). Forcing the
+    # sync as a PR step keeps drift visible.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: scripts/sync-schema.sh --check
+        run: ./scripts/sync-schema.sh --check
+
   test:
     name: Test
     runs-on: ubuntu-latest
