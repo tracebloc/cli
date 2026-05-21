@@ -7,7 +7,12 @@
 
 run:
   timeout: 5m
-  go: "1.22"
+  # Track go.mod's `go` directive. Go's release cadence + `go mod
+  # tidy`'s aggressive bumping (especially when k8s.io/* deps want
+  # newer Go) keep dragging go.mod's minimum up; pinning a stale
+  # version here just produces typecheck errors instead of real
+  # findings.
+  go: "1.24"
 
 linters:
   disable-all: true

@@ -66,10 +66,13 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.61.0
-          # Pin the cache key per Go version so a Go bump invalidates
-          # cleanly — stale caches across Go versions cause noisy
-          # "invalid pkg" failures.
+          # v2.x supports Go 1.24+ — required because go.mod's `go`
+          # directive ends up at whatever the developer's local
+          # toolchain produces during `go mod tidy` + the k8s.io
+          # deps want a recent Go. Older golangci-lint emitted
+          # `undefined: foo (typecheck)` errors when it couldn't
+          # parse newer-Go source, which masked real findings.
+          version: v1.64.7
           args: --timeout=5m
 
   build:

@@ -1,5 +1,10 @@
 module github.com/tracebloc/cli
 
+// Minimum Go is 1.22 (the version this module targets). `go mod
+// tidy` may rewrite this to whatever the local toolchain is when
+// run by a developer on a newer Go — we tolerate that because Go
+// modules are forward-compatible (a stale `go 1.22` directive
+// just means newer Go features won't be available in source).
 go 1.26.0
 
 require (
