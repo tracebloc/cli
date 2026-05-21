@@ -11,8 +11,10 @@ run:
   # tidy`'s aggressive bumping (especially when k8s.io/* deps want
   # newer Go) keep dragging go.mod's minimum up; pinning a stale
   # version here just produces typecheck errors instead of real
-  # findings.
-  go: "1.24"
+  # findings. Currently 1.26 to match `go 1.26.0` in go.mod (the
+  # earlier "1.24" pin drifted when k8s.io/* v0.36 bumped the floor;
+  # Bugbot caught the drift on PR #2).
+  go: "1.26"
 
 linters:
   disable-all: true

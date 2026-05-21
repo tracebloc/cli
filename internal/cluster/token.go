@@ -2,11 +2,11 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -147,36 +147,26 @@ func MintIngestorToken(
 // Falling back on a network error would mask the network problem;
 // the customer would see a less useful "static secret not found"
 // instead of "couldn't reach the API server."
+//
+// Defers to k8s.io/apimachinery/pkg/api/errors for the classification
+// rather than re-implementing the HTTP-status checks. The stdlib
+// helpers key off Status.Reason (the typed enum) — that's the
+// canonical interpretation, and our test file already constructs its
+// fake errors via apierrors.NewForbidden, which sets both Code and
+// Reason. Earlier versions of this file rolled their own helpers
+// that read Status.Code numerically; Bugbot correctly flagged the
+// divergence as a future-bug-waiting-to-happen for non-standard
+// status errors.
 func isTokenRequestRecoverable(err error) bool {
 	if err == nil {
 		return false
 	}
-	// k8s.io/apimachinery exposes typed checks. Permission denied
-	// (StatusForbidden), API not available (StatusMethodNotAllowed
-	// — pre-1.22 clusters), SA not found (StatusNotFound).
-	switch {
-	case isForbidden(err), isNotFound(err), isMethodNotSupported(err):
-		return true
-	}
-	return false
-}
-
-func isForbidden(err error) bool          { return statusCode(err) == 403 }
-func isNotFound(err error) bool           { return statusCode(err) == 404 }
-func isMethodNotSupported(err error) bool { return statusCode(err) == 405 }
-
-// statusCode extracts the HTTP status from a k8s API error. Returns
-// 0 if the error doesn't carry one (network error, marshalling
-// error, etc.).
-func statusCode(err error) int {
-	type statusError interface {
-		Status() metav1.Status
-	}
-	var se statusError
-	if errors.As(err, &se) {
-		return int(se.Status().Code)
-	}
-	return 0
+	// Permission denied (StatusForbidden), SA missing
+	// (StatusNotFound), API not available on this cluster — typically
+	// pre-1.22 (StatusMethodNotAllowed/MethodNotSupported).
+	return apierrors.IsForbidden(err) ||
+		apierrors.IsNotFound(err) ||
+		apierrors.IsMethodNotSupported(err)
 }
 
 // findStaticTokenSecret looks for a long-lived
