@@ -2,13 +2,18 @@
 
 ## Local development
 
-```bash
-go build -o tracebloc ./cmd/tracebloc
-./tracebloc version
+The `Makefile` mirrors the CI pipeline — `make ci` runs the exact same checks that PR #N's GitHub Actions run. If `make ci` passes locally, CI will too (modulo non-deterministic flakes). **Run `make ci` before pushing.** Skipping it has cost us at least one PR's worth of fix-up commits per bug class so far.
 
-go test ./...
-golangci-lint run    # https://golangci-lint.run/usage/install/
+```bash
+make ci          # vet + test + lint + fmt-check + schema-check  (run this before push)
+make build       # produces ./tracebloc
+make fmt         # fixes gofmt -s drift in place
+make schema-sync # pulls latest ingest.v1.json from data-ingestors master
 ```
+
+Individual targets are also runnable in isolation — `make test`, `make lint`, etc. See the `Makefile` for the full list.
+
+Requires [`golangci-lint`](https://golangci-lint.run/usage/install/) (install via `brew install golangci-lint` or your platform's equivalent).
 
 Cobra autocomplete for `bash` / `zsh` / `fish` / `powershell` is available via the `completion` subcommand. Useful while developing too:
 

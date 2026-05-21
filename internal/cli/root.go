@@ -64,6 +64,7 @@ roadmap. Subsequent phases land subcommands incrementally.`,
 
 	// Subcommands. New phases append here.
 	root.AddCommand(newVersionCmd(info))
+	root.AddCommand(newIngestCmd())
 
 	return root
 }
