@@ -57,7 +57,11 @@ func main() {
 	// "silent" by returning an exitError with a nil inner — see
 	// cli.IsSilentError for the contract.
 	if !cli.IsSilentError(err) {
-		fmt.Fprintln(os.Stderr, "Error:", err)
+		// Explicit-discard the writer error: if stderr itself is
+		// gone (closed pipe, redirected to /dev/full, etc.) we
+		// still need to exit non-zero — the error message is
+		// best-effort, the exit code is the contract.
+		_, _ = fmt.Fprintln(os.Stderr, "Error:", err)
 	}
 
 	// Map command-defined exit codes through. Handlers that want a
