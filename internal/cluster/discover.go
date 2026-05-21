@@ -39,8 +39,13 @@ type ParentRelease struct {
 	JobsManagerService string
 
 	// IngestorSAName is the name of the ServiceAccount the chart's
-	// hook pods run as. Defaults to "ingestor" but customers can
-	// override; the value comes from jobs-manager's environment.
+	// hook pods run as. Today this is always the chart's default
+	// "ingestor". Customers who set `ingestionAuthz.serviceAccountName`
+	// to a non-default name in the parent client chart need to
+	// override via `tracebloc cluster info --ingestor-sa=<name>`
+	// (and similarly for the future `dataset push` command). Reading
+	// the name from the cluster's ingestionAuthz ConfigMap so this
+	// flag becomes unnecessary is a v0.2 follow-up (see #7).
 	IngestorSAName string
 
 	// IngestorImageDigest is the canonical digest the cluster's
@@ -140,14 +145,20 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 	svc := pickJobsManagerService(ctx, cs, namespace, release.ReleaseName)
 	release.JobsManagerService = fmt.Sprintf("http://%s.%s.svc.cluster.local:8080", svc, namespace)
 
-	// Read INGESTOR_IMAGE_DIGEST + ingestor SA name from the
-	// Deployment's pod-spec env. Both are populated by the chart's
-	// values; defaults are "ingestor" SA + empty digest.
-	release.IngestorSAName = "ingestor" // chart default
+	// Read INGESTOR_IMAGE_DIGEST from jobs-manager's pod-spec env.
+	// The chart pipes images.ingestor.digest through to here.
+	//
+	// SA name is NOT discovered today — the chart doesn't surface
+	// `ingestionAuthz.serviceAccountName` through the jobs-manager
+	// env, and reading the ingestionAuthz ConfigMap to learn it is a
+	// v0.2 follow-up (see #7). We default to "ingestor" (the chart
+	// default); customers who renamed it pass --ingestor-sa from
+	// the CLI. Bugbot caught the earlier version that incorrectly
+	// claimed to read the SA name from env.
+	release.IngestorSAName = "ingestor"
 	if len(d.Spec.Template.Spec.Containers) > 0 {
 		for _, env := range d.Spec.Template.Spec.Containers[0].Env {
-			switch env.Name {
-			case "INGESTOR_IMAGE_DIGEST":
+			if env.Name == "INGESTOR_IMAGE_DIGEST" {
 				release.IngestorImageDigest = env.Value
 			}
 		}

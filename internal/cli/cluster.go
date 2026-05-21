@@ -54,6 +54,7 @@ func newClusterInfoCmd() *cobra.Command {
 		kubeconfigPath  string
 		contextOverride string
 		nsOverride      string
+		ingestorSAName  string
 		tokenExpiry     int64
 	)
 
@@ -87,6 +88,7 @@ Exit codes:
 				cmd.Context(),
 				cmd.OutOrStdout(),
 				kubeconfigPath, contextOverride, nsOverride,
+				ingestorSAName,
 				tokenExpiry,
 			)
 		},
@@ -98,6 +100,9 @@ Exit codes:
 		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
 	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
 		"namespace where the parent tracebloc/client release is installed (default: the context's namespace, or 'default')")
+	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
+		"override the ingestor ServiceAccount name (default: \"ingestor\", the chart default; "+
+			"set this if you customized `ingestionAuthz.serviceAccountName` in the parent client chart)")
 	cmd.Flags().Int64Var(&tokenExpiry, "token-expiry-seconds", 600,
 		"requested SA token expiration in seconds (default 600 = 10 min; ignored for static-secret fallback)")
 
@@ -108,6 +113,7 @@ func runClusterInfo(
 	ctx context.Context,
 	out interface{ Write([]byte) (int, error) },
 	kubeconfigPath, contextOverride, nsOverride string,
+	ingestorSAOverride string,
 	tokenExpiry int64,
 ) error {
 	resolved, err := cluster.Load(cluster.KubeconfigOptions{
@@ -146,6 +152,13 @@ func runClusterInfo(
 		// branch: 3 means "fix your kubeconfig", 4 means "install
 		// the parent chart first".
 		return &exitError{code: 4, err: err}
+	}
+
+	// Apply the SA-name override here. Discovery doesn't read the
+	// name from the cluster (see #7); customers with a non-default
+	// name pass --ingestor-sa.
+	if ingestorSAOverride != "" {
+		release.IngestorSAName = ingestorSAOverride
 	}
 
 	_, _ = fmt.Fprintf(out, "Parent release:\n")
