@@ -1,0 +1,43 @@
+# golangci-lint configuration for tracebloc/cli.
+#
+# Philosophy: a small, opinionated set of linters that catch real
+# bugs without flooding PRs with style noise. Tune up over time
+# rather than turning everything on day one and quarantining half of
+# them.
+
+run:
+  timeout: 5m
+  go: "1.22"
+
+linters:
+  disable-all: true
+  enable:
+    # Standard set — these catch real bugs and have very low false-positive rates.
+    - errcheck       # unchecked error returns
+    - govet          # `go vet`
+    - ineffassign    # assignments that go nowhere
+    - staticcheck    # SA-series checks (well-vetted)
+    - unused         # dead code
+
+    # Style / hygiene that pays for itself in code review time.
+    - gofmt
+    - goimports
+    - misspell
+    - unconvert      # unnecessary type conversions
+
+linters-settings:
+  goimports:
+    # Group imports: stdlib, third-party, our own. Keeps diffs
+    # readable when adding new imports.
+    local-prefixes: github.com/tracebloc/cli
+
+issues:
+  # Default exclusions hide a lot of real findings — opt back in.
+  exclude-use-default: false
+
+  exclude-rules:
+    # Test files often deliberately ignore err returns from
+    # bytes.Buffer / strings.Builder / fmt.Fprintf, which never fail.
+    - path: _test\.go
+      linters:
+        - errcheck

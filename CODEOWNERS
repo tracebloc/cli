@@ -1,0 +1,8 @@
+# Default owner for everything in this repo. Adjust once the team's
+# CLI reviewers are established; for now the whole maintainer set is
+# the default reviewer.
+*       @tracebloc/maintainers
+
+# CI + release infrastructure. Changes here can break the release
+# pipeline; route them to platform reviewers explicitly.
+/.github/      @tracebloc/maintainers

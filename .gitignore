@@ -1,0 +1,25 @@
+# Build output — populated by `go build ./cmd/tracebloc` at the repo
+# root. Release artifacts go through dist/ (see Phase 5 / release
+# workflow); local hacking puts a binary here.
+/tracebloc
+
+# Cross-compiled binaries staged by the release workflow.
+/dist/
+
+# Go test artefacts.
+*.test
+*.out
+coverage.html
+coverage.txt
+
+# Vendored dependencies — we use the module cache, not vendor/.
+/vendor/
+
+# Editor + OS noise.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude Code workspace state (per-user, never committed).
+/.claude/

@@ -1,0 +1,124 @@
+name: Build
+
+# Runs on every PR + every push to develop/main. Validates the binary
+# builds cleanly across all 5 release-target platforms, the tests pass,
+# and the linter is green. Release-time signing + tag artifacts live
+# in release.yml (Phase 5).
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        # -race catches data races in the test process. The CLI is
+        # not concurrent today (Phase 0), but the watch/log-stream
+        # path in Phase 4 will be — enabling -race from day one keeps
+        # us from having to retrofit it later.
+        run: go test -race -cover ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61.0
+          # Pin the cache key per Go version so a Go bump invalidates
+          # cleanly — stale caches across Go versions cause noisy
+          # "invalid pkg" failures.
+          args: --timeout=5m
+
+  build:
+    name: Build (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't fail-fast — we want the matrix to surface ALL broken
+      # platforms in one run, not stop at the first.
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+          - os: windows
+            arch: amd64
+            ext: .exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build \
+            -trimpath \
+            -ldflags "\
+              -s -w \
+              -X main.version=${{ github.ref_name }}-${GITHUB_SHA:0:7} \
+              -X main.gitSHA=${GITHUB_SHA:0:12} \
+              -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o dist/tracebloc-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} \
+            ./cmd/tracebloc
+
+      - name: Smoke test (Linux amd64 only — host arch matches runner)
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        # Cross-built darwin/windows/arm64 binaries can't run on the
+        # ubuntu runner, so only the native build gets exercised
+        # post-compile. The other platforms get compile-time
+        # validation only — which is still meaningful because
+        # client-go and most k8s deps have OS-conditional code paths.
+        run: |
+          ./dist/tracebloc-linux-amd64 version
+          ./dist/tracebloc-linux-amd64 version --output-json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['version'], 'empty version'"
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracebloc-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/tracebloc-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+          retention-days: 7
+          if-no-files-found: error
