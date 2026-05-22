@@ -165,6 +165,32 @@ func TestDiscover_NoAcceptedImageExtensions(t *testing.T) {
 	}
 }
 
+func TestDiscover_LabelsCSVIsDirectory(t *testing.T) {
+	// A directory literally named "labels.csv" — os.Stat succeeds,
+	// so without the IsDir guard the pre-flight would accept it and
+	// PR-b's tar stream would fail confusingly. Symmetric with the
+	// images/ check. Bugbot flagged the missing guard on PR #8.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "labels.csv"), 0o755); err != nil {
+		t.Fatalf("mkdir labels.csv/: %v", err)
+	}
+	imagesDir := filepath.Join(root, "images")
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		t.Fatalf("mkdir images/: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(imagesDir, "a.jpg"),
+		make([]byte, 100), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	_, err := Discover(root)
+	if err == nil {
+		t.Fatal("Discover returned nil error; expected labels.csv-is-a-directory error")
+	}
+	if !strings.Contains(err.Error(), "is a directory") {
+		t.Errorf("error = %q, want it to mention 'is a directory'", err)
+	}
+}
+
 func TestDiscover_NotADirectory(t *testing.T) {
 	// Customer passes a path to a single file instead of a dir.
 	// This is a common autocomplete-mistake (tab-completing

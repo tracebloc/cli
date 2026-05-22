@@ -120,6 +120,17 @@ func Discover(rootDir string) (*LocalLayout, error) {
 		}
 		return nil, fmt.Errorf("stat labels.csv: %w", err)
 	}
+	if labelsStat.IsDir() {
+		// A directory literally named "labels.csv" passes the
+		// os.Stat above — without this check the pre-flight would
+		// accept it, and PR-b's tar stream would fail confusingly
+		// trying to read a directory as a CSV. Symmetric with the
+		// imagesStat.IsDir() check below.
+		return nil, fmt.Errorf(
+			"%q is a directory, not a file. labels.csv must be the "+
+				"CSV file holding the image_id,label rows.",
+			labelsPath)
+	}
 	if labelsStat.Size() > MaxSingleFileBytes {
 		return nil, sizeError("labels.csv", labelsStat.Size(), MaxSingleFileBytes)
 	}
