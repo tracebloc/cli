@@ -48,6 +48,54 @@ func TestWaitForJobPod_RunningPodSurfaces(t *testing.T) {
 	}
 }
 
+// TestWaitForJobPod_PicksMostRecentNotFirst: Jobs with retries
+// (or any multi-Pod scenario) produce multiple Pods with the
+// same `job-name=<j>` label. The List API doesn't guarantee
+// order — picking items[0] could grab the old Failed Pod from a
+// prior retry while the current Running one waits. Bugbot
+// PR #10 r4 caught the missing tie-break.
+func TestWaitForJobPod_PicksMostRecentNotFirst(t *testing.T) {
+	now := time.Now()
+	older := jobPod("ingestor-old-failed", "ingestor", corev1.PodFailed)
+	older.CreationTimestamp = metav1.NewTime(now.Add(-10 * time.Minute))
+
+	newer := jobPod("ingestor-new-running", "ingestor", corev1.PodRunning)
+	newer.CreationTimestamp = metav1.NewTime(now.Add(-1 * time.Minute))
+
+	cs := fake.NewClientset(older, newer)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	name, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor")
+	if err != nil {
+		t.Fatalf("waitForJobPod: %v", err)
+	}
+	if name != "ingestor-new-running" {
+		t.Errorf("name = %q, want ingestor-new-running "+
+			"(most-recent useful-phase Pod, not items[0])", name)
+	}
+}
+
+// TestWaitForJobPod_AllPendingKeepsPolling: if every Pod is still
+// Pending (image pulling, scheduling), the function keeps polling
+// rather than returning a Pending Pod's name (Pods with no log
+// stream yet aren't useful to attach to).
+func TestWaitForJobPod_AllPendingKeepsPolling(t *testing.T) {
+	cs := fake.NewClientset(jobPod("pending-1", "ingestor", corev1.PodPending))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor")
+	if err == nil {
+		t.Fatal("waitForJobPod returned nil on all-Pending; expected DeadlineExceeded")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error doesn't wrap DeadlineExceeded: %v", err)
+	}
+}
+
 // TestWaitForJobPod_FastCompletionPath: ingestions that finish
 // faster than the poll interval might be in Phase=Succeeded by
 // the time the watch loop checks. We still want the Pod's name so

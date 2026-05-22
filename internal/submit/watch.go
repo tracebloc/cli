@@ -244,24 +244,37 @@ func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobN
 			if len(pods.Items) == 0 {
 				return false, nil // Pod hasn't been created yet
 			}
-			// Pick the first Pod with the label; Jobs default to
-			// parallelism=1 so there's only one. If a future
-			// jobs-manager spawns parallel Pods, the first one
-			// to surface logs is the one we attach to.
-			p := pods.Items[0]
-			switch p.Status.Phase {
-			case corev1.PodRunning, corev1.PodSucceeded, corev1.PodFailed:
-				// Running is the happy path; Succeeded/Failed
-				// mean we missed the Running window (typical
-				// for fast-completing ingestions). In all three
-				// cases we can fetch logs.
-				podName = p.Name
-				return true, nil
-			default:
-				// Pending: still pulling image / scheduling. Keep
-				// polling. The PodReadyTimeout caps this loop.
-				return false, nil
+			// Pick the MOST RECENT useful-phase Pod, not just
+			// items[0]. A Job with backoffLimit > 0 (or a Job
+			// where jobs-manager re-spawned the Pod for any
+			// reason) can have multiple Pods bearing the same
+			// `job-name=<jobName>` label. The List API doesn't
+			// guarantee order, so items[0] could be the old
+			// Failed Pod from a prior retry instead of the
+			// current Running one. Bugbot PR #10 r4 caught this.
+			//
+			// "Useful phase" = Running (happy path) | Succeeded
+			// (fast-completing ingestion we missed) | Failed
+			// (terminated; we still want its logs). Pending Pods
+			// don't count — they have no logs to stream yet, so
+			// we keep polling until they either transition or
+			// become irrelevant.
+			var bestPod *corev1.Pod
+			for i := range pods.Items {
+				p := &pods.Items[i]
+				switch p.Status.Phase {
+				case corev1.PodRunning, corev1.PodSucceeded, corev1.PodFailed:
+					if bestPod == nil ||
+						p.CreationTimestamp.After(bestPod.CreationTimestamp.Time) {
+						bestPod = p
+					}
+				}
 			}
+			if bestPod == nil {
+				return false, nil // all Pods still Pending
+			}
+			podName = bestPod.Name
+			return true, nil
 		})
 	if err != nil {
 		return "", err
