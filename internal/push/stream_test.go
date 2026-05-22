@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -172,22 +173,43 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 		t.Errorf("cmd[:2] = %v, want [/bin/sh -c]", fe.gotCmd[:2])
 	}
 	script := fe.gotCmd[2]
-	// The remote command must be both:
+	// The remote command must be:
 	//   1. HERMETIC (Bugbot r5): old files don't survive a re-push
-	//   2. TRANSACTIONAL (Bugbot r7): if tar fails, the previously
-	//      staged dataset for this table is preserved
+	//   2. TRANSACTIONAL (Bugbot r7): tar failure preserves prev
+	//      dataset
+	//   3. RACE-SAFE under parallel-push (Bugbot r8): unique
+	//      .staging-<hex> suffix per invocation so concurrent pushes
+	//      don't interleave each other's tar extraction
 	//
-	// Pattern: extract to <dest>.staging, then on tar SUCCESS
+	// Pattern: extract to <dest>.staging-<hex>, then on tar SUCCESS
 	// rm the old dest + mv staging → dest. The order matters:
 	//
 	//   - tar BEFORE any rm of $DEST  (preserves on tar failure)
 	//   - mv AFTER tar succeeds       (atomic-ish swap)
 	//
-	// We pin all three properties:
+	// Extract the staging path with a regex so the random hex
+	// suffix doesn't pin us to a specific invocation's bytes.
+	stagingRE := regexp.MustCompile(`/data/shared/my_table\.staging-[0-9a-f]{8}`)
+	stagingPaths := stagingRE.FindAllString(script, -1)
+	if len(stagingPaths) == 0 {
+		t.Fatalf("remote script has no /data/shared/my_table.staging-<8hex> path (race-safety regression):\n%s", script)
+	}
+	// All staging mentions must refer to the SAME suffix in a single
+	// invocation. If we see two distinct suffixes that's a bug:
+	// rm/mkdir/tar/mv would target different dirs.
+	for i := 1; i < len(stagingPaths); i++ {
+		if stagingPaths[i] != stagingPaths[0] {
+			t.Errorf("remote script mixes staging suffixes %q and %q:\n%s",
+				stagingPaths[0], stagingPaths[i], script)
+		}
+	}
+	staging := stagingPaths[0]
+
+	// Pin the four key operations.
 	for _, want := range []string{
-		`mkdir -p "/data/shared/my_table.staging"`,
-		`tar -xf - -C "/data/shared/my_table.staging"`,
-		`mv "/data/shared/my_table.staging" "/data/shared/my_table"`,
+		`mkdir -p "` + staging + `"`,
+		`tar -xf - -C "` + staging + `"`,
+		`mv "` + staging + `" "/data/shared/my_table"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("remote script missing %q: %s", want, script)
@@ -196,7 +218,7 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 	// Transactional property: tar must come BEFORE any `rm` of
 	// the real destination. If a refactor inverts this, a tar
 	// failure could wipe the customer's previously-staged data.
-	tarIdx := strings.Index(script, `tar -xf - -C "/data/shared/my_table.staging"`)
+	tarIdx := strings.Index(script, `tar -xf - -C "`+staging+`"`)
 	destRmIdx := strings.Index(script, `rm -rf "/data/shared/my_table"`)
 	if tarIdx < 0 || destRmIdx < 0 {
 		t.Fatalf("remote script missing tar or final-rm step: %s", script)
@@ -205,10 +227,40 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 		t.Errorf("remote script does tar AFTER rm of $DEST — partial-transfer would destroy previous data:\n%s", script)
 	}
 	// Single-segment guarantee: both rm targets must end with
-	// /my_table (or /my_table.staging) — never just /data/shared.
+	// /my_table or /my_table.staging-* — never just /data/shared.
 	if strings.Contains(script, `rm -rf "/data/shared"`) ||
 		strings.Contains(script, `rm -rf "/data/shared/"`) {
 		t.Errorf("remote script rm-rfs the parent /data/shared (would nuke sibling tables):\n%s", script)
+	}
+}
+
+// TestStreamLayout_StagingSuffixIsUniquePerInvocation: two back-to-
+// back StreamLayout calls for the same table MUST produce different
+// staging-dir suffixes. Without this, concurrent `dataset push` runs
+// for the same table would race on the same .staging path and
+// corrupt each other's tar extraction. Bugbot r8 fix.
+func TestStreamLayout_StagingSuffixIsUniquePerInvocation(t *testing.T) {
+	layout, err := Discover(imgcDir(t))
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	stagingRE := regexp.MustCompile(`/data/shared/t\.staging-[0-9a-f]{8}`)
+
+	collect := func() string {
+		fe := &fakeExecutor{}
+		if err := StreamLayout(context.Background(), fe, "tracebloc", "p", "stage",
+			layout, "t", NoOpProgress{}); err != nil {
+			t.Fatalf("StreamLayout: %v", err)
+		}
+		m := stagingRE.FindString(fe.gotCmd[2])
+		if m == "" {
+			t.Fatalf("no staging path in: %s", fe.gotCmd[2])
+		}
+		return m
+	}
+	a, b := collect(), collect()
+	if a == b {
+		t.Errorf("back-to-back StreamLayout produced identical staging path %q; race-safety regression", a)
 	}
 }
 

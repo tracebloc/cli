@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -198,8 +199,25 @@ func StreamLayout(
 	// and ValidateTableName guarantees `table` is a single safe
 	// segment ([A-Za-z0-9_]+, max 63 chars), so neither rm
 	// can escape /data/shared/<table>{,.staging}.
+	// Staging dir gets a fresh 8-hex-char suffix per invocation
+	// so two concurrent `dataset push` runs for the same table
+	// don't race on the same .staging path. Without this, push A's
+	// `rm -rf .staging` could wipe push B's in-progress tar
+	// extraction (or vice versa), producing an interleaved-and-
+	// corrupted dataset on the PVC. Bugbot flagged on PR-b r8.
+	//
+	// The FINAL `rm $DEST && mv $STAGING $DEST` is still
+	// last-write-wins between concurrent pushes — that's an
+	// acceptable v0.1 semantic (concurrent pushes to the same
+	// table name are inherently undefined; whichever push
+	// commits last "wins"). What this suffix closes is the
+	// INTERLEAVED-write hole.
+	stagingSuffix, err := randomSuffix(4) // 4 bytes → 8 hex chars
+	if err != nil {
+		return fmt.Errorf("generating staging-dir suffix: %w", err)
+	}
 	dest := StagedPrefix(table)
-	staging := dest + ".staging"
+	staging := dest + ".staging-" + stagingSuffix
 	remoteCmd := []string{
 		"/bin/sh", "-c",
 		fmt.Sprintf(
@@ -278,9 +296,25 @@ func writeLayoutTar(w io.Writer, layout *LocalLayout) (err error) {
 		}
 	}()
 
+	// Running total enforces the v0.1 MaxTotalBytes cap at STREAM
+	// time, not just at Discover time. A file that grew between
+	// pre-flight and now (TOCTOU) — or just a sum miscount — would
+	// otherwise sneak past the cap silently. Bugbot flagged on
+	// PR-b r8 as Medium.
+	var totalBytes int64
+
 	// labels.csv first (small, sanity-checks the stream quickly).
-	if err := writeTarFile(tw, layout.LabelsCSV, "labels.csv"); err != nil {
+	n, err := writeTarFile(tw, layout.LabelsCSV, "labels.csv")
+	if err != nil {
 		return fmt.Errorf("packaging labels.csv: %w", err)
+	}
+	totalBytes += n
+	if totalBytes > MaxTotalBytes {
+		return fmt.Errorf(
+			"dataset exceeded v0.1 total cap of %s during stream "+
+				"(labels.csv alone is %s; pre-flight likely raced with "+
+				"a file growing on disk)",
+			HumanBytes(MaxTotalBytes), HumanBytes(totalBytes))
 	}
 
 	// Then each image. We write them in the order Discover returned
@@ -297,13 +331,18 @@ func writeLayoutTar(w io.Writer, layout *LocalLayout) (err error) {
 		// tar requires forward slashes; a Windows-built CLI using
 		// filepath.Join would emit `images\001.jpg` headers that the
 		// Linux stage Pod's `tar -xf` either rejects or extracts as
-		// a flat-named file. The basename argument is fine via
-		// filepath.Base (it returns the trailing element, no
-		// separators) — only the join needs to be slash-portable.
-		// Bugbot flagged on PR-b round 6.
+		// a flat-named file. Bugbot flagged on PR-b round 6.
 		dst := path.Join("images", filepath.Base(abs))
-		if err := writeTarFile(tw, abs, dst); err != nil {
+		n, err := writeTarFile(tw, abs, dst)
+		if err != nil {
 			return fmt.Errorf("packaging %s: %w", abs, err)
+		}
+		totalBytes += n
+		if totalBytes > MaxTotalBytes {
+			return fmt.Errorf(
+				"dataset exceeded v0.1 total cap of %s after streaming %s "+
+					"(reached %s; file growth between pre-flight and stream)",
+				HumanBytes(MaxTotalBytes), dst, HumanBytes(totalBytes))
 		}
 	}
 
@@ -318,22 +357,31 @@ func writeLayoutTar(w io.Writer, layout *LocalLayout) (err error) {
 // read into memory — so a single 500 MiB image doesn't balloon
 // the CLI's memory.
 //
+// Returns the file's declared size (from os.Lstat) so the caller
+// can maintain a running total against MaxTotalBytes — closes the
+// stream-time half of the TOCTOU window Bugbot flagged on r8.
+//
 // Uses os.Lstat (not Stat) + an explicit symlink reject as a
-// defense-in-depth second layer behind walk.go's rejectSymlink.
-// The Discover-side check is the primary fix for the
-// symlink-bypass-size-caps hole Bugbot flagged on PR-b round 4;
-// this layer guards against a future refactor that calls
-// writeTarFile directly without going through Discover.
-func writeTarFile(tw *tar.Writer, src, dst string) error {
+// defense-in-depth second layer behind walk.go's rejectSymlink
+// (Bugbot r4). Also re-checks the single-file size cap at stream
+// time: a file that grew between Discover and now would otherwise
+// upload past the advertised 500 MiB cap (Bugbot r8).
+func writeTarFile(tw *tar.Writer, src, dst string) (int64, error) {
 	st, err := os.Lstat(src)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if st.Mode()&os.ModeSymlink != 0 {
 		// Reaching here means Discover let a symlink through —
 		// shouldn't happen in production, but the explicit error
 		// keeps the security property locally enforceable.
-		return fmt.Errorf("refusing to stream symbolic link %q (defense-in-depth; should have been rejected by Discover)", src)
+		return 0, fmt.Errorf("refusing to stream symbolic link %q (defense-in-depth; should have been rejected by Discover)", src)
+	}
+	if st.Size() > MaxSingleFileBytes {
+		// Stream-time recheck of the single-file cap. Discover
+		// caught this in pre-flight; if we see it again here, the
+		// file grew between then and now.
+		return 0, sizeError(dst, st.Size(), MaxSingleFileBytes)
 	}
 	hdr := &tar.Header{
 		Name:     dst,
@@ -346,19 +394,27 @@ func writeTarFile(tw *tar.Writer, src, dst string) error {
 		// (helps tests, makes future content-hash checks easier).
 	}
 	if err := tw.WriteHeader(hdr); err != nil {
-		return err
+		return 0, err
 	}
 	f, err := os.Open(src)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	// Read-only file Close errors are not meaningful — there's
 	// nothing the caller can do, and the underlying file descriptor
 	// gets returned to the OS regardless. Explicit-discard pattern,
 	// same as the Fprintf writers elsewhere.
 	defer func() { _ = f.Close() }()
-	if _, err := io.Copy(tw, f); err != nil {
-		return err
+	// io.CopyN caps the actual stream at the declared header size.
+	// Without the cap, a file that grew between Lstat above and
+	// the Copy here would overflow the header — the tar would be
+	// corrupted (header says N bytes, body has > N). Cap-and-trust
+	// is the safe choice: if the file shrank, the tar trailer
+	// surfaces the mismatch; if the file grew, we just stop at
+	// the declared size and let the new bytes get re-pushed next
+	// invocation. Closes the body-side half of the TOCTOU window.
+	if _, err := io.CopyN(tw, f, st.Size()); err != nil && !errors.Is(err, io.EOF) {
+		return 0, err
 	}
-	return nil
+	return st.Size(), nil
 }
