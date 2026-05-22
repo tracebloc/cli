@@ -28,6 +28,84 @@ func stageOpts() PodSpecOptions {
 	}
 }
 
+// TestDNS1123SafeTableSegment is the High-severity regression pin
+// for the Bugbot finding on PR-b. Every realistic table name in
+// tracebloc docs uses snake_case (cats_dogs_train, chest_xrays_train);
+// without the transform these would produce Pod names K8s rejects
+// post-pre-flight, which is the worst-of-both-worlds UX. The
+// transform's job: take any ValidateTableName-passed name and
+// produce a DNS-1123 subdomain-safe segment for the Pod name.
+func TestDNS1123SafeTableSegment(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		// Canonical happy path: snake_case → kebab-case.
+		{"cats_dogs", "cats-dogs"},
+		{"chest_xrays_train", "chest-xrays-train"},
+		// Uppercase: must lowercase.
+		{"MyTable", "mytable"},
+		{"ABC", "abc"},
+		// Already lowercase no-underscore: identity.
+		{"single", "single"},
+		// Mixed: lowercase + underscore → hyphen.
+		{"Table_123", "table-123"},
+		// Edge: leading underscore must be stripped (would
+		// otherwise produce "-leading", and while the full Pod
+		// name `tracebloc-stage--leading-<hex>` is valid DNS-1123
+		// the consecutive hyphens are ugly).
+		{"_leading_underscore", "leading-underscore"},
+		// Edge: trailing underscore stripped.
+		{"trailing_", "trailing"},
+		// Edge: digit-led is valid (DNS-1123 allows it).
+		{"9starts_with_digit", "9starts-with-digit"},
+		// Truncation: input > 30 chars caps at 30, then trims
+		// any trailing hyphen the cut might have left.
+		{strings.Repeat("a", 50), strings.Repeat("a", 30)},
+		// Pathological: all-underscores → fallback "tbl".
+		{"_", "tbl"},
+		{"___", "tbl"},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			got := dns1123SafeTableSegment(c.in)
+			if got != c.want {
+				t.Errorf("dns1123SafeTableSegment(%q) = %q, want %q", c.in, got, c.want)
+			}
+			// Defensive: the result must satisfy DNS-1123
+			// subdomain rules for a Pod-name segment. Cheap
+			// regex check covers the contract.
+			if !isDNS1123SafeSegment(got) {
+				t.Errorf("dns1123SafeTableSegment(%q) = %q, which violates DNS-1123",
+					c.in, got)
+			}
+		})
+	}
+}
+
+// isDNS1123SafeSegment is a test-only helper: returns true iff s
+// matches the DNS-1123 subdomain segment regex (lowercase alnum +
+// hyphen, must start AND end with alnum). Matches what the K8s
+// validation library checks for Pod names.
+func isDNS1123SafeSegment(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-':
+			// Hyphen forbidden at boundaries.
+			if i == 0 || i == len(s)-1 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // TestBuildStagePodSpec_Defaults pins the spec fields PR-b's
 // post-create logic depends on: the SA name, the PVC mount, the
 // activeDeadline, and the labels orphan.go keys off.
@@ -37,11 +115,14 @@ func TestBuildStagePodSpec_Defaults(t *testing.T) {
 	if p.Namespace != "tracebloc" {
 		t.Errorf("Namespace = %q, want tracebloc", p.Namespace)
 	}
-	if !strings.HasPrefix(p.Name, "tracebloc-stage-cats_dogs-") {
-		t.Errorf("Name = %q, want prefix tracebloc-stage-cats_dogs-", p.Name)
+	// Pod name uses the DNS-1123-safe transform of the table name:
+	// "cats_dogs" → "cats-dogs". Bugbot flagged the raw-name version
+	// on PR-b as High severity (snake_case is the canonical naming
+	// style in tracebloc docs but K8s Pod names reject underscores).
+	if !strings.HasPrefix(p.Name, "tracebloc-stage-cats-dogs-") {
+		t.Errorf("Name = %q, want prefix tracebloc-stage-cats-dogs-", p.Name)
 	}
-	// 8-hex-char suffix: tracebloc-stage-cats_dogs- + 8 chars
-	if got, wantLen := len(p.Name), len("tracebloc-stage-cats_dogs-")+8; got != wantLen {
+	if got, wantLen := len(p.Name), len("tracebloc-stage-cats-dogs-")+8; got != wantLen {
 		t.Errorf("len(Name) = %d, want %d (8-hex-char random suffix)", got, wantLen)
 	}
 	if p.Spec.ServiceAccountName != "ingestor" {
@@ -229,8 +310,8 @@ func TestCreateStagePod_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateStagePod: %v", err)
 	}
-	if !strings.HasPrefix(name, "tracebloc-stage-cats_dogs-") {
-		t.Errorf("returned name = %q, want prefix tracebloc-stage-cats_dogs-", name)
+	if !strings.HasPrefix(name, "tracebloc-stage-cats-dogs-") {
+		t.Errorf("returned name = %q, want prefix tracebloc-stage-cats-dogs-", name)
 	}
 	// Cross-check: the Pod actually exists in the fake cluster.
 	if _, err := cs.CoreV1().Pods("tracebloc").Get(context.Background(), name, metav1.GetOptions{}); err != nil {

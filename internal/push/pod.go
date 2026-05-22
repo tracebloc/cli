@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -137,7 +138,22 @@ func BuildStagePodSpec(opts PodSpecOptions) *corev1.Pod {
 	}
 
 	suffix, _ := randomSuffix(4) // 4 bytes → 8 hex chars
-	podName := fmt.Sprintf("tracebloc-stage-%s-%s", opts.Table, suffix)
+	// Transform the table name into a DNS-1123 subdomain-safe
+	// segment for the Pod name. ValidateTableName accepts
+	// [A-Za-z0-9_]+ (MySQL identifier rules), but Kubernetes Pod
+	// names follow DNS-1123 — lowercase + alphanumeric + hyphen
+	// only, must start/end with alphanumeric. Without this
+	// transform, the dominant canonical example (cats_dogs_train,
+	// snake_case throughout the tracebloc docs) would fail Pod
+	// creation post-pre-flight, which is a worst-of-both-worlds
+	// UX (the pre-flight summary says "we're good!" then the
+	// create fails). Bugbot flagged the gap as High on PR-b.
+	//
+	// The original (un-transformed) table name is preserved
+	// verbatim in the tracebloc.io/table label below, so orphan
+	// warnings still surface the customer-facing identifier.
+	podName := fmt.Sprintf("tracebloc-stage-%s-%s",
+		dns1123SafeTableSegment(opts.Table), suffix)
 
 	// Pod-level security context: runAsNonRoot is the only field
 	// PSA's restricted profile *requires* at the Pod level (the
@@ -394,6 +410,44 @@ func DeleteStagePod(ctx context.Context, cs kubernetes.Interface, namespace, pod
 		return fmt.Errorf("deleting stage Pod %s/%s: %w", namespace, podName, err)
 	}
 	return nil
+}
+
+// dns1123SafeTableSegment transforms a ValidateTableName-passed
+// table name into a Kubernetes-Pod-name-compatible path segment.
+// The Pod's full name is then `tracebloc-stage-<segment>-<8hex>`,
+// which must satisfy DNS-1123 subdomain rules:
+//
+//	[a-z0-9]([-a-z0-9]*[a-z0-9])?
+//
+// (lowercase + digit + hyphen, start/end alphanumeric).
+//
+// Our input alphabet is [A-Za-z0-9_], so the transform is:
+//
+//  1. Lowercase (DNS-1123 forbids uppercase)
+//  2. Replace '_' with '-' (DNS-1123 forbids underscore)
+//  3. Strip leading/trailing hyphens (a name like "_leading"
+//     would otherwise become "-leading" → tracebloc-stage--leading
+//     which is OK in the middle but ugly)
+//  4. Cap length at 30 chars — Pod names are bounded at 63 total,
+//     and "tracebloc-stage-" + 8-hex-suffix already consumes ~25
+//     of those, leaving ~38 for the segment. 30 gives margin.
+//  5. Fallback to "tbl" if the transform leaves an empty string
+//     (the pathological "_"-only-name case).
+func dns1123SafeTableSegment(table string) string {
+	s := strings.ToLower(strings.ReplaceAll(table, "_", "-"))
+	s = strings.Trim(s, "-")
+	if len(s) > 30 {
+		s = s[:30]
+		// Truncation could leave a trailing hyphen — re-trim.
+		s = strings.TrimRight(s, "-")
+	}
+	if s == "" {
+		// Pathological all-underscore name. The label still
+		// carries the original, so customers can still trace
+		// orphan-Pod warnings back to their push.
+		s = "tbl"
+	}
+	return s
 }
 
 // randomSuffix returns a hex string of length 2*n. Used to make
