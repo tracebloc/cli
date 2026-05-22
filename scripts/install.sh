@@ -227,17 +227,26 @@ fi
 
 # --------------------------------------------------------------------
 # Install to a writable prefix.
+#
+# Bugbot PR #11 r2 caught a UX bug in the previous flow: POSIX
+# `test -w` is false for paths that don't exist, so a custom
+# --prefix /opt/tracebloc (legitimate, just not created yet) was
+# silently overridden with the ~/.local/bin fallback. The right
+# semantic: try to mkdir the customer's chosen prefix; if THAT
+# fails (no write perms on parent), THEN fall back.
 # --------------------------------------------------------------------
 PREFIX="$INSTALL_PREFIX"
-if [ ! -w "$(dirname "$PREFIX/$BINARY_NAME" 2>/dev/null || true)" ] && [ ! -w "$PREFIX" ] 2>/dev/null; then
-    # /usr/local/bin needs sudo on most distros. Fall back to per-user.
+if ! mkdir -p "$PREFIX" 2>/dev/null || [ ! -w "$PREFIX" ]; then
+    # The customer's chosen prefix isn't usable (no write perms on
+    # parent, /usr/local/bin without sudo, etc.). Fall back to a
+    # per-user dir; the PATH-advice block below tells them how to
+    # pick it up.
     FALLBACK="$HOME/.local/bin"
-    echo "Note: $PREFIX is not writable; falling back to $FALLBACK"
+    echo "Note: $PREFIX isn't writable (couldn't mkdir or no -w); falling back to $FALLBACK"
     mkdir -p "$FALLBACK"
     PREFIX="$FALLBACK"
 fi
 
-mkdir -p "$PREFIX"
 chmod +x "$TMP/$BINARY_FILE"
 mv "$TMP/$BINARY_FILE" "$PREFIX/$BINARY_NAME"
 

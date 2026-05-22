@@ -131,9 +131,27 @@ try {
     # -------------------------------------------------------------
     if (Get-Command cosign -ErrorAction SilentlyContinue) {
         Write-Host "Verifying cosign signature..."
+        # Separate "download .sig/.cert" (recoverable if absent — old
+        # releases predate signing) from "verify the downloaded sig"
+        # (NOT recoverable — a failed verification means the binary
+        # is potentially tampered, refuse to install). Bugbot PR #11
+        # caught the prior structure: with $ErrorActionPreference =
+        # 'Stop', Write-Error inside the try-block was thrown and
+        # caught by the same catch that handled missing-sig, so a
+        # failed verify silently downgraded to "skip + continue."
+        $sigDownloaded = $false
         try {
             Invoke-WebRequest -Uri "$baseUrl/$binaryFile.sig"  -OutFile (Join-Path $tmpDir "$binaryFile.sig")  -UseBasicParsing
             Invoke-WebRequest -Uri "$baseUrl/$binaryFile.cert" -OutFile (Join-Path $tmpDir "$binaryFile.cert") -UseBasicParsing
+            $sigDownloaded = $true
+        } catch {
+            Write-Host "  ⚠ couldn't download .sig/.cert — release may pre-date signing."
+        }
+        if ($sigDownloaded) {
+            # Verify OUTSIDE the try/catch: a non-zero $LASTEXITCODE
+            # from cosign is a hard refusal, not a swallowed
+            # exception. & invokes cosign as an external process,
+            # which doesn't interact with $ErrorActionPreference.
             & cosign verify-blob `
                 --certificate-identity-regexp "https://github.com/$GitHubRepo/.github/workflows/release.yml@.*" `
                 --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
@@ -141,12 +159,10 @@ try {
                 --signature   (Join-Path $tmpDir "$binaryFile.sig") `
                 (Join-Path $tmpDir $binaryFile) 2>$null
             if ($LASTEXITCODE -ne 0) {
-                Write-Error "cosign signature verification FAILED — refusing to install."
+                Write-Host "Error: cosign signature verification FAILED — refusing to install." -ForegroundColor Red
                 exit 1
             }
             Write-Host "  ✓ cosign signature valid"
-        } catch {
-            Write-Host "  ⚠ couldn't download .sig/.cert — release may pre-date signing."
         }
     } else {
         Write-Host "  (cosign not installed; SHA256 verified, signature skipped)"
