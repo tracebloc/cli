@@ -28,6 +28,20 @@ func stageOpts() PodSpecOptions {
 	}
 }
 
+// mustBuildStagePod wraps BuildStagePodSpec for tests that don't
+// care about the (rare) crypto/rand failure path — failing the
+// test if it ever fires is the right escape from "if err != nil"
+// noise in every assertion. The dedicated TestBuildStagePodSpec_
+// PropagatesRandError below covers the error path directly.
+func mustBuildStagePod(t *testing.T, opts PodSpecOptions) *corev1.Pod {
+	t.Helper()
+	p, err := BuildStagePodSpec(opts)
+	if err != nil {
+		t.Fatalf("BuildStagePodSpec: %v", err)
+	}
+	return p
+}
+
 // TestDNS1123SafeTableSegment is the High-severity regression pin
 // for the Bugbot finding on PR-b. Every realistic table name in
 // tracebloc docs uses snake_case (cats_dogs_train, chest_xrays_train);
@@ -110,7 +124,7 @@ func isDNS1123SafeSegment(s string) bool {
 // post-create logic depends on: the SA name, the PVC mount, the
 // activeDeadline, and the labels orphan.go keys off.
 func TestBuildStagePodSpec_Defaults(t *testing.T) {
-	p := BuildStagePodSpec(stageOpts())
+	p := mustBuildStagePod(t, stageOpts())
 
 	if p.Namespace != "tracebloc" {
 		t.Errorf("Namespace = %q, want tracebloc", p.Namespace)
@@ -140,7 +154,7 @@ func TestBuildStagePodSpec_Defaults(t *testing.T) {
 // if this ever drifts to a tag-only reference, air-gapped customers
 // would silently get whatever alpine:3.20 resolved to that day.
 func TestBuildStagePodSpec_DefaultImage(t *testing.T) {
-	p := BuildStagePodSpec(stageOpts())
+	p := mustBuildStagePod(t, stageOpts())
 	got := p.Spec.Containers[0].Image
 	if got != DefaultStagePodImage {
 		t.Errorf("Image = %q, want %q (default)", got, DefaultStagePodImage)
@@ -155,7 +169,7 @@ func TestBuildStagePodSpec_DefaultImage(t *testing.T) {
 func TestBuildStagePodSpec_OverrideImage(t *testing.T) {
 	opts := stageOpts()
 	opts.Image = "internal-mirror.example.com/alpine:3.20@sha256:abc123"
-	p := BuildStagePodSpec(opts)
+	p := mustBuildStagePod(t, opts)
 	if got := p.Spec.Containers[0].Image; got != opts.Image {
 		t.Errorf("Image = %q, want override %q", got, opts.Image)
 	}
@@ -165,7 +179,7 @@ func TestBuildStagePodSpec_OverrideImage(t *testing.T) {
 // will key off. If these ever drift, orphan-pod detection silently
 // misses leftover Pods from crashed pushes.
 func TestBuildStagePodSpec_LabelsForOrphanScan(t *testing.T) {
-	p := BuildStagePodSpec(stageOpts())
+	p := mustBuildStagePod(t, stageOpts())
 	wantLabels := map[string]string{
 		StagePodManagedByLabel: StagePodManagedByValue,
 		StagePodComponentLabel: StagePodComponentValue,
@@ -183,7 +197,7 @@ func TestBuildStagePodSpec_LabelsForOrphanScan(t *testing.T) {
 // stage Pod gets rejected on hardened namespaces (which is the
 // majority of production tracebloc deployments).
 func TestBuildStagePodSpec_RestrictedPSA(t *testing.T) {
-	p := BuildStagePodSpec(stageOpts())
+	p := mustBuildStagePod(t, stageOpts())
 
 	// Pod-level: runAsNonRoot, seccomp RuntimeDefault.
 	psc := p.Spec.SecurityContext
@@ -231,7 +245,7 @@ func TestBuildStagePodSpec_RestrictedPSA(t *testing.T) {
 // from cluster.SharedPVCMountPath, the tar would write to the
 // wrong location and Phase 4's ingestor Job would see "no files."
 func TestBuildStagePodSpec_PVCMount(t *testing.T) {
-	p := BuildStagePodSpec(stageOpts())
+	p := mustBuildStagePod(t, stageOpts())
 
 	// Volume side: the PVC reference.
 	var foundVol bool
@@ -269,7 +283,7 @@ func TestBuildStagePodSpec_PVCMount(t *testing.T) {
 // tar would fail to create its working state and the stream would
 // die mid-transfer.
 func TestBuildStagePodSpec_TmpEmptyDir(t *testing.T) {
-	p := BuildStagePodSpec(stageOpts())
+	p := mustBuildStagePod(t, stageOpts())
 	var foundEmptyDir, foundMount bool
 	for _, v := range p.Spec.Volumes {
 		if v.Name == "tmp" {
@@ -293,8 +307,8 @@ func TestBuildStagePodSpec_TmpEmptyDir(t *testing.T) {
 // built back-to-back must have distinct names so parallel pushes
 // don't race on Create.
 func TestBuildStagePodSpec_RandomSuffixCollisionAvoidance(t *testing.T) {
-	a := BuildStagePodSpec(stageOpts())
-	b := BuildStagePodSpec(stageOpts())
+	a := mustBuildStagePod(t, stageOpts())
+	b := mustBuildStagePod(t, stageOpts())
 	if a.Name == b.Name {
 		t.Errorf("back-to-back BuildStagePodSpec produced identical name %q; "+
 			"random-suffix collision avoidance is broken", a.Name)
@@ -403,6 +417,59 @@ func TestWaitForStagePodReady_TimeoutHint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ImagePullBackOff") {
 		t.Errorf("error missing ImagePullBackOff hint: %v", err)
+	}
+}
+
+// TestWaitForStagePodReady_NotFoundIsTerminal: if the Pod gets
+// deleted out-of-band mid-wait (admin cleanup, parallel test
+// teardown, etc.), the poll must short-circuit instead of waiting
+// the full timeout. Bugbot flagged the prior "everything transient"
+// behavior as Medium on PR-b.
+func TestWaitForStagePodReady_NotFoundIsTerminal(t *testing.T) {
+	cs := fake.NewClientset() // empty — Get returns NotFound
+
+	// Generous overall ctx; the test should return WAY before
+	// StagePodReadyTimeout (60s) because NotFound terminates the
+	// poll immediately. If the fix regresses, this test takes the
+	// full 60s and gets caught by go test's -timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := WaitForStagePodReady(ctx, cs, "tracebloc", "ghost-pod")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("WaitForStagePodReady returned nil on NotFound")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("WaitForStagePodReady waited %s for NotFound; expected immediate return", elapsed)
+	}
+}
+
+// TestWaitForStagePodReady_ForbiddenIsTerminal: same as NotFound but
+// for RBAC denial — the customer's kubeconfig might lose `get pods`
+// permission mid-push (token rotation, RBAC change). The poll must
+// surface that immediately, not spin until timeout.
+func TestWaitForStagePodReady_ForbiddenIsTerminal(t *testing.T) {
+	cs := fake.NewClientset()
+	cs.PrependReactor("get", "pods",
+		func(_ k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(
+				corev1.Resource("pods"), "test-pod",
+				errors.New("user cannot get pods"))
+		})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := WaitForStagePodReady(ctx, cs, "tracebloc", "test-pod")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("WaitForStagePodReady returned nil on Forbidden")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("WaitForStagePodReady waited %s for Forbidden; expected immediate return", elapsed)
 	}
 }
 

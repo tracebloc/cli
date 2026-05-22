@@ -124,6 +124,14 @@ type PodSpecOptions struct {
 // Separated from CreateStagePod so unit tests can assert the spec
 // shape without needing a fake clientset for every assertion.
 //
+// Returns an error only when crypto/rand fails — which is rare but
+// possible on systems with exhausted entropy. Earlier versions
+// swallowed that error and produced a Pod name ending with a bare
+// trailing hyphen (DNS-1123 violation → opaque API server
+// rejection). Bugbot flagged that as Low on PR-b; surfacing the
+// error here turns "weird API error message" into "clear local
+// diagnostic at the call site."
+//
 // Security context follows the Kubernetes Pod Security Standards
 // "restricted" profile — the strictest preset, accepted on every
 // PSA-enabled namespace including the chart's recommended config.
@@ -131,13 +139,16 @@ type PodSpecOptions struct {
 // namespace and writes to their PVC, so being a model citizen for
 // PSA defaults reduces "the Pod won't even start on my cluster"
 // surface area.
-func BuildStagePodSpec(opts PodSpecOptions) *corev1.Pod {
+func BuildStagePodSpec(opts PodSpecOptions) (*corev1.Pod, error) {
 	image := opts.Image
 	if image == "" {
 		image = DefaultStagePodImage
 	}
 
-	suffix, _ := randomSuffix(4) // 4 bytes → 8 hex chars
+	suffix, err := randomSuffix(4) // 4 bytes → 8 hex chars
+	if err != nil {
+		return nil, fmt.Errorf("generating Pod-name random suffix: %w", err)
+	}
 	// Transform the table name into a DNS-1123 subdomain-safe
 	// segment for the Pod name. ValidateTableName accepts
 	// [A-Za-z0-9_]+ (MySQL identifier rules), but Kubernetes Pod
@@ -286,7 +297,7 @@ func BuildStagePodSpec(opts PodSpecOptions) *corev1.Pod {
 				},
 			}},
 		},
-	}
+	}, nil
 }
 
 // CreateStagePod creates the Pod in the cluster and returns the
@@ -299,7 +310,10 @@ func BuildStagePodSpec(opts PodSpecOptions) *corev1.Pod {
 // renaming with a prefix). Reading back from the response is the
 // safe contract.
 func CreateStagePod(ctx context.Context, cs kubernetes.Interface, opts PodSpecOptions) (string, error) {
-	pod := BuildStagePodSpec(opts)
+	pod, err := BuildStagePodSpec(opts)
+	if err != nil {
+		return "", err
+	}
 	created, err := cs.CoreV1().Pods(opts.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		// Most-common failure path: PSA rejects the Pod because
@@ -332,11 +346,18 @@ func WaitForStagePodReady(ctx context.Context, cs kubernetes.Interface, namespac
 		func(ctx context.Context) (bool, error) {
 			p, err := cs.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 			if err != nil {
-				// Transient errors (network blips, brief API
-				// unavailability) shouldn't terminate the poll.
-				// Returning (false, nil) keeps the poll going.
-				// Persistent errors will exhaust the timeout and
-				// surface there with last-observed context.
+				// Distinguish terminal vs transient. Terminal
+				// errors (Pod deleted out-of-band, RBAC revoked
+				// to read Pods) MUST short-circuit the poll —
+				// otherwise the customer waits the full 60s
+				// timeout for a condition that won't change.
+				// Bugbot flagged the prior "everything transient"
+				// version as Medium on PR-b.
+				if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
+					return false, err
+				}
+				// Transient (network blip, brief API unavail).
+				// Keep polling; last-observed context survives.
 				return false, nil
 			}
 			lastObserved = p
