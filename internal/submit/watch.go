@@ -153,6 +153,16 @@ func WatchJob(
 			// the CLI is just not watching anymore.
 			return &WatchResult{Outcome: JobOutcomeDetached}, nil
 		}
+		// PodReadyTimeout (5min) exhausted = slow image pull /
+		// scheduling backlog / PSA still rejecting. The submit
+		// was accepted, the run will (eventually) execute in the
+		// cluster — the CLI just gave up observing within the
+		// timeout. Treat as Detached, not ingest-failed: bumping
+		// to exit 9 would falsely claim the ingestion failed.
+		// Bugbot PR #10 r5 flagged the false-positive exit code.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return &WatchResult{Outcome: JobOutcomeDetached}, nil
+		}
 		return nil, fmt.Errorf("waiting for ingestor Pod: %w", err)
 	}
 

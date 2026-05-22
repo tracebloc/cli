@@ -1,6 +1,7 @@
 package submit
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -229,6 +230,36 @@ func TestFinalJobStatus_TimeoutIsUnknown(t *testing.T) {
 	}
 	if out != JobOutcomeUnknown {
 		t.Errorf("Outcome = %v, want Unknown", out)
+	}
+}
+
+// TestWatchJob_PodWaitTimeoutMapsToDetach: when waitForJobPod
+// exhausts its 5-min budget (slow image pull, PSA backlog), the
+// submit has already been accepted by jobs-manager — the
+// ingestion will run, the CLI just gave up watching within the
+// timeout. WatchJob must return Outcome=Detached, not an error
+// that bubbles up as exit 9 ("ingestion failed"). Bugbot PR #10
+// r5 caught the false-positive exit code.
+func TestWatchJob_PodWaitTimeoutMapsToDetach(t *testing.T) {
+	cs := fake.NewClientset() // no Pod backing the job-name
+
+	// Tight ctx so the test doesn't actually wait PodReadyTimeout (5m).
+	// The DeadlineExceeded from the parent ctx propagates the same
+	// way the inner PodReadyTimeout would, exercising the same
+	// errors.Is(DeadlineExceeded) branch in WatchJob.
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+
+	var out bytes.Buffer
+	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor-stuck", &out)
+	if err != nil {
+		t.Fatalf("WatchJob returned error on Pod-wait timeout; want nil + Detached: %v", err)
+	}
+	if wr == nil {
+		t.Fatal("WatchJob returned nil result on Pod-wait timeout")
+	}
+	if wr.Outcome != JobOutcomeDetached {
+		t.Errorf("Outcome = %v, want Detached (the cluster keeps running; the CLI just gave up observing)", wr.Outcome)
 	}
 }
 

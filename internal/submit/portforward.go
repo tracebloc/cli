@@ -125,6 +125,16 @@ func PortForwardJobsManager(
 	// 5. Launch the forward goroutine. ForwardPorts blocks until
 	//    stopCh closes (or it errors). The select below waits for
 	//    EITHER ready (success) or done (early failure).
+	//
+	//    errCh is buffered (capacity 1) AND the send is wrapped in
+	//    a non-blocking select with a default — two layers of
+	//    safety against the "goroutine leaks waiting to send"
+	//    pattern. ForwardPorts only ever sends once, so the buffer
+	//    is sufficient; the non-blocking select is paranoid
+	//    defensive against a future refactor that adds a second
+	//    send path. Bugbot PR #10 r5 flagged the (already-
+	//    buffered) channel as a potential leak — the false alarm
+	//    is worth closing out structurally.
 	done := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
@@ -132,8 +142,17 @@ func PortForwardJobsManager(
 		// ForwardPorts is the long-running call. Its return value
 		// is meaningful only on early failure — on normal close,
 		// it returns nil after stopCh fires.
-		if err := pf.ForwardPorts(); err != nil {
-			errCh <- err
+		err := pf.ForwardPorts()
+		if err == nil {
+			return
+		}
+		select {
+		case errCh <- err:
+		default:
+			// Buffer full = receiver already saw an earlier error
+			// (impossible today — single sender, single error —
+			// but the default arm makes the goroutine drainable
+			// regardless of any future change).
 		}
 	}()
 
