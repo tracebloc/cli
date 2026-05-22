@@ -57,6 +57,42 @@ func (f *fakeExecutor) Exec(
 	return f.errToReturn
 }
 
+// TestStreamLayout_TarPathsAreForwardSlash pins the cross-platform
+// tar header convention. On Windows, filepath.Join uses '\' as
+// separator — using it for the tar HEADER name would produce
+// archive entries the Linux stage Pod's `tar -xf` either rejects
+// or extracts as flat-named files (collapsing the images/ subdir).
+// The fix is path.Join (always forward-slash); this test asserts
+// the portable property regardless of which OS the test runs on.
+// Bugbot flagged the Windows bug on PR-b round 6.
+func TestStreamLayout_TarPathsAreForwardSlash(t *testing.T) {
+	root := imgcDir(t, "a.jpg", "b.png")
+	layout, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	fe := &fakeExecutor{}
+	if err := StreamLayout(context.Background(), fe, "tracebloc", "p", "stage",
+		layout, "t", NoOpProgress{}); err != nil {
+		t.Fatalf("StreamLayout: %v", err)
+	}
+
+	tr := tar.NewReader(bytes.NewReader(fe.gotStdin))
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading tar: %v", err)
+		}
+		if strings.Contains(hdr.Name, `\`) {
+			t.Errorf("tar entry %q contains backslash; "+
+				"Linux stage Pod's `tar -xf` requires forward-slash paths", hdr.Name)
+		}
+	}
+}
+
 // TestStreamLayout_TarContents end-to-end: the bytes the executor
 // sees on stdin MUST be a valid tar with the layout's files at the
 // expected paths (labels.csv at the root, images/<basename> under

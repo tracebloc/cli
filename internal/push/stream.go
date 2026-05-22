@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 
 	corev1 "k8s.io/api/core/v1"
@@ -270,7 +271,17 @@ func writeLayoutTar(w io.Writer, layout *LocalLayout) (err error) {
 		// basename — strips the customer's local path so a push
 		// from /home/alice/datasets/cats_dogs/images/001.jpg
 		// becomes images/001.jpg in the tar (and on the PVC).
-		dst := filepath.Join("images", filepath.Base(abs))
+		//
+		// Use path.Join (always forward-slash) NOT filepath.Join
+		// (OS-native separator) for the tar HEADER name. USTAR/POSIX
+		// tar requires forward slashes; a Windows-built CLI using
+		// filepath.Join would emit `images\001.jpg` headers that the
+		// Linux stage Pod's `tar -xf` either rejects or extracts as
+		// a flat-named file. The basename argument is fine via
+		// filepath.Base (it returns the trailing element, no
+		// separators) — only the join needs to be slash-portable.
+		// Bugbot flagged on PR-b round 6.
+		dst := path.Join("images", filepath.Base(abs))
 		if err := writeTarFile(tw, abs, dst); err != nil {
 			return fmt.Errorf("packaging %s: %w", abs, err)
 		}

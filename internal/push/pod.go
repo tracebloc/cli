@@ -66,12 +66,24 @@ const (
 // the Pod stranded. activeDeadlineSeconds means the kubelet kills
 // it even if the CLI never gets the chance.
 //
-// 10 minutes is roughly 6x our largest expected v0.1 transfer
-// (1 GiB at a conservative 2 MB/s gives ~8.5 min). Customers
-// pushing close to the cap will hit the deadline; they're already
-// pointed at the v0.2 cloud-source story by the size-cap
-// diagnostic. v0.2 should make this configurable per push.
-const StagePodActiveDeadline = 600
+// 30 minutes covers the full lifecycle, not just the stream:
+//
+//	~60s   image pull on a fresh node + scheduler back-pressure
+//	~60s   WaitForStagePodReady ceiling (StagePodReadyTimeout)
+//	~8.5m  1 GiB transfer at a conservative 2 MB/s
+//	+ comfortable margin for variance
+//
+// activeDeadlineSeconds starts the clock at Pod CREATION (not at
+// streaming start), so we have to budget for the pre-stream
+// readiness portion too — the earlier 10-minute value cut it too
+// fine for near-cap customers on slow uplinks (kubelet would
+// terminate mid-transfer). Bugbot flagged the squeeze as High on
+// PR-b round 6.
+//
+// 30 min is generous but cheap — an idle alpine Pod with `sleep`
+// consumes ~5 MiB RAM and zero CPU on the cluster. v0.2 should
+// make this configurable per push.
+const StagePodActiveDeadline = 1800
 
 // StagePodReadyTimeout is how long we wait for the Pod to become
 // Running + Ready after CREATE. Most clusters spawn an alpine Pod

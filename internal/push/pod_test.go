@@ -150,6 +150,24 @@ func TestBuildStagePodSpec_Defaults(t *testing.T) {
 	}
 }
 
+// TestStagePodActiveDeadline_CoversFullLifecycle pins the floor on
+// activeDeadlineSeconds. The earlier 600s value was too tight: the
+// timer starts at Pod CREATION, but image pull (up to 60s) +
+// readiness wait (up to 60s) + the worst-case stream (1 GiB at
+// 2 MB/s = ~8.5 min) leaves no margin, so the kubelet could
+// terminate near-cap pushes mid-transfer. Bugbot flagged as High
+// on PR-b round 6. This test pins the floor at 1500s (25 min) so
+// a future regression bumping it back near 600 gets caught.
+func TestStagePodActiveDeadline_CoversFullLifecycle(t *testing.T) {
+	const minDeadline = 1500
+	if StagePodActiveDeadline < minDeadline {
+		t.Errorf("StagePodActiveDeadline = %d, want at least %d "+
+			"(must cover image-pull + readiness + worst-case 1 GiB stream "+
+			"+ margin; activeDeadline starts at Pod creation not stream start)",
+			StagePodActiveDeadline, minDeadline)
+	}
+}
+
 // TestBuildStagePodSpec_DefaultImage pins the digest-pinned image —
 // if this ever drifts to a tag-only reference, air-gapped customers
 // would silently get whatever alpine:3.20 resolved to that day.
