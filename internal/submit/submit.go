@@ -123,7 +123,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	_, _ = fmt.Fprintf(opts.Out, "Streaming logs from Job %s/%s:\n", resp.Namespace, resp.JobName)
 	wr, err := WatchJob(ctx, opts.Client, resp.Namespace, resp.JobName, opts.Out)
 	if err != nil {
-		return &Result{Submit: resp}, fmt.Errorf("watching ingestor Job: %w", err)
+		// Tag as WatchError so the orchestrator picks the
+		// ingest-flavored exit code (9), not the submit-flavored
+		// one (8). The cluster has already accepted the run by
+		// this point — the CLI just failed to follow it.
+		return &Result{Submit: resp}, &WatchError{Err: fmt.Errorf("watching ingestor Job: %w", err)}
 	}
 
 	// Detach-from-SIGINT path. Print the reconnect hint so the
@@ -158,4 +162,28 @@ func IsAuthError(err error) bool {
 		return false
 	}
 	return se.StatusCode == 401 || se.StatusCode == 403
+}
+
+// WatchError wraps errors that originated in the watch phase
+// (waitForJobPod, log streaming, finalJobStatus). The
+// orchestrator distinguishes these from submit-phase errors so
+// the exit-code mapping is correct: jobs-manager accepted the
+// run already, the cluster is doing the work, the CLI just
+// failed to follow along. Maps to exit code 9 (ingest-side
+// problem), not 8 (submit-side problem). Bugbot flagged the
+// previous "everything that wasn't auth → exit 8" version on
+// PR #10.
+type WatchError struct {
+	Err error
+}
+
+func (e *WatchError) Error() string { return e.Err.Error() }
+func (e *WatchError) Unwrap() error { return e.Err }
+
+// IsWatchError reports whether err originated in the watch phase
+// rather than the submit phase. The orchestrator's exit-code
+// branch uses this directly.
+func IsWatchError(err error) bool {
+	var we *WatchError
+	return errors.As(err, &we)
 }

@@ -127,6 +127,16 @@ func WatchJob(
 	namespace, jobName string,
 	out io.Writer,
 ) (*WatchResult, error) {
+	// Enforce the JobWatchTimeout absolute cap. Earlier versions
+	// declared the constant but only the per-step timeouts
+	// (PodReadyTimeout, finalJobStatus's 30s) bounded the watch —
+	// the log-stream phase could run indefinitely on a stuck
+	// ingestor. Bugbot flagged the gap on PR #10. The cap
+	// triggers as ctx.DeadlineExceeded, which the orchestrator
+	// surfaces with a clear "watch timed out" framing.
+	ctx, cancel := context.WithTimeout(ctx, JobWatchTimeout)
+	defer cancel()
+
 	// 1. Wait for the ingestor Job's Pod to exist + reach Running.
 	//    jobs-manager creates the Job and Kubernetes spawns the
 	//    Pod asynchronously, so the Pod usually isn't there the
@@ -292,9 +302,17 @@ func streamPodLogsAndParse(
 		// EOF is normal end-of-stream; other errors (network drop
 		// mid-stream, ctx cancel) get propagated.
 		if !errors.Is(err, io.EOF) {
+			// Flush any buffered partial line before returning so
+			// the parser sees content even on mid-line failure.
+			parser.FlushLine()
 			return parser.Result(), err
 		}
 	}
+	// Flush at the end of stream too. A Pod that exited without
+	// a trailing newline on its final stdout write would otherwise
+	// lose the final line — including potentially the closing
+	// ═-rule that finalizes the banner. Bugbot flagged on PR #10.
+	parser.FlushLine()
 	return parser.Result(), nil
 }
 

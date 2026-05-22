@@ -425,10 +425,19 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		Out:              out,
 	})
 	if err != nil {
-		if submit.IsAuthError(err) {
+		switch {
+		case submit.IsAuthError(err):
 			return &exitError{code: 5, err: err}
+		case submit.IsWatchError(err):
+			// Watch-phase failure: jobs-manager already accepted
+			// the run, the cluster is doing the work, the CLI
+			// just couldn't follow along. Exit 9 (ingest-side)
+			// not 8 (submit-side). Bugbot flagged the
+			// previously-undifferentiated mapping on PR #10.
+			return &exitError{code: 9, err: err}
+		default:
+			return &exitError{code: 8, err: err}
 		}
-		return &exitError{code: 8, err: err}
 	}
 
 	// Detach paths (--detach flag OR SIGINT-mid-watch) are
@@ -438,10 +447,18 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return nil
 	}
 
-	// Watch outcomes.
+	// Watch outcomes. Both Failed and Unknown route to exit 9
+	// (Unknown = finalJobStatus timed out without seeing a
+	// terminal condition, which we can't claim as success).
+	// Bugbot flagged the prior switch's missing Unknown branch
+	// on PR #10.
 	switch submitRes.Watch.Outcome {
 	case submit.JobOutcomeFailed:
 		return &exitError{code: 9, err: errors.New("ingestion Job exited non-zero — see logs above")}
+	case submit.JobOutcomeUnknown:
+		return &exitError{code: 9, err: errors.New(
+			"ingestion Job's final status couldn't be determined within the watch window — " +
+				"check `kubectl get job -n " + submitRes.Submit.Namespace + " " + submitRes.Submit.JobName + "` for the outcome")}
 	case submit.JobOutcomeSucceeded:
 		if submitRes.Watch.Summary != nil && submitRes.Watch.Summary.HasFailures() {
 			return &exitError{code: 9, err: errors.New(

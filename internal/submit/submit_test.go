@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -177,6 +178,31 @@ func TestRun_NilOutDefaultsToDiscard(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Run with nil Out panicked or errored: %v", err)
+	}
+}
+
+// TestIsWatchError: pin the contract that the orchestrator uses
+// to distinguish watch-phase failures (exit 9) from submit-phase
+// failures (exit 8). Bugbot r1 found the missing distinction;
+// this test guards against a regression that drops the typing.
+func TestIsWatchError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"plain error", errors.New("plain"), false},
+		{"submit error", &SubmitError{StatusCode: 422}, false},
+		{"watch error", &WatchError{Err: errors.New("inner")}, true},
+		{"wrapped watch error", fmt.Errorf("outer: %w", &WatchError{Err: errors.New("inner")}), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsWatchError(c.err); got != c.want {
+				t.Errorf("IsWatchError = %v, want %v", got, c.want)
+			}
+		})
 	}
 }
 
