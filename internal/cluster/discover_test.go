@@ -76,12 +76,14 @@ func TestDiscoverParentRelease_HappyPath(t *testing.T) {
 	}
 
 	want := ParentRelease{
-		ReleaseName:         "tracebloc",
-		ChartVersion:        "1.3.5",
-		AppVersion:          "1.3.5",
-		JobsManagerService:  "http://jobs-manager." + ns + ".svc.cluster.local:8080",
-		IngestorSAName:      "ingestor",
-		IngestorImageDigest: "sha256:463e236748708a5e3564569eec9173ea8cb3bcf515992d4939c5b610f3807a4a",
+		ReleaseName:            "tracebloc",
+		ChartVersion:           "1.3.5",
+		AppVersion:             "1.3.5",
+		JobsManagerService:     "http://jobs-manager." + ns + ".svc.cluster.local:8080",
+		JobsManagerServiceName: "jobs-manager",
+		JobsManagerPort:        8080,
+		IngestorSAName:         "ingestor",
+		IngestorImageDigest:    "sha256:463e236748708a5e3564569eec9173ea8cb3bcf515992d4939c5b610f3807a4a",
 	}
 	if *release != want {
 		t.Errorf("mismatch.\ngot:  %+v\nwant: %+v", *release, want)

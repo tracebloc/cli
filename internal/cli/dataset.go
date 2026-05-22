@@ -12,6 +12,7 @@ import (
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/schema"
+	"github.com/tracebloc/cli/internal/submit"
 )
 
 // newDatasetCmd wires the `tracebloc dataset` subtree. The dominant
@@ -89,6 +90,16 @@ func newDatasetPushCmd() *cobra.Command {
 		// Pin by digest in your override too — tag-only references
 		// drift silently and break "all my pushes worked yesterday."
 		stagePodImage string
+
+		// Phase 4 flags. --detach exits immediately after the 201
+		// from jobs-manager; --idempotency-key plumbs through to
+		// the submit body for retry-safety across CLI invocations
+		// (default: fresh per call); --image-digest pins the
+		// ingestor image (default: jobs-manager picks the
+		// cluster-configured one).
+		detach         bool
+		idempotencyKey string
+		imageDigest    string
 	)
 
 	cmd := &cobra.Command{
@@ -113,13 +124,18 @@ datasets need the v0.2 cloud-source story (S3/GCS/HTTPS sources) —
 see tracebloc/client#147 non-goals.
 
 Exit codes:
-  0   files staged successfully (Phase 4 will add: submitted + completed)
+  0   files staged + ingested successfully (or --detach: just staged + submitted)
   2   schema validation failed (synthesized spec rejected) or
       v0.1-unsupported category passed
   3   local-layout or kubeconfig error
   4   cluster reachable but parent release / shared PVC missing
+  5   ingestor SA token couldn't be obtained, or jobs-manager
+      rejected the token (401/403)
   7   pre-flight succeeded but staging the files failed
-      (Pod creation, image pull, exec stream, or remote tar error)`,
+      (Pod creation, image pull, exec stream, or remote tar error)
+  8   jobs-manager rejected the submit (4xx/5xx other than auth)
+  9   ingestion Job exited non-zero, or completed with row-level
+      failures the summary panel reports`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDatasetPush(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
@@ -132,6 +148,9 @@ Exit codes:
 					DryRun:         dryRun,
 					IngestorSAName: ingestorSAName,
 					StagePodImage:  stagePodImage,
+					Detach:         detach,
+					IdempotencyKey: idempotencyKey,
+					ImageDigest:    imageDigest,
 				})
 		},
 	}
@@ -166,6 +185,17 @@ Exit codes:
 		"override the ephemeral stage Pod's image (default: digest-pinned alpine 3.20 baked into the CLI). "+
 			"Pin by digest in your override too — tag-only refs drift silently.")
 
+	cmd.Flags().BoolVar(&detach, "detach", false,
+		"exit immediately after jobs-manager accepts the run (no log streaming, no summary panel). "+
+			"Use for CI scenarios; reconnect later with `kubectl logs -f -n <ns> job/<name>`.")
+	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "",
+		"reuse this idempotency key across retry attempts (default: fresh per invocation). "+
+			"jobs-manager treats a duplicate key as a replay and attaches to the existing Job "+
+			"rather than spawning a new one — useful for at-most-once-across-attempts semantics.")
+	cmd.Flags().StringVar(&imageDigest, "image-digest", "",
+		"pin the ingestor container image to a specific digest (default: jobs-manager picks the "+
+			"cluster-configured `images.ingestor.digest`). Format: sha256:<hex>.")
+
 	return cmd
 }
 
@@ -182,6 +212,12 @@ type runDatasetPushArgs struct {
 	DryRun         bool
 	IngestorSAName string
 	StagePodImage  string
+
+	// Phase 4 (#152) fields. See the flag declarations for the
+	// per-knob rationale; all three are optional.
+	Detach         bool
+	IdempotencyKey string
+	ImageDigest    string
 }
 
 // runDatasetPush is the full Phase 3 implementation: pre-flight
@@ -350,14 +386,102 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 7, err: stageErr}
 	}
 
-	// 10. Phase 4 (submit to jobs-manager + watch + summary) hooks
-	//     in here — tracebloc/client#152. For now PR-b leaves the
-	//     dataset staged on the PVC and exits 0, which the customer
-	//     can then chase manually via `helm install ingestor ...` if
-	//     they need the ingestion to actually run today.
+	// 10. Mint the SA token Phase 4 uses to authenticate the POST
+	//     to jobs-manager. Expiry is 1 hour (vs cluster info's 10
+	//     min) because the full Phase 4 lifecycle — submit + watch
+	//     + log stream — can run that long for large ingestions.
+	//     The chart's helm flow uses the same token-mint code path.
 	_, _ = fmt.Fprintln(out)
-	_, _ = fmt.Fprintln(out, "Dataset staged. Submission to jobs-manager arrives in Phase 4 (#152);")
-	_, _ = fmt.Fprintln(out, "in the meantime, the existing helm ingestor flow can pick up the staged files.")
+	tok, err := cluster.MintIngestorToken(ctx, cs, resolved.Namespace,
+		release.IngestorSAName, 3600, nil)
+	if err != nil {
+		return &exitError{code: 5, err: err}
+	}
+
+	// 11. Open a port-forward to a Pod backing the jobs-manager
+	//     Service. The CLI runs off-cluster (on a laptop, in CI
+	//     runners outside the cluster network), so the discovered
+	//     *.svc.cluster.local URL isn't reachable — we tunnel
+	//     through the kubeconfig-authenticated apiserver, same as
+	//     `kubectl port-forward`. Bugbot PR #10 r3 caught the
+	//     original broken-by-design direct-URL POST.
+	_, _ = fmt.Fprintln(out, "Opening port-forward to jobs-manager...")
+	pf, err := submit.PortForwardJobsManager(ctx, cs, resolved.RestConfig,
+		resolved.Namespace, release.JobsManagerServiceName, release.JobsManagerPort)
+	if err != nil {
+		return &exitError{code: 8, err: fmt.Errorf("setting up jobs-manager port-forward: %w", err)}
+	}
+	defer pf.Close()
+
+	// 12. Phase 4: POST to jobs-manager via the local port,
+	//     watch the spawned ingestor Job, render the parsed
+	//     INGESTION SUMMARY panel.
+	//
+	//     Exit-code mapping:
+	//        SubmitError 401/403         → 5 (auth — same bucket as
+	//                                       token-mint, shared
+	//                                       "your SA can't do this"
+	//                                       diagnostic class)
+	//        SubmitError other 4xx/5xx   → 8 (submit failed)
+	//        WatchResult Failed          → 9 (ingest failed)
+	//        WatchResult Succeeded +
+	//          summary.HasFailures()     → 9 (some rows failed
+	//                                       even though Job exited 0;
+	//                                       the ingestor surfaces
+	//                                       partial-failure summaries)
+	//        WatchResult Detached        → 0 (cluster keeps running)
+	//        WatchResult Succeeded clean → 0
+	localEndpoint := fmt.Sprintf("http://localhost:%d", pf.LocalPort)
+	submitRes, err := submit.Run(ctx, submit.Options{
+		Submitter:        submit.NewHTTPSubmitter(localEndpoint, tok.Token),
+		Client:           cs,
+		IngestConfigYAML: string(specBytes),
+		IdempotencyKey:   a.IdempotencyKey,
+		ImageDigest:      a.ImageDigest,
+		Detach:           a.Detach,
+		Out:              out,
+	})
+	if err != nil {
+		switch {
+		case submit.IsAuthError(err):
+			return &exitError{code: 5, err: err}
+		case submit.IsWatchError(err):
+			// Watch-phase failure: jobs-manager already accepted
+			// the run, the cluster is doing the work, the CLI
+			// just couldn't follow along. Exit 9 (ingest-side)
+			// not 8 (submit-side). Bugbot flagged the
+			// previously-undifferentiated mapping on PR #10.
+			return &exitError{code: 9, err: err}
+		default:
+			return &exitError{code: 8, err: err}
+		}
+	}
+
+	// Detach paths (--detach flag OR SIGINT-mid-watch) are
+	// success — cluster keeps running; the orchestrator already
+	// printed the reconnect hint.
+	if submitRes.Watch == nil || submitRes.Watch.Outcome == submit.JobOutcomeDetached {
+		return nil
+	}
+
+	// Watch outcomes. Both Failed and Unknown route to exit 9
+	// (Unknown = finalJobStatus timed out without seeing a
+	// terminal condition, which we can't claim as success).
+	// Bugbot flagged the prior switch's missing Unknown branch
+	// on PR #10.
+	switch submitRes.Watch.Outcome {
+	case submit.JobOutcomeFailed:
+		return &exitError{code: 9, err: errors.New("ingestion Job exited non-zero — see logs above")}
+	case submit.JobOutcomeUnknown:
+		return &exitError{code: 9, err: errors.New(
+			"ingestion Job's final status couldn't be determined within the watch window — " +
+				"check `kubectl get job -n " + submitRes.Submit.Namespace + " " + submitRes.Submit.JobName + "` for the outcome")}
+	case submit.JobOutcomeSucceeded:
+		if submitRes.Watch.Summary != nil && submitRes.Watch.Summary.HasFailures() {
+			return &exitError{code: 9, err: errors.New(
+				"ingestion Job completed but the summary reports failures — see panel above")}
+		}
+	}
 	return nil
 }
 

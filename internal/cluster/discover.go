@@ -35,8 +35,19 @@ type ParentRelease struct {
 	// JobsManagerService is the in-cluster DNS name of the
 	// jobs-manager Service, e.g.
 	// "<release>-jobs-manager.<namespace>.svc.cluster.local:8080".
-	// Used as the POST target for ingestion submissions.
+	// Used as the POST target for ingestion submissions WHEN
+	// the CLI runs in-cluster (e.g. CI inside the same cluster).
+	// For laptop / off-cluster use, the orchestrator port-forwards
+	// to JobsManagerServiceName + JobsManagerPort instead.
 	JobsManagerService string
+
+	// JobsManagerServiceName + JobsManagerPort are the bare Service
+	// reference for off-cluster port-forwarding (Bugbot PR #10 r3).
+	// The FQDN-based JobsManagerService URL above doesn't resolve
+	// from a laptop; the port-forward path uses these to set up a
+	// localhost tunnel via the kubeconfig API server.
+	JobsManagerServiceName string
+	JobsManagerPort        int
 
 	// IngestorSAName is the name of the ServiceAccount the chart's
 	// hook pods run as. Today this is always the chart's default
@@ -143,7 +154,10 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 	// release-prefixed form. Customers can always override via the
 	// ingestor subchart's `jobsManager.endpoint` value.
 	svc := pickJobsManagerService(ctx, cs, namespace, release.ReleaseName)
-	release.JobsManagerService = fmt.Sprintf("http://%s.%s.svc.cluster.local:8080", svc, namespace)
+	const jobsManagerPort = 8080 // chart's well-known port for /internal/submit-ingestion-run
+	release.JobsManagerService = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", svc, namespace, jobsManagerPort)
+	release.JobsManagerServiceName = svc
+	release.JobsManagerPort = jobsManagerPort
 
 	// Read INGESTOR_IMAGE_DIGEST from jobs-manager's pod-spec env.
 	// The chart pipes images.ingestor.digest through to here.
