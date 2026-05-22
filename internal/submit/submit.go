@@ -130,13 +130,30 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		return &Result{Submit: resp}, &WatchError{Err: fmt.Errorf("watching ingestor Job: %w", err)}
 	}
 
-	// Detach-from-SIGINT path. Print the reconnect hint so the
-	// customer knows the cluster keeps running.
+	// Detach paths print a per-reason diagnostic + the same
+	// kubectl-logs reconnect hint. Bugbot PR #10 r7 caught the
+	// previous "on signal" framing being misleading for the
+	// timeout-detach cases — customers who hit the 5-min
+	// PodReadyTimeout or 1-hour JobWatchTimeout aren't pressing
+	// Ctrl-C, so attributing it to "signal" was wrong.
 	if wr.Outcome == JobOutcomeDetached {
 		_, _ = fmt.Fprintln(opts.Out)
+		switch wr.DetachReason {
+		case DetachReasonSignal:
+			_, _ = fmt.Fprintln(opts.Out, "Detached on signal.")
+		case DetachReasonPodWaitTimeout:
+			_, _ = fmt.Fprintln(opts.Out,
+				"Detached: the ingestor Pod didn't reach Ready within the observation window. "+
+					"This usually means slow image pull or scheduling backlog — the run is in "+
+					"jobs-manager's queue and will execute when the Pod starts.")
+		case DetachReasonWatchCap:
+			_, _ = fmt.Fprintln(opts.Out,
+				"Detached: the watch window (1 hour) elapsed while the ingestion was still running.")
+		default:
+			_, _ = fmt.Fprintln(opts.Out, "Detached.")
+		}
 		_, _ = fmt.Fprintf(opts.Out,
-			"Detached on signal. Ingestion continues in the cluster. "+
-				"Reconnect with: kubectl logs -f -n %s job/%s\n",
+			"Ingestion continues in the cluster. Reconnect with: kubectl logs -f -n %s job/%s\n",
 			resp.Namespace, resp.JobName)
 		return &Result{Submit: resp, Watch: wr}, nil
 	}

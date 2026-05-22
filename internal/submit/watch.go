@@ -104,7 +104,43 @@ type WatchResult struct {
 	// (success path) or include it in the failure framing
 	// (failed-after-summary path).
 	Summary *Summary
+
+	// DetachReason qualifies the Detached outcome — set only
+	// when Outcome == JobOutcomeDetached. Lets the orchestrator
+	// print accurate diagnostics ("Detached on signal" vs
+	// "Pod didn't become Ready within timeout" vs "Watch cap
+	// exceeded") instead of the previous one-size-fits-all
+	// message. Bugbot PR #10 r7 flagged the misleading "signal"
+	// framing for the timeout-detach paths.
+	DetachReason DetachReason
 }
+
+// DetachReason enumerates the conditions that produce a Detached
+// outcome. Used by the orchestrator's diagnostic output only —
+// the exit-code mapping treats all detach reasons as success (0)
+// because the cluster keeps running regardless of why we stopped
+// watching.
+type DetachReason int
+
+const (
+	// DetachReasonNone is the zero value, used when Outcome is
+	// not Detached.
+	DetachReasonNone DetachReason = iota
+
+	// DetachReasonSignal: customer pressed Ctrl-C (or a parent
+	// process sent SIGTERM). The original Detach semantic.
+	DetachReasonSignal
+
+	// DetachReasonPodWaitTimeout: PodReadyTimeout (5 min)
+	// exhausted before the ingestor Pod reached a useful
+	// phase. Slow image pull, scheduling backlog, PSA rejection.
+	DetachReasonPodWaitTimeout
+
+	// DetachReasonWatchCap: JobWatchTimeout (1 hour) exceeded
+	// during log streaming. Long-running ingestion that
+	// outlasted the observation window.
+	DetachReasonWatchCap
+)
 
 // WatchJob is the top-level watch loop: poll the Job until it
 // reaches a terminal phase, stream the Pod's logs while it's
@@ -151,7 +187,10 @@ func WatchJob(
 			// SIGINT before the Pod even appeared. jobs-manager
 			// has accepted the run, the cluster will run it,
 			// the CLI is just not watching anymore.
-			return &WatchResult{Outcome: JobOutcomeDetached}, nil
+			return &WatchResult{
+				Outcome:      JobOutcomeDetached,
+				DetachReason: DetachReasonSignal,
+			}, nil
 		}
 		// PodReadyTimeout (5min) exhausted = slow image pull /
 		// scheduling backlog / PSA still rejecting. The submit
@@ -161,7 +200,10 @@ func WatchJob(
 		// to exit 9 would falsely claim the ingestion failed.
 		// Bugbot PR #10 r5 flagged the false-positive exit code.
 		if errors.Is(err, context.DeadlineExceeded) {
-			return &WatchResult{Outcome: JobOutcomeDetached}, nil
+			return &WatchResult{
+				Outcome:      JobOutcomeDetached,
+				DetachReason: DetachReasonPodWaitTimeout,
+			}, nil
 		}
 		return nil, fmt.Errorf("waiting for ingestor Pod: %w", err)
 	}
@@ -201,11 +243,19 @@ func WatchJob(
 	//    on PodReady timeout but the watch-cap exit still mapped
 	//    to exit 9.
 	if errors.Is(customerCtx.Err(), context.Canceled) || errors.Is(watchCtx.Err(), context.DeadlineExceeded) {
+		reason := DetachReasonSignal
+		if errors.Is(watchCtx.Err(), context.DeadlineExceeded) &&
+			!errors.Is(customerCtx.Err(), context.Canceled) {
+			// Pure watchCtx-only expiry = JobWatchTimeout. The
+			// customerCtx-canceled case takes precedence (if both
+			// fired, the customer's intent was SIGINT).
+			reason = DetachReasonWatchCap
+		}
 		return &WatchResult{
-			Outcome: JobOutcomeDetached,
-			PodName: podName,
-			Summary: summary, // may be partial if the customer
-			// hit Ctrl-C right at the banner
+			Outcome:      JobOutcomeDetached,
+			PodName:      podName,
+			Summary:      summary, // may be partial
+			DetachReason: reason,
 		}, nil
 	}
 
@@ -231,9 +281,10 @@ func WatchJob(
 		// post-stream SIGINT" inconsistency.
 		if errors.Is(customerCtx.Err(), context.Canceled) {
 			return &WatchResult{
-				Outcome: JobOutcomeDetached,
-				PodName: podName,
-				Summary: summary,
+				Outcome:      JobOutcomeDetached,
+				PodName:      podName,
+				Summary:      summary,
+				DetachReason: DetachReasonSignal,
 			}, nil
 		}
 		return nil, fmt.Errorf("reading final Job status for %s/%s: %w", namespace, jobName, err)
