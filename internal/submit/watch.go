@@ -178,16 +178,29 @@ func WatchJob(
 	//    a structured representation of the banner without
 	//    requiring a second log fetch post-completion.
 	summary, logErr := streamPodLogsAndParse(watchCtx, cs, namespace, podName, out)
-	if logErr != nil && !errors.Is(logErr, context.Canceled) {
+	// Filter out the two ctx-flavored errors — both are "observation
+	// gave up early," not "stream failed." They get classified below
+	// into Detached (customer SIGINT, JobWatchTimeout expiry). Any
+	// other error is a real streaming failure (network mid-stream,
+	// API server tantrum) and bubbles up as a watch error.
+	if logErr != nil &&
+		!errors.Is(logErr, context.Canceled) &&
+		!errors.Is(logErr, context.DeadlineExceeded) {
 		return nil, fmt.Errorf("streaming logs from Pod %s/%s: %w", namespace, podName, logErr)
 	}
 
-	// 3. Customer-ctx cancellation = detach. Check customerCtx
-	//    (not watchCtx) so a JobWatchTimeout expiry doesn't
-	//    masquerade as a SIGINT. The customer's signal handler
-	//    cancels customerCtx specifically; the WithTimeout wrap
-	//    cancels watchCtx only.
-	if errors.Is(customerCtx.Err(), context.Canceled) {
+	// 3. Detach branches:
+	//    - customerCtx canceled = SIGINT
+	//    - watchCtx expired (DeadlineExceeded) = JobWatchTimeout cap
+	//      hit during streaming (1-hour observation window exceeded)
+	//
+	//    Both are "the cluster keeps running; the CLI just gave up
+	//    observing." Same UX as the PodReadyTimeout case from r5
+	//    above — exit 0 with the kubectl-logs reconnect hint.
+	//    Bugbot PR #10 r6 flagged the inconsistency: r5 detached
+	//    on PodReady timeout but the watch-cap exit still mapped
+	//    to exit 9.
+	if errors.Is(customerCtx.Err(), context.Canceled) || errors.Is(watchCtx.Err(), context.DeadlineExceeded) {
 		return &WatchResult{
 			Outcome: JobOutcomeDetached,
 			PodName: podName,
