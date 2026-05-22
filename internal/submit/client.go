@@ -153,6 +153,15 @@ func (s *HTTPSubmitter) Submit(ctx context.Context, req *SubmitRequest) (*Submit
 		// job_name would silently break Phase 4's watch step.
 		return nil, fmt.Errorf("submit response missing job_name (got body %q)", string(respBody))
 	}
+	if parsed.Namespace == "" {
+		// Same shape as the job_name check: a missing namespace
+		// would route subsequent k8s API calls (watch the Pod,
+		// stream logs) at the empty string — kubelet returns
+		// confusing errors, and the kubectl-logs reconnect hint
+		// printed in --detach output would be malformed. Bugbot
+		// PR #10 r2 flagged the gap.
+		return nil, fmt.Errorf("submit response missing namespace (got body %q)", string(respBody))
+	}
 	return &parsed, nil
 }
 

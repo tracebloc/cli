@@ -127,21 +127,25 @@ func WatchJob(
 	namespace, jobName string,
 	out io.Writer,
 ) (*WatchResult, error) {
-	// Enforce the JobWatchTimeout absolute cap. Earlier versions
-	// declared the constant but only the per-step timeouts
-	// (PodReadyTimeout, finalJobStatus's 30s) bounded the watch —
-	// the log-stream phase could run indefinitely on a stuck
-	// ingestor. Bugbot flagged the gap on PR #10. The cap
-	// triggers as ctx.DeadlineExceeded, which the orchestrator
-	// surfaces with a clear "watch timed out" framing.
-	ctx, cancel := context.WithTimeout(ctx, JobWatchTimeout)
+	// Keep the customer's original ctx separately so finalJobStatus
+	// can derive a FRESH 30s context from it (rather than inheriting
+	// a possibly-depleted JobWatchTimeout). Bugbot PR #10 r2: the
+	// previous "wrap everything in JobWatchTimeout" approach starved
+	// finalJobStatus's budget when streaming used most of the hour,
+	// so a successful slow ingestion misreported as Unknown → exit 9.
+	customerCtx := ctx
+
+	// JobWatchTimeout caps the pod-wait + log-stream phases (the
+	// time-spend dominant parts of the watch). finalJobStatus gets
+	// its own ctx below.
+	watchCtx, cancel := context.WithTimeout(customerCtx, JobWatchTimeout)
 	defer cancel()
 
 	// 1. Wait for the ingestor Job's Pod to exist + reach Running.
 	//    jobs-manager creates the Job and Kubernetes spawns the
 	//    Pod asynchronously, so the Pod usually isn't there the
 	//    moment after the 201 comes back.
-	podName, err := waitForJobPod(ctx, cs, namespace, jobName)
+	podName, err := waitForJobPod(watchCtx, cs, namespace, jobName)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// SIGINT before the Pod even appeared. jobs-manager
@@ -163,15 +167,17 @@ func WatchJob(
 	//    a side-channel to the summary parser so we end up with
 	//    a structured representation of the banner without
 	//    requiring a second log fetch post-completion.
-	summary, logErr := streamPodLogsAndParse(ctx, cs, namespace, podName, out)
+	summary, logErr := streamPodLogsAndParse(watchCtx, cs, namespace, podName, out)
 	if logErr != nil && !errors.Is(logErr, context.Canceled) {
 		return nil, fmt.Errorf("streaming logs from Pod %s/%s: %w", namespace, podName, logErr)
 	}
 
-	// 3. ctx cancellation = detach. Pod might still be running
-	//    server-side, but as far as the CLI is concerned we've
-	//    handed off.
-	if errors.Is(ctx.Err(), context.Canceled) {
+	// 3. Customer-ctx cancellation = detach. Check customerCtx
+	//    (not watchCtx) so a JobWatchTimeout expiry doesn't
+	//    masquerade as a SIGINT. The customer's signal handler
+	//    cancels customerCtx specifically; the WithTimeout wrap
+	//    cancels watchCtx only.
+	if errors.Is(customerCtx.Err(), context.Canceled) {
 		return &WatchResult{
 			Outcome: JobOutcomeDetached,
 			PodName: podName,
@@ -180,13 +186,33 @@ func WatchJob(
 		}, nil
 	}
 
-	// 4. Final status check: even though log streaming ending
-	//    SHOULD mean Pod completion, the apiserver may not have
-	//    posted the terminal state by the time the log stream
-	//    drained. Poll briefly to confirm — bounded at 30s
-	//    because beyond that something else is wrong.
-	outcome, err := finalJobStatus(ctx, cs, namespace, jobName)
+	// 4. Final status check with a FRESH 30s budget derived from
+	//    the customer's ctx (not watchCtx, which may be near-
+	//    expired after a long log stream). Bugbot PR #10 r2:
+	//    inheriting watchCtx's depleted budget caused successful
+	//    slow ingestions to misreport as Unknown.
+	//
+	//    The fresh ctx still propagates SIGINT (parent is
+	//    customerCtx, which carries signal.NotifyContext's
+	//    cancel). If the customer Ctrl-C's during this 30s
+	//    window, we fall into the detach branch below — same
+	//    contract as during the log stream.
+	finalCtx, finalCancel := context.WithTimeout(customerCtx, 30*time.Second)
+	defer finalCancel()
+	outcome, err := finalJobStatus(finalCtx, cs, namespace, jobName)
 	if err != nil {
+		// Treat SIGINT during finalJobStatus as graceful detach
+		// (same as during the log stream — jobs-manager already
+		// accepted the run, the customer is just stopping the
+		// observation). Bugbot PR #10 r2 flagged the "exit 9 on
+		// post-stream SIGINT" inconsistency.
+		if errors.Is(customerCtx.Err(), context.Canceled) {
+			return &WatchResult{
+				Outcome: JobOutcomeDetached,
+				PodName: podName,
+				Summary: summary,
+			}, nil
+		}
 		return nil, fmt.Errorf("reading final Job status for %s/%s: %w", namespace, jobName, err)
 	}
 	return &WatchResult{

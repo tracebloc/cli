@@ -183,6 +183,16 @@ type SummaryParser struct {
 	// (so e.g. a stray emoji in earlier log output doesn't
 	// trigger spurious parsing).
 	insideBanner bool
+
+	// sawAnyField latches once we successfully parse a
+	// fieldPatterns line (regardless of whether the count is
+	// zero). Used by feedLine to distinguish the opening ═-rule
+	// (no fields yet → ignore) from the closing one (fields
+	// already parsed → finalize). The earlier "any field
+	// non-zero" check failed on banners where every metric was
+	// genuinely 0 (early failure case) — Bugbot caught this on
+	// PR #10 round 2.
+	sawAnyField bool
 }
 
 // NewSummaryParser returns an initialized parser. Caller's
@@ -283,6 +293,12 @@ func (p *SummaryParser) feedLine(rawLine string) {
 			return // malformed; ignore this line
 		}
 		fp.apply(p.summary, n)
+		// Latch regardless of value. An all-zero banner is a
+		// real shape (early failure: the ingestor still prints
+		// the summary structure with all counts at 0). Bugbot
+		// PR #10 r2 flagged the "non-zero" hasParsedAnyField
+		// check as a finalization hole for this case.
+		p.sawAnyField = true
 		return
 	}
 }
@@ -291,19 +307,7 @@ func (p *SummaryParser) feedLine(rawLine string) {
 // applied at least one fieldPatterns line. Used to disambiguate
 // the two ═-rules in the banner (see feedLine).
 func (p *SummaryParser) hasParsedAnyField() bool {
-	if p.summary == nil {
-		return false
-	}
-	// "Any field non-zero" is a fine proxy — the ingestor always
-	// prints at least one positive count even on early failure
-	// (TotalRecords includes everything it loaded before crashing).
-	return p.summary.TotalRecords > 0 ||
-		p.summary.ProcessedRecords > 0 ||
-		p.summary.InsertedRecords > 0 ||
-		p.summary.APISentRecords > 0 ||
-		p.summary.SkippedRecords > 0 ||
-		p.summary.FileTransferFailures > 0 ||
-		p.summary.FailedRecords > 0
+	return p.sawAnyField
 }
 
 // Result returns the accumulated Summary. nil if the parser never
