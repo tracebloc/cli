@@ -166,15 +166,30 @@ if [ -z "$expected" ]; then
     exit 1
 fi
 # sha256sum (GNU coreutils) vs shasum -a 256 (macOS): detect which is on PATH.
+# If neither is available, refuse to install — running an unverified
+# binary from the internet is exactly what this script exists to
+# prevent. Bugbot PR #11 caught the previous "warn + continue + still
+# print ✓ matches" branch as both a security regression AND a
+# misleading-log issue. Almost every modern Linux distro ships coreutils
+# (sha256sum) by default; macOS ships /usr/bin/shasum as part of the
+# base Perl install. A host with neither is unusual enough that
+# erroring out is the right call — the customer can install coreutils
+# / xcode-select / similar and re-run.
 if command -v sha256sum >/dev/null 2>&1; then
     actual="$(sha256sum "$TMP/$BINARY_FILE" | awk '{print $1}')"
 elif command -v shasum >/dev/null 2>&1; then
     actual="$(shasum -a 256 "$TMP/$BINARY_FILE" | awk '{print $1}')"
 else
-    echo "Warning: no sha256sum / shasum on PATH — skipping checksum verify." >&2
-    actual=""
+    echo "Error: neither sha256sum nor shasum is on PATH — can't verify the" >&2
+    echo "       downloaded binary's integrity. Install one of:" >&2
+    echo "         apt install coreutils       # Debian/Ubuntu" >&2
+    echo "         dnf install coreutils       # Fedora/RHEL" >&2
+    echo "         apk add coreutils           # Alpine" >&2
+    echo "         (macOS ships /usr/bin/shasum by default — PATH issue?)" >&2
+    echo "       and re-run." >&2
+    exit 1
 fi
-if [ -n "$actual" ] && [ "$actual" != "$expected" ]; then
+if [ "$actual" != "$expected" ]; then
     echo "Error: SHA256 mismatch!" >&2
     echo "  expected: $expected" >&2
     echo "  actual:   $actual" >&2
