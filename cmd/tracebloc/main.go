@@ -18,8 +18,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/tracebloc/cli/internal/cli"
 )
@@ -35,11 +38,32 @@ var (
 )
 
 func main() {
+	// Wire SIGINT / SIGTERM into the cobra root command's context.
+	// Long-running operations (e.g. push.Stage in `dataset push`)
+	// propagate ctx down through every k8s API call, so cancelling
+	// here triggers ctx.Done() → in-flight HTTP cancels → defers
+	// fire in normal stack unwind → orphan Pod gets cleaned up.
+	//
+	// Without this wire, Ctrl-C goes straight through Go's runtime
+	// signal handler and exits the process WITHOUT running defers
+	// — which silently broke the SIGINT-safe cleanup contract in
+	// push.Stage's docstring. Bugbot flagged this on PR-b.
+	//
+	// signal.NotifyContext (Go 1.16+) is the stdlib pattern for
+	// this. The stop func unregisters the handler so a *second*
+	// SIGINT does the normal hard-kill — important for the case
+	// where the cleanup itself hangs (e.g. API server unreachable
+	// even past the 30s cleanup deadline). The customer's second
+	// Ctrl-C should always work.
+	ctx, stop := signal.NotifyContext(context.Background(),
+		syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	err := cli.NewRootCmd(cli.BuildInfo{
 		Version:   version,
 		GitSHA:    gitSHA,
 		BuildDate: buildDate,
-	}).Execute()
+	}).ExecuteContext(ctx)
 	if err == nil {
 		return
 	}
