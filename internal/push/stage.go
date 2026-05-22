@@ -13,8 +13,9 @@ import (
 // struct so callers (cli.runDatasetPush) can build it incrementally
 // without juggling 10 positional args.
 //
-// Required fields are pinned in the doc; nil-able fields (Progress,
-// OrphanLogger) get default behaviors so the happy path is short.
+// Required fields are pinned in the doc; the nil-able Progress + Out
+// fields get default behaviors (NoOpProgress / io.Discard) so the
+// happy path is short.
 type StageOptions struct {
 	// Client is the discovered kubernetes.Interface.
 	Client kubernetes.Interface

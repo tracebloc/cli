@@ -154,32 +154,6 @@ func StreamLayout(
 	dest := StagedPrefix(table)
 	staging := dest + ".staging-" + stagingSuffix
 
-	// Compose the remote command. Re-push semantics need to be
-	// HERMETIC (no stale files from a previous push, Bugbot r5),
-	// TRANSACTIONAL (the previously-staged dataset stays intact
-	// if THIS push fails mid-transfer, Bugbot r7), and
-	// PARALLEL-SAFE (concurrent pushes don't corrupt each other,
-	// r8 via unique suffix above).
-	//
-	// Pattern: extract to a unique <dest>.staging-<hex>, then
-	// atomically rename on tar success. && sequencing means the
-	// swap only fires if tar succeeded.
-	//
-	// Also: clean up any orphan .staging-<hex>-* dirs from
-	// PREVIOUSLY-FAILED pushes (Bugbot r9). Constraints:
-	//   - Use mmin +60 (older than 1 hour) so we don't race with
-	//     a parallel push's in-progress staging. v0.1's
-	//     activeDeadlineSeconds is 30 min, so anything 1 hour+
-	//     can't be from a still-running Pod.
-	//   - Scope to ".staging-*" siblings of THIS table only
-	//     (find -name pattern); other tables' staging dirs are
-	//     none of our business.
-	//   - 2>/dev/null + || true so find failures don't fail the
-	//     whole stream (defensive cleanup is best-effort).
-	//
-	// All paths derive from StagedPrefix(table); ValidateTableName
-	// guarantees `table` is a single safe segment, so the find
-	// pattern + rm can't escape /data/shared/.
 	// Backup path for the swap. Same unique suffix as staging so
 	// two parallel pushes don't collide on each other's .old-,
 	// AND so the find pattern below catches both .staging-* and
@@ -189,10 +163,20 @@ func StreamLayout(
 	parentDir := path.Dir(dest)
 	tableBase := path.Base(dest)
 
-	// Atomic-ish dir swap with rollback (Bugbot r10) + correct exit
-	// propagation (Bugbot r11).
+	// Remote command pipeline. Crosses three semantic guarantees:
 	//
-	// Pipeline:
+	//   - HERMETIC (r5): old files don't survive into a re-push
+	//   - TRANSACTIONAL (r7+r10): the previously-staged dataset
+	//     stays intact if THIS push fails mid-transfer; backup-
+	//     and-rollback restores on mv failure
+	//   - PARALLEL-SAFE (r8): unique .staging-<hex>/.old-<hex>
+	//     suffix per invocation so concurrent pushes don't
+	//     interleave each other's tar extraction
+	//   - EXIT-FAITHFUL (r11): set -e propagates any non-zero
+	//     status; the prior `&&-chain ; find || true` shape
+	//     could silently return success on actual failures
+	//
+	// Pipeline steps:
 	//   1. set -e — any unhandled non-zero status aborts the script
 	//   2. rm -rf $STAGING (clean prior failed attempt)
 	//   3. mkdir + tar (extract to staging)

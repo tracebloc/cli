@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -10,16 +11,26 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// OrphanGracePeriod is how long a stage Pod has to live before we
-// flag it as an orphan. Just-created Pods (the current `dataset
-// push` invocation's own Pod, for instance, if the scan runs while
-// the Pod is still being scheduled) are below this threshold and
-// silently filtered out.
+// OrphanGracePeriod is how long a non-Running stage Pod has to live
+// before we flag it as an orphan. Running Pods are NEVER flagged
+// regardless of age (see FindOrphanStagePods's Phase=Running skip,
+// Bugbot r7) — Pods past pod.go's StagePodActiveDeadline of 30 min
+// are still legitimate "in-progress active push" candidates, and
+// any per-age cap would produce false positives for near-cap pushes.
 //
-// 5 minutes is generous: a healthy stage Pod is fully done in ~30
-// seconds for typical v0.1 sizes; even at the 1 GiB cap with a
-// slow uplink, the total push wraps under a couple minutes.
-// Anything past 5 minutes is almost certainly a crash leftover.
+// 5 minutes targets the genuinely-stuck shapes:
+//
+//   - Phase=Pending past 5 min: image pull failure that didn't
+//     resolve, scheduling stuck on missing nodes, PSA rejection
+//     that took kubelet a while to surface
+//   - Phase=Failed past 5 min: container crashed at startup or
+//     during stream, CLI didn't get a chance to clean up
+//   - Phase=Unknown past 5 min: node went away (network partition,
+//     kubelet crash) and the Pod metadata is stranded
+//
+// All three shapes are genuinely orphan — no still-running push
+// will ever progress past Pending/Failed/Unknown into Ready, so
+// 5 min is comfortable for "stuck enough to surface as a warning."
 const OrphanGracePeriod = 5 * time.Minute
 
 // Orphan describes a stage Pod found by the orphan scan. Carries
@@ -155,21 +166,7 @@ func FormatOrphansWarning(orphans []Orphan) string {
 	// else's in-progress push. Bugbot flagged the over-broad
 	// delete on PR-b round 7.
 	s += "Delete with: kubectl delete pod -n " + orphans[0].Namespace + " " +
-		joinNames(names) + "\n"
-	return s
-}
-
-// joinNames is space-joining for the `kubectl delete pod a b c`
-// argv. Not strings.Join'd inline so the test pinning the format
-// has a single point of change.
-func joinNames(names []string) string {
-	var s string
-	for i, n := range names {
-		if i > 0 {
-			s += " "
-		}
-		s += n
-	}
+		strings.Join(names, " ") + "\n"
 	return s
 }
 

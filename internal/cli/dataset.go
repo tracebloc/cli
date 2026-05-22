@@ -184,10 +184,10 @@ type runDatasetPushArgs struct {
 	StagePodImage  string
 }
 
-// runDatasetPush is the PR-a slim implementation. It performs every
-// pre-flight check and prints a summary; the actual file staging
-// is gated behind a clear "not yet implemented" error so PR-a
-// merging doesn't silently advertise a feature it can't deliver.
+// runDatasetPush is the full Phase 3 implementation: pre-flight
+// checks, then either --dry-run stop or stage Pod + tar stream +
+// cleanup. Phase 4 (#152) will hook submit-to-jobs-manager after
+// the staging step.
 //
 // Step order is "fail fast, fail local" — every step that doesn't
 // need the cluster runs before any that does, so a customer with
