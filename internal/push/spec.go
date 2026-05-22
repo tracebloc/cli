@@ -16,7 +16,63 @@
 // before we touch the cluster"; PR-b is "now actually push the bytes".
 package push
 
-import "path"
+import (
+	"fmt"
+	"path"
+	"regexp"
+)
+
+// tableNamePattern is the safe character set for a table name. It
+// must satisfy TWO independent constraints simultaneously:
+//
+//  1. A valid unquoted MySQL identifier — the chart's ingestor
+//     CREATEs a table with this exact name.
+//  2. A safe single path segment — the name becomes the
+//     /data/shared/<table>/ subdirectory on the PVC.
+//
+// The intersection of "MySQL identifier" and "single safe path
+// component" is [A-Za-z0-9_]: letters, digits, underscore. No
+// slashes, no dots — which is what closes the path-traversal hole
+// (see ValidateTableName).
+//
+// All the real-world example tables (chest_xrays_train,
+// cats_dogs_train) match this; it's the conventional snake_case
+// table-naming style anyway.
+var tableNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+// ValidateTableName rejects table names that aren't safe as both a
+// MySQL identifier and a single PVC path segment.
+//
+// Why a CLI-side check rather than the schema: the embedded
+// ingest.v1.json only enforces `minLength: 1` on `table` — no
+// `pattern`. Without this guard, --table=../../etc would flow into
+// the /data/shared/<table>/ PVC path; PR-b's stage Pod would then
+// write outside the intended subtree and could clobber another
+// table's data. Tightening the upstream schema with a `pattern`
+// is the proper long-term fix (it would protect the helm flow +
+// jobs-manager too) but needs a change to tracebloc/data-ingestors'
+// schema, which the schema-drift CI check pins — filed as
+// tracebloc/data-ingestors#116. Once that lands and we re-sync,
+// this guard can collapse to a thin "schema says so" wrapper.
+//
+// Callers MUST run this before SpecArgs.Build() or StagedPrefix(),
+// both of which assume a validated name.
+func ValidateTableName(table string) error {
+	if table == "" {
+		return fmt.Errorf("table name is required (set --table)")
+	}
+	if !tableNamePattern.MatchString(table) {
+		return fmt.Errorf(
+			"table name %q is invalid: must match [A-Za-z0-9_]+ "+
+				"(letters, digits, underscore only). The table name is "+
+				"used both as the MySQL table identifier and as the "+
+				"/data/shared/<table>/ subdirectory on the cluster PVC, "+
+				"so slashes, dots, and path-traversal sequences are "+
+				"rejected.",
+			table)
+	}
+	return nil
+}
 
 // SpecArgs is the user-facing flag set for `tracebloc dataset push`.
 //
@@ -73,6 +129,9 @@ type SpecArgs struct {
 // sides — the CLI's view of "what local files we expect" and the
 // spec's view of "where they'll live in the cluster" — means a
 // successful Discover guarantees a runnable spec.
+//
+// PRECONDITION: a.Table must have passed ValidateTableName. Build
+// calls StagedPrefix, which panics on an unsafe name.
 func (a SpecArgs) Build() map[string]any {
 	prefix := StagedPrefix(a.Table)
 	return map[string]any{
@@ -102,10 +161,26 @@ func (a SpecArgs) Build() map[string]any {
 // Exported because Phase 3's PR-b (stage Pod construction) needs
 // it from the same place, and Phase 4 (submit) might want to print
 // it as part of "what we pushed."
+//
+// PRECONDITION: table must already have passed ValidateTableName.
+// This function panics on an unsafe name rather than returning an
+// escape path — a name that escapes /data/shared is a caller bug
+// (validation was skipped), and a panic surfaces it loudly in
+// tests instead of silently letting PR-b's stage Pod write to,
+// say, /etc. Every production call path runs ValidateTableName
+// first (see cli.runDatasetPush), so the panic is unreachable in
+// correct code.
 func StagedPrefix(table string) string {
-	// path.Join collapses redundant slashes but doesn't preserve
-	// trailing slashes — fine here because callers either append a
-	// filename (labels.csv) or add the trailing slash explicitly
-	// (images/).
-	return path.Join("/data/shared", table)
+	// Deliberately NOT path.Join here: path.Join cleans ".."
+	// segments, which is exactly the silent traversal we're
+	// guarding against. Plain concatenation keeps the name as a
+	// literal segment so the assertion below can detect a bad one.
+	prefix := "/data/shared/" + table
+	if !tableNamePattern.MatchString(table) {
+		panic(fmt.Sprintf(
+			"push.StagedPrefix: unsafe table name %q — caller must "+
+				"ValidateTableName before constructing a PVC path",
+			table))
+	}
+	return prefix
 }

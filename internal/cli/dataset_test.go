@@ -99,6 +99,30 @@ func TestDatasetPush_BadCategory_ExitsTwo(t *testing.T) {
 	}
 }
 
+// TestDatasetPush_TraversalTableName_ExitsTwo is the security
+// regression pin at the CLI layer. --table=../../etc must be
+// rejected with exit 2 BEFORE any spec synthesis or cluster work —
+// the table name flows into the /data/shared/<table>/ PVC path,
+// and a traversal value would let PR-b's stage Pod escape that
+// subtree. Bugbot flagged this on PR #8 commit 4240097.
+func TestDatasetPush_TraversalTableName_ExitsTwo(t *testing.T) {
+	root := imgcLayout(t)
+	for _, bad := range []string{"../../etc", "../foo", "foo/bar"} {
+		t.Run(bad, func(t *testing.T) {
+			code, _, _ := execDatasetPush(t, []string{
+				root,
+				"--table=" + bad,
+				"--category=image_classification",
+				"--intent=train",
+				"--label-column=label",
+			})
+			if code != 2 {
+				t.Fatalf("expected exit 2 for traversal table name %q, got %d", bad, code)
+			}
+		})
+	}
+}
+
 // TestDatasetPush_MissingIntent_ExitsTwo: pins the "intent is
 // required" diagnostic path — different schema violation but the
 // same exit-code class.

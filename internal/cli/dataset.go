@@ -174,11 +174,23 @@ type runDatasetPushArgs struct {
 // a bad label-column or oversized dataset gets the diagnostic in
 // milliseconds without a kubeconfig round-trip.
 func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPushArgs) error {
-	// 1. Synthesize the spec from flags + validate against schema.
-	//    Catches "no table", "bad category", "missing intent" etc.
-	//    BEFORE we touch the filesystem or the cluster. The error
-	//    formatter is the same one ingest validate uses, so a
-	//    customer who YAML'd manually first sees identical wording.
+	// 1. Validate the table name BEFORE anything else. It's both
+	//    the MySQL identifier and the /data/shared/<table>/ PVC
+	//    subdirectory — an unsanitized traversal name (../../etc)
+	//    would escape that subtree once PR-b's stage Pod writes to
+	//    it. The embedded schema only checks minLength on `table`,
+	//    so this CLI-side guard is the real fix. SpecArgs.Build()
+	//    below calls StagedPrefix, which panics on an unsafe name —
+	//    so this check MUST come first.
+	if err := push.ValidateTableName(a.Spec.Table); err != nil {
+		return &exitError{code: 2, err: err}
+	}
+
+	// 2. Synthesize the spec from flags + validate against schema.
+	//    Catches "bad category", "missing intent" etc. BEFORE we
+	//    touch the filesystem or the cluster. The error formatter
+	//    is the same one ingest validate uses, so a customer who
+	//    YAML'd manually first sees identical wording.
 	spec := a.Spec.Build()
 	specBytes, err := yaml.Marshal(spec)
 	if err != nil {
@@ -211,7 +223,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 2, err: errors.New("synthesized spec failed schema validation; check the flag values above")}
 	}
 
-	// 2. Walk the local directory. Enforces layout + size caps;
+	// 3. Walk the local directory. Enforces layout + size caps;
 	//    customer sees a clear pointer to expected layout if they
 	//    pass the wrong directory.
 	layout, err := push.Discover(a.LocalPath)
@@ -219,7 +231,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 3, err: err}
 	}
 
-	// 3. Cluster discovery — same kubeconfig path as `cluster info`.
+	// 4. Cluster discovery — same kubeconfig path as `cluster info`.
 	//    Errors mirror that command's exit-code contract (3 for
 	//    kubeconfig, 4 for missing release) so behaviour is
 	//    consistent across pre-flight commands.
@@ -243,7 +255,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		release.IngestorSAName = a.IngestorSAName
 	}
 
-	// 4. PVC discovery. New in this PR — confirms the chart's
+	// 5. PVC discovery. New in this PR — confirms the chart's
 	//    shared-data PVC is Bound before we waste time provisioning
 	//    a Pod that can't mount it.
 	pvc, err := cluster.DiscoverSharedPVC(ctx, cs, resolved.Namespace)
@@ -251,20 +263,20 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 4, err: err}
 	}
 
-	// 5. Print the pre-flight summary. The output is the same in
+	// 6. Print the pre-flight summary. The output is the same in
 	//    dry-run and (eventually) live mode — only the "what
 	//    happens next" line differs. Customers iterating on a
 	//    bad layout see this every attempt, so it's worth keeping
 	//    skimmable: one fact per line, aligned by column.
 	printPushPreflight(out, layout, release, pvc, spec, a.DryRun)
 
-	// 6. Dry-run stop. Acknowledged success.
+	// 7. Dry-run stop. Acknowledged success.
 	if a.DryRun {
 		_, _ = fmt.Fprintln(out, "Dry-run complete — no cluster resources were created.")
 		return nil
 	}
 
-	// 7. The actual staging branch lands in PR-b. Failing here
+	// 8. The actual staging branch lands in PR-b. Failing here
 	//    rather than silently returning success means a customer
 	//    who pulled PR-a's binary and ran without --dry-run gets
 	//    a clear "wait for PR-b" signal instead of "0 files

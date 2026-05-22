@@ -105,3 +105,69 @@ func TestStagedPrefix_PerTableIsolation(t *testing.T) {
 		t.Errorf("StagedPrefix(%q) = %q, want /data/shared/table_a", "table_a", got)
 	}
 }
+
+// TestValidateTableName_Accepts pins the names that MUST pass —
+// the real-world example tables plus a few edge shapes (single
+// char, leading underscore, mixed case, digits). A regression
+// that rejects a valid name would break legitimate pushes.
+func TestValidateTableName_Accepts(t *testing.T) {
+	for _, name := range []string{
+		"cats_dogs",
+		"chest_xrays_train",
+		"t1",
+		"ABC",
+		"table_123",
+		"_leading_underscore",
+		"9starts_with_digit", // valid MySQL identifier + safe path segment
+	} {
+		if err := ValidateTableName(name); err != nil {
+			t.Errorf("ValidateTableName(%q) = %v, want nil", name, err)
+		}
+	}
+}
+
+// TestValidateTableName_RejectsUnsafe is the security-regression
+// pin. The path-traversal cases (../../etc, ../foo) are the ones
+// Bugbot flagged on PR #8 — if this test ever goes green with
+// those removed, the traversal hole is back open.
+func TestValidateTableName_RejectsUnsafe(t *testing.T) {
+	cases := map[string]string{
+		"empty":            "",
+		"parent traversal": "../../etc",
+		"single parent":    "../foo",
+		"embedded slash":   "foo/bar",
+		"embedded dot":     "foo.bar",
+		"bare dot":         ".",
+		"absolute":         "/etc/passwd",
+		"space":            "my table",
+		"dash":             "cats-dogs", // not a valid unquoted MySQL identifier
+		"trailing newline": "foo\n",
+		"shell metachar":   "foo;rm",
+		"null-ish unicode": "foo\x00bar",
+	}
+	for desc, table := range cases {
+		if err := ValidateTableName(table); err == nil {
+			t.Errorf("%s: ValidateTableName(%q) = nil, want a rejection error", desc, table)
+		}
+	}
+}
+
+// TestStagedPrefix_PanicsOnUnsafeName pins the defense-in-depth
+// backstop: if a caller skips ValidateTableName and hands a
+// traversal name straight to StagedPrefix, it must panic rather
+// than silently return an escape path. PR-b adds new call sites
+// for StagedPrefix — this test guards against one of them
+// forgetting the validation step.
+func TestStagedPrefix_PanicsOnUnsafeName(t *testing.T) {
+	for _, unsafe := range []string{"../../etc", "foo/bar", ""} {
+		t.Run(unsafe, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("StagedPrefix(%q) did not panic; an unsafe "+
+						"name must panic, not return an escape path", unsafe)
+				}
+			}()
+			_ = StagedPrefix(unsafe)
+		})
+	}
+}
