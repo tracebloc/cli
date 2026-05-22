@@ -278,10 +278,23 @@ func writeLayoutTar(w io.Writer, layout *LocalLayout) (err error) {
 // archive-relative name `dst`. Streams the file body — no full-
 // read into memory — so a single 500 MiB image doesn't balloon
 // the CLI's memory.
+//
+// Uses os.Lstat (not Stat) + an explicit symlink reject as a
+// defense-in-depth second layer behind walk.go's rejectSymlink.
+// The Discover-side check is the primary fix for the
+// symlink-bypass-size-caps hole Bugbot flagged on PR-b round 4;
+// this layer guards against a future refactor that calls
+// writeTarFile directly without going through Discover.
 func writeTarFile(tw *tar.Writer, src, dst string) error {
-	st, err := os.Stat(src)
+	st, err := os.Lstat(src)
 	if err != nil {
 		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		// Reaching here means Discover let a symlink through —
+		// shouldn't happen in production, but the explicit error
+		// keeps the security property locally enforceable.
+		return fmt.Errorf("refusing to stream symbolic link %q (defense-in-depth; should have been rejected by Discover)", src)
 	}
 	hdr := &tar.Header{
 		Name:     dst,

@@ -3,6 +3,7 @@ package push
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -188,6 +189,85 @@ func TestDiscover_LabelsCSVIsDirectory(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "is a directory") {
 		t.Errorf("error = %q, want it to mention 'is a directory'", err)
+	}
+}
+
+// TestDiscover_RejectsSymlinkedImage is the security regression pin
+// for the Bugbot-Medium finding on PR-b round 4. A symlink in
+// images/ whose target points outside the dataset tree (or at a
+// big local file) used to pass Discover's size cap (because
+// DirEntry.Info() returns the link's own ~100-byte size) yet
+// stream the target's full contents into the cluster PVC via
+// writeTarFile's os.Stat+os.Open path. That's both a size-cap
+// bypass AND an arbitrary-local-file disclosure to the cluster
+// admin. v0.1 rejects symlinks outright.
+func TestDiscover_RejectsSymlinkedImage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require admin privileges on Windows")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "labels.csv"),
+		[]byte("image_id,label\n001.jpg,cat\n"), 0o644); err != nil {
+		t.Fatalf("write labels.csv: %v", err)
+	}
+	imagesDir := filepath.Join(root, "images")
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		t.Fatalf("mkdir images: %v", err)
+	}
+	// Create a real image file outside the dataset tree to be the
+	// symlink target. The symlink inside images/ points at it.
+	target := filepath.Join(t.TempDir(), "outside.jpg")
+	if err := os.WriteFile(target, make([]byte, 100), 0o644); err != nil {
+		t.Fatalf("write outside target: %v", err)
+	}
+	link := filepath.Join(imagesDir, "evil.jpg")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := Discover(root)
+	if err == nil {
+		t.Fatal("Discover accepted a symlinked image — security regression; v0.1 must reject")
+	}
+	for _, want := range []string{"symbolic link", "security", "cp -L"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q in: %v", want, err)
+		}
+	}
+}
+
+// TestDiscover_RejectsSymlinkedLabelsCSV: same hole, different
+// file. The labels.csv path can also be a symlink (e.g. pointing
+// at a huge local file). Lstat + reject covers both cases
+// symmetrically.
+func TestDiscover_RejectsSymlinkedLabelsCSV(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require admin privileges on Windows")
+	}
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "outside-labels.csv")
+	if err := os.WriteFile(target, []byte("image_id,label\n001.jpg,cat\n"), 0o644); err != nil {
+		t.Fatalf("write outside target: %v", err)
+	}
+	link := filepath.Join(root, "labels.csv")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	imagesDir := filepath.Join(root, "images")
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		t.Fatalf("mkdir images: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(imagesDir, "a.jpg"),
+		make([]byte, 100), 0o644); err != nil {
+		t.Fatalf("write img: %v", err)
+	}
+
+	_, err := Discover(root)
+	if err == nil {
+		t.Fatal("Discover accepted a symlinked labels.csv — security regression")
+	}
+	if !strings.Contains(err.Error(), "symbolic link") {
+		t.Errorf("error missing symbolic-link rejection: %v", err)
 	}
 }
 

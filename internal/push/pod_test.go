@@ -473,6 +473,49 @@ func TestWaitForStagePodReady_ForbiddenIsTerminal(t *testing.T) {
 	}
 }
 
+// TestWaitForStagePodReady_FailedPhaseIsTerminal: a Pod that
+// crashes at startup (PSA rejection, ImagePullBackOff that escalates
+// to ErrImagePull, OOMKilled during container start) lands in
+// Phase=Failed and will never become Ready. The poll must
+// short-circuit instead of waiting the full 60s. Bugbot flagged
+// the missing check as Medium on PR-b round 4.
+func TestWaitForStagePodReady_FailedPhaseIsTerminal(t *testing.T) {
+	cs := fake.NewClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "crashed-pod",
+			Namespace: "tracebloc",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "stage",
+				State: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						Reason:   "OOMKilled",
+						ExitCode: 137,
+					},
+				},
+			}},
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := WaitForStagePodReady(ctx, cs, "tracebloc", "crashed-pod")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("WaitForStagePodReady returned nil on Phase=Failed")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("WaitForStagePodReady waited %s for Phase=Failed; expected immediate return", elapsed)
+	}
+	if !strings.Contains(err.Error(), "Failed") {
+		t.Errorf("error missing Phase=Failed signal: %v", err)
+	}
+}
+
 // TestDeleteStagePod_NotFoundIsOK: the Pod might be gone already
 // (activeDeadlineSeconds fired, or someone kubectl-deleted it).
 // Not-found shouldn't error — our goal is "Pod doesn't exist," which

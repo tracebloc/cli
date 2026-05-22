@@ -361,10 +361,26 @@ func WaitForStagePodReady(ctx context.Context, cs kubernetes.Interface, namespac
 				return false, nil
 			}
 			lastObserved = p
+			// Positive terminal: Ready=True.
 			for _, c := range p.Status.Conditions {
 				if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
 					return true, nil
 				}
+			}
+			// Negative terminal: Phase=Failed (container crashed
+			// at startup — PSA rejection, image crashloop, OOM)
+			// or Phase=Succeeded (sleep exited unexpectedly — the
+			// stage container shouldn't terminate by itself before
+			// we exec into it, so this is also a failure mode).
+			// Without these checks the poll waits the full 60s
+			// for a Pod that will never become Ready. Bugbot
+			// flagged on PR-b round 4 as Medium; this is the
+			// counterpart to the NotFound/Forbidden short-circuit
+			// landed in the previous commit.
+			if p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded {
+				return false, fmt.Errorf(
+					"stage Pod %s/%s terminated in phase %q before becoming Ready%s",
+					namespace, podName, p.Status.Phase, podReadyTimeoutHint(p))
 			}
 			return false, nil
 		})

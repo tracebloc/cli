@@ -106,9 +106,17 @@ func Discover(rootDir string) (*LocalLayout, error) {
 
 	layout := &LocalLayout{Root: abs}
 
-	// labels.csv (required).
+	// labels.csv (required). Use Lstat — NOT Stat — so a symlink
+	// shows up as a symlink (mode includes ModeSymlink) rather
+	// than being silently followed. v0.1 rejects symlinks entirely
+	// (see rejectSymlink); without Lstat the size cap below would
+	// see the symlink's own ~100-byte size while writeTarFile
+	// (which uses os.Stat → follows symlinks) would happily stream
+	// the target's full contents — a size-cap bypass and an
+	// arbitrary-local-file disclosure to the cluster PVC. Bugbot
+	// flagged this as Medium-severity security on PR-b round 4.
 	labelsPath := filepath.Join(abs, "labels.csv")
-	labelsStat, err := os.Stat(labelsPath)
+	labelsStat, err := os.Lstat(labelsPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf(
@@ -119,6 +127,9 @@ func Discover(rootDir string) (*LocalLayout, error) {
 				abs)
 		}
 		return nil, fmt.Errorf("stat labels.csv: %w", err)
+	}
+	if err := rejectSymlink(labelsStat, "labels.csv"); err != nil {
+		return nil, err
 	}
 	if labelsStat.IsDir() {
 		// A directory literally named "labels.csv" passes the
@@ -175,9 +186,18 @@ func Discover(rootDir string) (*LocalLayout, error) {
 		if _, ok := imageExtensions[ext]; !ok {
 			continue
 		}
+		// entry.Info() returns Lstat-like metadata for the
+		// directory entry (the symlink's own mode if it's a
+		// symlink, not the target's). That's exactly what we
+		// want here — combined with rejectSymlink it closes the
+		// symlink-bypass-size-caps hole Bugbot flagged on PR-b
+		// round 4.
 		info, err := entry.Info()
 		if err != nil {
 			return nil, fmt.Errorf("stat %q: %w", entry.Name(), err)
+		}
+		if err := rejectSymlink(info, filepath.Join("images", entry.Name())); err != nil {
+			return nil, err
 		}
 		if info.Size() > MaxSingleFileBytes {
 			return nil, sizeError(filepath.Join("images", entry.Name()),
@@ -205,6 +225,39 @@ func Discover(rootDir string) (*LocalLayout, error) {
 	}
 
 	return layout, nil
+}
+
+// rejectSymlink returns a non-nil error if info describes a symlink.
+// v0.1 refuses symlinks under <root>/labels.csv and <root>/images/*
+// entirely because:
+//
+//   - SECURITY: writeTarFile uses os.Stat + os.Open (which follow
+//     symlinks). Discover sized entries via DirEntry.Info() (which
+//     does not). A symlink whose target is a multi-GB local file
+//     would pass Discover's size cap (the symlink itself is ~100
+//     bytes) yet stream the target's full contents to the cluster
+//     PVC — a size-cap bypass and arbitrary-local-file disclosure
+//     to the cluster admin. Bugbot caught this on PR-b round 4.
+//   - UX: legitimate image_classification datasets don't use
+//     symlinks. A clear "symlinks not supported" error is better
+//     than the alternative fixes (resolve + re-stat the target,
+//     blanket Stat() everywhere) — both of which would let the
+//     security hole creep back in on a future refactor.
+//
+// Customers with symlink-heavy layouts (rare; usually means their
+// data lives on another filesystem) can `cp -L` to materialize
+// the files before pushing.
+func rejectSymlink(info os.FileInfo, relPath string) error {
+	if info.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%q is a symbolic link, which v0.1 does not allow in the dataset "+
+			"layout (security: a symlink could escape the dataset tree or "+
+			"bypass size caps). Materialize the link target (e.g. `cp -L`) "+
+			"and re-run, or wait for v0.2's cloud-source story if the data "+
+			"lives elsewhere.",
+		relPath)
 }
 
 // sizeError builds the over-the-single-file-cap error with the same
