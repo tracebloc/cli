@@ -1,6 +1,7 @@
 package push
 
 import (
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -123,6 +124,24 @@ func TestValidateTableName_Accepts(t *testing.T) {
 		if err := ValidateTableName(name); err != nil {
 			t.Errorf("ValidateTableName(%q) = %v, want nil", name, err)
 		}
+	}
+}
+
+// TestValidateTableName_RejectsTooLong: K8s label values are
+// capped at 63 chars, and the stage Pod carries the raw table
+// name as the tracebloc.io/table label. Without this rejection,
+// a 100-char table name passes pre-flight then fails Pod create
+// with an opaque label-validation error. Bugbot flagged on PR-b
+// round 5.
+func TestValidateTableName_RejectsTooLong(t *testing.T) {
+	tooLong := strings.Repeat("a", MaxTableNameLength+1)
+	if err := ValidateTableName(tooLong); err == nil {
+		t.Fatalf("ValidateTableName(%d-char name) = nil, want length-cap error", len(tooLong))
+	}
+	// Right at the boundary: 63 chars must be accepted.
+	atCap := strings.Repeat("a", MaxTableNameLength)
+	if err := ValidateTableName(atCap); err != nil {
+		t.Errorf("ValidateTableName(%d-char name) = %v, want nil (at exact cap)", len(atCap), err)
 	}
 }
 

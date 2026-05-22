@@ -136,10 +136,29 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 		t.Errorf("cmd[:2] = %v, want [/bin/sh -c]", fe.gotCmd[:2])
 	}
 	script := fe.gotCmd[2]
-	for _, want := range []string{`mkdir -p "/data/shared/my_table"`, `tar -xf -`, `-C "/data/shared/my_table"`} {
+	// rm -rf is the hermetic-re-push guard (Bugbot PR-b round 5):
+	// without it, a smaller second push leaves stale images on the
+	// PVC that disagree with the new labels.csv. Pin its presence
+	// AND that it targets the per-table subdir (not /data/shared
+	// itself, which would nuke sibling tables) — ValidateTableName
+	// is the security boundary that keeps the dest single-segment.
+	for _, want := range []string{
+		`rm -rf "/data/shared/my_table"`,
+		`mkdir -p "/data/shared/my_table"`,
+		`tar -xf -`,
+		`-C "/data/shared/my_table"`,
+	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("remote script missing %q: %s", want, script)
 		}
+	}
+	// Defense-in-depth: the rm MUST appear BEFORE the mkdir+tar.
+	// A future refactor that reorders these would silently break
+	// hermetic re-push without this assertion.
+	rmIdx := strings.Index(script, "rm -rf")
+	mkdirIdx := strings.Index(script, "mkdir -p")
+	if rmIdx >= mkdirIdx {
+		t.Errorf("remote script has `rm -rf` after `mkdir -p` (order broken — re-push won't be hermetic):\n%s", script)
 	}
 }
 

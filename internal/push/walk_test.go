@@ -236,6 +236,45 @@ func TestDiscover_RejectsSymlinkedImage(t *testing.T) {
 	}
 }
 
+// TestDiscover_RejectsSymlinkedImagesDir is the round-5 follow-up
+// to the symlinked-FILE fix from round 4. The DIRECTORY itself
+// could also be a symlink (e.g. `ln -s /etc images`), which the
+// previous fix didn't catch because it only Lstat'd the entries
+// INSIDE images/. Bugbot flagged it; this test pins the
+// dir-level Lstat.
+func TestDiscover_RejectsSymlinkedImagesDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require admin privileges on Windows")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "labels.csv"),
+		[]byte("image_id,label\n001.jpg,cat\n"), 0o644); err != nil {
+		t.Fatalf("write labels.csv: %v", err)
+	}
+	// Create a real images dir somewhere ELSE that the symlink
+	// will point at. The symlink in `root` is what should be
+	// rejected.
+	realDir := filepath.Join(t.TempDir(), "real-images")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir real-images: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "a.jpg"),
+		make([]byte, 100), 0o644); err != nil {
+		t.Fatalf("write img: %v", err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(root, "images")); err != nil {
+		t.Fatalf("symlink images: %v", err)
+	}
+
+	_, err := Discover(root)
+	if err == nil {
+		t.Fatal("Discover accepted a symlinked images/ directory — security regression")
+	}
+	if !strings.Contains(err.Error(), "symbolic link") {
+		t.Errorf("error missing symbolic-link rejection: %v", err)
+	}
+}
+
 // TestDiscover_RejectsSymlinkedLabelsCSV: same hole, different
 // file. The labels.csv path can also be a symlink (e.g. pointing
 // at a huge local file). Lstat + reject covers both cases

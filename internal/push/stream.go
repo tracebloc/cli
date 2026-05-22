@@ -168,12 +168,19 @@ func StreamLayout(
 		tarErrCh <- err
 	}()
 
-	// Compose the remote command. We mkdir -p the destination
-	// (idempotent — re-push overwrites) and pipe stdin into tar.
-	// `-C` makes tar extract there instead of cwd. Using sh -c
-	// rather than a multi-argv form because the && sequencing is
-	// what we want, and the table name is already
-	// ValidateTableName-guarded so it can't shell-escape.
+	// Compose the remote command. Re-push semantics need to be
+	// HERMETIC: a previous push of 3 images followed by a new push
+	// of 2 images must leave the PVC with exactly 2 images, not
+	// the union (which would disagree with the new labels.csv
+	// and silently produce a broken dataset). Bugbot flagged the
+	// non-hermetic "mkdir -p + tar -xf" version on PR-b round 5.
+	//
+	// rm -rf the destination first, then mkdir + extract. Safe
+	// because the destination string is StagedPrefix(table) =
+	// /data/shared/<table>/, and ValidateTableName has already
+	// ensured `table` is [A-Za-z0-9_]+ (no slashes, no traversal,
+	// max 63 chars). So `rm -rf` only nukes that one per-table
+	// subdir, never the parent /data/shared/ or any other table.
 	//
 	// `exec /bin/tar` replaces the shell with tar in the same
 	// process, so the only thing waiting on tar's stdout is the
@@ -181,7 +188,8 @@ func StreamLayout(
 	dest := StagedPrefix(table)
 	remoteCmd := []string{
 		"/bin/sh", "-c",
-		fmt.Sprintf("mkdir -p %q && exec /bin/tar -xf - -C %q", dest, dest),
+		fmt.Sprintf("rm -rf %q && mkdir -p %q && exec /bin/tar -xf - -C %q",
+			dest, dest, dest),
 	}
 
 	streamErr := exec.Exec(ctx, namespace, podName, containerName,

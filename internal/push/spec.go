@@ -40,18 +40,33 @@ import (
 // table-naming style anyway.
 var tableNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
+// MaxTableNameLength caps `--table` at 63 chars. Two hard limits
+// agree on this:
+//
+//  1. MySQL identifier limit: 64 chars (MySQL Reference 9.2 Schema
+//     Object Names). We use 63 to leave one char of headroom for
+//     any future "ingestion_run_id" suffix the chart might want to
+//     append.
+//  2. Kubernetes label value limit: 63 chars (DNS-1123 label rules).
+//     The stage Pod's tracebloc.io/table label carries the
+//     untransformed table name verbatim — a longer value fails Pod
+//     creation post-pre-flight, which Bugbot flagged on PR-b
+//     round 5.
+//
+// 63 is a coincidence that lets both checks share the same constant.
+const MaxTableNameLength = 63
+
 // ValidateTableName rejects table names that aren't safe as both a
 // MySQL identifier and a single PVC path segment.
 //
 // Why a CLI-side check rather than the schema: the embedded
 // ingest.v1.json only enforces `minLength: 1` on `table` — no
-// `pattern`. Without this guard, --table=../../etc would flow into
-// the /data/shared/<table>/ PVC path; PR-b's stage Pod would then
-// write outside the intended subtree and could clobber another
-// table's data. Tightening the upstream schema with a `pattern`
-// is the proper long-term fix (it would protect the helm flow +
-// jobs-manager too) but needs a change to tracebloc/data-ingestors'
-// schema, which the schema-drift CI check pins — filed as
+// `pattern`, no `maxLength`. Without this guard, --table=../../etc
+// would flow into the /data/shared/<table>/ PVC path, and a 100-char
+// name would make the Pod-label assignment fail post-pre-flight.
+// Tightening the upstream schema is the proper long-term fix
+// (it would protect the helm flow + jobs-manager too) but needs
+// a change to tracebloc/data-ingestors' schema — filed as
 // tracebloc/data-ingestors#116. Once that lands and we re-sync,
 // this guard can collapse to a thin "schema says so" wrapper.
 //
@@ -60,6 +75,14 @@ var tableNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 func ValidateTableName(table string) error {
 	if table == "" {
 		return fmt.Errorf("table name is required (set --table)")
+	}
+	if len(table) > MaxTableNameLength {
+		return fmt.Errorf(
+			"table name is %d characters; the max is %d "+
+				"(matches both the MySQL identifier limit and the "+
+				"Kubernetes label-value limit, which the stage Pod's "+
+				"tracebloc.io/table label is bound by). Use a shorter name.",
+			len(table), MaxTableNameLength)
 	}
 	if !tableNamePattern.MatchString(table) {
 		return fmt.Errorf(

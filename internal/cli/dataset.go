@@ -322,6 +322,14 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	//    failure was their environment vs the actual data transfer.
 	progress := push.NewProgress(out, layout.TotalBytes,
 		fmt.Sprintf("Staging %s", a.Spec.Table))
+	// Defer Finish so a failure path that returns BEFORE
+	// StreamLayout (e.g. CreateStagePod fails on PSA rejection,
+	// WaitForStagePodReady times out) still clears the TTY
+	// progress UI. push.StreamLayout's own deferred Finish would
+	// otherwise be unreachable. Calling Finish twice on the same
+	// schollz bar is a no-op, so the double-call on the happy
+	// path is safe. Bugbot flagged on PR-b round 5.
+	defer progress.Finish()
 	stageErr := push.Stage(ctx, push.StageOptions{
 		Client: cs,
 		Executor: &push.SPDYExecutor{

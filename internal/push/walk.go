@@ -149,9 +149,14 @@ func Discover(rootDir string) (*LocalLayout, error) {
 	layout.TotalBytes += labelsStat.Size()
 
 	// images/ subdir (required, must contain at least one
-	// image-extension file).
+	// image-extension file). Use os.Lstat — NOT Stat — so a
+	// symlinked-directory case (e.g. `ln -s /etc images`) gets
+	// caught here, not silently followed into the linked path.
+	// Without Lstat, the symlink-image fixes from the previous
+	// commit don't matter: the whole directory could be a link.
+	// Bugbot flagged the missing dir-level Lstat on PR-b round 5.
 	imagesDir := filepath.Join(abs, "images")
-	imagesStat, err := os.Stat(imagesDir)
+	imagesStat, err := os.Lstat(imagesDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf(
@@ -160,6 +165,9 @@ func Discover(rootDir string) (*LocalLayout, error) {
 				abs)
 		}
 		return nil, fmt.Errorf("stat images/: %w", err)
+	}
+	if err := rejectSymlink(imagesStat, "images"); err != nil {
+		return nil, err
 	}
 	if !imagesStat.IsDir() {
 		return nil, fmt.Errorf("%q exists but is not a directory", imagesDir)
@@ -228,16 +236,16 @@ func Discover(rootDir string) (*LocalLayout, error) {
 }
 
 // rejectSymlink returns a non-nil error if info describes a symlink.
-// v0.1 refuses symlinks under <root>/labels.csv and <root>/images/*
+// v0.1 refuses symlinks under <root>/{labels.csv, images, images/*}
 // entirely because:
 //
-//   - SECURITY: writeTarFile uses os.Stat + os.Open (which follow
-//     symlinks). Discover sized entries via DirEntry.Info() (which
-//     does not). A symlink whose target is a multi-GB local file
-//     would pass Discover's size cap (the symlink itself is ~100
-//     bytes) yet stream the target's full contents to the cluster
-//     PVC — a size-cap bypass and arbitrary-local-file disclosure
-//     to the cluster admin. Bugbot caught this on PR-b round 4.
+//   - SECURITY: writeTarFile uses os.Open (which follows symlinks).
+//     Discover sized entries via DirEntry.Info() (which does not).
+//     A symlink whose target is a multi-GB local file would pass
+//     Discover's size cap (the symlink itself is ~100 bytes) yet
+//     stream the target's full contents to the cluster PVC — a
+//     size-cap bypass and arbitrary-local-file disclosure to the
+//     cluster admin. Bugbot caught this on PR-b round 4.
 //   - UX: legitimate image_classification datasets don't use
 //     symlinks. A clear "symlinks not supported" error is better
 //     than the alternative fixes (resolve + re-stat the target,
@@ -247,6 +255,21 @@ func Discover(rootDir string) (*LocalLayout, error) {
 // Customers with symlink-heavy layouts (rare; usually means their
 // data lives on another filesystem) can `cp -L` to materialize
 // the files before pushing.
+//
+// Known limitation: HARD LINKS are NOT rejected. The filesystem
+// doesn't expose a Mode bit for hard links the way ModeSymlink
+// distinguishes symlinks, and a high-Nlink check has too many
+// false positives (legitimate hard-linked datasets where the
+// dataset dir is the only entry point). The implicit security
+// boundary is the CLI's process-level read permissions: a
+// customer can only hard-link files they already have read
+// access to, so the cluster admin reading a hard-linked
+// /etc/shadow via the PVC isn't a privilege escalation — they'd
+// need the CLI to be running as root for that to be exploitable,
+// and the docs already recommend running as a low-privileged
+// user. v0.2 may add openat(O_NOFOLLOW)-based sandboxing if a
+// real customer needs harder isolation; tracked alongside the
+// cloud-source story (#147 non-goals).
 func rejectSymlink(info os.FileInfo, relPath string) error {
 	if info.Mode()&os.ModeSymlink == 0 {
 		return nil
