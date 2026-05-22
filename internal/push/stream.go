@@ -169,28 +169,48 @@ func StreamLayout(
 		tarErrCh <- err
 	}()
 
-	// Compose the remote command. Re-push semantics need to be
-	// HERMETIC: a previous push of 3 images followed by a new push
-	// of 2 images must leave the PVC with exactly 2 images, not
-	// the union (which would disagree with the new labels.csv
-	// and silently produce a broken dataset). Bugbot flagged the
-	// non-hermetic "mkdir -p + tar -xf" version on PR-b round 5.
+	// Compose the remote command. Re-push semantics must be both
+	// HERMETIC (no stale files from a previous push, Bugbot r5)
+	// AND TRANSACTIONAL (the previously-staged dataset stays
+	// intact if THIS push fails mid-transfer, Bugbot r7). The
+	// earlier `rm -rf $DEST && tar -xf -` version satisfied r5
+	// but not r7 — a tar failure mid-stream left the customer
+	// with NOTHING on the PVC.
 	//
-	// rm -rf the destination first, then mkdir + extract. Safe
-	// because the destination string is StagedPrefix(table) =
-	// /data/shared/<table>/, and ValidateTableName has already
-	// ensured `table` is [A-Za-z0-9_]+ (no slashes, no traversal,
-	// max 63 chars). So `rm -rf` only nukes that one per-table
-	// subdir, never the parent /data/shared/ or any other table.
+	// Pattern: extract to a sibling .staging dir, then atomically
+	// rename. Three steps inside the shell:
 	//
-	// `exec /bin/tar` replaces the shell with tar in the same
-	// process, so the only thing waiting on tar's stdout is the
-	// kubelet — one less indirection in the pipe chain.
+	//  1. rm -rf $DEST.staging   (clean up any prior failed attempt)
+	//  2. mkdir -p $DEST.staging && tar -xf - -C $DEST.staging
+	//     (do the transfer into staging; if this fails, the
+	//     pre-existing $DEST is untouched)
+	//  3. ONLY ON tar SUCCESS: rm -rf $DEST && mv $DEST.staging $DEST
+	//     (window of "nothing here" between rm + mv is sub-ms; a
+	//     v0.2 follow-up could close it with a double-mv pattern
+	//     if customers actually hit interruption in that window)
+	//
+	// The `&&` sequencing in sh means step 3 only fires if step 2
+	// succeeded. The trailing rm -rf of the .staging cleans up if
+	// the mv itself somehow fails (unlikely on the same fs but
+	// defensive).
+	//
+	// All three operate on paths derived from StagedPrefix(table),
+	// and ValidateTableName guarantees `table` is a single safe
+	// segment ([A-Za-z0-9_]+, max 63 chars), so neither rm
+	// can escape /data/shared/<table>{,.staging}.
 	dest := StagedPrefix(table)
+	staging := dest + ".staging"
 	remoteCmd := []string{
 		"/bin/sh", "-c",
-		fmt.Sprintf("rm -rf %q && mkdir -p %q && exec /bin/tar -xf - -C %q",
-			dest, dest, dest),
+		fmt.Sprintf(
+			"rm -rf %q && mkdir -p %q && "+
+				"/bin/tar -xf - -C %q && "+
+				"rm -rf %q && mv %q %q && "+
+				"rm -rf %q",
+			staging, staging,
+			staging,
+			dest, staging, dest,
+			staging),
 	}
 
 	streamErr := exec.Exec(ctx, namespace, podName, containerName,

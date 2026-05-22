@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -401,12 +402,22 @@ func WaitForStagePodReady(ctx context.Context, cs kubernetes.Interface, namespac
 		return lastObserved, nil
 	}
 
-	// Timeout or context-cancelled. Try to give a useful hint
-	// from the last-observed Pod status.
+	// Differentiate "actual timeout expired" from "poll terminated
+	// early" (NotFound, Forbidden, Failed phase, ctx-canceled).
+	// The earlier blanket "did not become Ready within 60s"
+	// wording was misleading — Bugbot flagged on PR-b round 7.
 	hint := podReadyTimeoutHint(lastObserved)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf(
+			"stage Pod %s/%s did not become Ready within %s%s",
+			namespace, podName, StagePodReadyTimeout, hint)
+	}
+	// Early-exit error (terminal API error, terminal phase,
+	// SIGINT). Surface it as-is so the customer sees the actual
+	// cause without the wrong "ran out the timer" framing.
 	return nil, fmt.Errorf(
-		"stage Pod %s/%s did not become Ready within %s: %w%s",
-		namespace, podName, StagePodReadyTimeout, err, hint)
+		"stage Pod %s/%s did not reach Ready state: %w%s",
+		namespace, podName, err, hint)
 }
 
 // podReadyTimeoutHint extracts the most useful diagnostic from a

@@ -172,29 +172,43 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 		t.Errorf("cmd[:2] = %v, want [/bin/sh -c]", fe.gotCmd[:2])
 	}
 	script := fe.gotCmd[2]
-	// rm -rf is the hermetic-re-push guard (Bugbot PR-b round 5):
-	// without it, a smaller second push leaves stale images on the
-	// PVC that disagree with the new labels.csv. Pin its presence
-	// AND that it targets the per-table subdir (not /data/shared
-	// itself, which would nuke sibling tables) — ValidateTableName
-	// is the security boundary that keeps the dest single-segment.
+	// The remote command must be both:
+	//   1. HERMETIC (Bugbot r5): old files don't survive a re-push
+	//   2. TRANSACTIONAL (Bugbot r7): if tar fails, the previously
+	//      staged dataset for this table is preserved
+	//
+	// Pattern: extract to <dest>.staging, then on tar SUCCESS
+	// rm the old dest + mv staging → dest. The order matters:
+	//
+	//   - tar BEFORE any rm of $DEST  (preserves on tar failure)
+	//   - mv AFTER tar succeeds       (atomic-ish swap)
+	//
+	// We pin all three properties:
 	for _, want := range []string{
-		`rm -rf "/data/shared/my_table"`,
-		`mkdir -p "/data/shared/my_table"`,
-		`tar -xf -`,
-		`-C "/data/shared/my_table"`,
+		`mkdir -p "/data/shared/my_table.staging"`,
+		`tar -xf - -C "/data/shared/my_table.staging"`,
+		`mv "/data/shared/my_table.staging" "/data/shared/my_table"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("remote script missing %q: %s", want, script)
 		}
 	}
-	// Defense-in-depth: the rm MUST appear BEFORE the mkdir+tar.
-	// A future refactor that reorders these would silently break
-	// hermetic re-push without this assertion.
-	rmIdx := strings.Index(script, "rm -rf")
-	mkdirIdx := strings.Index(script, "mkdir -p")
-	if rmIdx >= mkdirIdx {
-		t.Errorf("remote script has `rm -rf` after `mkdir -p` (order broken — re-push won't be hermetic):\n%s", script)
+	// Transactional property: tar must come BEFORE any `rm` of
+	// the real destination. If a refactor inverts this, a tar
+	// failure could wipe the customer's previously-staged data.
+	tarIdx := strings.Index(script, `tar -xf - -C "/data/shared/my_table.staging"`)
+	destRmIdx := strings.Index(script, `rm -rf "/data/shared/my_table"`)
+	if tarIdx < 0 || destRmIdx < 0 {
+		t.Fatalf("remote script missing tar or final-rm step: %s", script)
+	}
+	if tarIdx >= destRmIdx {
+		t.Errorf("remote script does tar AFTER rm of $DEST — partial-transfer would destroy previous data:\n%s", script)
+	}
+	// Single-segment guarantee: both rm targets must end with
+	// /my_table (or /my_table.staging) — never just /data/shared.
+	if strings.Contains(script, `rm -rf "/data/shared"`) ||
+		strings.Contains(script, `rm -rf "/data/shared/"`) {
+		t.Errorf("remote script rm-rfs the parent /data/shared (would nuke sibling tables):\n%s", script)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -81,6 +82,24 @@ func FindOrphanStagePods(ctx context.Context, cs kubernetes.Interface, namespace
 	var orphans []Orphan
 	for i := range pods.Items {
 		p := &pods.Items[i]
+
+		// Phase=Running means an active push (this workstation or
+		// another's) is still doing real work. activeDeadlineSeconds
+		// is its safety net at the cluster level. Flagging it as
+		// orphan would produce false positives for legitimate
+		// slow/near-cap pushes — pod.go budgets ~8.5 minutes for
+		// the 1 GiB-cap transfer alone, which exceeds the 5-min
+		// grace below. Bugbot flagged the false-positive risk on
+		// PR-b round 7.
+		//
+		// Pods in non-Running phases (Pending/Failed/Unknown) past
+		// the grace period are still flagged — those are the
+		// genuine orphan shapes (stuck on image pull, crashed
+		// during stream, network-partitioned).
+		if p.Status.Phase == corev1.PodRunning {
+			continue
+		}
+
 		age := now.Sub(p.CreationTimestamp.Time)
 		if age < OrphanGracePeriod {
 			continue
@@ -119,17 +138,38 @@ func FormatOrphansWarning(orphans []Orphan) string {
 	s += fmt.Sprintf("WARNING: %d orphan stage Pod%s detected in this namespace — likely "+
 		"leftover from a previously crashed `dataset push`:\n",
 		len(orphans), pluralS(len(orphans)))
+	names := make([]string, 0, len(orphans))
 	for _, o := range orphans {
 		tableHint := ""
 		if o.Table != "" {
 			tableHint = fmt.Sprintf(" (table: %s)", o.Table)
 		}
 		s += fmt.Sprintf("  - %s, age %s%s\n", o.Name, humanDuration(o.Age), tableHint)
+		names = append(names, o.Name)
 	}
-	s += "Delete with: kubectl delete pod -n " + orphans[0].Namespace +
-		" -l " + fmt.Sprintf("%s=%s,%s=%s",
-		StagePodManagedByLabel, StagePodManagedByValue,
-		StagePodComponentLabel, StagePodComponentValue) + "\n"
+	// Use SPECIFIC Pod names in the delete command, not the
+	// label selector. The selector would match every stage Pod
+	// in the namespace, including legitimate running ones from
+	// parallel pushes (this workstation or another's) — copy-
+	// pasting a label-based delete could silently kill someone
+	// else's in-progress push. Bugbot flagged the over-broad
+	// delete on PR-b round 7.
+	s += "Delete with: kubectl delete pod -n " + orphans[0].Namespace + " " +
+		joinNames(names) + "\n"
+	return s
+}
+
+// joinNames is space-joining for the `kubectl delete pod a b c`
+// argv. Not strings.Join'd inline so the test pinning the format
+// has a single point of change.
+func joinNames(names []string) string {
+	var s string
+	for i, n := range names {
+		if i > 0 {
+			s += " "
+		}
+		s += n
+	}
 	return s
 }
 
