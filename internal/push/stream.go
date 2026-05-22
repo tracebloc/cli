@@ -134,6 +134,69 @@ func StreamLayout(
 	}
 	defer progress.Finish()
 
+	// Generate the staging-dir suffix + compose the remote command
+	// BEFORE spawning the tar goroutine. Earlier versions did the
+	// suffix after, which meant a crypto/rand failure would return
+	// from this function without closing the pipe or waiting on
+	// the goroutine — the goroutine would block once the ~64 KB
+	// pipe buffer filled, leaking forever. Bugbot flagged on r9.
+	//
+	// Staging dir gets a fresh 8-hex-char suffix per invocation so
+	// two concurrent `dataset push` runs for the same table don't
+	// race on the same .staging path (r8). Without this, push A's
+	// `rm -rf .staging` could wipe push B's in-progress tar
+	// extraction (or vice versa), producing an interleaved
+	// corrupt dataset on the PVC.
+	stagingSuffix, err := randomSuffix(4) // 4 bytes → 8 hex chars
+	if err != nil {
+		return fmt.Errorf("generating staging-dir suffix: %w", err)
+	}
+	dest := StagedPrefix(table)
+	staging := dest + ".staging-" + stagingSuffix
+
+	// Compose the remote command. Re-push semantics need to be
+	// HERMETIC (no stale files from a previous push, Bugbot r5),
+	// TRANSACTIONAL (the previously-staged dataset stays intact
+	// if THIS push fails mid-transfer, Bugbot r7), and
+	// PARALLEL-SAFE (concurrent pushes don't corrupt each other,
+	// r8 via unique suffix above).
+	//
+	// Pattern: extract to a unique <dest>.staging-<hex>, then
+	// atomically rename on tar success. && sequencing means the
+	// swap only fires if tar succeeded.
+	//
+	// Also: clean up any orphan .staging-<hex>-* dirs from
+	// PREVIOUSLY-FAILED pushes (Bugbot r9). Constraints:
+	//   - Use mmin +60 (older than 1 hour) so we don't race with
+	//     a parallel push's in-progress staging. v0.1's
+	//     activeDeadlineSeconds is 30 min, so anything 1 hour+
+	//     can't be from a still-running Pod.
+	//   - Scope to ".staging-*" siblings of THIS table only
+	//     (find -name pattern); other tables' staging dirs are
+	//     none of our business.
+	//   - 2>/dev/null + || true so find failures don't fail the
+	//     whole stream (defensive cleanup is best-effort).
+	//
+	// All paths derive from StagedPrefix(table); ValidateTableName
+	// guarantees `table` is a single safe segment, so the find
+	// pattern + rm can't escape /data/shared/.
+	parentDir := path.Dir(dest)
+	tableBase := path.Base(dest)
+	remoteCmd := []string{
+		"/bin/sh", "-c",
+		fmt.Sprintf(
+			"rm -rf %q && mkdir -p %q && "+
+				"/bin/tar -xf - -C %q && "+
+				"rm -rf %q && mv %q %q && "+
+				"rm -rf %q ; "+
+				"find %q -maxdepth 1 -name %q -mmin +60 -exec rm -rf {} + 2>/dev/null || true",
+			staging, staging,
+			staging,
+			dest, staging, dest,
+			staging,
+			parentDir, tableBase+".staging-*"),
+	}
+
 	// Use a synchronous pipe so the tar Writer's writes block on
 	// the exec stream's reads — no in-memory buffering of the
 	// whole archive. For a 1 GiB dataset this is the difference
@@ -142,13 +205,10 @@ func StreamLayout(
 
 	// Wire the progress sink on the WRITE side so every byte the
 	// tar Writer emits (headers + bodies) counts toward the bar.
-	// Doing it here (not on individual file reads) means we don't
-	// have to instrument the tar.Writer internals.
 	countedPW := &progressWriter{w: pw, p: progress}
 
-	// Capture stderr from the in-cluster tar so failures (e.g.
-	// "no space left on device" on a near-full PVC) surface with
-	// the actual remote message, not a generic "exec failed."
+	// Capture stderr from the in-cluster tar so failures surface
+	// with the actual remote message.
 	var stderrBuf bytes.Buffer
 
 	// Kick off the tar build in a goroutine. The Pipe.Writer MUST
@@ -156,9 +216,7 @@ func StreamLayout(
 	// side blocks forever waiting for more bytes.
 	//
 	// CloseWithError vs Close: CloseWithError preserves the tar
-	// error across the pipe so the exec side sees the cause
-	// (otherwise the executor reports EOF and the real tar error
-	// gets swallowed).
+	// error across the pipe so the exec side sees the cause.
 	tarErrCh := make(chan error, 1)
 	go func() {
 		err := writeLayoutTar(countedPW, layout)
@@ -169,67 +227,6 @@ func StreamLayout(
 		}
 		tarErrCh <- err
 	}()
-
-	// Compose the remote command. Re-push semantics must be both
-	// HERMETIC (no stale files from a previous push, Bugbot r5)
-	// AND TRANSACTIONAL (the previously-staged dataset stays
-	// intact if THIS push fails mid-transfer, Bugbot r7). The
-	// earlier `rm -rf $DEST && tar -xf -` version satisfied r5
-	// but not r7 — a tar failure mid-stream left the customer
-	// with NOTHING on the PVC.
-	//
-	// Pattern: extract to a sibling .staging dir, then atomically
-	// rename. Three steps inside the shell:
-	//
-	//  1. rm -rf $DEST.staging   (clean up any prior failed attempt)
-	//  2. mkdir -p $DEST.staging && tar -xf - -C $DEST.staging
-	//     (do the transfer into staging; if this fails, the
-	//     pre-existing $DEST is untouched)
-	//  3. ONLY ON tar SUCCESS: rm -rf $DEST && mv $DEST.staging $DEST
-	//     (window of "nothing here" between rm + mv is sub-ms; a
-	//     v0.2 follow-up could close it with a double-mv pattern
-	//     if customers actually hit interruption in that window)
-	//
-	// The `&&` sequencing in sh means step 3 only fires if step 2
-	// succeeded. The trailing rm -rf of the .staging cleans up if
-	// the mv itself somehow fails (unlikely on the same fs but
-	// defensive).
-	//
-	// All three operate on paths derived from StagedPrefix(table),
-	// and ValidateTableName guarantees `table` is a single safe
-	// segment ([A-Za-z0-9_]+, max 63 chars), so neither rm
-	// can escape /data/shared/<table>{,.staging}.
-	// Staging dir gets a fresh 8-hex-char suffix per invocation
-	// so two concurrent `dataset push` runs for the same table
-	// don't race on the same .staging path. Without this, push A's
-	// `rm -rf .staging` could wipe push B's in-progress tar
-	// extraction (or vice versa), producing an interleaved-and-
-	// corrupted dataset on the PVC. Bugbot flagged on PR-b r8.
-	//
-	// The FINAL `rm $DEST && mv $STAGING $DEST` is still
-	// last-write-wins between concurrent pushes — that's an
-	// acceptable v0.1 semantic (concurrent pushes to the same
-	// table name are inherently undefined; whichever push
-	// commits last "wins"). What this suffix closes is the
-	// INTERLEAVED-write hole.
-	stagingSuffix, err := randomSuffix(4) // 4 bytes → 8 hex chars
-	if err != nil {
-		return fmt.Errorf("generating staging-dir suffix: %w", err)
-	}
-	dest := StagedPrefix(table)
-	staging := dest + ".staging-" + stagingSuffix
-	remoteCmd := []string{
-		"/bin/sh", "-c",
-		fmt.Sprintf(
-			"rm -rf %q && mkdir -p %q && "+
-				"/bin/tar -xf - -C %q && "+
-				"rm -rf %q && mv %q %q && "+
-				"rm -rf %q",
-			staging, staging,
-			staging,
-			dest, staging, dest,
-			staging),
-	}
 
 	streamErr := exec.Exec(ctx, namespace, podName, containerName,
 		remoteCmd, pr, nil, &stderrBuf)

@@ -232,6 +232,15 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 		strings.Contains(script, `rm -rf "/data/shared/"`) {
 		t.Errorf("remote script rm-rfs the parent /data/shared (would nuke sibling tables):\n%s", script)
 	}
+
+	// Bugbot r9: orphan-staging-dir cleanup for previously-failed
+	// pushes. Find pattern must be scoped to THIS table's staging
+	// siblings (not all tables') and use -mmin +60 so we don't
+	// race with parallel pushes' in-progress staging.
+	if !strings.Contains(script,
+		`find "/data/shared" -maxdepth 1 -name "my_table.staging-*" -mmin +60 -exec rm -rf {} +`) {
+		t.Errorf("remote script missing orphan-staging-dir cleanup (Bugbot r9):\n%s", script)
+	}
 }
 
 // TestStreamLayout_StagingSuffixIsUniquePerInvocation: two back-to-
