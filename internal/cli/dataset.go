@@ -398,8 +398,24 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 5, err: err}
 	}
 
-	// 11. Phase 4: POST to jobs-manager, watch the spawned ingestor
-	//     Job, render the parsed INGESTION SUMMARY panel.
+	// 11. Open a port-forward to a Pod backing the jobs-manager
+	//     Service. The CLI runs off-cluster (on a laptop, in CI
+	//     runners outside the cluster network), so the discovered
+	//     *.svc.cluster.local URL isn't reachable — we tunnel
+	//     through the kubeconfig-authenticated apiserver, same as
+	//     `kubectl port-forward`. Bugbot PR #10 r3 caught the
+	//     original broken-by-design direct-URL POST.
+	_, _ = fmt.Fprintln(out, "Opening port-forward to jobs-manager...")
+	pf, err := submit.PortForwardJobsManager(ctx, cs, resolved.RestConfig,
+		resolved.Namespace, release.JobsManagerServiceName, release.JobsManagerPort)
+	if err != nil {
+		return &exitError{code: 8, err: fmt.Errorf("setting up jobs-manager port-forward: %w", err)}
+	}
+	defer pf.Close()
+
+	// 12. Phase 4: POST to jobs-manager via the local port,
+	//     watch the spawned ingestor Job, render the parsed
+	//     INGESTION SUMMARY panel.
 	//
 	//     Exit-code mapping:
 	//        SubmitError 401/403         → 5 (auth — same bucket as
@@ -415,8 +431,9 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	//                                       partial-failure summaries)
 	//        WatchResult Detached        → 0 (cluster keeps running)
 	//        WatchResult Succeeded clean → 0
+	localEndpoint := fmt.Sprintf("http://localhost:%d", pf.LocalPort)
 	submitRes, err := submit.Run(ctx, submit.Options{
-		Submitter:        submit.NewHTTPSubmitter(release.JobsManagerService, tok.Token),
+		Submitter:        submit.NewHTTPSubmitter(localEndpoint, tok.Token),
 		Client:           cs,
 		IngestConfigYAML: string(specBytes),
 		IdempotencyKey:   a.IdempotencyKey,
