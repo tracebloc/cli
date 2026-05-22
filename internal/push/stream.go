@@ -189,47 +189,63 @@ func StreamLayout(
 	parentDir := path.Dir(dest)
 	tableBase := path.Base(dest)
 
-	// Atomic-ish dir swap with rollback (Bugbot r10):
+	// Atomic-ish dir swap with rollback (Bugbot r10) + correct exit
+	// propagation (Bugbot r11).
 	//
-	//   1. If $DEST exists, rename it to $DEST.old-<hex> (backup).
-	//   2. Rename $STAGING → $DEST.
-	//   3. If step 2 failed AND step 1 ran, restore the backup.
-	//   4. On full success, rm the backup.
+	// Pipeline:
+	//   1. set -e — any unhandled non-zero status aborts the script
+	//   2. rm -rf $STAGING (clean prior failed attempt)
+	//   3. mkdir + tar (extract to staging)
+	//   4. If $DEST exists, mv $DEST → $DEST.old-<hex>  (backup)
+	//   5. mv $STAGING → $DEST                          (commit)
+	//      On failure: restore backup, exit 1
+	//   6. rm -rf $BACKUP                                (success)
+	//   7. find ... orphan cleanup (best-effort, || true)
 	//
-	// The earlier `rm $DEST && mv $STAGING $DEST` could leave the
-	// customer with NOTHING at $DEST if the mv failed after the
-	// rm. The rename-rename-cleanup pattern keeps the previous
-	// dataset accessible (under .old-<hex>) until we know the new
-	// one is in place. rename(2) on the same filesystem is
-	// atomic (Linux kernel guarantee), so the .old → main-name
-	// transition is the safest swap available without a proper
-	// COW filesystem.
+	// The earlier `&&-chained ... ; find ... || true` shape had a
+	// hidden correctness bug (Bugbot r11): POSIX `;` runs the
+	// next command regardless of prior status, and `|| true` then
+	// forces exit 0. A failed tar mid-script would silently
+	// return success to the exec subprocess, and the CLI would
+	// report "Staged N files" on what was actually a failed push.
 	//
-	// Failure modes:
-	//   - tar fails: $DEST untouched (transactional from r7)
-	//   - backup mv fails: $DEST untouched (extremely rare — same fs)
-	//   - main mv fails: backup still at .old-<hex>, customer
-	//     recovers via `kubectl exec -- mv .old-<hex> $DEST`
-	//   - final rm fails: leaves .old-<hex> cruft, picked up by
-	//     the find -mmin +60 cleanup
+	// set -e fixes that: any unguarded non-zero exits the script
+	// with that status. The find's `|| true` is still fine
+	// because under set -e a `cmd || fallback` is treated as
+	// "cmd may fail" and doesn't trigger the immediate exit.
 	//
-	// The find pattern below covers both .staging-* and .old-*
-	// siblings of THIS table for the orphan sweep.
+	// Failure modes (recap):
+	//   - tar fails: set -e aborts; $DEST untouched (transactional from r7)
+	//   - backup mv fails: same — aborts before any change to $DEST
+	//   - main mv fails: explicit if/then rolls back the backup
+	//     then `exit 1` (set -e doesn't preempt the explicit
+	//     handler because of the `||`)
+	//   - final rm fails: set -e exits, but the customer's new
+	//     data is already in place — the leftover .old-<hex>
+	//     gets picked up by the find sweep on next invocation
+	//   - find fails: `|| true` suppresses (cleanup is best-effort)
 	remoteCmd := []string{
 		"/bin/sh", "-c",
 		fmt.Sprintf(
-			"rm -rf %q && mkdir -p %q && "+
-				"/bin/tar -xf - -C %q && "+
-				"{ [ -e %q ] && mv %q %q || true; } && "+
-				"{ mv %q %q || { [ -e %q ] && mv %q %q ; exit 1; }; } && "+
-				"rm -rf %q ; "+
-				"find %q -maxdepth 1 \\( -name %q -o -name %q \\) -mmin +60 -exec rm -rf {} + 2>/dev/null || true",
-			staging, staging,
-			staging,
-			dest, dest, backup,
-			staging, dest, backup, backup, dest,
-			backup,
-			parentDir, tableBase+".staging-*", tableBase+".old-*"),
+			"set -e\n"+
+				"rm -rf %q\n"+
+				"mkdir -p %q\n"+
+				"/bin/tar -xf - -C %q\n"+
+				"if [ -e %q ]; then mv %q %q; fi\n"+
+				"if ! mv %q %q; then\n"+
+				"  if [ -e %q ]; then mv %q %q; fi\n"+
+				"  exit 1\n"+
+				"fi\n"+
+				"rm -rf %q\n"+
+				"find %q -maxdepth 1 \\( -name %q -o -name %q \\) -mmin +60 -exec rm -rf {} + 2>/dev/null || true\n",
+			staging,            // rm
+			staging,            // mkdir
+			staging,            // tar -C
+			dest, dest, backup, // if exists, backup
+			staging, dest, // main mv
+			backup, backup, dest, // rollback
+			backup,                                                 // success cleanup
+			parentDir, tableBase+".staging-*", tableBase+".old-*"), // find
 	}
 
 	// Use a synchronous pipe so the tar Writer's writes block on
@@ -280,18 +296,28 @@ func StreamLayout(
 	// send imminently after CloseWithError or the pr.Close above).
 	tarErr := <-tarErrCh
 
-	// Stream errors trump tar errors: if exec failed, the tar
-	// goroutine likely failed because of a broken pipe, which is
-	// downstream noise. Customer wants the exec error.
+	// Order matters here. Bugbot r11 caught the previous logic:
+	// when the LOCAL tar build fails (e.g. r8's stream-time size
+	// cap recheck rejecting a file that grew on disk), the
+	// CloseWithError on the pipe causes exec to see "broken pipe"
+	// and return a generic stream error. If we report streamErr
+	// first, the customer sees "streaming failed" instead of the
+	// actually-actionable "dataset exceeded v0.1 cap" diagnostic
+	// from the tar side.
+	//
+	// Check tarErr first — when both are non-nil, the tar side
+	// is usually the upstream cause. streamErr-only (no tarErr)
+	// is the genuine network/RBAC/remote-tar-failed case where
+	// the exec wording is the right surface.
+	if tarErr != nil {
+		return fmt.Errorf("building tar archive: %w", tarErr)
+	}
 	if streamErr != nil {
 		hint := ""
 		if remote := stderrBuf.String(); remote != "" {
 			hint = fmt.Sprintf(" (remote tar stderr: %s)", remote)
 		}
 		return fmt.Errorf("streaming files to %s/%s: %w%s", namespace, podName, streamErr, hint)
-	}
-	if tarErr != nil {
-		return fmt.Errorf("building tar archive: %w", tarErr)
 	}
 	return nil
 }
