@@ -206,7 +206,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		// JSON output mode) isn't polluted by error text. Exit 2
 		// is reserved for schema violations across the CLI.
 		_, _ = fmt.Fprintf(errOut, "synthesized spec failed schema validation (%d issue%s):\n",
-			len(errs), pluralS(len(errs)))
+			len(errs), plural(len(errs)))
 		_, _ = fmt.Fprintln(errOut, schema.FormatErrors(errs))
 		return &exitError{code: 2, err: errors.New("synthesized spec failed schema validation; check the flag values above")}
 	}
@@ -326,16 +326,6 @@ func printPushPreflight(
 			push.StagedPrefix(spec["table"].(string)))
 		_, _ = fmt.Fprintln(out)
 	}
-}
-
-// pluralS returns "s" for n != 1, else "". Tiny helper that keeps
-// the "1 issue" / "3 issues" diagnostic readable without an inline
-// ternary.
-func pluralS(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
 }
 
 // humanBytesForSummary mirrors push.humanBytes but lives here to
