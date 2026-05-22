@@ -215,16 +215,18 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 			t.Errorf("remote script missing %q: %s", want, script)
 		}
 	}
-	// Transactional property: tar must come BEFORE any `rm` of
-	// the real destination. If a refactor inverts this, a tar
-	// failure could wipe the customer's previously-staged data.
+	// Transactional property: tar must come BEFORE any mutation
+	// of the real destination. r5+r7 used `rm $DEST` for the
+	// pre-mv step; r10 swapped that to `mv $DEST $DEST.old-<hex>`
+	// (backup-and-swap, so a mv failure can be rolled back).
+	// The contract is the same: tar runs while $DEST is intact.
 	tarIdx := strings.Index(script, `tar -xf - -C "`+staging+`"`)
-	destRmIdx := strings.Index(script, `rm -rf "/data/shared/my_table"`)
-	if tarIdx < 0 || destRmIdx < 0 {
-		t.Fatalf("remote script missing tar or final-rm step: %s", script)
+	destBackupMvIdx := strings.Index(script, `mv "/data/shared/my_table" "`)
+	if tarIdx < 0 || destBackupMvIdx < 0 {
+		t.Fatalf("remote script missing tar or destination-backup mv: %s", script)
 	}
-	if tarIdx >= destRmIdx {
-		t.Errorf("remote script does tar AFTER rm of $DEST — partial-transfer would destroy previous data:\n%s", script)
+	if tarIdx >= destBackupMvIdx {
+		t.Errorf("remote script touches $DEST BEFORE tar succeeds — partial-transfer could destroy previous data:\n%s", script)
 	}
 	// Single-segment guarantee: both rm targets must end with
 	// /my_table or /my_table.staging-* — never just /data/shared.
@@ -233,13 +235,57 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 		t.Errorf("remote script rm-rfs the parent /data/shared (would nuke sibling tables):\n%s", script)
 	}
 
-	// Bugbot r9: orphan-staging-dir cleanup for previously-failed
-	// pushes. Find pattern must be scoped to THIS table's staging
-	// siblings (not all tables') and use -mmin +60 so we don't
-	// race with parallel pushes' in-progress staging.
-	if !strings.Contains(script,
-		`find "/data/shared" -maxdepth 1 -name "my_table.staging-*" -mmin +60 -exec rm -rf {} +`) {
-		t.Errorf("remote script missing orphan-staging-dir cleanup (Bugbot r9):\n%s", script)
+	// Bugbot r9 + r10: orphan cleanup for previously-failed pushes
+	// must catch BOTH .staging-* and .old-* siblings. The .old-*
+	// dirs are created by the round-10 backup-and-rollback swap;
+	// without including them in the find pattern, failed-mid-swap
+	// pushes would leak .old-* dirs.
+	for _, wantName := range []string{`-name "my_table.staging-*"`, `-name "my_table.old-*"`} {
+		if !strings.Contains(script, wantName) {
+			t.Errorf("remote script missing %s in orphan cleanup:\n%s", wantName, script)
+		}
+	}
+	if !strings.Contains(script, `-mmin +60 -exec rm -rf {} +`) {
+		t.Errorf("remote script missing -mmin+60 orphan window:\n%s", script)
+	}
+
+	// Bugbot r10: backup-and-swap pattern. The previous dataset
+	// must be backed up to .old-<hex> BEFORE the new dataset
+	// arrives, and restored if the main mv fails. Pin the key
+	// shape pieces — backup mv, primary mv, rollback mv, cleanup.
+	backupRE := regexp.MustCompile(`/data/shared/my_table\.old-[0-9a-f]{8}`)
+	backupPaths := backupRE.FindAllString(script, -1)
+	if len(backupPaths) == 0 {
+		t.Fatalf("remote script has no .old-<hex> backup path (r10 rollback regression):\n%s", script)
+	}
+	// All .old-<hex> mentions in a single invocation must agree —
+	// otherwise the rollback would target a different path than
+	// the backup created.
+	for i := 1; i < len(backupPaths); i++ {
+		if backupPaths[i] != backupPaths[0] {
+			t.Errorf("remote script mixes backup suffixes %q vs %q:\n%s",
+				backupPaths[0], backupPaths[i], script)
+		}
+	}
+	backup := backupPaths[0]
+	// Backup must use the SAME suffix as staging — different
+	// suffixes would defeat the "find -name ...staging-* ...old-*"
+	// orphan-cleanup symmetry, AND would risk collision with a
+	// concurrent push's .old-<hex>.
+	if strings.TrimPrefix(backup, "/data/shared/my_table.old-") !=
+		strings.TrimPrefix(staging, "/data/shared/my_table.staging-") {
+		t.Errorf("backup and staging suffixes diverge: %q vs %q", backup, staging)
+	}
+	// Backup mv (DEST → .old) must appear BEFORE primary mv
+	// (.staging → DEST), or rollback wouldn't have anything to
+	// restore.
+	backupMvIdx := strings.Index(script, `mv "/data/shared/my_table" "`+backup+`"`)
+	primaryMvIdx := strings.Index(script, `mv "`+staging+`" "/data/shared/my_table"`)
+	if backupMvIdx < 0 || primaryMvIdx < 0 {
+		t.Fatalf("remote script missing backup or primary mv:\n%s", script)
+	}
+	if backupMvIdx >= primaryMvIdx {
+		t.Errorf("backup mv (DEST→.old) must come BEFORE primary mv (.staging→DEST); rollback contract broken:\n%s", script)
 	}
 }
 

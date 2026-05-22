@@ -180,21 +180,56 @@ func StreamLayout(
 	// All paths derive from StagedPrefix(table); ValidateTableName
 	// guarantees `table` is a single safe segment, so the find
 	// pattern + rm can't escape /data/shared/.
+	// Backup path for the swap. Same unique suffix as staging so
+	// two parallel pushes don't collide on each other's .old-,
+	// AND so the find pattern below catches both .staging-* and
+	// .old-* siblings as orphan candidates.
+	backup := dest + ".old-" + stagingSuffix
+
 	parentDir := path.Dir(dest)
 	tableBase := path.Base(dest)
+
+	// Atomic-ish dir swap with rollback (Bugbot r10):
+	//
+	//   1. If $DEST exists, rename it to $DEST.old-<hex> (backup).
+	//   2. Rename $STAGING → $DEST.
+	//   3. If step 2 failed AND step 1 ran, restore the backup.
+	//   4. On full success, rm the backup.
+	//
+	// The earlier `rm $DEST && mv $STAGING $DEST` could leave the
+	// customer with NOTHING at $DEST if the mv failed after the
+	// rm. The rename-rename-cleanup pattern keeps the previous
+	// dataset accessible (under .old-<hex>) until we know the new
+	// one is in place. rename(2) on the same filesystem is
+	// atomic (Linux kernel guarantee), so the .old → main-name
+	// transition is the safest swap available without a proper
+	// COW filesystem.
+	//
+	// Failure modes:
+	//   - tar fails: $DEST untouched (transactional from r7)
+	//   - backup mv fails: $DEST untouched (extremely rare — same fs)
+	//   - main mv fails: backup still at .old-<hex>, customer
+	//     recovers via `kubectl exec -- mv .old-<hex> $DEST`
+	//   - final rm fails: leaves .old-<hex> cruft, picked up by
+	//     the find -mmin +60 cleanup
+	//
+	// The find pattern below covers both .staging-* and .old-*
+	// siblings of THIS table for the orphan sweep.
 	remoteCmd := []string{
 		"/bin/sh", "-c",
 		fmt.Sprintf(
 			"rm -rf %q && mkdir -p %q && "+
 				"/bin/tar -xf - -C %q && "+
-				"rm -rf %q && mv %q %q && "+
+				"{ [ -e %q ] && mv %q %q || true; } && "+
+				"{ mv %q %q || { [ -e %q ] && mv %q %q ; exit 1; }; } && "+
 				"rm -rf %q ; "+
-				"find %q -maxdepth 1 -name %q -mmin +60 -exec rm -rf {} + 2>/dev/null || true",
+				"find %q -maxdepth 1 \\( -name %q -o -name %q \\) -mmin +60 -exec rm -rf {} + 2>/dev/null || true",
 			staging, staging,
 			staging,
-			dest, staging, dest,
-			staging,
-			parentDir, tableBase+".staging-*"),
+			dest, dest, backup,
+			staging, dest, backup, backup, dest,
+			backup,
+			parentDir, tableBase+".staging-*", tableBase+".old-*"),
 	}
 
 	// Use a synchronous pipe so the tar Writer's writes block on
