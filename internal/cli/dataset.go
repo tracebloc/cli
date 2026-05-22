@@ -308,7 +308,7 @@ func printPushPreflight(
 	_, _ = fmt.Fprintf(out, "  root:          %s\n", layout.Root)
 	_, _ = fmt.Fprintf(out, "  labels.csv:    %s\n", layout.LabelsCSV)
 	_, _ = fmt.Fprintf(out, "  images:        %d files\n", len(layout.Images))
-	_, _ = fmt.Fprintf(out, "  total size:    %s\n", humanBytesForSummary(layout.TotalBytes))
+	_, _ = fmt.Fprintf(out, "  total size:    %s\n", push.HumanBytes(layout.TotalBytes))
 	_, _ = fmt.Fprintln(out)
 
 	_, _ = fmt.Fprintf(out, "Target cluster:\n")
@@ -334,30 +334,8 @@ func printPushPreflight(
 
 	if !dryRun {
 		_, _ = fmt.Fprintf(out, "Next: stage %d files (%s) → %s (coming in PR-b for #151)\n",
-			1+len(layout.Images), humanBytesForSummary(layout.TotalBytes),
+			1+len(layout.Images), push.HumanBytes(layout.TotalBytes),
 			push.StagedPrefix(spec["table"].(string)))
 		_, _ = fmt.Fprintln(out)
-	}
-}
-
-// humanBytesForSummary mirrors push.humanBytes but lives here to
-// keep internal/push's API surface narrow (the internal helper is
-// unexported). Yes, this is a tiny duplication; if a third caller
-// shows up, we promote it to a shared util in v0.2.
-func humanBytesForSummary(n int64) string {
-	const (
-		KiB = 1024
-		MiB = 1024 * KiB
-		GiB = 1024 * MiB
-	)
-	switch {
-	case n >= GiB:
-		return fmt.Sprintf("%.2f GiB", float64(n)/float64(GiB))
-	case n >= MiB:
-		return fmt.Sprintf("%.2f MiB", float64(n)/float64(MiB))
-	case n >= KiB:
-		return fmt.Sprintf("%.2f KiB", float64(n)/float64(KiB))
-	default:
-		return fmt.Sprintf("%d B", n)
 	}
 }

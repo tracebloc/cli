@@ -190,7 +190,7 @@ func Discover(rootDir string) (*LocalLayout, error) {
 				"is on the v0.2 roadmap — see tracebloc/client#147 non-goals. "+
 				"Workaround for v0.1: split the push into multiple smaller "+
 				"tables, or stage directly via the existing helm flow.",
-			humanBytes(layout.TotalBytes), humanBytes(MaxTotalBytes))
+			HumanBytes(layout.TotalBytes), HumanBytes(MaxTotalBytes))
 	}
 
 	return layout, nil
@@ -203,12 +203,18 @@ func sizeError(relPath string, got, cap int64) error {
 	return fmt.Errorf(
 		"file %q is %s, exceeds v0.1 single-file cap of %s. "+
 			"For larger files, see tracebloc/client#147's v0.2 cloud-source story.",
-		relPath, humanBytes(got), humanBytes(cap))
+		relPath, HumanBytes(got), HumanBytes(cap))
 }
 
-// humanBytes renders a byte count in the shortest readable unit.
+// HumanBytes renders a byte count in the shortest readable unit.
 // Not internationalized — the CLI is English-only for v0.1.
-func humanBytes(n int64) string {
+//
+// Exported because the CLI's pre-flight summary (internal/cli) needs
+// the identical formatting — keeping one implementation here means
+// the size shown in an over-cap error and the size shown in the
+// dry-run summary can never drift (Bugbot flagged the earlier
+// copy-pasted variant on PR #8).
+func HumanBytes(n int64) string {
 	const (
 		KiB = 1024
 		MiB = 1024 * KiB
