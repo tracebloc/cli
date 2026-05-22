@@ -1,0 +1,205 @@
+package submit
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"k8s.io/client-go/kubernetes/fake"
+)
+
+// fakeSubmitter captures the request + returns a canned response.
+// Used by Run() tests to exercise the orchestrator without needing
+// an httptest.Server (covered by client_test.go).
+type fakeSubmitter struct {
+	gotRequest *SubmitRequest
+	resp       *SubmitResponse
+	err        error
+}
+
+func (f *fakeSubmitter) Submit(_ context.Context, req *SubmitRequest) (*SubmitResponse, error) {
+	f.gotRequest = req
+	return f.resp, f.err
+}
+
+// TestRun_DetachPath_HappyPath: --detach exits immediately after
+// the 201 with the reconnect hint. No watch loop, no log streaming.
+func TestRun_DetachPath_HappyPath(t *testing.T) {
+	sub := &fakeSubmitter{
+		resp: &SubmitResponse{
+			JobName:   "ingestor-abc",
+			Namespace: "tracebloc",
+			Replay:    false,
+		},
+	}
+	var out bytes.Buffer
+
+	res, err := Run(context.Background(), Options{
+		Submitter:        sub,
+		Client:           fake.NewClientset(),
+		IngestConfigYAML: "apiVersion: tracebloc.io/v1\n",
+		Detach:           true,
+		Out:              &out,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Submit == nil || res.Submit.JobName != "ingestor-abc" {
+		t.Errorf("Result.Submit lost: %+v", res.Submit)
+	}
+	if res.Watch != nil {
+		t.Errorf("Result.Watch = %+v, want nil (detach skips watch)", res.Watch)
+	}
+	for _, want := range []string{
+		"Submitted: jobs-manager spawned ingestor Job tracebloc/ingestor-abc",
+		"Detached (no log streaming)",
+		"kubectl logs -f -n tracebloc job/ingestor-abc",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output missing %q in:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestRun_ReplayPath: replay=true changes the announcement
+// wording — "attaching to existing Job" instead of "spawned" —
+// because the cluster is already doing the work.
+func TestRun_ReplayPath(t *testing.T) {
+	sub := &fakeSubmitter{
+		resp: &SubmitResponse{
+			JobName:   "ingestor-existing",
+			Namespace: "tracebloc",
+			Replay:    true,
+		},
+	}
+	var out bytes.Buffer
+
+	_, err := Run(context.Background(), Options{
+		Submitter:        sub,
+		Client:           fake.NewClientset(),
+		IngestConfigYAML: "yaml",
+		Detach:           true, // skip the watch for this test
+		Out:              &out,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), "Replayed:") {
+		t.Errorf("output missing Replayed framing:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "attaching to existing Job") {
+		t.Errorf("output missing replay-specific wording:\n%s", out.String())
+	}
+}
+
+// TestRun_SubmitErrorPropagates: a non-2xx from jobs-manager
+// stops Run before any watching happens. The error surfaces with
+// jobs-manager's body framing (the client.go path).
+func TestRun_SubmitErrorPropagates(t *testing.T) {
+	sub := &fakeSubmitter{
+		err: &SubmitError{
+			StatusCode: 422,
+			Body:       `{"detail":"bad spec"}`,
+			Endpoint:   "http://jm/internal/submit-ingestion-run",
+		},
+	}
+	var out bytes.Buffer
+
+	_, err := Run(context.Background(), Options{
+		Submitter:        sub,
+		Client:           fake.NewClientset(),
+		IngestConfigYAML: "yaml",
+		Out:              &out,
+	})
+	if err == nil {
+		t.Fatal("Run returned nil on submit error")
+	}
+	if !IsSubmitError(err) {
+		t.Errorf("err is not *SubmitError: %T", err)
+	}
+}
+
+// TestRun_BuildRequestErrorPropagates: a crypto/rand failure in
+// BuildRequest stops Run before the submitter even gets called.
+// We can't easily mock crypto/rand, but we can verify the error
+// path is wired by checking that any failure here doesn't reach
+// the submitter. This test is more about the contract than the
+// trigger.
+func TestRun_PassesRequestFieldsThrough(t *testing.T) {
+	sub := &fakeSubmitter{
+		resp: &SubmitResponse{JobName: "j", Namespace: "ns"},
+	}
+	var out bytes.Buffer
+
+	_, err := Run(context.Background(), Options{
+		Submitter:        sub,
+		Client:           fake.NewClientset(),
+		IngestConfigYAML: "yaml-content-verbatim",
+		IdempotencyKey:   "my-key-override",
+		ImageDigest:      "sha256:abc",
+		Detach:           true,
+		Out:              &out,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sub.gotRequest == nil {
+		t.Fatal("submitter never called")
+	}
+	if sub.gotRequest.IngestConfig != "yaml-content-verbatim" {
+		t.Errorf("IngestConfig = %q, want yaml-content-verbatim",
+			sub.gotRequest.IngestConfig)
+	}
+	if sub.gotRequest.IdempotencyKey != "my-key-override" {
+		t.Errorf("IdempotencyKey = %q, want override value",
+			sub.gotRequest.IdempotencyKey)
+	}
+	if sub.gotRequest.ImageDigest != "sha256:abc" {
+		t.Errorf("ImageDigest = %q, want sha256:abc",
+			sub.gotRequest.ImageDigest)
+	}
+}
+
+// TestRun_NilOutDefaultsToDiscard: callers passing nil Out
+// shouldn't panic. The orchestrator silently discards output.
+func TestRun_NilOutDefaultsToDiscard(t *testing.T) {
+	sub := &fakeSubmitter{
+		resp: &SubmitResponse{JobName: "j", Namespace: "ns"},
+	}
+	_, err := Run(context.Background(), Options{
+		Submitter:        sub,
+		Client:           fake.NewClientset(),
+		IngestConfigYAML: "yaml",
+		Detach:           true,
+		Out:              nil,
+	})
+	if err != nil {
+		t.Fatalf("Run with nil Out panicked or errored: %v", err)
+	}
+}
+
+// TestIsAuthError: helper smoke test. Pin the contract used by
+// the CLI's exit-code mapping.
+func TestIsAuthError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"non-submit error", errors.New("network"), false},
+		{"submit 401", &SubmitError{StatusCode: 401}, true},
+		{"submit 403", &SubmitError{StatusCode: 403}, true},
+		{"submit 422", &SubmitError{StatusCode: 422}, false},
+		{"submit 500", &SubmitError{StatusCode: 500}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsAuthError(c.err); got != c.want {
+				t.Errorf("IsAuthError = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
