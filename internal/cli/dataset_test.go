@@ -63,39 +63,33 @@ func execDatasetPush(t *testing.T, args []string) (exitCode int, stdout, stderr 
 	return ExitCodeFromError(err), so.String(), se.String()
 }
 
-// TestDatasetPush_BadCategory_ExitsTwo: the synthesized spec gets
-// fed through the embedded schema before any cluster work; an
-// invalid category surfaces with exit 2 (the CLI-wide "schema
-// violation" code).
-func TestDatasetPush_BadCategory_ExitsTwo(t *testing.T) {
+// TestDatasetPush_UnsupportedCategory_ExitsTwo: v0.1 only supports
+// image_classification end-to-end (epic #147 non-goals); the
+// CLI-side gate runs before schema validation so a customer who
+// passes --category=tabular_classification gets the actionable
+// "v0.1 supports only image_classification" message instead of
+// the schema's confusing "missing property 'schema'" (which the
+// customer has no way to supply in v0.1). Bugbot review-on-self
+// caught the missing gate on PR-a; landing it here.
+func TestDatasetPush_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	root := imgcLayout(t)
-	code, _, stderr := execDatasetPush(t, []string{
-		root,
-		"--table=t1",
-		"--category=definitely-not-a-category",
-		"--intent=train",
-		"--label-column=label",
-	})
-	if code != 2 {
-		t.Fatalf("expected exit 2 for schema failure, got %d", code)
-	}
-	// The same FormatErrors output ingest validate uses, routed
-	// to stderr so downstream pipes of stdout aren't polluted.
-	// Checking for "category" + "image_classification" surfacing
-	// means we're getting the JSON-pointer-anchored diagnostic +
-	// the enum-list expansion, not a generic message.
-	// Check three things: (1) the JSON-pointer-style "category"
-	// anchor surfaces, (2) the enum-list expansion happened (so
-	// "image_classification" appears as a valid option), (3) our
-	// "synthesized spec" framing is on the right output stream.
-	// The wording "synthesized spec" is intentionally distinct
-	// from ingest validate's "schema validation failed" — it tells
-	// the customer the CLI synthesized the YAML; they didn't
-	// author it.
-	for _, want := range []string{"category", "image_classification", "synthesized spec failed schema validation"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("expected stderr to mention %q, got:\n%s", want, stderr)
-		}
+	for _, badCategory := range []string{
+		"tabular_classification",    // schema-valid but v0.1-unsupported
+		"object_detection",          // ditto
+		"definitely-not-a-category", // nonsense; gate catches this too
+	} {
+		t.Run(badCategory, func(t *testing.T) {
+			code, _, _ := execDatasetPush(t, []string{
+				root,
+				"--table=t1",
+				"--category=" + badCategory,
+				"--intent=train",
+				"--label-column=label",
+			})
+			if code != 2 {
+				t.Fatalf("expected exit 2 for unsupported category %q, got %d", badCategory, code)
+			}
+		})
 	}
 }
 

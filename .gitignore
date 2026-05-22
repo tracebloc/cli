@@ -1,7 +1,9 @@
 # Build output — populated by `go build ./cmd/tracebloc` at the repo
-# root. Release artifacts go through dist/ (see Phase 5 / release
-# workflow); local hacking puts a binary here.
+# root, or by `go build -o ./bin/tracebloc ./cmd/tracebloc` for the
+# convention some folks prefer. Release artifacts go through dist/
+# (see Phase 5 / release workflow); local hacking puts a binary here.
 /tracebloc
+/bin/
 
 # Cross-compiled binaries staged by the release workflow.
 /dist/

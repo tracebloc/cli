@@ -1,0 +1,351 @@
+package push
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+)
+
+// stageOpts is the minimal PodSpecOptions for happy-path tests —
+// individual cases mutate one field to exercise their specific
+// branch.
+func stageOpts() PodSpecOptions {
+	return PodSpecOptions{
+		Namespace:          "tracebloc",
+		PVCClaimName:       "client-pvc",
+		PVCMountPath:       "/data/shared",
+		Table:              "cats_dogs",
+		ServiceAccountName: "ingestor",
+	}
+}
+
+// TestBuildStagePodSpec_Defaults pins the spec fields PR-b's
+// post-create logic depends on: the SA name, the PVC mount, the
+// activeDeadline, and the labels orphan.go keys off.
+func TestBuildStagePodSpec_Defaults(t *testing.T) {
+	p := BuildStagePodSpec(stageOpts())
+
+	if p.Namespace != "tracebloc" {
+		t.Errorf("Namespace = %q, want tracebloc", p.Namespace)
+	}
+	if !strings.HasPrefix(p.Name, "tracebloc-stage-cats_dogs-") {
+		t.Errorf("Name = %q, want prefix tracebloc-stage-cats_dogs-", p.Name)
+	}
+	// 8-hex-char suffix: tracebloc-stage-cats_dogs- + 8 chars
+	if got, wantLen := len(p.Name), len("tracebloc-stage-cats_dogs-")+8; got != wantLen {
+		t.Errorf("len(Name) = %d, want %d (8-hex-char random suffix)", got, wantLen)
+	}
+	if p.Spec.ServiceAccountName != "ingestor" {
+		t.Errorf("ServiceAccountName = %q, want ingestor", p.Spec.ServiceAccountName)
+	}
+	if p.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("RestartPolicy = %q, want Never", p.Spec.RestartPolicy)
+	}
+	if p.Spec.ActiveDeadlineSeconds == nil || *p.Spec.ActiveDeadlineSeconds != int64(StagePodActiveDeadline) {
+		t.Errorf("ActiveDeadlineSeconds = %v, want %d", p.Spec.ActiveDeadlineSeconds, StagePodActiveDeadline)
+	}
+}
+
+// TestBuildStagePodSpec_DefaultImage pins the digest-pinned image —
+// if this ever drifts to a tag-only reference, air-gapped customers
+// would silently get whatever alpine:3.20 resolved to that day.
+func TestBuildStagePodSpec_DefaultImage(t *testing.T) {
+	p := BuildStagePodSpec(stageOpts())
+	got := p.Spec.Containers[0].Image
+	if got != DefaultStagePodImage {
+		t.Errorf("Image = %q, want %q (default)", got, DefaultStagePodImage)
+	}
+	if !strings.Contains(got, "@sha256:") {
+		t.Errorf("Image = %q, want digest-pinned (@sha256:...); air-gapped customers depend on this", got)
+	}
+}
+
+// TestBuildStagePodSpec_OverrideImage pins the --stage-pod-image
+// flag's contract end-to-end at the spec layer.
+func TestBuildStagePodSpec_OverrideImage(t *testing.T) {
+	opts := stageOpts()
+	opts.Image = "internal-mirror.example.com/alpine:3.20@sha256:abc123"
+	p := BuildStagePodSpec(opts)
+	if got := p.Spec.Containers[0].Image; got != opts.Image {
+		t.Errorf("Image = %q, want override %q", got, opts.Image)
+	}
+}
+
+// TestBuildStagePodSpec_LabelsForOrphanScan pins the labels orphan.go
+// will key off. If these ever drift, orphan-pod detection silently
+// misses leftover Pods from crashed pushes.
+func TestBuildStagePodSpec_LabelsForOrphanScan(t *testing.T) {
+	p := BuildStagePodSpec(stageOpts())
+	wantLabels := map[string]string{
+		StagePodManagedByLabel: StagePodManagedByValue,
+		StagePodComponentLabel: StagePodComponentValue,
+		StagePodTableLabel:     "cats_dogs",
+	}
+	for k, want := range wantLabels {
+		if got := p.Labels[k]; got != want {
+			t.Errorf("Label %s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// TestBuildStagePodSpec_RestrictedPSA is the security-regression
+// pin: every PSA-restricted requirement must hold, otherwise the
+// stage Pod gets rejected on hardened namespaces (which is the
+// majority of production tracebloc deployments).
+func TestBuildStagePodSpec_RestrictedPSA(t *testing.T) {
+	p := BuildStagePodSpec(stageOpts())
+
+	// Pod-level: runAsNonRoot, seccomp RuntimeDefault.
+	psc := p.Spec.SecurityContext
+	if psc == nil {
+		t.Fatal("Pod has no SecurityContext")
+	}
+	if psc.RunAsNonRoot == nil || !*psc.RunAsNonRoot {
+		t.Errorf("Pod.SecurityContext.RunAsNonRoot = %v, want true", psc.RunAsNonRoot)
+	}
+	if psc.SeccompProfile == nil || psc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("Pod.SeccompProfile = %v, want RuntimeDefault", psc.SeccompProfile)
+	}
+
+	// Container-level: every PSA restricted constraint.
+	if len(p.Spec.Containers) != 1 {
+		t.Fatalf("len(Containers) = %d, want 1", len(p.Spec.Containers))
+	}
+	c := p.Spec.Containers[0]
+	sc := c.SecurityContext
+	if sc == nil {
+		t.Fatal("Container has no SecurityContext")
+	}
+	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+		t.Errorf("AllowPrivilegeEscalation = %v, want false", sc.AllowPrivilegeEscalation)
+	}
+	if sc.Privileged == nil || *sc.Privileged {
+		t.Errorf("Privileged = %v, want false", sc.Privileged)
+	}
+	if sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem {
+		t.Errorf("ReadOnlyRootFilesystem = %v, want true", sc.ReadOnlyRootFilesystem)
+	}
+	if sc.Capabilities == nil || len(sc.Capabilities.Drop) == 0 {
+		t.Fatalf("Capabilities.Drop = %v, want [ALL]", sc.Capabilities)
+	}
+	if sc.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("Capabilities.Drop = %v, want [ALL]", sc.Capabilities.Drop)
+	}
+	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("Container SeccompProfile = %v, want RuntimeDefault", sc.SeccompProfile)
+	}
+}
+
+// TestBuildStagePodSpec_PVCMount pins the volume + mountPath that
+// the tar stream writes into. If the mount path here ever drifts
+// from cluster.SharedPVCMountPath, the tar would write to the
+// wrong location and Phase 4's ingestor Job would see "no files."
+func TestBuildStagePodSpec_PVCMount(t *testing.T) {
+	p := BuildStagePodSpec(stageOpts())
+
+	// Volume side: the PVC reference.
+	var foundVol bool
+	for _, v := range p.Spec.Volumes {
+		if v.Name == "shared" {
+			foundVol = true
+			if v.PersistentVolumeClaim == nil {
+				t.Errorf("shared volume has no PVC source")
+			} else if v.PersistentVolumeClaim.ClaimName != "client-pvc" {
+				t.Errorf("PVC ClaimName = %q, want client-pvc", v.PersistentVolumeClaim.ClaimName)
+			}
+		}
+	}
+	if !foundVol {
+		t.Error("Pod has no shared volume")
+	}
+
+	// Mount side: where the container sees it.
+	var foundMount bool
+	for _, m := range p.Spec.Containers[0].VolumeMounts {
+		if m.Name == "shared" {
+			foundMount = true
+			if m.MountPath != "/data/shared" {
+				t.Errorf("MountPath = %q, want /data/shared", m.MountPath)
+			}
+		}
+	}
+	if !foundMount {
+		t.Error("stage container has no shared mount")
+	}
+}
+
+// TestBuildStagePodSpec_TmpEmptyDir pins the writable /tmp emptyDir
+// that tar needs (since the root FS is read-only). Without this,
+// tar would fail to create its working state and the stream would
+// die mid-transfer.
+func TestBuildStagePodSpec_TmpEmptyDir(t *testing.T) {
+	p := BuildStagePodSpec(stageOpts())
+	var foundEmptyDir, foundMount bool
+	for _, v := range p.Spec.Volumes {
+		if v.Name == "tmp" {
+			foundEmptyDir = true
+			if v.EmptyDir == nil {
+				t.Error("tmp volume is not an EmptyDir")
+			}
+		}
+	}
+	for _, m := range p.Spec.Containers[0].VolumeMounts {
+		if m.Name == "tmp" && m.MountPath == "/tmp" {
+			foundMount = true
+		}
+	}
+	if !foundEmptyDir || !foundMount {
+		t.Errorf("tmp emptyDir mount missing (vol=%v, mount=%v)", foundEmptyDir, foundMount)
+	}
+}
+
+// TestBuildStagePodSpec_RandomSuffixCollisionAvoidance: two specs
+// built back-to-back must have distinct names so parallel pushes
+// don't race on Create.
+func TestBuildStagePodSpec_RandomSuffixCollisionAvoidance(t *testing.T) {
+	a := BuildStagePodSpec(stageOpts())
+	b := BuildStagePodSpec(stageOpts())
+	if a.Name == b.Name {
+		t.Errorf("back-to-back BuildStagePodSpec produced identical name %q; "+
+			"random-suffix collision avoidance is broken", a.Name)
+	}
+}
+
+// TestCreateStagePod_HappyPath: the fake clientset accepts a Create
+// and returns the created object. We pin that CreateStagePod
+// surfaces the assigned name back to the caller.
+func TestCreateStagePod_HappyPath(t *testing.T) {
+	cs := fake.NewClientset()
+	name, err := CreateStagePod(context.Background(), cs, stageOpts())
+	if err != nil {
+		t.Fatalf("CreateStagePod: %v", err)
+	}
+	if !strings.HasPrefix(name, "tracebloc-stage-cats_dogs-") {
+		t.Errorf("returned name = %q, want prefix tracebloc-stage-cats_dogs-", name)
+	}
+	// Cross-check: the Pod actually exists in the fake cluster.
+	if _, err := cs.CoreV1().Pods("tracebloc").Get(context.Background(), name, metav1.GetOptions{}); err != nil {
+		t.Errorf("Pod not found after CreateStagePod: %v", err)
+	}
+}
+
+// TestCreateStagePod_APIErrorSurfaces: PSA rejections, RBAC denials,
+// etc. surface verbatim so the customer sees the actionable cluster-
+// side message.
+func TestCreateStagePod_APIErrorSurfaces(t *testing.T) {
+	cs := fake.NewClientset()
+	cs.PrependReactor("create", "pods",
+		func(_ k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(
+				corev1.Resource("pods"), "",
+				errors.New("user cannot create pods"))
+		})
+
+	_, err := CreateStagePod(context.Background(), cs, stageOpts())
+	if err == nil {
+		t.Fatal("CreateStagePod returned nil error on forbidden Create")
+	}
+	if !strings.Contains(err.Error(), "creating stage Pod") {
+		t.Errorf("error missing CLI framing: %v", err)
+	}
+}
+
+// TestWaitForStagePodReady_HappyPath: a Pod that immediately reports
+// Ready=True passes through.
+func TestWaitForStagePodReady_HappyPath(t *testing.T) {
+	cs := fake.NewClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tracebloc-stage-cats_dogs-abc12345",
+			Namespace: "tracebloc",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{
+				Type:   corev1.PodReady,
+				Status: corev1.ConditionTrue,
+			}},
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	p, err := WaitForStagePodReady(ctx, cs, "tracebloc", "tracebloc-stage-cats_dogs-abc12345")
+	if err != nil {
+		t.Fatalf("WaitForStagePodReady: %v", err)
+	}
+	if p == nil {
+		t.Fatal("returned nil Pod on success")
+	}
+}
+
+// TestWaitForStagePodReady_TimeoutHint: when the Pod is stuck (e.g.
+// ImagePullBackOff), the timeout error should surface the waiting-
+// state reason from container statuses. This is the dominant slow
+// path — air-gapped customers without the right pull secret.
+func TestWaitForStagePodReady_TimeoutHint(t *testing.T) {
+	cs := fake.NewClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "stuck-pod",
+			Namespace: "tracebloc",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "stage",
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason:  "ImagePullBackOff",
+						Message: "Back-off pulling image \"alpine:3.20@sha256:...\"",
+					},
+				},
+			}},
+		},
+	})
+
+	// Tight ctx timeout so the test doesn't actually wait 60s.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := WaitForStagePodReady(ctx, cs, "tracebloc", "stuck-pod")
+	if err == nil {
+		t.Fatal("WaitForStagePodReady returned nil on stuck Pod")
+	}
+	if !strings.Contains(err.Error(), "ImagePullBackOff") {
+		t.Errorf("error missing ImagePullBackOff hint: %v", err)
+	}
+}
+
+// TestDeleteStagePod_NotFoundIsOK: the Pod might be gone already
+// (activeDeadlineSeconds fired, or someone kubectl-deleted it).
+// Not-found shouldn't error — our goal is "Pod doesn't exist," which
+// is satisfied.
+func TestDeleteStagePod_NotFoundIsOK(t *testing.T) {
+	cs := fake.NewClientset() // empty
+	if err := DeleteStagePod(context.Background(), cs, "tracebloc", "nope"); err != nil {
+		t.Errorf("DeleteStagePod on absent Pod = %v, want nil", err)
+	}
+}
+
+// TestDeleteStagePod_HappyPath: delete a real Pod, confirm it's gone.
+func TestDeleteStagePod_HappyPath(t *testing.T) {
+	cs := fake.NewClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "to-delete", Namespace: "tracebloc"},
+	})
+	if err := DeleteStagePod(context.Background(), cs, "tracebloc", "to-delete"); err != nil {
+		t.Fatalf("DeleteStagePod: %v", err)
+	}
+	_, err := cs.CoreV1().Pods("tracebloc").Get(context.Background(), "to-delete", metav1.GetOptions{})
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("Pod still exists after delete (err=%v)", err)
+	}
+}

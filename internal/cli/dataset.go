@@ -15,11 +15,11 @@ import (
 )
 
 // newDatasetCmd wires the `tracebloc dataset` subtree. The dominant
-// verb is `push`, introduced in Phase 3 (tracebloc/client#151) and
-// landing across two PRs: PR-a (this one) implements the
-// no-op-safe pre-flight; PR-b adds the actual file streaming via
-// an ephemeral Pod + tar-over-exec. Future verbs (`dataset list`,
-// `dataset rm`) hang off this parent in v0.2.
+// verb is `push`, completed in Phase 3 (tracebloc/client#151) across
+// PR-a (pre-flight: spec synth, validation, layout walk, cluster
+// discovery) and PR-b (this one: ephemeral stage Pod + tar-over-
+// exec stream + progress bar + SIGINT-safe cleanup). Future verbs
+// (`dataset list`, `dataset rm`) hang off this parent in v0.2.
 func newDatasetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dataset",
@@ -27,9 +27,13 @@ func newDatasetCmd() *cobra.Command {
 		Long: `Commands for staging and managing datasets on the cluster's
 shared PVC.
 
-Today: ` + "`dataset push`" + ` stages a local directory and (in PR-b)
-submits an ingestion run. ` + "`tracebloc cluster info`" + ` is the
-pre-flight you'd typically run before the first push.`,
+Today: ` + "`dataset push`" + ` stages a local directory to the cluster's
+shared PVC. Submission to jobs-manager (so the ingestor Job actually
+runs) lands in Phase 4 (` + "`tracebloc/client#152`" + `); for now the staged
+files are picked up by the existing helm ` + "`tracebloc/ingestor`" + ` flow.
+
+` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run
+before the first push.`,
 	}
 	cmd.AddCommand(newDatasetPushCmd())
 	return cmd
@@ -37,19 +41,21 @@ pre-flight you'd typically run before the first push.`,
 
 // newDatasetPushCmd implements `tracebloc dataset push <local-path>`.
 //
-// PR-a scope (what this implements today):
+// Phase 3 scope (now complete across PR-a + PR-b):
 //
 //   - Synthesize the ingest spec from flags (`internal/push.SpecArgs.Build`)
 //   - Validate it against the embedded ingest.v1 schema
 //   - Walk the local directory + enforce v0.1 size caps
 //   - Discover cluster, parent release, and shared PVC
-//   - Print a single-screen "ready to stage" summary
-//   - --dry-run stops here (and so does this PR — actual staging
-//     errors out with "coming in PR-b" until #151 PR-b merges)
+//   - Print a single-screen pre-flight summary
+//   - Either --dry-run stop, OR create an ephemeral stage Pod
+//     (alpine 3.20 pinned by digest, PSA-restricted security
+//     context), tar local files into it via an SPDY exec stream
+//     with a progress bar, then defer-delete the Pod
 //
-// PR-b will add the ephemeral stage Pod, tar-over-exec stream,
-// progress bar, and SIGINT-safe cleanup — slotting into the
-// "TODO: PR-b" branch below without touching anything above it.
+// Phase 4 (`tracebloc/client#152`) hooks the submit-to-jobs-manager
+// step into the bottom of this command, replacing the "manually
+// kick off helm ingestor" workaround in the success message.
 func newDatasetPushCmd() *cobra.Command {
 	var (
 		// Kubeconfig flags — same conventions as `cluster info`.
@@ -71,10 +77,18 @@ func newDatasetPushCmd() *cobra.Command {
 		// Operations flags.
 		dryRun bool
 
-		// Ingestor SA name override (only matters once PR-b mints
-		// a token to talk to the future stage-pod-creation hook).
-		// Plumbed today so PR-b doesn't have to touch flag wiring.
+		// Ingestor SA name override. Used as the ServiceAccountName
+		// of the ephemeral stage Pod, so the Pod inherits whatever
+		// imagePullSecrets + PSA exemptions the admin already
+		// configured for that SA.
 		ingestorSAName string
+
+		// Stage Pod image override. Defaults to the digest-pinned
+		// alpine that ships with the CLI; air-gapped customers
+		// override this to an image their registry mirror serves.
+		// Pin by digest in your override too — tag-only references
+		// drift silently and break "all my pushes worked yesterday."
+		stagePodImage string
 	)
 
 	cmd := &cobra.Command{
@@ -99,12 +113,13 @@ datasets need the v0.2 cloud-source story (S3/GCS/HTTPS sources) —
 see tracebloc/client#147 non-goals.
 
 Exit codes:
-  0   staged + (in PR-b) submitted successfully
-  2   schema validation failed (synthesized spec rejected)
+  0   files staged successfully (Phase 4 will add: submitted + completed)
+  2   schema validation failed (synthesized spec rejected) or
+      v0.1-unsupported category passed
   3   local-layout or kubeconfig error
-  4   cluster reachable but parent release missing
-  6   pre-flight succeeded but the actual stage step isn't
-      implemented yet (PR-b for #151 will deliver it)`,
+  4   cluster reachable but parent release / shared PVC missing
+  7   pre-flight succeeded but staging the files failed
+      (Pod creation, image pull, exec stream, or remote tar error)`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDatasetPush(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
@@ -116,6 +131,7 @@ Exit codes:
 					Spec:           push.SpecArgs{Table: table, Category: category, Intent: intent, LabelColumn: labelColumn},
 					DryRun:         dryRun,
 					IngestorSAName: ingestorSAName,
+					StagePodImage:  stagePodImage,
 				})
 		},
 	}
@@ -146,6 +162,9 @@ Exit codes:
 	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
 		"override the ingestor ServiceAccount name (default: \"ingestor\"); "+
 			"set this if you customized ingestionAuthz.serviceAccountName in the parent client chart")
+	cmd.Flags().StringVar(&stagePodImage, "stage-pod-image", "",
+		"override the ephemeral stage Pod's image (default: digest-pinned alpine 3.20 baked into the CLI). "+
+			"Pin by digest in your override too — tag-only refs drift silently.")
 
 	return cmd
 }
@@ -162,6 +181,7 @@ type runDatasetPushArgs struct {
 	Spec           push.SpecArgs
 	DryRun         bool
 	IngestorSAName string
+	StagePodImage  string
 }
 
 // runDatasetPush is the PR-a slim implementation. It performs every
@@ -177,7 +197,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	// 1. Validate the table name BEFORE anything else. It's both
 	//    the MySQL identifier and the /data/shared/<table>/ PVC
 	//    subdirectory — an unsanitized traversal name (../../etc)
-	//    would escape that subtree once PR-b's stage Pod writes to
+	//    would escape that subtree once the stage Pod writes to
 	//    it. The embedded schema only checks minLength on `table`,
 	//    so this CLI-side guard is the real fix. SpecArgs.Build()
 	//    below calls StagedPrefix, which panics on an unsafe name —
@@ -186,7 +206,23 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 2, err: err}
 	}
 
-	// 2. Synthesize the spec from flags + validate against schema.
+	// 2. v0.1 category gate. Runs BEFORE schema validation because
+	//    schema-valid-but-unsupported categories (e.g.
+	//    tabular_classification) would otherwise fail with the
+	//    schema's "missing property 'schema'" message — confusing
+	//    for the customer who has no way to set --schema in v0.1.
+	//    Nonsense categories (typos) also hit this gate; the
+	//    "only image_classification in v0.1" message is more
+	//    actionable than the schema's 11-option enum list anyway.
+	//    Bugbot's review-on-self caught the missing gate on PR-a.
+	if a.Spec.Category != "" && a.Spec.Category != "image_classification" {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"category %q is not supported in v0.1 (only image_classification). "+
+				"Other categories are one-PR additions in v0.2 — see "+
+				"tracebloc/client#147 non-goals.", a.Spec.Category)}
+	}
+
+	// 3. Synthesize the spec from flags + validate against schema.
 	//    Catches "bad category", "missing intent" etc. BEFORE we
 	//    touch the filesystem or the cluster. The error formatter
 	//    is the same one ingest validate uses, so a customer who
@@ -223,7 +259,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 2, err: errors.New("synthesized spec failed schema validation; check the flag values above")}
 	}
 
-	// 3. Walk the local directory. Enforces layout + size caps;
+	// 4. Walk the local directory. Enforces layout + size caps;
 	//    customer sees a clear pointer to expected layout if they
 	//    pass the wrong directory.
 	layout, err := push.Discover(a.LocalPath)
@@ -231,7 +267,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 3, err: err}
 	}
 
-	// 4. Cluster discovery — same kubeconfig path as `cluster info`.
+	// 5. Cluster discovery — same kubeconfig path as `cluster info`.
 	//    Errors mirror that command's exit-code contract (3 for
 	//    kubeconfig, 4 for missing release) so behaviour is
 	//    consistent across pre-flight commands.
@@ -255,36 +291,66 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		release.IngestorSAName = a.IngestorSAName
 	}
 
-	// 5. PVC discovery. New in this PR — confirms the chart's
-	//    shared-data PVC is Bound before we waste time provisioning
-	//    a Pod that can't mount it.
+	// 6. PVC discovery — confirms the chart's shared-data PVC is
+	//    Bound before we waste time provisioning a Pod that can't
+	//    mount it.
 	pvc, err := cluster.DiscoverSharedPVC(ctx, cs, resolved.Namespace)
 	if err != nil {
 		return &exitError{code: 4, err: err}
 	}
 
-	// 6. Print the pre-flight summary. The output is the same in
-	//    dry-run and (eventually) live mode — only the "what
-	//    happens next" line differs. Customers iterating on a
-	//    bad layout see this every attempt, so it's worth keeping
-	//    skimmable: one fact per line, aligned by column.
+	// 7. Print the pre-flight summary. The output is the same in
+	//    dry-run and live mode — only the "what happens next" line
+	//    differs. Customers iterating on a bad layout see this
+	//    every attempt, so it's worth keeping skimmable: one fact
+	//    per line, aligned by column.
 	printPushPreflight(out, layout, release, pvc, spec, a.DryRun)
 
-	// 7. Dry-run stop. Acknowledged success.
+	// 8. Dry-run stop. Acknowledged success.
 	if a.DryRun {
 		_, _ = fmt.Fprintln(out, "Dry-run complete — no cluster resources were created.")
 		return nil
 	}
 
-	// 8. The actual staging branch lands in PR-b. Failing here
-	//    rather than silently returning success means a customer
-	//    who pulled PR-a's binary and ran without --dry-run gets
-	//    a clear "wait for PR-b" signal instead of "0 files
-	//    transferred" confusion in Phase 4.
-	return &exitError{code: 6, err: errors.New(
-		"pre-flight succeeded but the actual file staging step isn't " +
-			"implemented yet — wait for tracebloc/client#151 PR-b. " +
-			"Re-run with --dry-run to validate without this error.")}
+	// 9. Stage the files: create ephemeral Pod → wait Ready → tar
+	//    stream → cleanup. The deferred cleanup inside push.Stage
+	//    runs on success and failure (including ctx cancellation
+	//    from a SIGINT handler), so no orphan Pod is left behind.
+	//
+	//    Exit code 7 ("staging failed") is distinct from the
+	//    pre-flight codes so customers can branch on whether the
+	//    failure was their environment vs the actual data transfer.
+	progress := push.NewProgress(out, layout.TotalBytes,
+		fmt.Sprintf("Staging %s", a.Spec.Table))
+	stageErr := push.Stage(ctx, push.StageOptions{
+		Client: cs,
+		Executor: &push.SPDYExecutor{
+			Config: resolved.RestConfig,
+			Client: cs,
+		},
+		Namespace:      resolved.Namespace,
+		IngestorSAName: release.IngestorSAName,
+		PVCClaimName:   pvc.ClaimName,
+		PVCMountPath:   pvc.MountPath,
+		Layout:         layout,
+		Table:          a.Spec.Table,
+		StagePodImage:  a.StagePodImage,
+		Progress:       progress,
+		Out:            out,
+	})
+	if stageErr != nil {
+		return &exitError{code: 7, err: stageErr}
+	}
+
+	// 10. Phase 4 (submit to jobs-manager + watch + summary) hooks
+	//     in here — tracebloc/client#152. For now PR-b leaves the
+	//     dataset staged on the PVC and exits 0, which the customer
+	//     can then chase manually via `helm install ingestor ...` if
+	//     they need the ingestion to actually run today.
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Dataset staged. Submission to jobs-manager arrives in Phase 4 (#152);")
+	_, _ = fmt.Fprintln(out, "in the meantime, the existing helm ingestor flow can pick up the staged files.")
+	return nil
 }
 
 // printPushPreflight is the customer-facing summary. Mirrors
@@ -333,7 +399,7 @@ func printPushPreflight(
 	_, _ = fmt.Fprintln(out)
 
 	if !dryRun {
-		_, _ = fmt.Fprintf(out, "Next: stage %d files (%s) → %s (coming in PR-b for #151)\n",
+		_, _ = fmt.Fprintf(out, "Next: stage %d files (%s) → %s\n",
 			1+len(layout.Images), push.HumanBytes(layout.TotalBytes),
 			push.StagedPrefix(spec["table"].(string)))
 		_, _ = fmt.Fprintln(out)
