@@ -23,6 +23,19 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Fail prints a clean error message + exits. With Stop preference,
+# Write-Error throws a terminating error BEFORE any subsequent exit
+# runs, surfacing as a verbose PowerShell error record with stack
+# trace + line numbers — confusing for a customer-facing installer.
+# Bugbot PR #11 r3 flagged the original Write-Error + exit 1
+# patterns as both dead code (exit never reached) AND ugly UX.
+# Fail's Write-Host + explicit exit produces a one-line red error
+# the customer can actually act on.
+function Fail([string]$msg) {
+    Write-Host "Error: $msg" -ForegroundColor Red
+    exit 1
+}
+
 # ---------------------------------------------------------------------
 # Config knobs (env-overridable, mirrors install.sh).
 # ---------------------------------------------------------------------
@@ -43,12 +56,10 @@ function Get-Arch {
     switch ($proc) {
         'AMD64' { return 'amd64' }
         'ARM64' {
-            Write-Error "Windows ARM64 binary isn't released yet. File an issue at https://github.com/tracebloc/cli if you need it."
-            exit 1
+            Fail "Windows ARM64 binary isn't released yet. File an issue at https://github.com/tracebloc/cli if you need it."
         }
         default {
-            Write-Error "Unsupported PROCESSOR_ARCHITECTURE: $proc"
-            exit 1
+            Fail "Unsupported PROCESSOR_ARCHITECTURE: $proc"
         }
     }
 }
@@ -84,8 +95,7 @@ function Resolve-Tag {
         if (-not $loc) { try { $loc = $resp.Headers.Location } catch {} }
     }
     if (-not $loc) {
-        Write-Error "Couldn't resolve the 'latest' release tag from GitHub. Pass `$env:RELEASE_VERSION explicitly."
-        exit 1
+        Fail "Couldn't resolve the 'latest' release tag from GitHub. Pass `$env:RELEASE_VERSION explicitly."
     }
     # Location: https://github.com/tracebloc/cli/releases/tag/vX.Y.Z
     return Split-Path -Leaf $loc
@@ -116,13 +126,11 @@ try {
     $expected = ($sumsContent | Where-Object { $_ -match " $([regex]::Escape($binaryFile))$" } |
                  Select-Object -First 1) -replace ' .*$',''
     if (-not $expected) {
-        Write-Error "SHA256SUMS doesn't contain an entry for $binaryFile — release artifacts may be incomplete."
-        exit 1
+        Fail "SHA256SUMS doesn't contain an entry for $binaryFile — release artifacts may be incomplete."
     }
     $actual = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $tmpDir $binaryFile)).Hash.ToLower()
     if ($actual -ne $expected) {
-        Write-Error "SHA256 mismatch!`n  expected: $expected`n  actual:   $actual`n  refusing to install."
-        exit 1
+        Fail "SHA256 mismatch!`n  expected: $expected`n  actual:   $actual`n  refusing to install."
     }
     Write-Host "  ✓ checksum matches"
 
@@ -182,11 +190,23 @@ try {
     Write-Host "  $target version"
 
     # PATH advice. User-scope PATH edit so this survives reboots.
+    #
+    # Null-guard the existing $userPath before concatenation. On
+    # fresh Windows installs (or accounts that never set user-scope
+    # PATH), GetEnvironmentVariable returns $null. The naive
+    # `"$userPath;$InstallPrefix"` interpolation would then produce
+    # `";C:\..."` — a leading semicolon = empty PATH entry, which on
+    # Windows resolves to the CURRENT WORKING DIRECTORY. That's a
+    # well-known PATH-injection vector (binary planted in cwd runs
+    # ahead of real ones). Bugbot PR #11 r3 flagged the security
+    # concern.
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if (-not ($userPath -split ';' | Where-Object { $_ -eq $InstallPrefix })) {
+    $existingEntries = if ($userPath) { $userPath -split ';' } else { @() }
+    if ($existingEntries -notcontains $InstallPrefix) {
         Write-Host ""
-        Write-Host "Note: $InstallPrefix is not on \$env:Path. Adding it for your user:"
-        [Environment]::SetEnvironmentVariable('Path', "$userPath;$InstallPrefix", 'User')
+        Write-Host "Note: $InstallPrefix is not on `$env:Path. Adding it for your user:"
+        $newPath = if ($userPath) { "$userPath;$InstallPrefix" } else { $InstallPrefix }
+        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
         Write-Host "  (open a new PowerShell window to pick up the change)"
     }
 
