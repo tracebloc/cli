@@ -1,0 +1,272 @@
+# Build, sign, and publish the official tracebloc CLI binaries.
+#
+# Triggered by pushing a vX.Y.Z tag (or manually via
+# workflow_dispatch). Produces:
+#
+#   - Cross-compiled binaries for linux/{amd64,arm64},
+#     darwin/{amd64,arm64}, windows/amd64
+#   - Cosign keyless signature for each binary (Sigstore Rekor;
+#     same machinery as tracebloc/data-ingestors' image release)
+#   - SHA256SUMS file covering every binary
+#   - install.sh + install.ps1 attached so the bootstrap URL
+#     `https://github.com/tracebloc/cli/releases/latest/download/install.sh`
+#     resolves to the right script for that release
+#   - GitHub Release with all of the above attached + release-notes
+#     body generated from CHANGELOG.md
+#   - Optional: Homebrew tap formula bump (gated on the
+#     HOMEBREW_TAP_TOKEN secret being present — uncommenting that
+#     secret in repo settings turns the bump on for future releases)
+#
+# Verification (one-liner customers run to check the signature):
+#
+#   cosign verify-blob \
+#     --certificate-identity-regexp \
+#       'https://github.com/tracebloc/cli/.github/workflows/release.yml@.*' \
+#     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+#     --certificate <binary>.cert \
+#     --signature <binary>.sig \
+#     <binary>
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag to build (e.g. v0.1.0). Must already exist on origin.'
+        required: true
+        type: string
+
+permissions:
+  contents: write  # create / update the GitHub Release
+  id-token: write  # cosign keyless OIDC
+
+jobs:
+  release:
+    name: Build + sign + publish
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+          - os: windows
+            arch: amd64
+            ext: .exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Determine release version
+        id: version
+        run: |
+          # On a tag push: github.ref_name = "v0.1.0"
+          # On workflow_dispatch: inputs.ref = "v0.1.0"
+          REF="${{ inputs.ref || github.ref_name }}"
+          # Strip the leading v for use in -X main.version
+          VERSION="${REF#v}"
+          echo "tag=$REF" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building $REF (version=$VERSION)"
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          BIN_NAME="tracebloc-${{ steps.version.outputs.tag }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          go build \
+            -trimpath \
+            -ldflags "\
+              -s -w \
+              -X main.version=${{ steps.version.outputs.version }} \
+              -X main.gitSHA=${GITHUB_SHA:0:12} \
+              -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "dist/$BIN_NAME" \
+            ./cmd/tracebloc
+          echo "Binary built: dist/$BIN_NAME"
+          ls -lh "dist/$BIN_NAME"
+
+      - name: Sign binary with cosign (keyless)
+        env:
+          # Required for keyless signing in GHA. The id-token: write
+          # permission above grants the workflow an OIDC token Sigstore
+          # validates against github.com's well-known issuer.
+          COSIGN_YES: 'true'
+        run: |
+          BIN_NAME="tracebloc-${{ steps.version.outputs.tag }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          cd dist
+          cosign sign-blob \
+            --output-certificate "$BIN_NAME.cert" \
+            --output-signature "$BIN_NAME.sig" \
+            "$BIN_NAME"
+          echo "Signed: $BIN_NAME"
+          ls -lh "$BIN_NAME"*
+
+      - name: Compute SHA256
+        run: |
+          BIN_NAME="tracebloc-${{ steps.version.outputs.tag }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          cd dist
+          # Per-binary SHA256 file. The release step aggregates them
+          # into a single SHA256SUMS that the install.sh script reads.
+          sha256sum "$BIN_NAME" > "$BIN_NAME.sha256"
+          cat "$BIN_NAME.sha256"
+
+      - name: Upload per-matrix artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Aggregate + create GitHub Release
+    runs-on: ubuntu-latest
+    needs: release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Download all matrix artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Aggregate SHA256SUMS
+        run: |
+          cd dist
+          # Combine every per-binary .sha256 into one canonical file.
+          # The install scripts download SHA256SUMS + their target binary,
+          # grep the line for that binary, and verify locally.
+          cat tracebloc-*.sha256 > SHA256SUMS
+          rm tracebloc-*.sha256
+          echo "Aggregated SHA256SUMS:"
+          cat SHA256SUMS
+
+      - name: Stage install scripts into the release
+        run: |
+          # The install.sh / install.ps1 ship inside the release so
+          # `releases/latest/download/install.sh` resolves stably (the
+          # raw scripts/ path would require knowing the tag).
+          cp scripts/install.sh dist/
+          cp scripts/install.ps1 dist/
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          REF="${{ inputs.ref || github.ref_name }}"
+          echo "tag=$REF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          # Mark as prerelease for v*.*.* tags containing - (e.g.
+          # v0.1.0-rc1). Plain semver releases are stable.
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
+          files: |
+            dist/tracebloc-*
+            dist/SHA256SUMS
+            dist/install.sh
+            dist/install.ps1
+
+  # Phase 5 follow-up: bump the Homebrew tap formula on each
+  # release. Disabled by default — flip the `if:` to `true` (and
+  # add a HOMEBREW_TAP_TOKEN repo secret with write access to
+  # tracebloc/homebrew-tap) when that repo exists.
+  bump-homebrew-tap:
+    name: Bump Homebrew tap formula
+    runs-on: ubuntu-latest
+    needs: publish
+    if: false  # ← flip when tracebloc/homebrew-tap is set up
+    steps:
+      - name: Checkout cli (for the formula template)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          REF="${{ inputs.ref || github.ref_name }}"
+          echo "tag=$REF" >> $GITHUB_OUTPUT
+          echo "version=${REF#v}" >> $GITHUB_OUTPUT
+
+      - name: Download SHA256SUMS from the release
+        run: |
+          curl -fsSL \
+            "https://github.com/tracebloc/cli/releases/download/${{ steps.tag.outputs.tag }}/SHA256SUMS" \
+            -o SHA256SUMS
+          # Extract the per-platform shasums the formula needs.
+          DARWIN_AMD64_SHA=$(grep "darwin-amd64" SHA256SUMS | awk '{print $1}')
+          DARWIN_ARM64_SHA=$(grep "darwin-arm64" SHA256SUMS | awk '{print $1}')
+          LINUX_AMD64_SHA=$(grep "linux-amd64" SHA256SUMS | awk '{print $1}')
+          LINUX_ARM64_SHA=$(grep "linux-arm64" SHA256SUMS | awk '{print $1}')
+          echo "darwin_amd64_sha=$DARWIN_AMD64_SHA" >> $GITHUB_OUTPUT
+          echo "darwin_arm64_sha=$DARWIN_ARM64_SHA" >> $GITHUB_OUTPUT
+          echo "linux_amd64_sha=$LINUX_AMD64_SHA" >> $GITHUB_OUTPUT
+          echo "linux_arm64_sha=$LINUX_ARM64_SHA" >> $GITHUB_OUTPUT
+        id: shasums
+
+      - name: Render formula from template
+        run: |
+          mkdir -p out/Formula
+          # Substitute placeholders in the formula template. Pure
+          # sed — no Ruby installation needed in the runner.
+          sed \
+            -e "s/__VERSION__/${{ steps.tag.outputs.version }}/g" \
+            -e "s/__TAG__/${{ steps.tag.outputs.tag }}/g" \
+            -e "s/__SHA_DARWIN_AMD64__/${{ steps.shasums.outputs.darwin_amd64_sha }}/g" \
+            -e "s/__SHA_DARWIN_ARM64__/${{ steps.shasums.outputs.darwin_arm64_sha }}/g" \
+            -e "s/__SHA_LINUX_AMD64__/${{ steps.shasums.outputs.linux_amd64_sha }}/g" \
+            -e "s/__SHA_LINUX_ARM64__/${{ steps.shasums.outputs.linux_arm64_sha }}/g" \
+            scripts/homebrew-formula.rb.tmpl > out/Formula/tracebloc.rb
+          echo "--- Rendered formula ---"
+          cat out/Formula/tracebloc.rb
+
+      - name: Push to tracebloc/homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/tracebloc/homebrew-tap.git tap
+          cp out/Formula/tracebloc.rb tap/Formula/tracebloc.rb
+          cd tap
+          git config user.name "tracebloc-cli-release-bot"
+          git config user.email "bot@tracebloc.io"
+          git add Formula/tracebloc.rb
+          git commit -m "tracebloc ${{ steps.tag.outputs.tag }}"
+          git push
