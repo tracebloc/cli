@@ -138,7 +138,7 @@ func Stage(ctx context.Context, opts StageOptions) error {
 	// 5. Stream the tar. This is where actual bytes flow. The
 	//    progress bar (if TTY) renders during this call.
 	_, _ = fmt.Fprintf(opts.Out, "Streaming %d files (%s) for table %q...\n",
-		1+len(opts.Layout.Images), HumanBytes(opts.Layout.TotalBytes), opts.Table)
+		opts.Layout.FileCount(), HumanBytes(opts.Layout.TotalBytes), opts.Table)
 
 	if err := StreamLayout(ctx, opts.Executor,
 		opts.Namespace, podName, "stage",
@@ -148,6 +148,6 @@ func Stage(ctx context.Context, opts StageOptions) error {
 
 	// 6. Print "done" message. The deferred cleanup runs after this.
 	_, _ = fmt.Fprintf(opts.Out, "Staged %d files for table %q\n",
-		1+len(opts.Layout.Images), opts.Table)
+		opts.Layout.FileCount(), opts.Table)
 	return nil
 }

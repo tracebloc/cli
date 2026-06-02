@@ -280,7 +280,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	case a.Spec.Category == "":
 		// Left empty by a caller; let the schema produce the canonical
 		// "category is required" error downstream.
-	case push.IsTabular(a.Spec.Category) || a.Spec.Category == "image_classification":
+	case push.IsTabular(a.Spec.Category) || push.IsText(a.Spec.Category) || a.Spec.Category == "image_classification":
 		// supported
 	case push.IsImage(a.Spec.Category):
 		return &exitError{code: 2, err: fmt.Errorf(
@@ -290,9 +290,11 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	default:
 		return &exitError{code: 2, err: fmt.Errorf(
 			"category %q isn't supported by the CLI yet. Supported: image_classification, "+
-				"tabular_classification, tabular_regression, time_series_forecasting, "+
-				"time_to_event_prediction. (Text / detection / segmentation are coming; "+
-				"use the helm flow for those meanwhile.)", a.Spec.Category)}
+				"text_classification, masked_language_modeling, and the tabular / "+
+				"time-series family (tabular_classification, tabular_regression, "+
+				"time_series_forecasting, time_to_event_prediction). (Object detection / "+
+				"keypoint / segmentation are coming; use the helm flow for those meanwhile.)",
+			a.Spec.Category)}
 	}
 
 	// 3. Walk the local directory FIRST (local "fail fast"), dispatched
@@ -305,9 +307,12 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		layout *push.LocalLayout
 		err    error
 	)
-	if push.IsTabular(a.Spec.Category) {
+	switch {
+	case push.IsTabular(a.Spec.Category):
 		layout, err = push.DiscoverTabular(a.LocalPath)
-	} else {
+	case push.IsText(a.Spec.Category):
+		layout, err = push.DiscoverText(a.Spec.Category, a.LocalPath)
+	default:
 		layout, err = push.Discover(a.LocalPath)
 	}
 	if err != nil {
@@ -316,7 +321,8 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 
 	// 3a. Per-category spec resolution from the local data, so the
 	//     synthesized spec carries the right fields before validation.
-	if push.IsTabular(a.Spec.Category) {
+	switch {
+	case push.IsTabular(a.Spec.Category):
 		// Column schema: an explicit --schema wins; otherwise infer
 		// INT/FLOAT/VARCHAR types from the CSV so the customer doesn't
 		// hand-write one for the common case.
@@ -340,7 +346,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 					"  (skipped framework-managed column(s): %s)\n", strings.Join(skipped, ", "))
 			}
 		}
-	} else {
+	case push.IsImage(a.Spec.Category):
 		// Image target resolution: the ingestor's image_classification
 		// default is 512x512 and it VALIDATES (it does not resize), so
 		// a mismatch hard-fails. Honour an explicit --target-size;
@@ -365,6 +371,10 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 						"resolution mismatch.\n", derr)
 			}
 		}
+	default:
+		// Text family: no extra per-category resolution. The label (for
+		// text_classification) comes straight from --label-column;
+		// masked_language_modeling needs neither a label nor a schema.
 	}
 
 	// 4. Synthesize the spec from flags + validate against schema.
@@ -604,16 +614,23 @@ func printPushPreflight(
 	// shouldn't convert success into failure. The exit code is
 	// the contract.
 	cat, _ := spec["category"].(string)
-	tabular := push.IsTabular(cat)
 
 	_, _ = fmt.Fprintf(out, "Local dataset:\n")
 	_, _ = fmt.Fprintf(out, "  root:          %s\n", layout.Root)
-	if tabular {
+	switch {
+	case push.IsTabular(cat):
 		_, _ = fmt.Fprintf(out, "  data CSV:      %s\n", layout.LabelsCSV)
 		if sch, ok := spec["schema"].(map[string]string); ok {
 			_, _ = fmt.Fprintf(out, "  columns:       %d\n", len(sch))
 		}
-	} else {
+	case push.IsText(cat):
+		dir := push.TextSidecarDir(cat)
+		_, _ = fmt.Fprintf(out, "  labels.csv:    %s\n", layout.LabelsCSV)
+		_, _ = fmt.Fprintf(out, "  %-15s%d files\n", dir+":", len(layout.Sidecars[dir]))
+		if _, ok := layout.ExtraFiles["tokenizer.json"]; ok {
+			_, _ = fmt.Fprintf(out, "  %-15s%s\n", "tokenizer:", "tokenizer.json")
+		}
+	default:
 		_, _ = fmt.Fprintf(out, "  labels.csv:    %s\n", layout.LabelsCSV)
 		_, _ = fmt.Fprintf(out, "  images:        %d files\n", len(layout.Images))
 	}
@@ -651,7 +668,7 @@ func printPushPreflight(
 
 	if !dryRun {
 		_, _ = fmt.Fprintf(out, "Next: stage %d files (%s) for table %q\n",
-			1+len(layout.Images), push.HumanBytes(layout.TotalBytes), spec["table"])
+			layout.FileCount(), push.HumanBytes(layout.TotalBytes), spec["table"])
 		_, _ = fmt.Fprintln(out)
 	}
 }

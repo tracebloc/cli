@@ -46,14 +46,44 @@ type LocalLayout struct {
 	// Images is the list of absolute paths to image files under
 	// Root/images/. Order is filesystem-walk order — Discover
 	// doesn't sort, so callers that need determinism (e.g.
-	// reproducible-build tests) sort before use.
+	// reproducible-build tests) sort before use. Empty for non-image
+	// categories (which use Sidecars instead).
 	Images []string
 
+	// Sidecars maps a sidecar directory name (e.g. "texts",
+	// "sequences", "annotations", "masks") to the absolute paths of
+	// the files in it. Each is staged under "<name>/<basename>" — the
+	// generic counterpart to Images, used by the text family (and,
+	// later, object detection / segmentation). nil for image_
+	// classification (which uses Images) and tabular (no sidecars).
+	Sidecars map[string][]string
+
+	// ExtraFiles maps a staged destination filename to its absolute
+	// source path, for single root-level files beyond labels.csv —
+	// e.g. masked_language_modeling's tokenizer.json, which the
+	// ingestor reads from SRC_PATH/tokenizer.json. Staged verbatim at
+	// the table root.
+	ExtraFiles map[string]string
+
 	// TotalBytes is the sum of all files Discover will stage —
-	// labels.csv plus every entry in Images. Pre-computed during
-	// the walk so the size-cap check + the progress bar (PR-b)
-	// can read it without re-stat'ing.
+	// labels.csv plus every entry in Images / Sidecars / ExtraFiles.
+	// Pre-computed during the walk so the size-cap check + the
+	// progress bar can read it without re-stat'ing.
 	TotalBytes int64
+}
+
+// FileCount returns the total number of files this layout stages:
+// labels.csv, every ExtraFile, and every Images / Sidecars entry. Used
+// for the "staging N files" messaging so it's accurate across all
+// category families.
+func (l *LocalLayout) FileCount() int {
+	n := 1 // labels.csv
+	n += len(l.Images)
+	n += len(l.ExtraFiles)
+	for _, files := range l.Sidecars {
+		n += len(files)
+	}
+	return n
 }
 
 // imageExtensions accepts the file types the chart's

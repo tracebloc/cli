@@ -38,6 +38,15 @@ var regressionClassCategories = map[string]bool{
 	"time_to_event_prediction": true,
 }
 
+// textCategories take a labels CSV + a directory of text files
+// (texts/ for classification, sequences/ for masked language
+// modeling). masked_language_modeling additionally needs a
+// tokenizer.json at the dataset root and has NO label.
+var textCategories = map[string]bool{
+	"text_classification":      true,
+	"masked_language_modeling": true,
+}
+
 // IsImage reports whether category uses the labels.csv + images/
 // local layout.
 func IsImage(category string) bool { return imageCategories[category] }
@@ -49,3 +58,18 @@ func IsTabular(category string) bool { return tabularCategories[category] }
 // IsRegressionClass reports whether category predicts a numeric
 // target and therefore needs label.policy (object label form).
 func IsRegressionClass(category string) bool { return regressionClassCategories[category] }
+
+// IsText reports whether category uses the labels.csv + text-file
+// directory (texts/ or sequences/) local layout.
+func IsText(category string) bool { return textCategories[category] }
+
+// TextSidecarDir returns the sidecar directory name a text category
+// expects: "sequences" for masked_language_modeling, "texts" for
+// text_classification. (Used both as the local subdir to stage and
+// the spec field to emit.)
+func TextSidecarDir(category string) string {
+	if category == "masked_language_modeling" {
+		return "sequences"
+	}
+	return "texts"
+}

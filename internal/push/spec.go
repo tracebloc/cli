@@ -194,14 +194,31 @@ func (a SpecArgs) Build() map[string]any {
 		"intent":     a.Intent,
 		"csv":        path.Join(prefix, "labels.csv"),
 	}
-	if IsTabular(a.Category) {
+	switch {
+	case IsTabular(a.Category):
 		a.buildTabular(spec)
-	} else {
+	case IsText(a.Category):
+		a.buildText(spec, prefix)
+	default:
 		// Image categories (and any not-yet-special-cased category —
 		// the schema validator produces the canonical error for those).
 		a.buildImage(spec, prefix)
 	}
 	return spec
+}
+
+// buildText fills in the text-family fields: the text-file sidecar
+// directory (texts/ for text_classification, sequences/ for
+// masked_language_modeling) and the label. masked_language_modeling
+// has NO label (the schema doesn't require one for it).
+func (a SpecArgs) buildText(spec map[string]any, prefix string) {
+	dir := TextSidecarDir(a.Category)
+	// Trailing slash matches the directory-glob convention the
+	// ingestor uses for sidecar dirs.
+	spec[dir] = path.Join(prefix, dir) + "/"
+	if a.Category == "text_classification" {
+		spec["label"] = a.LabelColumn
+	}
 }
 
 // buildImage fills in the image-category fields: the images/ sidecar
