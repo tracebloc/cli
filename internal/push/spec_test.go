@@ -275,6 +275,61 @@ func TestBuild_Tabular_RegressionDefaultsPolicyBucket(t *testing.T) {
 	}
 }
 
+// TestBuild_ImageExtras_PassSchema pins object_detection and
+// keypoint_detection: OD emits an annotations field; keypoint emits
+// number_of_keypoints under spec.file_options (NOT a top-level field,
+// so it validates against the current vendored schema) and no
+// annotations. Both must validate.
+func TestBuild_ImageExtras_PassSchema(t *testing.T) {
+	v, err := schema.NewV1Validator()
+	if err != nil {
+		t.Fatalf("NewV1Validator: %v", err)
+	}
+	validate := func(t *testing.T, spec map[string]any) {
+		b, err := yaml.Marshal(spec)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		_, errs, parseErr := v.ValidateYAML(b)
+		if parseErr != nil {
+			t.Fatalf("parse: %v\n%s", parseErr, b)
+		}
+		if len(errs) != 0 {
+			t.Fatalf("schema validation failed: %s\n%s", schema.FormatErrors(errs), b)
+		}
+	}
+
+	t.Run("object_detection", func(t *testing.T) {
+		spec := SpecArgs{
+			Table: "od", Category: "object_detection", Intent: "train",
+			LabelColumn: "image_label", TargetSize: []int{448, 448},
+		}.Build()
+		if _, ok := spec["annotations"]; !ok {
+			t.Errorf("OD spec missing annotations: %v", spec)
+		}
+		validate(t, spec)
+	})
+
+	t.Run("keypoint_detection", func(t *testing.T) {
+		spec := SpecArgs{
+			Table: "kp", Category: "keypoint_detection", Intent: "train",
+			LabelColumn: "image_label", TargetSize: []int{448, 448}, NumberOfKeypoints: 9,
+		}.Build()
+		if _, ok := spec["annotations"]; ok {
+			t.Errorf("keypoint spec should not emit annotations: %v", spec)
+		}
+		// keypoint requires target_size + number_of_keypoints TOP-LEVEL
+		// (the schema's keypoint conditional), not under file_options.
+		if spec["number_of_keypoints"] != 9 {
+			t.Errorf("top-level number_of_keypoints = %v, want 9", spec["number_of_keypoints"])
+		}
+		if ts, ok := spec["target_size"].([]int); !ok || len(ts) != 2 || ts[0] != 448 || ts[1] != 448 {
+			t.Errorf("top-level target_size = %#v, want [448 448]", spec["target_size"])
+		}
+		validate(t, spec)
+	})
+}
+
 // TestValidateTableName_Accepts pins the names that MUST pass —
 // the real-world example tables plus a few edge shapes (single
 // char, leading underscore, mixed case, digits). A regression

@@ -162,6 +162,14 @@ type SpecArgs struct {
 	// Emitted as the top-level `time_column` field. Empty ⇒ the
 	// ingestor falls back to a column named "time".
 	TimeColumn string
+
+	// NumberOfKeypoints is the keypoints-per-sample count for
+	// keypoint_detection (required there; no convention default).
+	// Emitted under spec.file_options.number_of_keypoints — the schema
+	// allows arbitrary file_options keys, and conventions.resolve reads
+	// it from there, so this needs no top-level schema field. 0 ⇒
+	// unset (ignored for non-keypoint categories).
+	NumberOfKeypoints int
 }
 
 // Build produces the ingest.v1.json-conforming spec map. The
@@ -221,19 +229,38 @@ func (a SpecArgs) buildText(spec map[string]any, prefix string) {
 	}
 }
 
-// buildImage fills in the image-category fields: the images/ sidecar
-// dir, the label column, and the optional target_size override.
+// buildImage fills in the image-family fields for image_classification,
+// object_detection, and keypoint_detection: the images/ dir, the label,
+// object_detection's annotations/ dir, and the resolution overrides.
+//
+// keypoint_detection emits target_size + number_of_keypoints as
+// TOP-LEVEL fields — the schema's keypoint conditional requires them
+// there (both are dataset-specific, no convention defaults), and the
+// ingestor validates against that conditional. image_classification
+// and object_detection emit target_size under spec.file_options (the
+// override key conventions.resolve reads); without it,
+// image_classification defaults to 512x512 and the Image Resolution
+// Validator rejects other sizes.
 func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
-	// Trailing slash on `images` matches the schema example
+	// Trailing slash on the dir fields matches the schema example
 	// (data-ingestors/examples/yaml/image_classification.yaml); the
-	// ingestor treats it as a directory glob.
+	// ingestor treats them as directory globs.
 	spec["images"] = path.Join(prefix, "images") + "/"
 	spec["label"] = a.LabelColumn
-	// Emit the image resolution under spec.file_options.target_size —
-	// the same override key data-ingestors' conventions.resolve
-	// honours. Without it, image_classification defaults to 512x512
-	// and the ingestor's Image Resolution Validator rejects any other
-	// size.
+	if a.Category == "object_detection" {
+		spec["annotations"] = path.Join(prefix, "annotations") + "/"
+	}
+
+	if a.Category == "keypoint_detection" {
+		if len(a.TargetSize) == 2 {
+			spec["target_size"] = []int{a.TargetSize[0], a.TargetSize[1]}
+		}
+		if a.NumberOfKeypoints > 0 {
+			spec["number_of_keypoints"] = a.NumberOfKeypoints
+		}
+		return
+	}
+
 	if len(a.TargetSize) == 2 {
 		spec["spec"] = map[string]any{
 			"file_options": map[string]any{
