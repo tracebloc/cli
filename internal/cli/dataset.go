@@ -30,10 +30,9 @@ func newDatasetCmd() *cobra.Command {
 		Long: `Commands for staging and managing datasets on the cluster's
 shared PVC.
 
-Today: ` + "`dataset push`" + ` stages a local directory to the cluster's
-shared PVC. Submission to jobs-manager (so the ingestor Job actually
-runs) lands in Phase 4 (` + "`tracebloc/client#152`" + `); for now the staged
-files are picked up by the existing helm ` + "`tracebloc/ingestor`" + ` flow.
+` + "`dataset push`" + ` stages a local dataset to the cluster's shared
+PVC, submits the ingestion run to jobs-manager, and watches the
+ingestor Job to completion (streaming logs + the final summary).
 
 ` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run
 before the first push.`,
@@ -112,10 +111,13 @@ func newDatasetPushCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "push <local-path>",
 		Short: "Stage a local dataset to the cluster's shared PVC",
-		Long: `Stages a local image_classification dataset to the parent client
-release's shared PVC, then (in PR-b) submits an ingestion run.
+		Long: `Stages a local dataset to the parent client release's shared PVC,
+submits an ingestion run to jobs-manager, and watches the ingestor Job
+to completion. Supports 9 task categories (image classification,
+object/keypoint detection, text classification, masked language
+modeling, and the tabular / time-series family); pick one with --category.
 
-Expected local layout:
+Expected local layout (image_classification shown):
 
     <local-path>/
       labels.csv             (required)

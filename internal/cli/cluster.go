@@ -197,6 +197,6 @@ func runClusterInfo(
 		_, _ = fmt.Fprintf(out, "  expires in:    never (static-secret fallback)\n")
 	}
 	_, _ = fmt.Fprintln(out)
-	_, _ = fmt.Fprintln(out, "Ready for `tracebloc dataset push` (coming in Phase 3).")
+	_, _ = fmt.Fprintln(out, "Ready for `tracebloc dataset push`.")
 	return nil
 }
