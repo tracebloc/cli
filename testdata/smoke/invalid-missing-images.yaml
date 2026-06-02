@@ -1,0 +1,12 @@
+# Smoke-test fixture: an image_classification spec missing the
+# required `images` directory. `tracebloc ingest validate` must REJECT
+# it with exit 2 (schema violation). Guards against a regression where
+# the embedded schema or the validator silently stops enforcing
+# per-category requirements.
+apiVersion: tracebloc.io/v1
+kind: IngestConfig
+category: image_classification
+table: smoke_test
+intent: train
+csv: /data/shared/smoke_test/labels.csv
+label: label

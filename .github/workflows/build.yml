@@ -156,8 +156,20 @@ jobs:
         # validation only — which is still meaningful because
         # client-go and most k8s deps have OS-conditional code paths.
         run: |
-          ./dist/tracebloc-linux-amd64 version
-          ./dist/tracebloc-linux-amd64 version --output-json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['version'], 'empty version'"
+          BIN=./dist/tracebloc-linux-amd64
+          "$BIN" version
+          "$BIN" version --output-json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['version'], 'empty version'"
+
+          # ingest validate exercises the embedded schema + validation
+          # wiring on the real binary (no cluster needed): a valid spec
+          # must pass, and an invalid one must be rejected with exit 2.
+          "$BIN" ingest validate testdata/smoke/valid-image-classification.yaml
+          if "$BIN" ingest validate testdata/smoke/invalid-missing-images.yaml; then
+            echo "::error::ingest validate accepted an invalid spec (missing 'images')"; exit 1
+          fi
+
+          # Command-tree wiring smoke for the dominant verb.
+          "$BIN" dataset push --help >/dev/null
 
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v4

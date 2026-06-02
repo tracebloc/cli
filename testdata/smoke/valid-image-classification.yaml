@@ -1,0 +1,12 @@
+# Smoke-test fixture: a minimal, valid image_classification ingest
+# spec. `tracebloc ingest validate` must accept it (exit 0). Used by
+# the CI smoke step to exercise the embedded schema + validation wiring
+# on the real built binary — no cluster required.
+apiVersion: tracebloc.io/v1
+kind: IngestConfig
+category: image_classification
+table: smoke_test
+intent: train
+csv: /data/shared/smoke_test/labels.csv
+images: /data/shared/smoke_test/images/
+label: label
