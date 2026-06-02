@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -388,10 +389,56 @@ func writeLayoutTar(w io.Writer, layout *LocalLayout) (err error) {
 		}
 	}
 
+	// Extra root-level files (e.g. masked_language_modeling's
+	// tokenizer.json), staged at the table root under their dest name.
+	// Sorted for deterministic stream order.
+	for _, dest := range sortedKeys(layout.ExtraFiles) {
+		n, err := writeTarFile(tw, layout.ExtraFiles[dest], dest)
+		if err != nil {
+			return fmt.Errorf("packaging %s: %w", dest, err)
+		}
+		totalBytes += n
+		if totalBytes > MaxTotalBytes {
+			return fmt.Errorf(
+				"dataset exceeded v0.1 total cap of %s after streaming %s (reached %s)",
+				HumanBytes(MaxTotalBytes), dest, HumanBytes(totalBytes))
+		}
+	}
+
+	// Generic sidecar directories (texts/, sequences/, and — later —
+	// annotations/, masks/), each staged under "<name>/<basename>".
+	// Sorted by dir name for deterministic stream order.
+	for _, name := range sortedKeys(layout.Sidecars) {
+		for _, abs := range layout.Sidecars[name] {
+			dst := path.Join(name, filepath.Base(abs))
+			n, err := writeTarFile(tw, abs, dst)
+			if err != nil {
+				return fmt.Errorf("packaging %s: %w", abs, err)
+			}
+			totalBytes += n
+			if totalBytes > MaxTotalBytes {
+				return fmt.Errorf(
+					"dataset exceeded v0.1 total cap of %s after streaming %s (reached %s)",
+					HumanBytes(MaxTotalBytes), dst, HumanBytes(totalBytes))
+			}
+		}
+	}
+
 	// tw.Close() in the defer above writes the tar footer
 	// (two zero blocks). Without that, GNU tar treats the archive
 	// as truncated and refuses to extract.
 	return nil
+}
+
+// sortedKeys returns a map's string keys in sorted order, for
+// deterministic iteration when packaging ExtraFiles / Sidecars.
+func sortedKeys[V any](m map[string]V) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
 }
 
 // writeTarFile writes one file from `src` into tw under the

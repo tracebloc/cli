@@ -74,8 +74,8 @@ func execDatasetPush(t *testing.T, args []string) (exitCode int, stdout, stderr 
 func TestDatasetPush_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	root := imgcLayout(t)
 	for _, badCategory := range []string{
-		"object_detection",          // image category, needs sidecar staging (later)
-		"text_classification",       // text family (later)
+		"object_detection",          // image category, needs annotation sidecar (later)
+		"keypoint_detection",        // image category, needs keypoint flags (later)
 		"definitely-not-a-category", // nonsense; gate catches this too
 	} {
 		t.Run(badCategory, func(t *testing.T) {
