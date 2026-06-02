@@ -72,14 +72,15 @@ func newDatasetPushCmd() *cobra.Command {
 		// Ingest-spec flags. image_classification + the tabular /
 		// time-series family are supported today; text + detection +
 		// segmentation land in later increments.
-		table       string
-		category    string
-		intent      string
-		labelColumn string
-		targetSize  string
-		schemaFlag  string
-		labelPolicy string
-		timeColumn  string
+		table             string
+		category          string
+		intent            string
+		labelColumn       string
+		targetSize        string
+		schemaFlag        string
+		labelPolicy       string
+		timeColumn        string
+		numberOfKeypoints int
 
 		// Operations flags.
 		dryRun bool
@@ -153,6 +154,7 @@ Exit codes:
 					Spec: push.SpecArgs{
 						Table: table, Category: category, Intent: intent,
 						LabelColumn: labelColumn, LabelPolicy: labelPolicy, TimeColumn: timeColumn,
+						NumberOfKeypoints: numberOfKeypoints,
 					},
 					TargetSizeFlag: targetSize,
 					SchemaFlag:     schemaFlag,
@@ -198,6 +200,8 @@ Exit codes:
 			"passthrough|bucket (default bucket — bins the target so the raw value never leaves the cluster)")
 	cmd.Flags().StringVar(&timeColumn, "time-column", "",
 		"time_to_event_prediction only: name of the time/duration column (default: a column named \"time\")")
+	cmd.Flags().IntVar(&numberOfKeypoints, "number-of-keypoints", 0,
+		"keypoint_detection only: number of keypoints per sample (required; e.g. 17 for COCO pose)")
 
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"validate + discover + walk, but don't create any cluster resources")
@@ -280,21 +284,24 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	case a.Spec.Category == "":
 		// Left empty by a caller; let the schema produce the canonical
 		// "category is required" error downstream.
-	case push.IsTabular(a.Spec.Category) || push.IsText(a.Spec.Category) || a.Spec.Category == "image_classification":
+	case push.IsTabular(a.Spec.Category) || push.IsText(a.Spec.Category) ||
+		a.Spec.Category == "image_classification" ||
+		a.Spec.Category == "object_detection" ||
+		a.Spec.Category == "keypoint_detection":
 		// supported
 	case push.IsImage(a.Spec.Category):
+		// semantic_segmentation / instance_segmentation
 		return &exitError{code: 2, err: fmt.Errorf(
-			"category %q isn't supported by the CLI yet — it needs annotation/mask "+
-				"sidecar staging that's coming in a later release. Supported image "+
-				"category: image_classification.", a.Spec.Category)}
+			"category %q isn't supported by the CLI yet. semantic_segmentation is "+
+				"blocked on the ingestor's mask-sidecar support (data-ingestors#136), and "+
+				"instance_segmentation isn't implemented. Supported image categories: "+
+				"image_classification, object_detection, keypoint_detection.", a.Spec.Category)}
 	default:
 		return &exitError{code: 2, err: fmt.Errorf(
-			"category %q isn't supported by the CLI yet. Supported: image_classification, "+
-				"text_classification, masked_language_modeling, and the tabular / "+
-				"time-series family (tabular_classification, tabular_regression, "+
-				"time_series_forecasting, time_to_event_prediction). (Object detection / "+
-				"keypoint / segmentation are coming; use the helm flow for those meanwhile.)",
-			a.Spec.Category)}
+			"category %q isn't a recognized task category. Supported: image_classification, "+
+				"object_detection, keypoint_detection, text_classification, "+
+				"masked_language_modeling, tabular_classification, tabular_regression, "+
+				"time_series_forecasting, time_to_event_prediction.", a.Spec.Category)}
 	}
 
 	// 3. Walk the local directory FIRST (local "fail fast"), dispatched
@@ -312,7 +319,10 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		layout, err = push.DiscoverTabular(a.LocalPath)
 	case push.IsText(a.Spec.Category):
 		layout, err = push.DiscoverText(a.Spec.Category, a.LocalPath)
+	case a.Spec.Category == "object_detection":
+		layout, err = push.DiscoverObjectDetection(a.LocalPath)
 	default:
+		// image_classification + keypoint_detection: labels.csv + images/.
 		layout, err = push.Discover(a.LocalPath)
 	}
 	if err != nil {
@@ -347,6 +357,14 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 			}
 		}
 	case push.IsImage(a.Spec.Category):
+		// keypoint_detection needs --number-of-keypoints (dataset-
+		// specific, no default). Catch it here with an actionable
+		// message rather than letting the ingestor fail mid-run.
+		if a.Spec.Category == "keypoint_detection" && a.Spec.NumberOfKeypoints <= 0 {
+			return &exitError{code: 2, err: errors.New(
+				"keypoint_detection requires --number-of-keypoints (e.g. " +
+					"--number-of-keypoints 17); it's dataset-specific and has no default")}
+		}
 		// Image target resolution: the ingestor's image_classification
 		// default is 512x512 and it VALIDATES (it does not resize), so
 		// a mismatch hard-fails. Honour an explicit --target-size;
@@ -633,6 +651,9 @@ func printPushPreflight(
 	default:
 		_, _ = fmt.Fprintf(out, "  labels.csv:    %s\n", layout.LabelsCSV)
 		_, _ = fmt.Fprintf(out, "  images:        %d files\n", len(layout.Images))
+		if anns := layout.Sidecars["annotations"]; len(anns) > 0 {
+			_, _ = fmt.Fprintf(out, "  annotations:   %d files\n", len(anns))
+		}
 	}
 	_, _ = fmt.Fprintf(out, "  total size:    %s\n", push.HumanBytes(layout.TotalBytes))
 	_, _ = fmt.Fprintln(out)
