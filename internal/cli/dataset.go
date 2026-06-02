@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -74,6 +75,7 @@ func newDatasetPushCmd() *cobra.Command {
 		category    string
 		intent      string
 		labelColumn string
+		targetSize  string
 
 		// Operations flags.
 		dryRun bool
@@ -145,6 +147,7 @@ Exit codes:
 					Context:        contextOverride,
 					Namespace:      nsOverride,
 					Spec:           push.SpecArgs{Table: table, Category: category, Intent: intent, LabelColumn: labelColumn},
+					TargetSizeFlag: targetSize,
 					DryRun:         dryRun,
 					IngestorSAName: ingestorSAName,
 					StagePodImage:  stagePodImage,
@@ -175,6 +178,9 @@ Exit codes:
 		"intent: train|test")
 	cmd.Flags().StringVar(&labelColumn, "label-column", "",
 		"column name in labels.csv that holds the label")
+	cmd.Flags().StringVar(&targetSize, "target-size", "",
+		"image resolution as WxH (e.g. 512x512). Default: auto-detected from the first image. "+
+			"All images must share this resolution — the ingestor validates it, it does not resize.")
 
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"validate + discover + walk, but don't create any cluster resources")
@@ -209,6 +215,7 @@ type runDatasetPushArgs struct {
 	Context        string
 	Namespace      string
 	Spec           push.SpecArgs
+	TargetSizeFlag string // raw --target-size; resolved after Discover
 	DryRun         bool
 	IngestorSAName string
 	StagePodImage  string
@@ -258,11 +265,48 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 				"tracebloc/client#147 non-goals.", a.Spec.Category)}
 	}
 
-	// 3. Synthesize the spec from flags + validate against schema.
+	// 3. Walk the local directory FIRST. Enforces layout + size caps,
+	//    and gives us the image list the target-size auto-detect below
+	//    needs. Both this and the schema check are local "fail fast"
+	//    steps; doing the walk first lets the synthesized spec carry
+	//    the resolved target_size.
+	layout, err := push.Discover(a.LocalPath)
+	if err != nil {
+		return &exitError{code: 3, err: err}
+	}
+
+	// 3a. Resolve the image target resolution. The ingestor's
+	//     image_classification default is 512x512 and it VALIDATES
+	//     (it does not resize), so a mismatch hard-fails the run with
+	//     an "incorrect resolution" error. Honour an explicit
+	//     --target-size; otherwise auto-detect from the first image so
+	//     the common "all my images are NxN" case just works without
+	//     the customer needing to know the knob exists.
+	if a.TargetSizeFlag != "" {
+		w, h, perr := push.ParseTargetSize(a.TargetSizeFlag)
+		if perr != nil {
+			return &exitError{code: 2, err: perr}
+		}
+		a.Spec.TargetSize = []int{w, h}
+	} else if len(layout.Images) > 0 {
+		if w, h, derr := push.DetectImageSize(layout.Images[0]); derr == nil {
+			a.Spec.TargetSize = []int{w, h}
+			_, _ = fmt.Fprintf(out,
+				"Auto-detected image target size %dx%d from %s (override with --target-size).\n",
+				w, h, filepath.Base(layout.Images[0]))
+		} else {
+			_, _ = fmt.Fprintf(errOut,
+				"Note: couldn't auto-detect image size (%v); using the ingestor "+
+					"default. Pass --target-size WxH if ingestion reports a "+
+					"resolution mismatch.\n", derr)
+		}
+	}
+
+	// 4. Synthesize the spec from flags + validate against schema.
 	//    Catches "bad category", "missing intent" etc. BEFORE we
-	//    touch the filesystem or the cluster. The error formatter
-	//    is the same one ingest validate uses, so a customer who
-	//    YAML'd manually first sees identical wording.
+	//    touch the cluster. The error formatter is the same one
+	//    ingest validate uses, so a customer who YAML'd manually
+	//    first sees identical wording.
 	spec := a.Spec.Build()
 	specBytes, err := yaml.Marshal(spec)
 	if err != nil {
@@ -293,14 +337,6 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 			len(errs), plural(len(errs)))
 		_, _ = fmt.Fprintln(errOut, schema.FormatErrors(errs))
 		return &exitError{code: 2, err: errors.New("synthesized spec failed schema validation; check the flag values above")}
-	}
-
-	// 4. Walk the local directory. Enforces layout + size caps;
-	//    customer sees a clear pointer to expected layout if they
-	//    pass the wrong directory.
-	layout, err := push.Discover(a.LocalPath)
-	if err != nil {
-		return &exitError{code: 3, err: err}
 	}
 
 	// 5. Cluster discovery — same kubeconfig path as `cluster info`.
@@ -527,13 +563,12 @@ func printPushPreflight(
 	_, _ = fmt.Fprintf(out, "  category:      %s\n", spec["category"])
 	_, _ = fmt.Fprintf(out, "  intent:        %s\n", spec["intent"])
 	_, _ = fmt.Fprintf(out, "  label column:  %s\n", spec["label"])
-	_, _ = fmt.Fprintf(out, "  destination:   %s\n", push.StagedPrefix(spec["table"].(string)))
+	_, _ = fmt.Fprintf(out, "  destination:   %s\n", push.FinalDestPrefix(spec["table"].(string)))
 	_, _ = fmt.Fprintln(out)
 
 	if !dryRun {
-		_, _ = fmt.Fprintf(out, "Next: stage %d files (%s) → %s\n",
-			1+len(layout.Images), push.HumanBytes(layout.TotalBytes),
-			push.StagedPrefix(spec["table"].(string)))
+		_, _ = fmt.Fprintf(out, "Next: stage %d files (%s) for table %q\n",
+			1+len(layout.Images), push.HumanBytes(layout.TotalBytes), spec["table"])
 		_, _ = fmt.Fprintln(out)
 	}
 }

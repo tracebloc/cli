@@ -187,12 +187,19 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 	//   - tar BEFORE any rm of $DEST  (preserves on tar failure)
 	//   - mv AFTER tar succeeds       (atomic-ish swap)
 	//
+	// `dest` is StagedPrefix(table) — the CLI's SOURCE staging dir,
+	// which (since #26) lives under SharedRoot/.tracebloc-staging/ so
+	// it never collides with the ingestor's DEST_PATH. Derive the
+	// expected paths from it so this test tracks StagedPrefix rather
+	// than hardcoding the prefix.
+	dest := StagedPrefix("my_table")
+
 	// Extract the staging path with a regex so the random hex
 	// suffix doesn't pin us to a specific invocation's bytes.
-	stagingRE := regexp.MustCompile(`/data/shared/my_table\.staging-[0-9a-f]{8}`)
+	stagingRE := regexp.MustCompile(regexp.QuoteMeta(dest) + `\.staging-[0-9a-f]{8}`)
 	stagingPaths := stagingRE.FindAllString(script, -1)
 	if len(stagingPaths) == 0 {
-		t.Fatalf("remote script has no /data/shared/my_table.staging-<8hex> path (race-safety regression):\n%s", script)
+		t.Fatalf("remote script has no %s.staging-<8hex> path (race-safety regression):\n%s", dest, script)
 	}
 	// All staging mentions must refer to the SAME suffix in a single
 	// invocation. If we see two distinct suffixes that's a bug:
@@ -209,7 +216,7 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 	for _, want := range []string{
 		`mkdir -p "` + staging + `"`,
 		`tar -xf - -C "` + staging + `"`,
-		`mv "` + staging + `" "/data/shared/my_table"`,
+		`mv "` + staging + `" "` + dest + `"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("remote script missing %q: %s", want, script)
@@ -221,18 +228,24 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 	// (backup-and-swap, so a mv failure can be rolled back).
 	// The contract is the same: tar runs while $DEST is intact.
 	tarIdx := strings.Index(script, `tar -xf - -C "`+staging+`"`)
-	destBackupMvIdx := strings.Index(script, `mv "/data/shared/my_table" "`)
+	destBackupMvIdx := strings.Index(script, `mv "`+dest+`" "`)
 	if tarIdx < 0 || destBackupMvIdx < 0 {
 		t.Fatalf("remote script missing tar or destination-backup mv: %s", script)
 	}
 	if tarIdx >= destBackupMvIdx {
 		t.Errorf("remote script touches $DEST BEFORE tar succeeds — partial-transfer could destroy previous data:\n%s", script)
 	}
-	// Single-segment guarantee: both rm targets must end with
-	// /my_table or /my_table.staging-* — never just /data/shared.
-	if strings.Contains(script, `rm -rf "/data/shared"`) ||
-		strings.Contains(script, `rm -rf "/data/shared/"`) {
-		t.Errorf("remote script rm-rfs the parent /data/shared (would nuke sibling tables):\n%s", script)
+	// Single-segment guarantee: rm targets must never be the shared
+	// root or the staging parent themselves (that would nuke sibling
+	// tables / every in-flight push).
+	for _, forbidden := range []string{
+		`rm -rf "/data/shared"`,
+		`rm -rf "/data/shared/"`,
+		`rm -rf "` + SharedRoot + "/" + stagingDirName + `"`,
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("remote script contains dangerous %q (would nuke sibling tables/pushes):\n%s", forbidden, script)
+		}
 	}
 
 	// Bugbot r9 + r10: orphan cleanup for previously-failed pushes
@@ -253,7 +266,7 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 	// must be backed up to .old-<hex> BEFORE the new dataset
 	// arrives, and restored if the main mv fails. Pin the key
 	// shape pieces — backup mv, primary mv, rollback mv, cleanup.
-	backupRE := regexp.MustCompile(`/data/shared/my_table\.old-[0-9a-f]{8}`)
+	backupRE := regexp.MustCompile(regexp.QuoteMeta(dest) + `\.old-[0-9a-f]{8}`)
 	backupPaths := backupRE.FindAllString(script, -1)
 	if len(backupPaths) == 0 {
 		t.Fatalf("remote script has no .old-<hex> backup path (r10 rollback regression):\n%s", script)
@@ -272,15 +285,15 @@ func TestStreamLayout_RemoteCommand(t *testing.T) {
 	// suffixes would defeat the "find -name ...staging-* ...old-*"
 	// orphan-cleanup symmetry, AND would risk collision with a
 	// concurrent push's .old-<hex>.
-	if strings.TrimPrefix(backup, "/data/shared/my_table.old-") !=
-		strings.TrimPrefix(staging, "/data/shared/my_table.staging-") {
+	if strings.TrimPrefix(backup, dest+".old-") !=
+		strings.TrimPrefix(staging, dest+".staging-") {
 		t.Errorf("backup and staging suffixes diverge: %q vs %q", backup, staging)
 	}
 	// Backup mv (DEST → .old) must appear BEFORE primary mv
 	// (.staging → DEST), or rollback wouldn't have anything to
 	// restore.
-	backupMvIdx := strings.Index(script, `mv "/data/shared/my_table" "`+backup+`"`)
-	primaryMvIdx := strings.Index(script, `mv "`+staging+`" "/data/shared/my_table"`)
+	backupMvIdx := strings.Index(script, `mv "`+dest+`" "`+backup+`"`)
+	primaryMvIdx := strings.Index(script, `mv "`+staging+`" "`+dest+`"`)
 	if backupMvIdx < 0 || primaryMvIdx < 0 {
 		t.Fatalf("remote script missing backup or primary mv:\n%s", script)
 	}
@@ -299,7 +312,7 @@ func TestStreamLayout_StagingSuffixIsUniquePerInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	stagingRE := regexp.MustCompile(`/data/shared/t\.staging-[0-9a-f]{8}`)
+	stagingRE := regexp.MustCompile(regexp.QuoteMeta(StagedPrefix("t")) + `\.staging-[0-9a-f]{8}`)
 
 	collect := func() string {
 		fe := &fakeExecutor{}

@@ -102,8 +102,98 @@ func TestStagedPrefix_PerTableIsolation(t *testing.T) {
 	if a, b := StagedPrefix("cats"), StagedPrefix("dogs"); a == b {
 		t.Errorf("StagedPrefix(%q) == StagedPrefix(%q) = %q, want distinct", "cats", "dogs", a)
 	}
-	if got := StagedPrefix("table_a"); got != "/data/shared/table_a" {
-		t.Errorf("StagedPrefix(%q) = %q, want /data/shared/table_a", "table_a", got)
+	if got := StagedPrefix("table_a"); got != "/data/shared/.tracebloc-staging/table_a" {
+		t.Errorf("StagedPrefix(%q) = %q, want /data/shared/.tracebloc-staging/table_a", "table_a", got)
+	}
+}
+
+// TestStagedPrefix_DoesNotCollideWithDest is the regression pin for
+// the live-discovered blocker (#26): the CLI must stage SOURCE files
+// somewhere the ingestor's DEST_PATH (= FinalDestPrefix = /data/
+// shared/<table>) does NOT contain. If staging ever lands at or under
+// the destination again, the ingestor's DuplicateValidator will
+// reject the CLI's own staging as a pre-existing non-empty
+// destination, and every push fails the duplicate check.
+func TestStagedPrefix_DoesNotCollideWithDest(t *testing.T) {
+	const table = "cats_dogs_train"
+	staged := StagedPrefix(table)
+	dest := FinalDestPrefix(table)
+
+	if staged == dest {
+		t.Fatalf("StagedPrefix == FinalDestPrefix == %q; the CLI would stage "+
+			"into the ingestor's DEST_PATH and trip DuplicateValidator", staged)
+	}
+	// The destination must not contain the staging dir either —
+	// otherwise DEST is non-empty (it holds the staging subtree) and
+	// the validator still fails.
+	if strings.HasPrefix(staged, dest+"/") {
+		t.Errorf("StagedPrefix %q is under FinalDestPrefix %q; DEST would be "+
+			"non-empty at ingest time", staged, dest)
+	}
+	if got := FinalDestPrefix(table); got != "/data/shared/"+table {
+		t.Errorf("FinalDestPrefix(%q) = %q, want /data/shared/%s", table, got, table)
+	}
+}
+
+// TestBuild_WithTargetSize_PassesSchema pins the #27 plumbing: when
+// the CLI resolves an image resolution (via --target-size or
+// auto-detect), Build emits spec.file_options.target_size and the
+// result still validates against the embedded v1 schema. A drift here
+// would make every push that sets a target size fail validation.
+func TestBuild_WithTargetSize_PassesSchema(t *testing.T) {
+	spec := SpecArgs{
+		Table:       "cats_dogs_train",
+		Category:    "image_classification",
+		Intent:      "train",
+		LabelColumn: "label",
+		TargetSize:  []int{256, 256},
+	}.Build()
+
+	// The nested override must be present and well-shaped.
+	specBlock, ok := spec["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("Build() with TargetSize didn't emit a spec block: %#v", spec["spec"])
+	}
+	fo, ok := specBlock["file_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec.file_options missing/wrong type: %#v", specBlock["file_options"])
+	}
+	ts, ok := fo["target_size"].([]int)
+	if !ok || len(ts) != 2 || ts[0] != 256 || ts[1] != 256 {
+		t.Fatalf("spec.file_options.target_size = %#v, want [256 256]", fo["target_size"])
+	}
+
+	specBytes, err := yaml.Marshal(spec)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	v, err := schema.NewV1Validator()
+	if err != nil {
+		t.Fatalf("NewV1Validator: %v", err)
+	}
+	_, errs, parseErr := v.ValidateYAML(specBytes)
+	if parseErr != nil {
+		t.Fatalf("ValidateYAML parse error on our own output: %v\n%s", parseErr, specBytes)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("spec with target_size failed schema validation: %s\nspec:\n%s",
+			schema.FormatErrors(errs), specBytes)
+	}
+}
+
+// TestBuild_NoTargetSize_OmitsSpecBlock: when no resolution is set,
+// Build must NOT emit a spec block (the ingestor's per-category
+// default applies). Asserting the omission keeps the minimal-spec
+// contract that the original schema test relies on.
+func TestBuild_NoTargetSize_OmitsSpecBlock(t *testing.T) {
+	spec := SpecArgs{
+		Table:       "t",
+		Category:    "image_classification",
+		Intent:      "train",
+		LabelColumn: "label",
+	}.Build()
+	if _, present := spec["spec"]; present {
+		t.Errorf("Build() with no TargetSize emitted a spec block; want omitted")
 	}
 }
 
