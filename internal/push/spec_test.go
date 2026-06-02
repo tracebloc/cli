@@ -197,6 +197,84 @@ func TestBuild_NoTargetSize_OmitsSpecBlock(t *testing.T) {
 	}
 }
 
+// TestBuild_Tabular_PassesSchema pins the tabular Build branch: it
+// emits schema-valid specs for the three label shapes — a string
+// label (tabular_classification), an object label+policy
+// (tabular_regression), and an object label + time_column
+// (time_to_event_prediction) — and never emits an images field.
+func TestBuild_Tabular_PassesSchema(t *testing.T) {
+	v, err := schema.NewV1Validator()
+	if err != nil {
+		t.Fatalf("NewV1Validator: %v", err)
+	}
+	check := func(name string, a SpecArgs, wantLabelObject bool) {
+		t.Run(name, func(t *testing.T) {
+			spec := a.Build()
+			if _, hasImages := spec["images"]; hasImages {
+				t.Errorf("tabular spec emitted an images field: %v", spec)
+			}
+			if _, hasSchema := spec["schema"]; !hasSchema {
+				t.Errorf("tabular spec missing schema: %v", spec)
+			}
+			if wantLabelObject {
+				if _, ok := spec["label"].(map[string]any); !ok {
+					t.Errorf("label = %#v, want object form {column, policy}", spec["label"])
+				}
+			} else {
+				if _, ok := spec["label"].(string); !ok {
+					t.Errorf("label = %#v, want string form", spec["label"])
+				}
+			}
+			b, err := yaml.Marshal(spec)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			_, errs, parseErr := v.ValidateYAML(b)
+			if parseErr != nil {
+				t.Fatalf("parse: %v\n%s", parseErr, b)
+			}
+			if len(errs) != 0 {
+				t.Fatalf("schema validation failed: %s\n%s", schema.FormatErrors(errs), b)
+			}
+		})
+	}
+
+	check("tabular_classification", SpecArgs{
+		Table: "t_clf", Category: "tabular_classification", Intent: "train",
+		LabelColumn: "label",
+		Schema:      map[string]string{"f0": "FLOAT", "f1": "FLOAT", "label": "INT"},
+	}, false)
+
+	check("tabular_regression", SpecArgs{
+		Table: "t_reg", Category: "tabular_regression", Intent: "train",
+		LabelColumn: "price",
+		Schema:      map[string]string{"sqft": "FLOAT", "price": "FLOAT"},
+	}, true)
+
+	check("time_to_event_prediction", SpecArgs{
+		Table: "t_tte", Category: "time_to_event_prediction", Intent: "train",
+		LabelColumn: "DEATH_EVENT", TimeColumn: "time",
+		Schema: map[string]string{"age": "INT", "time": "INT", "DEATH_EVENT": "INT"},
+	}, true)
+}
+
+// TestBuild_Tabular_RegressionDefaultsPolicyBucket: regression-class
+// categories default to policy=bucket so the raw numeric target never
+// ships to the central backend unless the customer opts out.
+func TestBuild_Tabular_RegressionDefaultsPolicyBucket(t *testing.T) {
+	spec := SpecArgs{
+		Table: "t", Category: "tabular_regression", Intent: "train",
+		LabelColumn: "y", Schema: map[string]string{"x": "FLOAT", "y": "FLOAT"},
+	}.Build()
+	lbl, ok := spec["label"].(map[string]any)
+	if !ok {
+		t.Fatalf("label = %#v, want object", spec["label"])
+	}
+	if lbl["policy"] != "bucket" {
+		t.Errorf("default policy = %v, want bucket", lbl["policy"])
+	}
+}
+
 // TestValidateTableName_Accepts pins the names that MUST pass —
 // the real-world example tables plus a few edge shapes (single
 // char, leading underscore, mixed case, digits). A regression

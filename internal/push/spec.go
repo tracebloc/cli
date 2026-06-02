@@ -141,8 +141,27 @@ type SpecArgs struct {
 	// spec.file_options.target_size so the customer's actual
 	// resolution wins. Empty (len 0) ⇒ omit and let the ingestor
 	// default apply. Populated by the CLI from --target-size or by
-	// auto-detecting the first image.
+	// auto-detecting the first image. (Image categories only.)
 	TargetSize []int
+
+	// Schema is the column→SQL-type map for tabular / time-series
+	// categories (required by the schema for those). Populated by the
+	// CLI from --schema or by inferring types from the CSV. Ignored
+	// for image categories.
+	Schema map[string]string
+
+	// LabelPolicy is "passthrough" or "bucket". Regression-class
+	// categories (tabular_regression, time_series_forecasting,
+	// time_to_event_prediction) require the object label form with a
+	// policy; the CLI defaults it to "bucket" so the raw numeric
+	// target never ships to the central backend. Ignored for
+	// classification categories (which emit the string label form).
+	LabelPolicy string
+
+	// TimeColumn names the time column for time_to_event_prediction.
+	// Emitted as the top-level `time_column` field. Empty ⇒ the
+	// ingestor falls back to a column named "time".
+	TimeColumn string
 }
 
 // Build produces the ingest.v1.json-conforming spec map. The
@@ -173,19 +192,31 @@ func (a SpecArgs) Build() map[string]any {
 		"category":   a.Category,
 		"table":      a.Table,
 		"intent":     a.Intent,
-		// Trailing slash on `images` matches the schema example
-		// (data-ingestors/examples/yaml/image_classification.yaml,
-		// line 14). The ingestor treats it as a directory glob.
-		"csv":    path.Join(prefix, "labels.csv"),
-		"images": path.Join(prefix, "images") + "/",
-		"label":  a.LabelColumn,
+		"csv":        path.Join(prefix, "labels.csv"),
 	}
+	if IsTabular(a.Category) {
+		a.buildTabular(spec)
+	} else {
+		// Image categories (and any not-yet-special-cased category —
+		// the schema validator produces the canonical error for those).
+		a.buildImage(spec, prefix)
+	}
+	return spec
+}
+
+// buildImage fills in the image-category fields: the images/ sidecar
+// dir, the label column, and the optional target_size override.
+func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
+	// Trailing slash on `images` matches the schema example
+	// (data-ingestors/examples/yaml/image_classification.yaml); the
+	// ingestor treats it as a directory glob.
+	spec["images"] = path.Join(prefix, "images") + "/"
+	spec["label"] = a.LabelColumn
 	// Emit the image resolution under spec.file_options.target_size —
-	// the same override key the helm flow + data-ingestors'
-	// conventions.resolve honour (it merges spec.file_options over the
-	// per-category default). Without this, image_classification
-	// defaults to 512x512 and the ingestor's Image Resolution
-	// Validator rejects any other size.
+	// the same override key data-ingestors' conventions.resolve
+	// honours. Without it, image_classification defaults to 512x512
+	// and the ingestor's Image Resolution Validator rejects any other
+	// size.
 	if len(a.TargetSize) == 2 {
 		spec["spec"] = map[string]any{
 			"file_options": map[string]any{
@@ -193,7 +224,31 @@ func (a SpecArgs) Build() map[string]any {
 			},
 		}
 	}
-	return spec
+}
+
+// buildTabular fills in the tabular / time-series fields: the column
+// schema, the label (string form for classification, object form with
+// a policy for regression-class), and time_column for
+// time_to_event_prediction.
+func (a SpecArgs) buildTabular(spec map[string]any) {
+	spec["schema"] = a.Schema
+	if IsRegressionClass(a.Category) {
+		// Regression-class tasks require the object label form with an
+		// explicit policy (the schema enforces this). Default to
+		// `bucket` so the raw numeric target never ships to the central
+		// backend unless the customer opts into passthrough.
+		policy := a.LabelPolicy
+		if policy == "" {
+			policy = "bucket"
+		}
+		spec["label"] = map[string]any{"column": a.LabelColumn, "policy": policy}
+	} else {
+		// tabular_classification: plain column-name label.
+		spec["label"] = a.LabelColumn
+	}
+	if a.Category == "time_to_event_prediction" && a.TimeColumn != "" {
+		spec["time_column"] = a.TimeColumn
+	}
 }
 
 // SharedRoot is the in-cluster mount path of the chart's shared PVC
