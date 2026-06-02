@@ -63,19 +63,19 @@ func execDatasetPush(t *testing.T, args []string) (exitCode int, stdout, stderr 
 	return ExitCodeFromError(err), so.String(), se.String()
 }
 
-// TestDatasetPush_UnsupportedCategory_ExitsTwo: v0.1 only supports
-// image_classification end-to-end (epic #147 non-goals); the
-// CLI-side gate runs before schema validation so a customer who
-// passes --category=tabular_classification gets the actionable
-// "v0.1 supports only image_classification" message instead of
-// the schema's confusing "missing property 'schema'" (which the
-// customer has no way to supply in v0.1). Bugbot review-on-self
-// caught the missing gate on PR-a; landing it here.
+// TestDatasetPush_UnsupportedCategory_ExitsTwo: the CLI-side category
+// gate runs before schema validation so a customer who passes a
+// not-yet-supported category gets an actionable message (exit 2)
+// rather than the schema's confusing missing-property error. Today's
+// supported set is image_classification + the tabular / time-series
+// family; the other image categories (which need annotation/mask
+// sidecar staging), the text family, and nonsense values are gated
+// out here. Bugbot review-on-self caught the missing gate on PR-a.
 func TestDatasetPush_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	root := imgcLayout(t)
 	for _, badCategory := range []string{
-		"tabular_classification",    // schema-valid but v0.1-unsupported
-		"object_detection",          // ditto
+		"object_detection",          // image category, needs sidecar staging (later)
+		"text_classification",       // text family (later)
 		"definitely-not-a-category", // nonsense; gate catches this too
 	} {
 		t.Run(badCategory, func(t *testing.T) {
