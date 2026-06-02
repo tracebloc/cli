@@ -1,0 +1,50 @@
+name: Integration (e2e)
+
+# Spins a kind cluster and runs the build-tagged `integration` suite,
+# which exercises the real-I/O seams the unit tests mock out:
+# kubeconfig->clientset connectivity and the SPDYExecutor tar-over-exec
+# stream against a live Pod + PVC (internal/push.SPDYExecutor.Exec is
+# 0% in unit coverage — this is where every live bug actually lived).
+#
+# Heavy (kind boot + image pulls), so it does NOT run on every PR:
+#   - nightly (schedule)
+#   - manual (workflow_dispatch)
+#   - on a PR only when it carries the `e2e` label
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Integration (kind)
+    runs-on: ubuntu-latest
+    # Skip on PRs that aren't explicitly opted in via the `e2e` label;
+    # always run on schedule / manual dispatch.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Boots a single-node kind cluster and points $KUBECONFIG at it,
+      # which the integration suite picks up via cluster.Load's default
+      # kubeconfig resolution. kind ships a default StorageClass
+      # (local-path), so the test's PVC binds.
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+
+      - name: Integration tests
+        run: make test-integration
