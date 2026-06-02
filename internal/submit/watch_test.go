@@ -263,6 +263,62 @@ func TestWatchJob_PodWaitTimeoutMapsToDetach(t *testing.T) {
 	}
 }
 
+// TestWatchJob_TerminalJobStatusWins is the #28 regression pin: the
+// Job — not the log stream — is the source of truth for the outcome.
+// With a Running Pod and a Job already reporting Complete, WatchJob
+// must return Succeeded. This holds whether the (fake) log stream
+// yields data or breaks: if the stream errored, the new
+// "streamFailed but Job terminal → report outcome" branch still
+// resolves to the Job's verdict instead of bubbling exit-9. Before
+// the fix, a broken stream (e.g. a Pod replaced by a retry, or
+// deleted mid-follow) returned an error even on a successful Job.
+func TestWatchJob_TerminalJobStatusWins(t *testing.T) {
+	cs := fake.NewClientset(
+		jobPod("ingestor-xyz", "ingestor", corev1.PodRunning),
+		jobWithCondition("ingestor", batchv1.JobComplete),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var out bytes.Buffer
+	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor", &out)
+	if err != nil {
+		t.Fatalf("WatchJob returned error; want nil + Succeeded: %v", err)
+	}
+	if wr == nil {
+		t.Fatal("WatchJob returned nil result")
+	}
+	if wr.Outcome != JobOutcomeSucceeded {
+		t.Fatalf("Outcome = %v, want Succeeded (Job condition is the source of truth)", wr.Outcome)
+	}
+}
+
+// TestWatchJob_TerminalFailedJobReported: the mirror of the above for
+// a Failed Job — the watch reports Failed (→ exit 9), not a generic
+// watch error, even if the stream broke.
+func TestWatchJob_TerminalFailedJobReported(t *testing.T) {
+	cs := fake.NewClientset(
+		jobPod("ingestor-xyz", "ingestor", corev1.PodRunning),
+		jobWithCondition("ingestor", batchv1.JobFailed),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var out bytes.Buffer
+	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor", &out)
+	if err != nil {
+		t.Fatalf("WatchJob returned error; want nil + Failed: %v", err)
+	}
+	if wr == nil {
+		t.Fatal("WatchJob returned nil result")
+	}
+	if wr.Outcome != JobOutcomeFailed {
+		t.Fatalf("Outcome = %v, want Failed", wr.Outcome)
+	}
+}
+
 // TestJobOutcome_String: stringer pin so diagnostic output stays
 // stable.
 func TestJobOutcome_String(t *testing.T) {

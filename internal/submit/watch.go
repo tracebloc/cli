@@ -220,18 +220,10 @@ func WatchJob(
 	//    a structured representation of the banner without
 	//    requiring a second log fetch post-completion.
 	summary, logErr := streamPodLogsAndParse(watchCtx, cs, namespace, podName, out)
-	// Filter out the two ctx-flavored errors — both are "observation
-	// gave up early," not "stream failed." They get classified below
-	// into Detached (customer SIGINT, JobWatchTimeout expiry). Any
-	// other error is a real streaming failure (network mid-stream,
-	// API server tantrum) and bubbles up as a watch error.
-	if logErr != nil &&
-		!errors.Is(logErr, context.Canceled) &&
-		!errors.Is(logErr, context.DeadlineExceeded) {
-		return nil, fmt.Errorf("streaming logs from Pod %s/%s: %w", namespace, podName, logErr)
-	}
 
-	// 3. Detach branches:
+	// 3. Detach branches — checked FIRST, since the customer's SIGINT
+	//    or the watch-cap expiry is the operative intent and takes
+	//    precedence over any stream error:
 	//    - customerCtx canceled = SIGINT
 	//    - watchCtx expired (DeadlineExceeded) = JobWatchTimeout cap
 	//      hit during streaming (1-hour observation window exceeded)
@@ -265,20 +257,29 @@ func WatchJob(
 	//    inheriting watchCtx's depleted budget caused successful
 	//    slow ingestions to misreport as Unknown.
 	//
-	//    The fresh ctx still propagates SIGINT (parent is
-	//    customerCtx, which carries signal.NotifyContext's
-	//    cancel). If the customer Ctrl-C's during this 30s
-	//    window, we fall into the detach branch below — same
-	//    contract as during the log stream.
+	//    The Job — not the log stream — is the source of truth for
+	//    success/failure, so we ALWAYS consult it here, INCLUDING when
+	//    the log stream broke for a non-ctx reason (#28: the watched
+	//    Pod was replaced / restarted / deleted mid-follow, e.g. a
+	//    backoffLimit retry). A broken stream is only fatal if we also
+	//    can't determine the Job's outcome.
+	//
+	//    The fresh ctx still propagates SIGINT (parent is customerCtx,
+	//    which carries signal.NotifyContext's cancel); a Ctrl-C in this
+	//    window falls into the detach branches below.
 	finalCtx, finalCancel := context.WithTimeout(customerCtx, 30*time.Second)
 	defer finalCancel()
-	outcome, err := finalJobStatus(finalCtx, cs, namespace, jobName)
-	if err != nil {
-		// Treat SIGINT during finalJobStatus as graceful detach
-		// (same as during the log stream — jobs-manager already
-		// accepted the run, the customer is just stopping the
-		// observation). Bugbot PR #10 r2 flagged the "exit 9 on
-		// post-stream SIGINT" inconsistency.
+	outcome, statusErr := finalJobStatus(finalCtx, cs, namespace, jobName)
+
+	// A non-ctx log-stream error is incidental if the Job still
+	// reached a terminal state. Previously ANY such error (e.g.
+	// "container is terminated" once the Pod was replaced by a retry)
+	// returned exit 9 even when the Job ultimately succeeded. #28.
+	streamFailed := logErr != nil &&
+		!errors.Is(logErr, context.Canceled) &&
+		!errors.Is(logErr, context.DeadlineExceeded)
+	if streamFailed {
+		// SIGINT during the final-status poll → graceful detach.
 		if errors.Is(customerCtx.Err(), context.Canceled) {
 			return &WatchResult{
 				Outcome:      JobOutcomeDetached,
@@ -287,7 +288,32 @@ func WatchJob(
 				DetachReason: DetachReasonSignal,
 			}, nil
 		}
-		return nil, fmt.Errorf("reading final Job status for %s/%s: %w", namespace, jobName, err)
+		// Job reached a terminal state → the stream error was
+		// incidental (Pod replaced/restarted). Report the real
+		// outcome the customer cares about.
+		if statusErr == nil && (outcome == JobOutcomeSucceeded || outcome == JobOutcomeFailed) {
+			return &WatchResult{Outcome: outcome, PodName: podName, Summary: summary}, nil
+		}
+		// Couldn't confirm a terminal Job state → the stream failure
+		// is the actionable signal; surface it.
+		return nil, fmt.Errorf("streaming logs from Pod %s/%s: %w", namespace, podName, logErr)
+	}
+
+	// 5. Clean-stream path: classify on the Job status alone.
+	if statusErr != nil {
+		// Treat SIGINT during finalJobStatus as graceful detach
+		// (jobs-manager already accepted the run; the customer is
+		// just stopping the observation). Bugbot PR #10 r2 flagged
+		// the "exit 9 on post-stream SIGINT" inconsistency.
+		if errors.Is(customerCtx.Err(), context.Canceled) {
+			return &WatchResult{
+				Outcome:      JobOutcomeDetached,
+				PodName:      podName,
+				Summary:      summary,
+				DetachReason: DetachReasonSignal,
+			}, nil
+		}
+		return nil, fmt.Errorf("reading final Job status for %s/%s: %w", namespace, jobName, statusErr)
 	}
 	return &WatchResult{
 		Outcome: outcome,

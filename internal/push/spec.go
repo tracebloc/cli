@@ -133,6 +133,16 @@ type SpecArgs struct {
 	// shorthand because passthrough is the only policy
 	// image_classification cares about.
 	LabelColumn string
+
+	// TargetSize, when len==2, pins the image resolution as [W, H].
+	// The ingestor's image_classification default is 512x512 and it
+	// VALIDATES (it does not resize), so a dataset whose images don't
+	// match the default hard-fails. Setting this emits
+	// spec.file_options.target_size so the customer's actual
+	// resolution wins. Empty (len 0) ⇒ omit and let the ingestor
+	// default apply. Populated by the CLI from --target-size or by
+	// auto-detecting the first image.
+	TargetSize []int
 }
 
 // Build produces the ingest.v1.json-conforming spec map. The
@@ -157,7 +167,7 @@ type SpecArgs struct {
 // calls StagedPrefix, which panics on an unsafe name.
 func (a SpecArgs) Build() map[string]any {
 	prefix := StagedPrefix(a.Table)
-	return map[string]any{
+	spec := map[string]any{
 		"apiVersion": "tracebloc.io/v1",
 		"kind":       "IngestConfig",
 		"category":   a.Category,
@@ -170,40 +180,94 @@ func (a SpecArgs) Build() map[string]any {
 		"images": path.Join(prefix, "images") + "/",
 		"label":  a.LabelColumn,
 	}
+	// Emit the image resolution under spec.file_options.target_size —
+	// the same override key the helm flow + data-ingestors'
+	// conventions.resolve honour (it merges spec.file_options over the
+	// per-category default). Without this, image_classification
+	// defaults to 512x512 and the ingestor's Image Resolution
+	// Validator rejects any other size.
+	if len(a.TargetSize) == 2 {
+		spec["spec"] = map[string]any{
+			"file_options": map[string]any{
+				"target_size": []int{a.TargetSize[0], a.TargetSize[1]},
+			},
+		}
+	}
+	return spec
 }
 
-// StagedPrefix returns the in-cluster destination directory the CLI
-// writes files into for a given table. Used in two places that
-// MUST agree:
+// SharedRoot is the in-cluster mount path of the chart's shared PVC
+// (cluster.SharedPVCMountPath). Both the ephemeral stage Pod and the
+// ingestor Job mount client-pvc here, so any path under it is visible
+// to both — which is why the CLI's staging area lives under it.
+const SharedRoot = "/data/shared"
+
+// stagingDirName is the hidden directory under SharedRoot where the
+// CLI lands a run's SOURCE files. It is deliberately SEPARATE from
+// the ingestor's destination (SharedRoot/<table>):
 //
-//  1. Phase 3 (this PR + PR-b): the path the ephemeral stage Pod
-//     creates and tars files into.
+// data-ingestors computes DEST_PATH = STORAGE_PATH/TABLE_NAME =
+// SharedRoot/<table>, and its DuplicateValidator FAILS if that path
+// already exists non-empty. If the CLI staged straight into
+// SharedRoot/<table> (as it did originally), its own staging would
+// create exactly the non-empty destination the validator rejects —
+// so every push failed the duplicate check. Staging under
+// SharedRoot/.tracebloc-staging/<table> keeps the destination fresh
+// while remaining on the same PVC the ingestor reads.
+const stagingDirName = ".tracebloc-staging"
+
+// StagedPrefix returns the in-cluster directory the CLI streams a
+// dataset's SOURCE files into for a given table. The synthesized
+// spec's csv/images point here; the ingestor reads from here and
+// writes the processed table to FinalDestPrefix(table).
+//
+// Two call sites MUST agree on this value:
+//
+//  1. The ephemeral stage Pod's tar target (StreamLayout).
 //  2. The csv/images fields in Build() above, which jobs-manager
-//     reads to know where the ingestor Job will find them.
+//     hands to the ingestor Job so it reads what we just staged.
 //
-// Exported because Phase 3's PR-b (stage Pod construction) needs
-// it from the same place, and Phase 4 (submit) might want to print
-// it as part of "what we pushed."
+// It is intentionally NOT SharedRoot/<table>: that is the ingestor's
+// DEST_PATH, whose DuplicateValidator rejects a pre-existing,
+// non-empty directory. See stagingDirName.
 //
 // PRECONDITION: table must already have passed ValidateTableName.
 // This function panics on an unsafe name rather than returning an
-// escape path — a name that escapes /data/shared is a caller bug
-// (validation was skipped), and a panic surfaces it loudly in
-// tests instead of silently letting PR-b's stage Pod write to,
-// say, /etc. Every production call path runs ValidateTableName
-// first (see cli.runDatasetPush), so the panic is unreachable in
-// correct code.
+// escape path — a name that escapes SharedRoot is a caller bug
+// (validation was skipped), and a panic surfaces it loudly in tests
+// instead of silently letting the stage Pod write to, say, /etc.
+// Every production call path runs ValidateTableName first (see
+// cli.runDatasetPush), so the panic is unreachable in correct code.
 func StagedPrefix(table string) string {
 	// Deliberately NOT path.Join here: path.Join cleans ".."
 	// segments, which is exactly the silent traversal we're
 	// guarding against. Plain concatenation keeps the name as a
 	// literal segment so the assertion below can detect a bad one.
-	prefix := "/data/shared/" + table
 	if !tableNamePattern.MatchString(table) {
 		panic(fmt.Sprintf(
 			"push.StagedPrefix: unsafe table name %q — caller must "+
 				"ValidateTableName before constructing a PVC path",
 			table))
 	}
-	return prefix
+	return SharedRoot + "/" + stagingDirName + "/" + table
+}
+
+// FinalDestPrefix returns where the ingestor writes the processed
+// table: SharedRoot/<table>, matching data-ingestors' config.DEST_PATH
+// (STORAGE_PATH/TABLE_NAME). This is what the training side reads and
+// what the CLI shows the customer as the destination. The CLI never
+// writes here directly — doing so would trip the ingestor's
+// DuplicateValidator; it stages to StagedPrefix(table) and the
+// ingestor produces this path.
+//
+// PRECONDITION: table must already have passed ValidateTableName.
+// Panics on an unsafe name, same rationale as StagedPrefix.
+func FinalDestPrefix(table string) string {
+	if !tableNamePattern.MatchString(table) {
+		panic(fmt.Sprintf(
+			"push.FinalDestPrefix: unsafe table name %q — caller must "+
+				"ValidateTableName before constructing a PVC path",
+			table))
+	}
+	return SharedRoot + "/" + table
 }
