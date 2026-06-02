@@ -36,6 +36,16 @@ vet:
 test:
 	$(GO) test -race -cover $(PKGS)
 
+# Integration tests (build-tagged `integration`) run against a REAL
+# cluster reachable via the ambient kubeconfig — kind in CI, or your
+# own dev cluster locally. They cover the real-I/O seams the unit
+# suite mocks (clientset connectivity, the SPDYExecutor tar-over-exec
+# stream against a live Pod + PVC). -count=1 disables caching since
+# these touch live cluster state. See .github/workflows/e2e.yml.
+.PHONY: test-integration
+test-integration:
+	$(GO) test -tags integration -count=1 -timeout 10m -v ./test/integration/...
+
 .PHONY: lint
 lint:
 	@command -v $(GOLANGCI_LINT) >/dev/null 2>&1 || { \
