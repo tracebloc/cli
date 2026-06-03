@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // Summary is the parsed contents of the ingestor's 📊 INGESTION
@@ -318,45 +320,46 @@ func (p *SummaryParser) Result() *Summary {
 	return p.summary
 }
 
-// RenderPanel returns a multi-line, customer-facing rendering of
-// the Summary for display in the orchestrator's success/failure
-// message. Format:
+// RenderSummary prints the installer-style ingestion summary through
+// p: an outcome-colored headline (green when clean, yellow on skips,
+// red on failures), the per-stage counts as Section/Field rows, and a
+// short "what's next". It replaces the old box-drawing panel —
+// Section/Field is plain-ASCII friendly, so no Unicode-box fallback is
+// needed (that was the v0.2 TODO).
 //
-//	┌─ Ingestion summary ──────────────────────────┐
-//	│ Ingestor ID:               <id>              │
-//	│ Total records:             1,234             │
-//	│ Inserted:                  1,200             │
-//	│ Skipped:                       4             │
-//	│ File transfer failures:        0             │
-//	│ DB-insert failures:           30             │
-//	│ Success rate:              97.2%             │
-//	└──────────────────────────────────────────────┘
-//
-// Uses box-drawing characters for visual structure. Plain ASCII
-// fallback could be added in v0.2 for terminals that don't render
-// Unicode (rare on modern OS X/Linux/Windows-Terminal).
-func RenderPanel(s *Summary) string {
+// No-op on a nil summary: an early failure (OOM before the ingestor
+// printed its banner) produces no Summary, so the orchestrator can
+// call this unconditionally.
+func RenderSummary(p *ui.Printer, s *Summary) {
 	if s == nil {
-		return ""
+		return
 	}
-	const labelWidth = 26
-	var b strings.Builder
-	b.WriteString("┌─ Ingestion summary ──────────────────────────┐\n")
-	row := func(label, value string) {
-		fmt.Fprintf(&b, "│ %-*s %s\n", labelWidth, label, value)
+	headline := fmt.Sprintf("ingested %s of %s records (%.1f%%)",
+		commaSep(s.InsertedRecords), commaSep(s.TotalRecords), s.SuccessRate())
+	switch {
+	case s.HasFailures():
+		p.Errorf("Ingestion completed with failures — %s", headline)
+	case s.SkippedRecords > 0:
+		p.Warnf("Ingestion completed with skips — %s", headline)
+	default:
+		p.Successf("Ingestion complete — %s", headline)
 	}
+
+	p.Section("Ingestion summary")
 	if s.IngestorID != "" {
-		row("Ingestor ID:", s.IngestorID)
+		p.Field("ingestor ID", s.IngestorID)
 	}
-	row("Total records:", commaSep(s.TotalRecords))
-	row("Inserted:", commaSep(s.InsertedRecords))
-	row("Sent to API:", commaSep(s.APISentRecords))
-	row("Skipped:", commaSep(s.SkippedRecords))
-	row("File transfer failures:", commaSep(s.FileTransferFailures))
-	row("DB-insert failures:", commaSep(s.FailedRecords))
-	row("Success rate:", fmt.Sprintf("%.1f%%", s.SuccessRate()))
-	b.WriteString("└──────────────────────────────────────────────┘\n")
-	return b.String()
+	p.Field("total records", commaSep(s.TotalRecords))
+	p.Field("inserted", commaSep(s.InsertedRecords))
+	p.Field("sent to API", commaSep(s.APISentRecords))
+	p.Field("skipped", commaSep(s.SkippedRecords))
+	p.Field("file failures", commaSep(s.FileTransferFailures))
+	p.Field("DB failures", commaSep(s.FailedRecords))
+	p.Field("success rate", fmt.Sprintf("%.1f%%", s.SuccessRate()))
+
+	p.Section("What's next")
+	p.Infof("View it in the dashboard: https://ai.tracebloc.io")
+	p.Hintf("The table is staged and ready for training jobs.")
 }
 
 // commaSep formats an int64 with thousands-separator commas to
