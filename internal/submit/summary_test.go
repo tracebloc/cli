@@ -1,8 +1,11 @@
 package submit
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // realIngestorBanner mirrors what
@@ -182,10 +185,10 @@ func TestStripANSI(t *testing.T) {
 	}
 }
 
-// TestRenderPanel_BasicShape: the panel rendering is what the
-// customer sees on success; pin a few key lines so a refactor
-// breaks the test rather than silently producing weird output.
-func TestRenderPanel_BasicShape(t *testing.T) {
+// TestRenderSummary_BasicShape pins the key facts the customer sees;
+// a refactor that drops one breaks the test rather than silently
+// producing weird output. Color off so we assert plain text.
+func TestRenderSummary_BasicShape(t *testing.T) {
 	s := &Summary{
 		IngestorID:           "run-abc",
 		TotalRecords:         1234567,
@@ -195,26 +198,53 @@ func TestRenderPanel_BasicShape(t *testing.T) {
 		FileTransferFailures: 30,
 		FailedRecords:        5,
 	}
-	got := RenderPanel(s)
+	var buf bytes.Buffer
+	RenderSummary(ui.New(&buf, ui.WithColor(false)), s)
+	got := buf.String()
 	for _, want := range []string{
 		"Ingestion summary",
 		"run-abc",
 		"1,234,567", // commaSep formatting
-		"1,200,000", // commaSep formatting
-		"30",        // file transfer failures
-		"DB-insert failures:",
+		"1,200,000",
+		"30", // file failures
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("RenderPanel missing %q in:\n%s", want, got)
+			t.Errorf("RenderSummary missing %q in:\n%s", want, got)
 		}
 	}
 }
 
-// TestRenderPanel_Nil: nil summary returns empty string so the
-// orchestrator can blind-print without a guard.
-func TestRenderPanel_Nil(t *testing.T) {
-	if got := RenderPanel(nil); got != "" {
-		t.Errorf("RenderPanel(nil) = %q, want empty", got)
+// TestRenderSummary_Nil: a nil summary writes nothing, so the
+// orchestrator can call it unconditionally.
+func TestRenderSummary_Nil(t *testing.T) {
+	var buf bytes.Buffer
+	RenderSummary(ui.New(&buf, ui.WithColor(false)), nil)
+	if buf.Len() != 0 {
+		t.Errorf("RenderSummary(nil) wrote %q, want nothing", buf.String())
+	}
+}
+
+// TestRenderSummary_OutcomeHeadline: the headline reflects the outcome
+// derived from the counts — clean / skips / failures. Table-driven,
+// one sub-test per row via t.Run.
+func TestRenderSummary_OutcomeHeadline(t *testing.T) {
+	cases := []struct {
+		name string
+		s    *Summary
+		want string
+	}{
+		{"clean", &Summary{TotalRecords: 10, ProcessedRecords: 10, InsertedRecords: 10}, "complete —"},
+		{"skips", &Summary{TotalRecords: 10, InsertedRecords: 8, SkippedRecords: 2}, "skips"},
+		{"failures", &Summary{TotalRecords: 10, InsertedRecords: 7, FailedRecords: 3}, "failures"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			RenderSummary(ui.New(&buf, ui.WithColor(false)), c.s)
+			if !strings.Contains(buf.String(), c.want) {
+				t.Errorf("headline missing %q in:\n%s", c.want, buf.String())
+			}
+		})
 	}
 }
 

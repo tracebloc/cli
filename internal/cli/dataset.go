@@ -577,6 +577,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		ImageDigest:      a.ImageDigest,
 		Detach:           a.Detach,
 		Out:              out,
+		Printer:          a.Printer,
 	})
 	if err != nil {
 		switch {
