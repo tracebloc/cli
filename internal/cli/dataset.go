@@ -83,7 +83,8 @@ func newDatasetPushCmd() *cobra.Command {
 		numberOfKeypoints int
 
 		// Operations flags.
-		dryRun bool
+		dryRun  bool
+		noInput bool
 
 		// Ingestor SA name override. Used as the ServiceAccountName
 		// of the ephemeral stage Pod, so the Pod inherits whatever
@@ -146,11 +147,24 @@ Exit codes:
   8   jobs-manager rejected the submit (4xx/5xx other than auth)
   9   ingestion Job exited non-zero, or completed with row-level
       failures the summary panel reports`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var localPath string
+			if len(args) > 0 {
+				localPath = args[0]
+			}
+			// Guided mode: on a terminal (and unless --no-input), prompt
+			// for whatever's still missing. Off a TTY / with --no-input,
+			// prompter stays nil and runDatasetPush keeps flag-only
+			// behavior.
+			interactive := !noInput && isInteractiveTTY()
+			var pr prompter
+			if interactive {
+				pr = surveyPrompter{}
+			}
 			return runDatasetPush(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
 				runDatasetPushArgs{
-					LocalPath:  args[0],
+					LocalPath:  localPath,
 					Kubeconfig: kubeconfigPath,
 					Context:    contextOverride,
 					Namespace:  nsOverride,
@@ -168,6 +182,9 @@ Exit codes:
 					IdempotencyKey: idempotencyKey,
 					ImageDigest:    imageDigest,
 					Printer:        printerFor(cmd),
+					Interactive:    interactive,
+					Prompter:       pr,
+					CategorySet:    cmd.Flags().Changed("category"),
 				})
 		},
 	}
@@ -209,6 +226,8 @@ Exit codes:
 
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"validate + discover + walk, but don't create any cluster resources")
+	cmd.Flags().BoolVar(&noInput, "no-input", false,
+		"disable interactive prompts; fail on missing required values (for CI/scripts)")
 	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
 		"override the ingestor ServiceAccount name (default: \"ingestor\"); "+
 			"set this if you customized ingestionAuthz.serviceAccountName in the parent client chart")
@@ -250,6 +269,15 @@ type runDatasetPushArgs struct {
 	// the RunE from the persistent --plain flag (see printerFor).
 	Printer *ui.Printer
 
+	// Interactive guided mode (#28). When Interactive is true,
+	// runDatasetPush prompts (via Prompter) for any missing core inputs
+	// before validation. CategorySet records whether --category was
+	// passed explicitly (its non-empty default would otherwise look
+	// like a deliberate choice). Prompter is nil off a TTY / --no-input.
+	Interactive bool
+	Prompter    prompter
+	CategorySet bool
+
 	// Phase 4 (#152) fields. See the flag declarations for the
 	// per-knob rationale; all three are optional.
 	Detach         bool
@@ -267,6 +295,20 @@ type runDatasetPushArgs struct {
 // a bad label-column or oversized dataset gets the diagnostic in
 // milliseconds without a kubeconfig round-trip.
 func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPushArgs) error {
+	// 0. Guided mode: prompt for any missing core inputs before
+	//    validation. Flags already provided win; non-TTY / --no-input
+	//    leaves Prompter nil and skips straight to the flag-only path.
+	if a.Interactive && a.Prompter != nil {
+		if err := runInteractive(a.Printer, a.Prompter, &a, a.CategorySet); err != nil {
+			return &exitError{code: 3, err: fmt.Errorf("interactive setup: %w", err)}
+		}
+	}
+	if a.LocalPath == "" {
+		return &exitError{code: 3, err: errors.New(
+			"local dataset path is required — pass it as an argument, or run " +
+				"on a terminal without --no-input for guided prompts")}
+	}
+
 	// 1. Validate the table name BEFORE anything else. It's both
 	//    the MySQL identifier and the /data/shared/<table>/ PVC
 	//    subdirectory — an unsanitized traversal name (../../etc)
