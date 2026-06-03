@@ -15,6 +15,20 @@ permissions:
   contents: read
 
 jobs:
+  schema-drift:
+    name: Schema drift check
+    # Verifies the embedded internal/schema/ingest.v1.json matches
+    # tracebloc/data-ingestors' master. A green PR that silently
+    # diverges from upstream is a real correctness hazard — a
+    # customer's YAML could pass `tracebloc ingest validate` locally
+    # but be rejected by jobs-manager (or vice versa). Forcing the
+    # sync as a PR step keeps drift visible.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: scripts/sync-schema.sh --check
+        run: ./scripts/sync-schema.sh --check
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -49,14 +63,44 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.61.0
-          # Pin the cache key per Go version so a Go bump invalidates
-          # cleanly — stale caches across Go versions cause noisy
-          # "invalid pkg" failures.
-          args: --timeout=5m
+      # golangci-lint-action@v6 reproducibly time-budgeted out at
+      # ~2 minutes on this module's k8s.io-heavy dep tree (3 runs
+      # in a row in early 2026 — see #6). Stand-alone tools run
+      # against the same code in <30 seconds and catch the bugs
+      # we've actually hit this week (unchecked Fprintf errors
+      # were errcheck-catchable; gofmt -s drift was a recurring
+      # nit). Going back to the action when #6 has a strategy.
+
+      # Tool versions are unpinned (@latest) because older tagged
+      # releases pulled stale golang.org/x/tools that fail to build
+      # against current Go ("invalid array length -delta * delta").
+      # Pinning is preferable for reproducibility but waiting on the
+      # upstream tools to ship newer tags. Track in #6.
+
+      - name: errcheck
+        run: |
+          go install github.com/kisielk/errcheck@latest
+          errcheck ./...
+
+      - name: gofmt -s
+        run: |
+          drift="$(gofmt -s -l .)"
+          if [ -n "$drift" ]; then
+            echo "::error::gofmt -s drift in:"
+            echo "$drift" | sed 's/^/    /'
+            echo "::error::run \`make fmt\` to fix"
+            exit 1
+          fi
+
+      - name: ineffassign
+        run: |
+          go install github.com/gordonklaus/ineffassign@latest
+          ineffassign ./...
+
+      - name: misspell
+        run: |
+          go install github.com/client9/misspell/cmd/misspell@latest
+          misspell -error .
 
   build:
     name: Build (${{ matrix.os }}/${{ matrix.arch }})
@@ -112,8 +156,20 @@ jobs:
         # validation only — which is still meaningful because
         # client-go and most k8s deps have OS-conditional code paths.
         run: |
-          ./dist/tracebloc-linux-amd64 version
-          ./dist/tracebloc-linux-amd64 version --output-json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['version'], 'empty version'"
+          BIN=./dist/tracebloc-linux-amd64
+          "$BIN" version
+          "$BIN" version --output-json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['version'], 'empty version'"
+
+          # ingest validate exercises the embedded schema + validation
+          # wiring on the real binary (no cluster needed): a valid spec
+          # must pass, and an invalid one must be rejected with exit 2.
+          "$BIN" ingest validate testdata/smoke/valid-image-classification.yaml
+          if "$BIN" ingest validate testdata/smoke/invalid-missing-images.yaml; then
+            echo "::error::ingest validate accepted an invalid spec (missing 'images')"; exit 1
+          fi
+
+          # Command-tree wiring smoke for the dominant verb.
+          "$BIN" dataset push --help >/dev/null
 
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v4

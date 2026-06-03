@@ -7,17 +7,32 @@
 
 run:
   timeout: 5m
-  go: "1.22"
+  # Track go.mod's `go` directive. Go's release cadence + `go mod
+  # tidy`'s aggressive bumping (especially when k8s.io/* deps want
+  # newer Go) keep dragging go.mod's minimum up; pinning a stale
+  # version here just produces typecheck errors instead of real
+  # findings. Currently 1.26 to match `go 1.26.0` in go.mod (the
+  # earlier "1.24" pin drifted when k8s.io/* v0.36 bumped the floor;
+  # Bugbot caught the drift on PR #2).
+  go: "1.26"
 
 linters:
   disable-all: true
   enable:
-    # Standard set — these catch real bugs and have very low false-positive rates.
+    # The set is trimmed to the linters that DON'T do full whole-program
+    # SSA analysis. `staticcheck` and `unused` were in the original set
+    # and reproducibly caused the GitHub-hosted runner to time-budget
+    # the job (~2 min then shutdown signal) on this module — k8s.io/*
+    # transitive deps inflate the analysis graph enough to OOM-or-stall
+    # the standard 4-CPU/16GB runner. Re-enabling them is a v0.2
+    # follow-up that needs either a larger runner, a much narrower
+    # scope (e.g. only `./internal/...`), or a faster successor like
+    # govulncheck for the security-only subset.
+
+    # Cheap, per-file checks — catch real bugs without SSA.
     - errcheck       # unchecked error returns
     - govet          # `go vet`
     - ineffassign    # assignments that go nowhere
-    - staticcheck    # SA-series checks (well-vetted)
-    - unused         # dead code
 
     # Style / hygiene that pays for itself in code review time.
     - gofmt

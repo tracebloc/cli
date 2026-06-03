@@ -6,9 +6,13 @@ The customer-facing CLI for the tracebloc declarative ingestion path. Wraps the 
 
 ## Status
 
-🚧 **Pre-alpha** — Phase 0 of the [v0.1 roadmap](https://github.com/tracebloc/client/issues/147). Today this binary implements only `version` and `completion`. Subsequent phases (#149–#153) land schema validation, cluster discovery, data staging, submission, and distribution.
+**v0.1.0-alpha is published** — the first [release](https://github.com/tracebloc/cli/releases/tag/v0.1.0-alpha), a pre-release for early testers, cut from `develop`. Every phase of the [v0.1 roadmap](https://github.com/tracebloc/client/issues/147) (#148–#153) is merged. The binary implements `version`, `completion`, `ingest validate`, `cluster info`, and the full `dataset push` flow — local schema validation, cluster discovery, data staging, submission, and Job watching, end to end.
 
-For the production ingestion flow today, use the Helm chart: `helm install tracebloc/ingestor --set-file ingestConfig=./ingest.yaml`. See the chart's [README](https://github.com/tracebloc/client/blob/develop/ingestor/README.md) for the full customer journey including the data-staging recipe.
+`dataset push` covers **9 of 10 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `text_classification`, `masked_language_modeling`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, and `time_to_event_prediction`. `semantic_segmentation` is pending mask-sidecar support upstream ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)); `instance_segmentation` is not yet implemented.
+
+The release pipeline has shipped [`v0.1.0-alpha`](https://github.com/tracebloc/cli/releases/tag/v0.1.0-alpha): cosign-signed binaries for linux/darwin/windows (amd64/arm64), `SHA256SUMS`, and the install scripts. Install it via [Customer experience](#customer-experience) or [build from source](#building-from-source). (The `install.tracebloc.io` shortcut, the `latest` one-liner, and a Homebrew tap all wait for the first **stable** `v*` tag — see below.)
+
+The Helm chart remains a sibling interface for the Kubernetes-native workflow: `helm install tracebloc/ingestor --set-file ingestConfig=./ingest.yaml` (see the chart's [README](https://github.com/tracebloc/client/blob/develop/ingestor/README.md)).
 
 ## Why a CLI in addition to the chart?
 
@@ -37,13 +41,15 @@ Customer interfaces (pick one or many):
 
 The protocol — the v1 schema + the POST endpoint — is the stable point. Everything above is interchangeable.
 
-## v0.1 design (target customer experience, once Phase 5 ships)
+## Customer experience
+
+> `v0.1.0-alpha` is a **pre-release**, so the `install.tracebloc.io` shortcut isn't wired up yet and GitHub's `latest` skips pre-releases. Install the alpha by explicit tag (below), or [build from source](#building-from-source).
 
 ```bash
-# Install once
-brew install tracebloc/tap/tracebloc        # macOS
-curl -fsSL https://install.tracebloc.io | sh # Linux/macOS
-irm https://install.tracebloc.io/install.ps1 | iex  # Windows
+# Install the alpha — pins the pre-release tag (Linux/macOS)
+curl -fsSL https://github.com/tracebloc/cli/releases/download/v0.1.0-alpha/install.sh \
+  | sh -s -- --version v0.1.0-alpha
+# Windows + manual/signed downloads: https://github.com/tracebloc/cli/releases/tag/v0.1.0-alpha
 
 # Per dataset
 tracebloc dataset push ./my-data \
@@ -73,7 +79,7 @@ go build -o tracebloc ./cmd/tracebloc
 ./tracebloc version
 ```
 
-Requires Go 1.22 or newer. The binary self-reports its build metadata; a `go build` without `-ldflags` reports `dev / unknown / unknown` for version/git-sha/build-date so support can tell a local hack apart from a release build.
+Requires Go 1.26 or newer (the `k8s.io/*` dependencies set the floor; see `go.mod`). The binary self-reports its build metadata; a `go build` without `-ldflags` reports `dev / unknown / unknown` for version/git-sha/build-date so support can tell a local hack apart from a release build.
 
 ```bash
 # Release-style build with version metadata
@@ -86,14 +92,20 @@ go build -ldflags "\
 
 ## Roadmap
 
-| Phase | Ticket | What |
-|---|---|---|
-| **0 (this PR)** | [#148](https://github.com/tracebloc/client/issues/148) | Repo bootstrap + Go module + CI + `tracebloc version` |
-| 1 | [#149](https://github.com/tracebloc/client/issues/149) | Embed `ingest.v1.json` + `tracebloc ingest validate <path>` (local-only) |
-| 2 | [#150](https://github.com/tracebloc/client/issues/150) | Cluster discovery + ingestor SA token via TokenRequest |
-| 3 | [#151](https://github.com/tracebloc/client/issues/151) | Stage data into the shared PVC via ephemeral Pod |
-| 4 | [#152](https://github.com/tracebloc/client/issues/152) | Submit to jobs-manager + watch ingestor Job + summary |
-| 5 | [#153](https://github.com/tracebloc/client/issues/153) | GitHub Releases, Homebrew tap, install.sh distribution |
+All v0.1 phases are merged:
+
+| Phase | Ticket | What | Status |
+|---|---|---|---|
+| 0 | [#148](https://github.com/tracebloc/client/issues/148) | Repo bootstrap + Go module + CI + `tracebloc version` | ✅ |
+| 1 | [#149](https://github.com/tracebloc/client/issues/149) | Embed `ingest.v1.json` + `tracebloc ingest validate <path>` (local-only) | ✅ |
+| 2 | [#150](https://github.com/tracebloc/client/issues/150) | Cluster discovery + ingestor SA token via TokenRequest | ✅ |
+| 3 | [#151](https://github.com/tracebloc/client/issues/151) | Stage data into the shared PVC via ephemeral Pod | ✅ |
+| 4 | [#152](https://github.com/tracebloc/client/issues/152) | Submit to jobs-manager + watch ingestor Job + summary | ✅ |
+| 5 | [#153](https://github.com/tracebloc/client/issues/153) | GitHub Releases + install.sh distribution (Homebrew tap deferred) | ✅ — [`v0.1.0-alpha`](https://github.com/tracebloc/cli/releases/tag/v0.1.0-alpha) published (pre-release) |
+
+Beyond the original phases, `dataset push` was widened from image-classification-only to 9 of 10 modalities, and the test suite gained unit-coverage wins plus a kind-based integration harness for the real-I/O seams.
+
+**Next (v0.2):** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap; `semantic_segmentation` ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)) and `instance_segmentation`; more `dataset` verbs (`list`, `rm`). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues) (#3–#7).
 
 Epic: [tracebloc/client#147](https://github.com/tracebloc/client/issues/147).
 
