@@ -134,7 +134,8 @@ type SpecArgs struct {
 	// image_classification cares about.
 	LabelColumn string
 
-	// TargetSize, when len==2, pins the image resolution as [W, H].
+	// TargetSize, when len==2, holds the resolution as [W, H] — the
+	// order produced by --target-size "WxH" and by DetectImageSize.
 	// The ingestor's image_classification default is 512x512 and it
 	// VALIDATES (it does not resize), so a dataset whose images don't
 	// match the default hard-fails. Setting this emits
@@ -142,6 +143,10 @@ type SpecArgs struct {
 	// resolution wins. Empty (len 0) ⇒ omit and let the ingestor
 	// default apply. Populated by the CLI from --target-size or by
 	// auto-detecting the first image. (Image categories only.)
+	//
+	// NOTE: stored [W, H] here, but EMITTED as [height, width] by
+	// Build — that's the order the ingest.v1 schema documents and the
+	// ingestor reads. buildImage does the swap. (Bugbot, PR #22.)
 	TargetSize []int
 
 	// Schema is the column→SQL-type map for tabular / time-series
@@ -253,7 +258,9 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 
 	if a.Category == "keypoint_detection" {
 		if len(a.TargetSize) == 2 {
-			spec["target_size"] = []int{a.TargetSize[0], a.TargetSize[1]}
+			// Schema documents target_size as [height, width]; TargetSize
+			// is stored [W, H], so swap on emit. (Bugbot, PR #22.)
+			spec["target_size"] = []int{a.TargetSize[1], a.TargetSize[0]}
 		}
 		if a.NumberOfKeypoints > 0 {
 			spec["number_of_keypoints"] = a.NumberOfKeypoints
@@ -264,7 +271,8 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 	if len(a.TargetSize) == 2 {
 		spec["spec"] = map[string]any{
 			"file_options": map[string]any{
-				"target_size": []int{a.TargetSize[0], a.TargetSize[1]},
+				// [height, width] per the schema; TargetSize is [W, H].
+				"target_size": []int{a.TargetSize[1], a.TargetSize[0]},
 			},
 		}
 	}

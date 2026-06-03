@@ -46,8 +46,21 @@ test:
 test-integration:
 	$(GO) test -tags integration -count=1 -timeout 10m -v ./test/integration/...
 
+# Lint set matched to .github/workflows/build.yml's lint job: errcheck +
+# ineffassign + misspell (gofmt -s is `fmt-check`, go vet is `vet`).
+# golangci-lint-action is disabled in CI pending tracebloc/cli#6 — so
+# until it's re-enabled there, `make ci` runs the SAME standalone tools
+# the CI lint job runs, keeping the "make ci green => CI green" invariant
+# this Makefile exists to protect. `make lint-full` keeps golangci-lint
+# available for a richer local pass.
 .PHONY: lint
 lint:
+	$(GO) run github.com/kisielk/errcheck@latest ./...
+	$(GO) run github.com/gordonklaus/ineffassign@latest ./...
+	$(GO) run github.com/client9/misspell/cmd/misspell@latest -error .
+
+.PHONY: lint-full
+lint-full:
 	@command -v $(GOLANGCI_LINT) >/dev/null 2>&1 || { \
 	  echo "==> $(GOLANGCI_LINT) not on PATH"; \
 	  echo "    install via:  brew install golangci-lint"; \
