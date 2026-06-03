@@ -7,6 +7,8 @@
 package cli
 
 import (
+	"io"
+
 	"github.com/spf13/cobra"
 
 	"github.com/tracebloc/cli/internal/ui"
@@ -105,8 +107,15 @@ what's planned next.`,
 // in ui.New; --plain just forces it off. Commands call this at the top
 // of their RunE.
 func printerFor(cmd *cobra.Command) *ui.Printer {
+	return printerForWriter(cmd, cmd.OutOrStdout())
+}
+
+// printerForWriter is printerFor for an explicit writer — used by
+// dataset push's --output-json mode, which routes human output to
+// stderr so stdout carries only the JSON result.
+func printerForWriter(cmd *cobra.Command, w io.Writer) *ui.Printer {
 	if plain, _ := cmd.Flags().GetBool("plain"); plain {
-		return ui.New(cmd.OutOrStdout(), ui.WithColor(false))
+		return ui.New(w, ui.WithColor(false))
 	}
-	return ui.New(cmd.OutOrStdout())
+	return ui.New(w)
 }

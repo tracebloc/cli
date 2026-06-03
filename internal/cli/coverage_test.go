@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/push"
+	"github.com/tracebloc/cli/internal/submit"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -58,6 +60,27 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("pre-flight output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestWritePushJSON checks the --output-json result serializes to
+// valid JSON with the expected fields.
+func TestWritePushJSON(t *testing.T) {
+	spec := map[string]any{"table": "reg_train", "category": "tabular_regression", "intent": "train"}
+	s := &submit.Summary{IngestorID: "run-1", TotalRecords: 240, InsertedRecords: 240, APISentRecords: 240}
+
+	var buf bytes.Buffer
+	writePushJSON(&buf, "succeeded", spec, s, "ns1", "ingest-job-x")
+
+	var got pushJSONResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	if got.Status != "succeeded" || got.Table != "reg_train" || got.JobName != "ingest-job-x" {
+		t.Errorf("unexpected result: %+v", got)
+	}
+	if got.Summary == nil || got.Summary.InsertedRecords != 240 {
+		t.Errorf("summary missing/wrong: %+v", got.Summary)
 	}
 }
 

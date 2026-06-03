@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -83,8 +84,9 @@ func newDatasetPushCmd() *cobra.Command {
 		numberOfKeypoints int
 
 		// Operations flags.
-		dryRun  bool
-		noInput bool
+		dryRun     bool
+		noInput    bool
+		outputJSON bool
 
 		// Ingestor SA name override. Used as the ServiceAccountName
 		// of the ephemeral stage Pod, so the Pod inherits whatever
@@ -157,12 +159,22 @@ Exit codes:
 			// for whatever's still missing. Off a TTY / with --no-input,
 			// prompter stays nil and runDatasetPush keeps flag-only
 			// behavior.
-			interactive := !noInput && isInteractiveTTY()
+			interactive := !noInput && !outputJSON && isInteractiveTTY()
 			var pr prompter
 			if interactive {
 				pr = surveyPrompter{}
 			}
-			return runDatasetPush(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
+			// In --output-json mode, human output goes to stderr so
+			// stdout carries only the JSON result.
+			humanOut := cmd.OutOrStdout()
+			printer := printerFor(cmd)
+			var jsonOut io.Writer
+			if outputJSON {
+				humanOut = cmd.ErrOrStderr()
+				printer = printerForWriter(cmd, cmd.ErrOrStderr())
+				jsonOut = cmd.OutOrStdout()
+			}
+			return runDatasetPush(cmd.Context(), humanOut, cmd.ErrOrStderr(),
 				runDatasetPushArgs{
 					LocalPath:  localPath,
 					Kubeconfig: kubeconfigPath,
@@ -181,10 +193,12 @@ Exit codes:
 					Detach:         detach,
 					IdempotencyKey: idempotencyKey,
 					ImageDigest:    imageDigest,
-					Printer:        printerFor(cmd),
+					Printer:        printer,
 					Interactive:    interactive,
 					Prompter:       pr,
 					CategorySet:    cmd.Flags().Changed("category"),
+					OutputJSON:     outputJSON,
+					JSONOut:        jsonOut,
 				})
 		},
 	}
@@ -228,6 +242,8 @@ Exit codes:
 		"validate + discover + walk, but don't create any cluster resources")
 	cmd.Flags().BoolVar(&noInput, "no-input", false,
 		"disable interactive prompts; fail on missing required values (for CI/scripts)")
+	cmd.Flags().BoolVar(&outputJSON, "output-json", false,
+		"emit a machine-readable JSON result on stdout (human output → stderr; implies --no-input)")
 	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
 		"override the ingestor ServiceAccount name (default: \"ingestor\"); "+
 			"set this if you customized ingestionAuthz.serviceAccountName in the parent client chart")
@@ -277,6 +293,12 @@ type runDatasetPushArgs struct {
 	Interactive bool
 	Prompter    prompter
 	CategorySet bool
+
+	// OutputJSON routes human output to stderr and emits a JSON result
+	// to JSONOut (stdout); set together by the RunE in --output-json
+	// mode (which also forces non-interactive).
+	OutputJSON bool
+	JSONOut    io.Writer
 
 	// Phase 4 (#152) fields. See the flag declarations for the
 	// per-knob rationale; all three are optional.
@@ -528,6 +550,9 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	// 8. Dry-run stop. Acknowledged success.
 	if a.DryRun {
 		_, _ = fmt.Fprintln(out, "Dry-run complete — no cluster resources were created.")
+		if a.OutputJSON {
+			writePushJSON(a.JSONOut, "dry-run", spec, nil, "", "")
+		}
 		return nil
 	}
 
@@ -641,6 +666,26 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		}
 	}
 
+	if a.OutputJSON {
+		status := "detached" // --detach flag → no watch result
+		var summary *submit.Summary
+		if submitRes.Watch != nil {
+			summary = submitRes.Watch.Summary
+			switch submitRes.Watch.Outcome {
+			case submit.JobOutcomeSucceeded:
+				status = "succeeded"
+			case submit.JobOutcomeFailed:
+				status = "failed"
+			case submit.JobOutcomeDetached:
+				status = "detached"
+			default:
+				status = "unknown"
+			}
+		}
+		writePushJSON(a.JSONOut, status, spec, summary,
+			submitRes.Submit.Namespace, submitRes.Submit.JobName)
+	}
+
 	// Detach paths (--detach flag OR SIGINT-mid-watch) are
 	// success — cluster keeps running; the orchestrator already
 	// printed the reconnect hint.
@@ -737,4 +782,59 @@ func printPushPreflight(
 		p.Infof("Next: stage %d files (%s) for table %q",
 			layout.FileCount(), push.HumanBytes(layout.TotalBytes), spec["table"])
 	}
+}
+
+// pushJSONResult is the machine-readable shape emitted by --output-json.
+// It's a presentation type owned by the CLI layer, so submit.Summary
+// stays json-tag-free and this wire format can evolve independently.
+type pushJSONResult struct {
+	Status    string           `json:"status"` // dry-run|succeeded|failed|detached|unknown
+	Table     string           `json:"table"`
+	Category  string           `json:"category"`
+	Intent    string           `json:"intent"`
+	Namespace string           `json:"namespace,omitempty"`
+	JobName   string           `json:"job_name,omitempty"`
+	Summary   *pushJSONSummary `json:"summary,omitempty"`
+}
+
+type pushJSONSummary struct {
+	IngestorID           string  `json:"ingestor_id,omitempty"`
+	TotalRecords         int64   `json:"total_records"`
+	InsertedRecords      int64   `json:"inserted_records"`
+	SentToAPI            int64   `json:"sent_to_api"`
+	SkippedRecords       int64   `json:"skipped_records"`
+	FileTransferFailures int64   `json:"file_transfer_failures"`
+	DBInsertFailures     int64   `json:"db_insert_failures"`
+	SuccessRate          float64 `json:"success_rate"`
+}
+
+// writePushJSON serializes the push result to w (stdout in
+// --output-json mode). Errors are dropped: marshaling our own struct
+// can't fail in practice, and the exit code remains the contract.
+func writePushJSON(w io.Writer, status string, spec map[string]any, s *submit.Summary, ns, jobName string) {
+	res := pushJSONResult{
+		Status:    status,
+		Table:     fmt.Sprintf("%v", spec["table"]),
+		Category:  fmt.Sprintf("%v", spec["category"]),
+		Intent:    fmt.Sprintf("%v", spec["intent"]),
+		Namespace: ns,
+		JobName:   jobName,
+	}
+	if s != nil {
+		res.Summary = &pushJSONSummary{
+			IngestorID:           s.IngestorID,
+			TotalRecords:         s.TotalRecords,
+			InsertedRecords:      s.InsertedRecords,
+			SentToAPI:            s.APISentRecords,
+			SkippedRecords:       s.SkippedRecords,
+			FileTransferFailures: s.FileTransferFailures,
+			DBInsertFailures:     s.FailedRecords,
+			SuccessRate:          s.SuccessRate(),
+		}
+	}
+	b, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintln(w, string(b))
 }
