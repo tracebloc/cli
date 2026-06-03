@@ -50,9 +50,12 @@ on the cluster's shared PVC, submitting the ingestion request,
 watching the resulting Job, and reporting the outcome. Customers never
 touch Helm, never edit YAML, never run kubectl cp manually.
 
-Today this binary implements only ` + "`version`" + ` and ` + "`completion`" + ` —
-see https://github.com/tracebloc/client/issues/147 for the v0.1
-roadmap. Subsequent phases land subcommands incrementally.`,
+This binary implements the full v0.1 ingestion path: ` + "`dataset push`" + `
+(the dominant workflow above), ` + "`ingest validate`" + ` for a local
+schema check, ` + "`cluster info`" + ` for discovery diagnostics, plus
+` + "`version`" + ` and ` + "`completion`" + `. See
+https://github.com/tracebloc/client/issues/147 for the v0.1 roadmap and
+what's planned next.`,
 
 		// Silence cobra's auto-printed errors + usage on every error;
 		// we already print structured errors in handlers, and the
