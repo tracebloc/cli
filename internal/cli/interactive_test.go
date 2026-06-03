@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/tracebloc/cli/internal/push"
@@ -15,6 +16,7 @@ import (
 type fakePrompter struct {
 	answers map[string]string
 	asked   []string
+	confirm *bool // nil → return the prompt's default (true)
 }
 
 func (f *fakePrompter) answer(label, def string) string {
@@ -37,6 +39,13 @@ func (f *fakePrompter) Input(label, _ /*help*/, def string, validate func(string
 
 func (f *fakePrompter) Select(label, _ /*help*/ string, _ []string, def string) (string, error) {
 	return f.answer(label, def), nil
+}
+
+func (f *fakePrompter) Confirm(_ string, def bool) (bool, error) {
+	if f.confirm != nil {
+		return *f.confirm, nil
+	}
+	return def, nil
 }
 
 func discardPrinter() *ui.Printer { return ui.New(&bytes.Buffer{}) }
@@ -77,10 +86,12 @@ func TestRunInteractive_FillsAllWhenEmpty(t *testing.T) {
 // explicit --category) mean nothing is prompted.
 func TestRunInteractive_SkipsProvidedValues(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{}}
+	// text_classification has no category-specific prompts, so with all
+	// core fields set + an explicit --category, nothing is asked.
 	a := &runDatasetPushArgs{
 		LocalPath: "./data",
 		Spec: push.SpecArgs{
-			Category: "image_classification", Table: "t", Intent: "train", LabelColumn: "label",
+			Category: "text_classification", Table: "t", Intent: "train", LabelColumn: "label",
 		},
 	}
 	if err := runInteractive(discardPrinter(), f, a, true /*categorySet*/); err != nil {
@@ -88,6 +99,62 @@ func TestRunInteractive_SkipsProvidedValues(t *testing.T) {
 	}
 	if len(f.asked) != 0 {
 		t.Errorf("expected no prompts, but asked: %v", f.asked)
+	}
+}
+
+// TestRunInteractive_Keypoint prompts for the required keypoint count;
+// the optional resolution left blank means auto-detect.
+func TestRunInteractive_Keypoint(t *testing.T) {
+	f := &fakePrompter{answers: map[string]string{"Number of keypoints per sample": "17"}}
+	a := &runDatasetPushArgs{
+		LocalPath: "./kp",
+		Spec:      push.SpecArgs{Category: "keypoint_detection", Table: "kp_train", Intent: "train", LabelColumn: "image_label"},
+	}
+	if err := runInteractive(discardPrinter(), f, a, true); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.Spec.NumberOfKeypoints != 17 {
+		t.Errorf("NumberOfKeypoints = %d, want 17", a.Spec.NumberOfKeypoints)
+	}
+	if a.TargetSizeFlag != "" {
+		t.Errorf("TargetSizeFlag = %q, want empty (auto-detect)", a.TargetSizeFlag)
+	}
+}
+
+// TestRunInteractive_TabularRegression prompts for the label policy
+// (regression-class) and leaves the schema to inference.
+func TestRunInteractive_TabularRegression(t *testing.T) {
+	f := &fakePrompter{answers: map[string]string{"Label policy": "passthrough"}}
+	a := &runDatasetPushArgs{
+		LocalPath: "./tab",
+		Spec:      push.SpecArgs{Category: "tabular_regression", Table: "reg_train", Intent: "train", LabelColumn: "Target"},
+	}
+	if err := runInteractive(discardPrinter(), f, a, true); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.Spec.LabelPolicy != "passthrough" {
+		t.Errorf("LabelPolicy = %q, want passthrough", a.Spec.LabelPolicy)
+	}
+	if a.SchemaFlag != "" {
+		t.Errorf("SchemaFlag = %q, want empty (infer)", a.SchemaFlag)
+	}
+}
+
+// TestRunInteractive_Cancel: declining the confirm returns the
+// cancellation sentinel — a clean abort, not a failure.
+func TestRunInteractive_Cancel(t *testing.T) {
+	no := false
+	f := &fakePrompter{
+		answers: map[string]string{"Path to your dataset directory": "./x"},
+		confirm: &no,
+	}
+	// path is prompted (→ prompted=true → a confirm is shown); the rest
+	// is pre-set so we reach the confirm cleanly.
+	a := &runDatasetPushArgs{Spec: push.SpecArgs{
+		Category: "image_classification", Table: "t", Intent: "train", LabelColumn: "label",
+	}}
+	if err := runInteractive(discardPrinter(), f, a, true); !errors.Is(err, errInteractiveCancelled) {
+		t.Fatalf("err = %v, want errInteractiveCancelled", err)
 	}
 }
 
