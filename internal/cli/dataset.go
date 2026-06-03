@@ -24,8 +24,9 @@ import (
 // verb is `push`, completed in Phase 3 (tracebloc/client#151) across
 // PR-a (pre-flight: spec synth, validation, layout walk, cluster
 // discovery) and PR-b (this one: ephemeral stage Pod + tar-over-
-// exec stream + progress bar + SIGINT-safe cleanup). Future verbs
-// (`dataset list`, `dataset rm`) hang off this parent in v0.2.
+// exec stream + progress bar + SIGINT-safe cleanup). `dataset rm`
+// (#30) removes a pushed dataset's in-cluster artifacts; `dataset
+// list` hangs off this parent later.
 func newDatasetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dataset",
@@ -41,6 +42,7 @@ ingestor Job to completion (streaming logs + the final summary).
 before the first push.`,
 	}
 	cmd.AddCommand(newDatasetPushCmd())
+	cmd.AddCommand(newDatasetRmCmd())
 	return cmd
 }
 
