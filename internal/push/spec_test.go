@@ -197,6 +197,39 @@ func TestBuild_NoTargetSize_OmitsSpecBlock(t *testing.T) {
 	}
 }
 
+// TestBuild_TargetSize_EmittedHeightWidth locks the [height, width]
+// emit order (Bugbot, PR #22). TargetSize is stored [W, H] but the
+// ingest.v1 schema + ingestor read target_size as [height, width].
+// Square sizes can't catch a swap, so this uses a NON-square
+// resolution: [W, H] = [640, 480] must emit [480, 640].
+func TestBuild_TargetSize_EmittedHeightWidth(t *testing.T) {
+	// image_classification → under spec.file_options
+	icSpec := SpecArgs{
+		Table: "t", Category: "image_classification", Intent: "train",
+		LabelColumn: "label", TargetSize: []int{640, 480}, // [W, H]
+	}.Build()
+	sb, ok := icSpec["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("image: no spec block: %#v", icSpec["spec"])
+	}
+	fo, ok := sb["file_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("image: no file_options: %#v", sb["file_options"])
+	}
+	if ts, ok := fo["target_size"].([]int); !ok || len(ts) != 2 || ts[0] != 480 || ts[1] != 640 {
+		t.Errorf("image target_size = %#v, want [480 640] (height, width)", fo["target_size"])
+	}
+
+	// keypoint_detection → top-level
+	kpSpec := SpecArgs{
+		Table: "t", Category: "keypoint_detection", Intent: "train",
+		LabelColumn: "image_label", TargetSize: []int{640, 480}, NumberOfKeypoints: 9,
+	}.Build()
+	if ts, ok := kpSpec["target_size"].([]int); !ok || len(ts) != 2 || ts[0] != 480 || ts[1] != 640 {
+		t.Errorf("keypoint top-level target_size = %#v, want [480 640] (height, width)", kpSpec["target_size"])
+	}
+}
+
 // TestBuild_Tabular_PassesSchema pins the tabular Build branch: it
 // emits schema-valid specs for the three label shapes — a string
 // label (tabular_classification), an object label+policy
