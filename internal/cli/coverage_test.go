@@ -13,6 +13,7 @@ import (
 
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/push"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // TestPrintPushPreflight_RendersKeyFacts pins that the pre-flight
@@ -46,7 +47,8 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printPushPreflight(&buf, layout, release, pvc, spec, false)
+	p := ui.New(&buf, ui.WithColor(false))
+	printPushPreflight(p, layout, release, pvc, spec, false)
 	out := buf.String()
 
 	for _, want := range []string{

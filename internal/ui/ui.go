@@ -148,3 +148,16 @@ func (p *Printer) Hintf(format string, a ...any) {
 func (p *Printer) PromptHeader(label string) {
 	p.out("\n  %s\n", p.paint(label, color.Bold, color.FgWhite))
 }
+
+// Section prints a bold section header preceded by a blank line. Used
+// to group related Field rows (e.g. "Target cluster").
+func (p *Printer) Section(title string) {
+	p.out("\n  %s\n", p.paint(title, color.Bold))
+}
+
+// Field prints an aligned, dim-labelled key/value row beneath a
+// Section: "    label:        value". The label is padded to a fixed
+// width so values line up within a section.
+func (p *Printer) Field(label, value string) {
+	p.out("    %s %s\n", p.paint(fmt.Sprintf("%-14s", label+":"), color.Faint), value)
+}

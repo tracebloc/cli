@@ -15,6 +15,7 @@ import (
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/schema"
 	"github.com/tracebloc/cli/internal/submit"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // newDatasetCmd wires the `tracebloc dataset` subtree. The dominant
@@ -166,6 +167,7 @@ Exit codes:
 					Detach:         detach,
 					IdempotencyKey: idempotencyKey,
 					ImageDigest:    imageDigest,
+					Printer:        printerFor(cmd),
 				})
 		},
 	}
@@ -243,6 +245,10 @@ type runDatasetPushArgs struct {
 	DryRun         bool
 	IngestorSAName string
 	StagePodImage  string
+
+	// Printer renders the pre-flight summary + status output. Built in
+	// the RunE from the persistent --plain flag (see printerFor).
+	Printer *ui.Printer
 
 	// Phase 4 (#152) fields. See the flag declarations for the
 	// per-knob rationale; all three are optional.
@@ -471,7 +477,7 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	//    differs. Customers iterating on a bad layout see this
 	//    every attempt, so it's worth keeping skimmable: one fact
 	//    per line, aligned by column.
-	printPushPreflight(out, layout, release, pvc, spec, a.DryRun)
+	printPushPreflight(a.Printer, layout, release, pvc, spec, a.DryRun)
 
 	// 8. Dry-run stop. Acknowledged success.
 	if a.DryRun {
@@ -622,76 +628,66 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 // types) because the formatting is policy and lives with the CLI,
 // not the data.
 func printPushPreflight(
-	out io.Writer,
+	p *ui.Printer,
 	layout *push.LocalLayout,
 	release *cluster.ParentRelease,
 	pvc *cluster.SharedPVC,
 	spec map[string]any,
 	dryRun bool,
 ) {
-	// Explicit-discard the writer errors throughout — same rationale
-	// as cli/cluster.go and cli/ingest.go: a pipe-write failure
-	// shouldn't convert success into failure. The exit code is
-	// the contract.
 	cat, _ := spec["category"].(string)
 
-	_, _ = fmt.Fprintf(out, "Local dataset:\n")
-	_, _ = fmt.Fprintf(out, "  root:          %s\n", layout.Root)
+	p.Section("Local dataset")
+	p.Field("root", layout.Root)
 	switch {
 	case push.IsTabular(cat):
-		_, _ = fmt.Fprintf(out, "  data CSV:      %s\n", layout.LabelsCSV)
+		p.Field("data CSV", layout.LabelsCSV)
 		if sch, ok := spec["schema"].(map[string]string); ok {
-			_, _ = fmt.Fprintf(out, "  columns:       %d\n", len(sch))
+			p.Field("columns", fmt.Sprintf("%d", len(sch)))
 		}
 	case push.IsText(cat):
 		dir := push.TextSidecarDir(cat)
-		_, _ = fmt.Fprintf(out, "  labels.csv:    %s\n", layout.LabelsCSV)
-		_, _ = fmt.Fprintf(out, "  %-15s%d files\n", dir+":", len(layout.Sidecars[dir]))
+		p.Field("labels.csv", layout.LabelsCSV)
+		p.Field(dir, fmt.Sprintf("%d files", len(layout.Sidecars[dir])))
 		if _, ok := layout.ExtraFiles["tokenizer.json"]; ok {
-			_, _ = fmt.Fprintf(out, "  %-15s%s\n", "tokenizer:", "tokenizer.json")
+			p.Field("tokenizer", "tokenizer.json")
 		}
 	default:
-		_, _ = fmt.Fprintf(out, "  labels.csv:    %s\n", layout.LabelsCSV)
-		_, _ = fmt.Fprintf(out, "  images:        %d files\n", len(layout.Images))
+		p.Field("labels.csv", layout.LabelsCSV)
+		p.Field("images", fmt.Sprintf("%d files", len(layout.Images)))
 		if anns := layout.Sidecars["annotations"]; len(anns) > 0 {
-			_, _ = fmt.Fprintf(out, "  annotations:   %d files\n", len(anns))
+			p.Field("annotations", fmt.Sprintf("%d files", len(anns)))
 		}
 	}
-	_, _ = fmt.Fprintf(out, "  total size:    %s\n", push.HumanBytes(layout.TotalBytes))
-	_, _ = fmt.Fprintln(out)
+	p.Field("total size", push.HumanBytes(layout.TotalBytes))
 
-	_, _ = fmt.Fprintf(out, "Target cluster:\n")
-	_, _ = fmt.Fprintf(out, "  release:       %s (chart %s)\n", release.ReleaseName, release.ChartVersion)
-	_, _ = fmt.Fprintf(out, "  jobs-manager:  %s\n", release.JobsManagerService)
-	_, _ = fmt.Fprintf(out, "  shared PVC:    %s (%s)\n", pvc.ClaimName, pvc.Phase)
+	p.Section("Target cluster")
+	p.Field("release", fmt.Sprintf("%s (chart %s)", release.ReleaseName, release.ChartVersion))
+	p.Field("jobs-manager", release.JobsManagerService)
+	p.Field("shared PVC", fmt.Sprintf("%s (%s)", pvc.ClaimName, pvc.Phase))
 	if !pvc.IsReadWriteMany() {
-		// Warn but don't block — RWO clusters still work, the
-		// scheduler will co-locate the stage Pod with the existing
-		// mounter. Phase 3 PR-b will surface the same warning at
-		// pod-create time too.
-		_, _ = fmt.Fprintf(out, "  access:        %v (warn: not ReadWriteMany — stage Pod will co-locate)\n", pvc.AccessModes)
+		// Warn but don't block — RWO clusters still work; the scheduler
+		// co-locates the stage Pod with the existing mounter.
+		p.Warnf("PVC is %v, not ReadWriteMany — the stage Pod will co-locate with the existing mounter", pvc.AccessModes)
 	}
-	_, _ = fmt.Fprintln(out)
 
-	_, _ = fmt.Fprintf(out, "Synthesized ingest spec:\n")
-	_, _ = fmt.Fprintf(out, "  table:         %s\n", spec["table"])
-	_, _ = fmt.Fprintf(out, "  category:      %s\n", spec["category"])
-	_, _ = fmt.Fprintf(out, "  intent:        %s\n", spec["intent"])
+	p.Section("Synthesized ingest spec")
+	p.Field("table", fmt.Sprintf("%v", spec["table"]))
+	p.Field("category", fmt.Sprintf("%v", spec["category"]))
+	p.Field("intent", fmt.Sprintf("%v", spec["intent"]))
 	switch lbl := spec["label"].(type) {
 	case string:
-		_, _ = fmt.Fprintf(out, "  label column:  %s\n", lbl)
+		p.Field("label column", lbl)
 	case map[string]any:
-		_, _ = fmt.Fprintf(out, "  label column:  %v (policy: %v)\n", lbl["column"], lbl["policy"])
+		p.Field("label column", fmt.Sprintf("%v (policy: %v)", lbl["column"], lbl["policy"]))
 	}
 	if tc, ok := spec["time_column"].(string); ok && tc != "" {
-		_, _ = fmt.Fprintf(out, "  time column:   %s\n", tc)
+		p.Field("time column", tc)
 	}
-	_, _ = fmt.Fprintf(out, "  destination:   %s\n", push.FinalDestPrefix(spec["table"].(string)))
-	_, _ = fmt.Fprintln(out)
+	p.Field("destination", push.FinalDestPrefix(spec["table"].(string)))
 
 	if !dryRun {
-		_, _ = fmt.Fprintf(out, "Next: stage %d files (%s) for table %q\n",
+		p.Infof("Next: stage %d files (%s) for table %q",
 			layout.FileCount(), push.HumanBytes(layout.TotalBytes), spec["table"])
-		_, _ = fmt.Fprintln(out)
 	}
 }

@@ -66,6 +66,26 @@ func TestWithColorTrue_EmitsANSI(t *testing.T) {
 	}
 }
 
+// TestSectionAndField_Plain: the aligned key/value rendering used by
+// cluster info + dataset push pre-flight stays clean (no ANSI) and
+// surfaces both label and value when color is off.
+func TestSectionAndField_Plain(t *testing.T) {
+	var buf bytes.Buffer
+	p := New(&buf, WithColor(false))
+	p.Section("Target cluster")
+	p.Field("release", "ingdemo (chart 1.4.2)")
+
+	out := buf.String()
+	if strings.Contains(out, esc) {
+		t.Errorf("plain Section/Field emitted ANSI: %q", out)
+	}
+	for _, want := range []string{"Target cluster", "release:", "ingdemo (chart 1.4.2)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %q", want, out)
+		}
+	}
+}
+
 // TestNoColorEnv_DefaultsPlain exercises the NO_COLOR branch of
 // autoColor: with it set, a freshly-constructed Printer stays plain.
 // (t.Setenv restores the prior value when the test ends.)
