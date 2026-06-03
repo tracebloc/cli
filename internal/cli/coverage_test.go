@@ -84,6 +84,43 @@ func TestWritePushJSON(t *testing.T) {
 	}
 }
 
+// TestClassifyPushOutcome pins the --output-json status ↔ exit-code
+// contract (Bugbot #38): the status must agree with the exit code on
+// every path — a partial-failure must NOT report "succeeded", and a
+// watch error must still classify (so JSON gets emitted). wantCode 0
+// means no exitError (success).
+func TestClassifyPushOutcome(t *testing.T) {
+	resp := &submit.SubmitResponse{Namespace: "ns1", JobName: "ingest-job-x"}
+	cases := []struct {
+		name     string
+		res      *submit.Result
+		err      error
+		wantStat string
+		wantCode int
+	}{
+		{"clean", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 10}}}, nil, "succeeded", 0},
+		{"partial", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 7, FailedRecords: 3}}}, nil, "completed_with_failures", 9},
+		{"failed", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeFailed}}, nil, "failed", 9},
+		{"detached", &submit.Result{Submit: resp}, nil, "detached", 0},
+		{"watch error", &submit.Result{Submit: resp}, &submit.WatchError{Err: errors.New("stream broke")}, "watch_error", 9},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotStat, gotErr := classifyPushOutcome(c.res, c.err)
+			if gotStat != c.wantStat {
+				t.Errorf("status = %q, want %q", gotStat, c.wantStat)
+			}
+			code := 0
+			if gotErr != nil {
+				code = gotErr.Code()
+			}
+			if code != c.wantCode {
+				t.Errorf("exit code = %d, want %d", code, c.wantCode)
+			}
+		})
+	}
+}
+
 // TestExitError_Methods pins the exit-code carrier: Error() surfaces
 // the wrapped message (or a fallback when nil), and Code() returns the
 // process exit code main() propagates.

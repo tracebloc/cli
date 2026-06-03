@@ -650,68 +650,73 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		Out:              out,
 		Printer:          a.Printer,
 	})
+	// Classify once: a machine-readable status + the process exit error
+	// in lockstep, so --output-json emits exactly one result object on
+	// EVERY path (success / partial / failure / submit-or-watch error)
+	// whose status matches the exit code. (Bugbot #38.)
+	status, exitErr := classifyPushOutcome(submitRes, err)
+
+	if a.OutputJSON {
+		var summary *submit.Summary
+		var ns, jobName string
+		if submitRes != nil {
+			if submitRes.Watch != nil {
+				summary = submitRes.Watch.Summary
+			}
+			if submitRes.Submit != nil {
+				ns, jobName = submitRes.Submit.Namespace, submitRes.Submit.JobName
+			}
+		}
+		writePushJSON(a.JSONOut, status, spec, summary, ns, jobName)
+	}
+
+	if exitErr != nil {
+		return exitErr
+	}
+	return nil
+}
+
+// classifyPushOutcome maps the result of submit.Run to a machine-
+// readable status string + the process exit error, kept in lockstep so
+// --output-json's status always agrees with the exit code (a nil
+// *exitError = success, exit 0). It also covers the error paths
+// (auth/submit/watch) so --output-json can still emit a result object
+// when submit.Run returns an error. (Bugbot #38.)
+func classifyPushOutcome(res *submit.Result, err error) (string, *exitError) {
 	if err != nil {
 		switch {
 		case submit.IsAuthError(err):
-			return &exitError{code: 5, err: err}
+			return "auth_error", &exitError{code: 5, err: err}
 		case submit.IsWatchError(err):
-			// Watch-phase failure: jobs-manager already accepted
-			// the run, the cluster is doing the work, the CLI
-			// just couldn't follow along. Exit 9 (ingest-side)
-			// not 8 (submit-side). Bugbot flagged the
-			// previously-undifferentiated mapping on PR #10.
-			return &exitError{code: 9, err: err}
+			// jobs-manager accepted the run; the cluster is doing the
+			// work, the CLI just couldn't follow along — ingest-side
+			// (exit 9), not submit-side (8).
+			return "watch_error", &exitError{code: 9, err: err}
 		default:
-			return &exitError{code: 8, err: err}
+			return "submit_error", &exitError{code: 8, err: err}
 		}
 	}
-
-	if a.OutputJSON {
-		status := "detached" // --detach flag → no watch result
-		var summary *submit.Summary
-		if submitRes.Watch != nil {
-			summary = submitRes.Watch.Summary
-			switch submitRes.Watch.Outcome {
-			case submit.JobOutcomeSucceeded:
-				status = "succeeded"
-			case submit.JobOutcomeFailed:
-				status = "failed"
-			case submit.JobOutcomeDetached:
-				status = "detached"
-			default:
-				status = "unknown"
-			}
-		}
-		writePushJSON(a.JSONOut, status, spec, summary,
-			submitRes.Submit.Namespace, submitRes.Submit.JobName)
+	// --detach (no watch) or SIGINT-mid-watch: success; cluster runs on.
+	if res == nil || res.Watch == nil || res.Watch.Outcome == submit.JobOutcomeDetached {
+		return "detached", nil
 	}
-
-	// Detach paths (--detach flag OR SIGINT-mid-watch) are
-	// success — cluster keeps running; the orchestrator already
-	// printed the reconnect hint.
-	if submitRes.Watch == nil || submitRes.Watch.Outcome == submit.JobOutcomeDetached {
-		return nil
-	}
-
-	// Watch outcomes. Both Failed and Unknown route to exit 9
-	// (Unknown = finalJobStatus timed out without seeing a
-	// terminal condition, which we can't claim as success).
-	// Bugbot flagged the prior switch's missing Unknown branch
-	// on PR #10.
-	switch submitRes.Watch.Outcome {
+	switch res.Watch.Outcome {
 	case submit.JobOutcomeFailed:
-		return &exitError{code: 9, err: errors.New("ingestion Job exited non-zero — see logs above")}
+		return "failed", &exitError{code: 9, err: errors.New("ingestion Job exited non-zero — see logs above")}
 	case submit.JobOutcomeUnknown:
-		return &exitError{code: 9, err: errors.New(
+		return "unknown", &exitError{code: 9, err: errors.New(
 			"ingestion Job's final status couldn't be determined within the watch window — " +
-				"check `kubectl get job -n " + submitRes.Submit.Namespace + " " + submitRes.Submit.JobName + "` for the outcome")}
+				"check `kubectl get job -n " + res.Submit.Namespace + " " + res.Submit.JobName + "` for the outcome")}
 	case submit.JobOutcomeSucceeded:
-		if submitRes.Watch.Summary != nil && submitRes.Watch.Summary.HasFailures() {
-			return &exitError{code: 9, err: errors.New(
+		// Job exited 0, but rows can still have failed — exit 9, and the
+		// JSON status must say so, NOT "succeeded". (Bugbot #38.)
+		if res.Watch.Summary != nil && res.Watch.Summary.HasFailures() {
+			return "completed_with_failures", &exitError{code: 9, err: errors.New(
 				"ingestion Job completed but the summary reports failures — see panel above")}
 		}
+		return "succeeded", nil
 	}
-	return nil
+	return "unknown", nil
 }
 
 // printPushPreflight is the customer-facing summary. Mirrors
@@ -788,7 +793,7 @@ func printPushPreflight(
 // It's a presentation type owned by the CLI layer, so submit.Summary
 // stays json-tag-free and this wire format can evolve independently.
 type pushJSONResult struct {
-	Status    string           `json:"status"` // dry-run|succeeded|failed|detached|unknown
+	Status    string           `json:"status"` // dry-run|succeeded|completed_with_failures|failed|detached|unknown|auth_error|submit_error|watch_error
 	Table     string           `json:"table"`
 	Category  string           `json:"category"`
 	Intent    string           `json:"intent"`
