@@ -300,6 +300,10 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	//    leaves Prompter nil and skips straight to the flag-only path.
 	if a.Interactive && a.Prompter != nil {
 		if err := runInteractive(a.Printer, a.Prompter, &a, a.CategorySet); err != nil {
+			if errors.Is(err, errInteractiveCancelled) {
+				a.Printer.Infof("Cancelled — nothing was pushed.")
+				return nil
+			}
 			return &exitError{code: 3, err: fmt.Errorf("interactive setup: %w", err)}
 		}
 	}
