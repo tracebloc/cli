@@ -121,6 +121,31 @@ func TestClassifyPushOutcome(t *testing.T) {
 	}
 }
 
+// TestExpandHome covers the #37 fix: a leading ~ / ~/… resolves under
+// $HOME, while relative, absolute, and empty paths pass through
+// untouched (the case that bit the interactive prompt — the shell
+// never got a chance to expand the typed ~).
+func TestExpandHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir: %v", err)
+	}
+	cases := []struct{ in, want string }{
+		{"~", home},
+		{"~/x", filepath.Join(home, "x")},
+		{"~/tb-fixtures/tab-reg", filepath.Join(home, "tb-fixtures", "tab-reg")},
+		{"./x", "./x"},
+		{"/abs/path", "/abs/path"},
+		{"relative/x", "relative/x"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := expandHome(c.in); got != c.want {
+			t.Errorf("expandHome(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // TestExitError_Methods pins the exit-code carrier: Error() surfaces
 // the wrapped message (or a fallback when nil), and Code() returns the
 // process exit code main() propagates.
