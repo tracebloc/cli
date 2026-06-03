@@ -80,6 +80,23 @@ what's planned next.`,
 	root.AddCommand(newClusterCmd())
 	root.AddCommand(newDatasetCmd())
 
+	// Bare `tracebloc` (no subcommand) renders a friendly home screen
+	// instead of cobra's raw usage dump. Subcommands and --help are
+	// unaffected — cobra dispatches those before this RunE runs.
+	root.RunE = func(cmd *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return cmd.Help() // an arg that wasn't a known subcommand
+		}
+		p := printerFor(cmd)
+		p.Banner("tracebloc", "declarative data ingestion for your cluster")
+		p.Section("Get started")
+		p.Infof("tracebloc dataset push ./data     — stage + ingest a dataset (guided if you omit flags)")
+		p.Infof("tracebloc cluster info            — check the CLI can reach your cluster")
+		p.Infof("tracebloc ingest validate f.yaml  — validate an ingest.yaml locally")
+		p.Hintf("Add --help to any command for the full flag list.")
+		return nil
+	}
+
 	return root
 }
 

@@ -117,6 +117,8 @@ func runClusterInfo(
 	ingestorSAOverride string,
 	tokenExpiry int64,
 ) error {
+	p.Banner("tracebloc", "cluster diagnostics")
+
 	resolved, err := cluster.Load(cluster.KubeconfigOptions{
 		Path:      kubeconfigPath,
 		Context:   contextOverride,
