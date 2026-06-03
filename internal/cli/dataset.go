@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -83,8 +84,9 @@ func newDatasetPushCmd() *cobra.Command {
 		numberOfKeypoints int
 
 		// Operations flags.
-		dryRun  bool
-		noInput bool
+		dryRun     bool
+		noInput    bool
+		outputJSON bool
 
 		// Ingestor SA name override. Used as the ServiceAccountName
 		// of the ephemeral stage Pod, so the Pod inherits whatever
@@ -157,12 +159,22 @@ Exit codes:
 			// for whatever's still missing. Off a TTY / with --no-input,
 			// prompter stays nil and runDatasetPush keeps flag-only
 			// behavior.
-			interactive := !noInput && isInteractiveTTY()
+			interactive := !noInput && !outputJSON && isInteractiveTTY()
 			var pr prompter
 			if interactive {
 				pr = surveyPrompter{}
 			}
-			return runDatasetPush(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
+			// In --output-json mode, human output goes to stderr so
+			// stdout carries only the JSON result.
+			humanOut := cmd.OutOrStdout()
+			printer := printerFor(cmd)
+			var jsonOut io.Writer
+			if outputJSON {
+				humanOut = cmd.ErrOrStderr()
+				printer = printerForWriter(cmd, cmd.ErrOrStderr())
+				jsonOut = cmd.OutOrStdout()
+			}
+			return runDatasetPush(cmd.Context(), humanOut, cmd.ErrOrStderr(),
 				runDatasetPushArgs{
 					LocalPath:  localPath,
 					Kubeconfig: kubeconfigPath,
@@ -181,10 +193,12 @@ Exit codes:
 					Detach:         detach,
 					IdempotencyKey: idempotencyKey,
 					ImageDigest:    imageDigest,
-					Printer:        printerFor(cmd),
+					Printer:        printer,
 					Interactive:    interactive,
 					Prompter:       pr,
 					CategorySet:    cmd.Flags().Changed("category"),
+					OutputJSON:     outputJSON,
+					JSONOut:        jsonOut,
 				})
 		},
 	}
@@ -228,6 +242,8 @@ Exit codes:
 		"validate + discover + walk, but don't create any cluster resources")
 	cmd.Flags().BoolVar(&noInput, "no-input", false,
 		"disable interactive prompts; fail on missing required values (for CI/scripts)")
+	cmd.Flags().BoolVar(&outputJSON, "output-json", false,
+		"emit a machine-readable JSON result on stdout (human output → stderr; implies --no-input)")
 	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
 		"override the ingestor ServiceAccount name (default: \"ingestor\"); "+
 			"set this if you customized ingestionAuthz.serviceAccountName in the parent client chart")
@@ -277,6 +293,12 @@ type runDatasetPushArgs struct {
 	Interactive bool
 	Prompter    prompter
 	CategorySet bool
+
+	// OutputJSON routes human output to stderr and emits a JSON result
+	// to JSONOut (stdout); set together by the RunE in --output-json
+	// mode (which also forces non-interactive).
+	OutputJSON bool
+	JSONOut    io.Writer
 
 	// Phase 4 (#152) fields. See the flag declarations for the
 	// per-knob rationale; all three are optional.
@@ -528,6 +550,9 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	// 8. Dry-run stop. Acknowledged success.
 	if a.DryRun {
 		_, _ = fmt.Fprintln(out, "Dry-run complete — no cluster resources were created.")
+		if a.OutputJSON {
+			writePushJSON(a.JSONOut, "dry-run", spec, nil, "", "")
+		}
 		return nil
 	}
 
@@ -625,48 +650,73 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		Out:              out,
 		Printer:          a.Printer,
 	})
+	// Classify once: a machine-readable status + the process exit error
+	// in lockstep, so --output-json emits exactly one result object on
+	// EVERY path (success / partial / failure / submit-or-watch error)
+	// whose status matches the exit code. (Bugbot #38.)
+	status, exitErr := classifyPushOutcome(submitRes, err)
+
+	if a.OutputJSON {
+		var summary *submit.Summary
+		var ns, jobName string
+		if submitRes != nil {
+			if submitRes.Watch != nil {
+				summary = submitRes.Watch.Summary
+			}
+			if submitRes.Submit != nil {
+				ns, jobName = submitRes.Submit.Namespace, submitRes.Submit.JobName
+			}
+		}
+		writePushJSON(a.JSONOut, status, spec, summary, ns, jobName)
+	}
+
+	if exitErr != nil {
+		return exitErr
+	}
+	return nil
+}
+
+// classifyPushOutcome maps the result of submit.Run to a machine-
+// readable status string + the process exit error, kept in lockstep so
+// --output-json's status always agrees with the exit code (a nil
+// *exitError = success, exit 0). It also covers the error paths
+// (auth/submit/watch) so --output-json can still emit a result object
+// when submit.Run returns an error. (Bugbot #38.)
+func classifyPushOutcome(res *submit.Result, err error) (string, *exitError) {
 	if err != nil {
 		switch {
 		case submit.IsAuthError(err):
-			return &exitError{code: 5, err: err}
+			return "auth_error", &exitError{code: 5, err: err}
 		case submit.IsWatchError(err):
-			// Watch-phase failure: jobs-manager already accepted
-			// the run, the cluster is doing the work, the CLI
-			// just couldn't follow along. Exit 9 (ingest-side)
-			// not 8 (submit-side). Bugbot flagged the
-			// previously-undifferentiated mapping on PR #10.
-			return &exitError{code: 9, err: err}
+			// jobs-manager accepted the run; the cluster is doing the
+			// work, the CLI just couldn't follow along — ingest-side
+			// (exit 9), not submit-side (8).
+			return "watch_error", &exitError{code: 9, err: err}
 		default:
-			return &exitError{code: 8, err: err}
+			return "submit_error", &exitError{code: 8, err: err}
 		}
 	}
-
-	// Detach paths (--detach flag OR SIGINT-mid-watch) are
-	// success — cluster keeps running; the orchestrator already
-	// printed the reconnect hint.
-	if submitRes.Watch == nil || submitRes.Watch.Outcome == submit.JobOutcomeDetached {
-		return nil
+	// --detach (no watch) or SIGINT-mid-watch: success; cluster runs on.
+	if res == nil || res.Watch == nil || res.Watch.Outcome == submit.JobOutcomeDetached {
+		return "detached", nil
 	}
-
-	// Watch outcomes. Both Failed and Unknown route to exit 9
-	// (Unknown = finalJobStatus timed out without seeing a
-	// terminal condition, which we can't claim as success).
-	// Bugbot flagged the prior switch's missing Unknown branch
-	// on PR #10.
-	switch submitRes.Watch.Outcome {
+	switch res.Watch.Outcome {
 	case submit.JobOutcomeFailed:
-		return &exitError{code: 9, err: errors.New("ingestion Job exited non-zero — see logs above")}
+		return "failed", &exitError{code: 9, err: errors.New("ingestion Job exited non-zero — see logs above")}
 	case submit.JobOutcomeUnknown:
-		return &exitError{code: 9, err: errors.New(
+		return "unknown", &exitError{code: 9, err: errors.New(
 			"ingestion Job's final status couldn't be determined within the watch window — " +
-				"check `kubectl get job -n " + submitRes.Submit.Namespace + " " + submitRes.Submit.JobName + "` for the outcome")}
+				"check `kubectl get job -n " + res.Submit.Namespace + " " + res.Submit.JobName + "` for the outcome")}
 	case submit.JobOutcomeSucceeded:
-		if submitRes.Watch.Summary != nil && submitRes.Watch.Summary.HasFailures() {
-			return &exitError{code: 9, err: errors.New(
+		// Job exited 0, but rows can still have failed — exit 9, and the
+		// JSON status must say so, NOT "succeeded". (Bugbot #38.)
+		if res.Watch.Summary != nil && res.Watch.Summary.HasFailures() {
+			return "completed_with_failures", &exitError{code: 9, err: errors.New(
 				"ingestion Job completed but the summary reports failures — see panel above")}
 		}
+		return "succeeded", nil
 	}
-	return nil
+	return "unknown", nil
 }
 
 // printPushPreflight is the customer-facing summary. Mirrors
@@ -737,4 +787,59 @@ func printPushPreflight(
 		p.Infof("Next: stage %d files (%s) for table %q",
 			layout.FileCount(), push.HumanBytes(layout.TotalBytes), spec["table"])
 	}
+}
+
+// pushJSONResult is the machine-readable shape emitted by --output-json.
+// It's a presentation type owned by the CLI layer, so submit.Summary
+// stays json-tag-free and this wire format can evolve independently.
+type pushJSONResult struct {
+	Status    string           `json:"status"` // dry-run|succeeded|completed_with_failures|failed|detached|unknown|auth_error|submit_error|watch_error
+	Table     string           `json:"table"`
+	Category  string           `json:"category"`
+	Intent    string           `json:"intent"`
+	Namespace string           `json:"namespace,omitempty"`
+	JobName   string           `json:"job_name,omitempty"`
+	Summary   *pushJSONSummary `json:"summary,omitempty"`
+}
+
+type pushJSONSummary struct {
+	IngestorID           string  `json:"ingestor_id,omitempty"`
+	TotalRecords         int64   `json:"total_records"`
+	InsertedRecords      int64   `json:"inserted_records"`
+	SentToAPI            int64   `json:"sent_to_api"`
+	SkippedRecords       int64   `json:"skipped_records"`
+	FileTransferFailures int64   `json:"file_transfer_failures"`
+	DBInsertFailures     int64   `json:"db_insert_failures"`
+	SuccessRate          float64 `json:"success_rate"`
+}
+
+// writePushJSON serializes the push result to w (stdout in
+// --output-json mode). Errors are dropped: marshaling our own struct
+// can't fail in practice, and the exit code remains the contract.
+func writePushJSON(w io.Writer, status string, spec map[string]any, s *submit.Summary, ns, jobName string) {
+	res := pushJSONResult{
+		Status:    status,
+		Table:     fmt.Sprintf("%v", spec["table"]),
+		Category:  fmt.Sprintf("%v", spec["category"]),
+		Intent:    fmt.Sprintf("%v", spec["intent"]),
+		Namespace: ns,
+		JobName:   jobName,
+	}
+	if s != nil {
+		res.Summary = &pushJSONSummary{
+			IngestorID:           s.IngestorID,
+			TotalRecords:         s.TotalRecords,
+			InsertedRecords:      s.InsertedRecords,
+			SentToAPI:            s.APISentRecords,
+			SkippedRecords:       s.SkippedRecords,
+			FileTransferFailures: s.FileTransferFailures,
+			DBInsertFailures:     s.FailedRecords,
+			SuccessRate:          s.SuccessRate(),
+		}
+	}
+	b, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintln(w, string(b))
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/push"
+	"github.com/tracebloc/cli/internal/submit"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -58,6 +60,64 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("pre-flight output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestWritePushJSON checks the --output-json result serializes to
+// valid JSON with the expected fields.
+func TestWritePushJSON(t *testing.T) {
+	spec := map[string]any{"table": "reg_train", "category": "tabular_regression", "intent": "train"}
+	s := &submit.Summary{IngestorID: "run-1", TotalRecords: 240, InsertedRecords: 240, APISentRecords: 240}
+
+	var buf bytes.Buffer
+	writePushJSON(&buf, "succeeded", spec, s, "ns1", "ingest-job-x")
+
+	var got pushJSONResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	if got.Status != "succeeded" || got.Table != "reg_train" || got.JobName != "ingest-job-x" {
+		t.Errorf("unexpected result: %+v", got)
+	}
+	if got.Summary == nil || got.Summary.InsertedRecords != 240 {
+		t.Errorf("summary missing/wrong: %+v", got.Summary)
+	}
+}
+
+// TestClassifyPushOutcome pins the --output-json status ↔ exit-code
+// contract (Bugbot #38): the status must agree with the exit code on
+// every path — a partial-failure must NOT report "succeeded", and a
+// watch error must still classify (so JSON gets emitted). wantCode 0
+// means no exitError (success).
+func TestClassifyPushOutcome(t *testing.T) {
+	resp := &submit.SubmitResponse{Namespace: "ns1", JobName: "ingest-job-x"}
+	cases := []struct {
+		name     string
+		res      *submit.Result
+		err      error
+		wantStat string
+		wantCode int
+	}{
+		{"clean", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 10}}}, nil, "succeeded", 0},
+		{"partial", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 7, FailedRecords: 3}}}, nil, "completed_with_failures", 9},
+		{"failed", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeFailed}}, nil, "failed", 9},
+		{"detached", &submit.Result{Submit: resp}, nil, "detached", 0},
+		{"watch error", &submit.Result{Submit: resp}, &submit.WatchError{Err: errors.New("stream broke")}, "watch_error", 9},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotStat, gotErr := classifyPushOutcome(c.res, c.err)
+			if gotStat != c.wantStat {
+				t.Errorf("status = %q, want %q", gotStat, c.wantStat)
+			}
+			code := 0
+			if gotErr != nil {
+				code = gotErr.Code()
+			}
+			if code != c.wantCode {
+				t.Errorf("exit code = %d, want %d", code, c.wantCode)
+			}
+		})
 	}
 }
 
