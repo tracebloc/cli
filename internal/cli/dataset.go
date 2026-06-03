@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -307,6 +308,27 @@ type runDatasetPushArgs struct {
 	ImageDigest    string
 }
 
+// expandHome expands a leading ~ or ~/… to $HOME, leaving every other
+// path (relative, absolute, empty) untouched. It mirrors
+// cluster.expandPath — kept as a small local copy rather than coupling
+// the dataset path-handling to the cluster package's internals; if a
+// third caller appears, promote both to a shared pathutil.
+func expandHome(path string) string {
+	if path == "" || path[0] != '~' {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Can't resolve $HOME — leave it and let the downstream
+		// Discover* error mention the literal path, which is more
+		// useful than a generic failure here.
+		return path
+	}
+	// path[1:] is "" for "~" (→ home) and "/x" for "~/x" (→ home/x);
+	// filepath.Join cleans the join either way.
+	return filepath.Join(home, path[1:])
+}
+
 // runDatasetPush is the full Phase 3 implementation: pre-flight
 // checks, then either --dry-run stop or stage Pod + tar stream +
 // cleanup. Phase 4 (#152) will hook submit-to-jobs-manager after
@@ -334,6 +356,13 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 			"local dataset path is required — pass it as an argument, or run " +
 				"on a terminal without --no-input for guided prompts")}
 	}
+	// Expand a leading ~ ourselves. The shell expands an unquoted ~ on
+	// the command line, but a path typed at the interactive prompt (or
+	// a quoted/literal ~ arg) reaches us unexpanded — and filepath.Abs
+	// would just prepend the CWD, yielding ".../cwd/~/...". Mirrors
+	// cluster.expandPath; done here so it covers both entry points
+	// before any push.Discover* call. (#37)
+	a.LocalPath = expandHome(a.LocalPath)
 
 	// 1. Validate the table name BEFORE anything else. It's both
 	//    the MySQL identifier and the /data/shared/<table>/ PVC
