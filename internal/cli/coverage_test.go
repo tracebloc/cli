@@ -83,6 +83,24 @@ func TestExitError_Methods(t *testing.T) {
 	}
 }
 
+// TestRunDatasetRm_InvalidTableExitsTwo: rm validates the table name
+// before any cluster work, so an unsafe name is exit-code-2 territory
+// and never reaches kubeconfig/cluster resolution.
+func TestRunDatasetRm_InvalidTableExitsTwo(t *testing.T) {
+	var buf bytes.Buffer
+	err := runDatasetRm(context.Background(), runDatasetRmArgs{
+		Table:   "../bad",
+		Printer: ui.New(&buf, ui.WithColor(false)),
+	})
+	var ee *exitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("error is not an *exitError: %v", err)
+	}
+	if ee.Code() != 2 {
+		t.Errorf("exit code = %d, want 2 (invalid table name)", ee.Code())
+	}
+}
+
 // TestRunClusterInfo_BadKubeconfigExitsThree: an unreadable/invalid
 // kubeconfig is exit-code-3 territory (the kubeconfig/local-input
 // bucket), surfaced before any cluster work. Covers the Load-error
