@@ -8,6 +8,8 @@ package cli
 
 import (
 	"github.com/spf13/cobra"
+
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // BuildInfo carries metadata that main.go pulls from -ldflags. We
@@ -65,6 +67,13 @@ what's planned next.`,
 		SilenceUsage:  true,
 	}
 
+	// Persistent flags apply to the root and every subcommand. --plain
+	// disables color + decorative output; ui.New also auto-plains on a
+	// non-TTY and honors $NO_COLOR, so this is the explicit opt-out for
+	// CI / log capture where stdout might still look like a terminal.
+	root.PersistentFlags().Bool("plain", false,
+		"disable color and decorative output (also honors $NO_COLOR)")
+
 	// Subcommands. New phases append here.
 	root.AddCommand(newVersionCmd(info))
 	root.AddCommand(newIngestCmd())
@@ -72,4 +81,15 @@ what's planned next.`,
 	root.AddCommand(newDatasetCmd())
 
 	return root
+}
+
+// printerFor builds a ui.Printer for a command's stdout, honoring the
+// persistent --plain flag. Color / TTY / NO_COLOR auto-detection lives
+// in ui.New; --plain just forces it off. Commands call this at the top
+// of their RunE.
+func printerFor(cmd *cobra.Command) *ui.Printer {
+	if plain, _ := cmd.Flags().GetBool("plain"); plain {
+		return ui.New(cmd.OutOrStdout(), ui.WithColor(false))
+	}
+	return ui.New(cmd.OutOrStdout())
 }

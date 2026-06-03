@@ -13,6 +13,7 @@ import (
 
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/push"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // TestPrintPushPreflight_RendersKeyFacts pins that the pre-flight
@@ -46,7 +47,8 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printPushPreflight(&buf, layout, release, pvc, spec, false)
+	p := ui.New(&buf, ui.WithColor(false))
+	printPushPreflight(p, layout, release, pvc, spec, false)
 	out := buf.String()
 
 	for _, want := range []string{
@@ -92,7 +94,7 @@ func TestRunClusterInfo_BadKubeconfigExitsThree(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := runClusterInfo(context.Background(), &buf, bad, "", "", "", 600)
+	err := runClusterInfo(context.Background(), ui.New(&buf), bad, "", "", "", 600)
 	if err == nil {
 		t.Fatal("runClusterInfo with a broken kubeconfig returned nil; want an exitError")
 	}
