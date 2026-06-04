@@ -155,6 +155,14 @@ func (p *Printer) Hintf(format string, a ...any) {
 	p.out("  %s\n", p.paint(fmt.Sprintf(format, a...), color.Faint))
 }
 
+// PromptHint prints guidance for an interactive prompt: a leading blank
+// line for separation, then the hint in cyan so it stands out directly
+// above the prompt. Distinct from Hintf (dim) — prompt guidance is meant
+// to be read, not skimmed past.
+func (p *Printer) PromptHint(format string, a ...any) {
+	p.out("\n  %s\n", p.paint(fmt.Sprintf(format, a...), color.FgCyan))
+}
+
 // PromptHeader prints a bold-white label before a user-input prompt.
 func (p *Printer) PromptHeader(label string) {
 	p.out("\n  %s\n", p.paint(label, color.Bold, color.FgWhite))
