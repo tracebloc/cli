@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/fatih/color"
 	"golang.org/x/term"
@@ -108,6 +109,16 @@ func (p *Printer) Banner(title, subtitle string) {
 	p.out("\n")
 }
 
+// Para prints a normal-weight paragraph, each line indented to match
+// Banner/Section bodies. It splits on embedded newlines so multi-line
+// prose keeps the indent. Use for explanatory prose — distinct from
+// Hintf (dim one-liners) and Infof (· bullets).
+func (p *Printer) Para(text string) {
+	for _, line := range strings.Split(text, "\n") {
+		p.out("  %s\n", line)
+	}
+}
+
 // Step prints a major-step header: "Step n/total  label" in bold cyan.
 // Mirrors common.sh step().
 func (p *Printer) Step(n, total int, label string) {
@@ -142,6 +153,14 @@ func (p *Printer) Errorf(format string, a ...any) {
 // Hintf prints dim contextual help (e.g. the line under a prompt).
 func (p *Printer) Hintf(format string, a ...any) {
 	p.out("  %s\n", p.paint(fmt.Sprintf(format, a...), color.Faint))
+}
+
+// PromptHint prints guidance for an interactive prompt: a leading blank
+// line for separation, then the hint in cyan so it stands out directly
+// above the prompt. Distinct from Hintf (dim) — prompt guidance is meant
+// to be read, not skimmed past.
+func (p *Printer) PromptHint(format string, a ...any) {
+	p.out("\n  %s\n", p.paint(fmt.Sprintf(format, a...), color.FgCyan))
 }
 
 // PromptHeader prints a bold-white label before a user-input prompt.

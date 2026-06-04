@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/tracebloc/cli/internal/push"
@@ -79,6 +80,35 @@ func TestRunInteractive_FillsAllWhenEmpty(t *testing.T) {
 	}
 	if a.Spec.LabelColumn != "churned" {
 		t.Errorf("LabelColumn = %q, want churned", a.Spec.LabelColumn)
+	}
+}
+
+// TestRunInteractive_ShowsExampleHints: each input prompt is preceded
+// by a visible hint with an example, so the guided flow teaches as it
+// goes. Drives runInteractive with a real (buffer-backed) Printer and
+// asserts the example text lands in the output.
+func TestRunInteractive_ShowsExampleHints(t *testing.T) {
+	f := &fakePrompter{answers: map[string]string{
+		"Path to your dataset directory": "./d",
+		"Destination table name":         "churn_train",
+	}}
+	a := &runDatasetPushArgs{Spec: push.SpecArgs{Category: "tabular_regression"}}
+
+	var buf bytes.Buffer
+	p := ui.New(&buf, ui.WithColor(false))
+	if err := runInteractive(p, f, a, true /*categorySet*/); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"e.g. churn_train",   // table-name example
+		"e.g. label, target", // label-column example
+		"age:INT",            // tabular schema example
+		"keeps raw values",   // label-policy explanation
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("interactive output missing hint %q:\n%s", want, out)
+		}
 	}
 }
 

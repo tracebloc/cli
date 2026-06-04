@@ -145,7 +145,7 @@ func runDatasetRm(ctx context.Context, a runDatasetRmArgs) error {
 	for _, path := range plan.PVCPaths {
 		p.Field("pvc path", path)
 	}
-	p.Warnf("Destructive and cannot be undone. The central backend catalog entry is NOT removed (tracebloc/cli#39).")
+	p.Warnf("Destructive and cannot be undone.")
 
 	// 5. Dry-run stop.
 	if a.DryRun {

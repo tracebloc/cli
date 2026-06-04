@@ -341,6 +341,19 @@ func expandHome(path string) string {
 // a bad label-column or oversized dataset gets the diagnostic in
 // milliseconds without a kubeconfig round-trip.
 func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPushArgs) error {
+	// Intro header: brand + a plain-English explainer of what a push
+	// does, so a first-time user understands it before any prompts.
+	// Routed through a.Printer, so --output-json keeps it on stderr and
+	// --plain/non-TTY degrade cleanly. (#31)
+	a.Printer.Banner("tracebloc", "dataset push")
+	a.Printer.Para(strings.TrimSpace(`
+This uploads a dataset from your machine into your tracebloc workspace so models
+can be trained on it. Your files are sent to the Kubernetes cluster your
+workspace was installed on — tracebloc checks them and loads them into a table
+your training runs read from. Your data stays on that cluster the whole time;
+contributors train against it without ever seeing the raw files.`))
+	a.Printer.Hintf("Learn more: https://docs.tracebloc.io")
+
 	// 0. Guided mode: prompt for any missing core inputs before
 	//    validation. Flags already provided win; non-TTY / --no-input
 	//    leaves Prompter nil and skips straight to the flag-only path.
@@ -435,6 +448,9 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	if err != nil {
 		return &exitError{code: 3, err: err}
 	}
+
+	a.Printer.Step(1, 4, "Check your dataset")
+	a.Printer.Hintf("Reading your files locally first — nothing has touched the cluster yet — so a layout or settings problem shows up right away.")
 
 	// 3a. Per-category spec resolution from the local data, so the
 	//     synthesized spec carries the right fields before validation.
@@ -539,10 +555,14 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 2, err: errors.New("synthesized spec failed schema validation; check the flag values above")}
 	}
 
+	printLocalSummary(a.Printer, layout, spec)
+
 	// 5. Cluster discovery — same kubeconfig path as `cluster info`.
 	//    Errors mirror that command's exit-code contract (3 for
 	//    kubeconfig, 4 for missing release) so behaviour is
 	//    consistent across pre-flight commands.
+	a.Printer.Step(2, 4, "Connect to your workspace's cluster")
+	a.Printer.Hintf("Using your kubeconfig to find the tracebloc release in your workspace and the shared storage your dataset will live on.")
 	resolved, err := cluster.Load(cluster.KubeconfigOptions{
 		Path:      a.Kubeconfig,
 		Context:   a.Context,
@@ -571,16 +591,15 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 4, err: err}
 	}
 
-	// 7. Print the pre-flight summary. The output is the same in
-	//    dry-run and live mode — only the "what happens next" line
-	//    differs. Customers iterating on a bad layout see this
-	//    every attempt, so it's worth keeping skimmable: one fact
-	//    per line, aligned by column.
-	printPushPreflight(a.Printer, layout, release, pvc, spec, a.DryRun)
+	// 7. Show what we found on the cluster — the customer's last look
+	//    before any bytes move.
+	printClusterSummary(a.Printer, release, pvc)
 
-	// 8. Dry-run stop. Acknowledged success.
+	// 8. Dry-run stop. Acknowledged success, plus a reminder of the
+	//    live-only steps (stage + ingest) the customer just skipped.
 	if a.DryRun {
-		_, _ = fmt.Fprintln(out, "Dry-run complete — no cluster resources were created.")
+		a.Printer.Successf("Dry-run complete — your dataset and cluster check out; nothing was created.")
+		a.Printer.Hintf("A real run continues with step 3 (stage your files) and step 4 (run the ingestion).")
 		if a.OutputJSON {
 			writePushJSON(a.JSONOut, "dry-run", spec, nil, "", "")
 		}
@@ -595,6 +614,8 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	//    Exit code 7 ("staging failed") is distinct from the
 	//    pre-flight codes so customers can branch on whether the
 	//    failure was their environment vs the actual data transfer.
+	a.Printer.Step(3, 4, "Stage your files")
+	a.Printer.Hintf("A short-lived helper pod mounts the shared storage and your files stream into it — like `kubectl cp`, but set up and cleaned up for you.")
 	progress := push.NewProgress(out, layout.TotalBytes,
 		fmt.Sprintf("Staging %s", a.Spec.Table))
 	// Defer Finish so a failure path that returns BEFORE
@@ -630,7 +651,8 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	//     min) because the full Phase 4 lifecycle — submit + watch
 	//     + log stream — can run that long for large ingestions.
 	//     The chart's helm flow uses the same token-mint code path.
-	_, _ = fmt.Fprintln(out)
+	a.Printer.Step(4, 4, "Run the ingestion")
+	a.Printer.Hintf("Submitting the run to your workspace, then watching as it validates your data and loads it into the table — progress streams below.")
 	tok, err := cluster.MintIngestorToken(ctx, cs, resolved.Namespace,
 		release.IngestorSAName, 3600, nil)
 	if err != nil {
@@ -750,19 +772,11 @@ func classifyPushOutcome(res *submit.Result, err error) (string, *exitError) {
 	return "unknown", nil
 }
 
-// printPushPreflight is the customer-facing summary. Mirrors
-// `cluster info`'s layout for consistency: section header,
-// indented key:value rows. Kept here (not on the layout/release/pvc
-// types) because the formatting is policy and lives with the CLI,
-// not the data.
-func printPushPreflight(
-	p *ui.Printer,
-	layout *push.LocalLayout,
-	release *cluster.ParentRelease,
-	pvc *cluster.SharedPVC,
-	spec map[string]any,
-	dryRun bool,
-) {
+// printLocalSummary shows what the CLI found on disk plus the ingest
+// settings it assembled — the detail under step 1 ("Check your
+// dataset"). Split from the cluster summary so each sits under its own
+// numbered step. Mirrors `cluster info`'s section/Field layout.
+func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]any) {
 	cat, _ := spec["category"].(string)
 
 	p.Section("Local dataset")
@@ -789,17 +803,7 @@ func printPushPreflight(
 	}
 	p.Field("total size", push.HumanBytes(layout.TotalBytes))
 
-	p.Section("Target cluster")
-	p.Field("release", fmt.Sprintf("%s (chart %s)", release.ReleaseName, release.ChartVersion))
-	p.Field("jobs-manager", release.JobsManagerService)
-	p.Field("shared PVC", fmt.Sprintf("%s (%s)", pvc.ClaimName, pvc.Phase))
-	if !pvc.IsReadWriteMany() {
-		// Warn but don't block — RWO clusters still work; the scheduler
-		// co-locates the stage Pod with the existing mounter.
-		p.Warnf("PVC is %v, not ReadWriteMany — the stage Pod will co-locate with the existing mounter", pvc.AccessModes)
-	}
-
-	p.Section("Synthesized ingest spec")
+	p.Section("Ingest settings")
 	p.Field("table", fmt.Sprintf("%v", spec["table"]))
 	p.Field("category", fmt.Sprintf("%v", spec["category"]))
 	p.Field("intent", fmt.Sprintf("%v", spec["intent"]))
@@ -813,10 +817,19 @@ func printPushPreflight(
 		p.Field("time column", tc)
 	}
 	p.Field("destination", push.FinalDestPrefix(spec["table"].(string)))
+}
 
-	if !dryRun {
-		p.Infof("Next: stage %d files (%s) for table %q",
-			layout.FileCount(), push.HumanBytes(layout.TotalBytes), spec["table"])
+// printClusterSummary shows the discovered workspace cluster target —
+// the detail under step 2 ("Connect to your workspace's cluster").
+func printClusterSummary(p *ui.Printer, release *cluster.ParentRelease, pvc *cluster.SharedPVC) {
+	p.Section("Target cluster")
+	p.Field("release", fmt.Sprintf("%s (chart %s)", release.ReleaseName, release.ChartVersion))
+	p.Field("jobs-manager", release.JobsManagerService)
+	p.Field("shared PVC", fmt.Sprintf("%s (%s)", pvc.ClaimName, pvc.Phase))
+	if !pvc.IsReadWriteMany() {
+		// Warn but don't block — RWO clusters still work; the scheduler
+		// co-locates the stage Pod with the existing mounter.
+		p.Warnf("PVC is %v, not ReadWriteMany — the stage Pod will co-locate with the existing mounter", pvc.AccessModes)
 	}
 }
 

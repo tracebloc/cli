@@ -124,6 +124,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDatasetPushArgs, categoryS
 	prompted := false
 
 	if a.LocalPath == "" {
+		p.PromptHint("The folder holding your dataset — a single .csv for tabular, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn")
 		ans, err := pr.Input("Path to your dataset directory", "e.g. ./my-data", "", nil)
 		if err != nil {
 			return err
@@ -133,6 +134,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDatasetPushArgs, categoryS
 	}
 
 	if !categorySet {
+		p.PromptHint("What kind of task your data is for — this drives how it's validated and loaded.")
 		ans, err := pr.Select("Task category", "what kind of data this is",
 			promptCategories, a.Spec.Category)
 		if err != nil {
@@ -143,6 +145,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDatasetPushArgs, categoryS
 	}
 
 	if a.Spec.Table == "" {
+		p.PromptHint("Names the table created on the cluster (and its folder on the shared storage). Letters, digits, underscores only.  e.g. churn_train")
 		ans, err := pr.Input("Destination table name",
 			"MySQL identifier + PVC subdir; letters, digits, underscore only", "",
 			push.ValidateTableName)
@@ -154,6 +157,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDatasetPushArgs, categoryS
 	}
 
 	if a.Spec.Intent == "" {
+		p.PromptHint("Whether this split is used to train the model or to evaluate it.")
 		ans, err := pr.Select("Intent", "which split this data is",
 			[]string{"train", "test"}, "train")
 		if err != nil {
@@ -165,6 +169,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDatasetPushArgs, categoryS
 
 	// masked_language_modeling is self-supervised — no label column.
 	if a.Spec.LabelColumn == "" && a.Spec.Category != "masked_language_modeling" {
+		p.PromptHint("The column in your CSV holding the value to predict (the target).  e.g. label, target, churned")
 		ans, err := pr.Input("Label column",
 			"the column in labels.csv that holds the label", "label", nil)
 		if err != nil {
@@ -174,7 +179,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDatasetPushArgs, categoryS
 		prompted = true
 	}
 
-	cp, err := promptCategorySpecific(pr, a)
+	cp, err := promptCategorySpecific(p, pr, a)
 	if err != nil {
 		return err
 	}
@@ -198,12 +203,13 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDatasetPushArgs, categoryS
 // promptCategorySpecific prompts for the inputs a particular category
 // needs beyond the core fields, filling only the gaps. Returns whether
 // it prompted anything (so the caller knows to show the confirm).
-func promptCategorySpecific(pr prompter, a *runDatasetPushArgs) (bool, error) {
+func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDatasetPushArgs) (bool, error) {
 	cat := a.Spec.Category
 	prompted := false
 	switch {
 	case push.IsImage(cat):
 		if cat == "keypoint_detection" && a.Spec.NumberOfKeypoints <= 0 {
+			p.PromptHint("How many keypoints each sample is annotated with — dataset-specific, no default.  e.g. 17 for COCO human pose")
 			ans, err := pr.Input("Number of keypoints per sample",
 				"e.g. 17 for COCO pose", "", validatePositiveInt)
 			if err != nil {
@@ -214,6 +220,7 @@ func promptCategorySpecific(pr prompter, a *runDatasetPushArgs) (bool, error) {
 			prompted = true
 		}
 		if a.TargetSizeFlag == "" {
+			p.PromptHint("All images must share one resolution; the ingestor checks it (it won't resize). Blank = auto-detect from the first image.  e.g. 224x224")
 			ans, err := pr.Input("Image resolution as WxH (blank = auto-detect from the first image)",
 				"all images must share it; the ingestor validates, it doesn't resize", "",
 				validateOptionalTargetSize)
@@ -225,6 +232,7 @@ func promptCategorySpecific(pr prompter, a *runDatasetPushArgs) (bool, error) {
 		}
 	case push.IsTabular(cat):
 		if a.SchemaFlag == "" {
+			p.PromptHint("Override the column types the CLI would infer. Blank = infer from the CSV.  e.g. age:INT,price:FLOAT,city:VARCHAR")
 			ans, err := pr.Input("Column schema as col:TYPE,... (blank = infer from the CSV)",
 				"e.g. age:INT,price:FLOAT", "", validateOptionalSchema)
 			if err != nil {
@@ -234,6 +242,7 @@ func promptCategorySpecific(pr prompter, a *runDatasetPushArgs) (bool, error) {
 			prompted = true
 		}
 		if push.IsRegressionClass(cat) && a.Spec.LabelPolicy == "" {
+			p.PromptHint("Regression targets are continuous. 'bucket' groups them into ranges before they leave the cluster; 'passthrough' keeps raw values.")
 			ans, err := pr.Select("Label policy",
 				"bucket bins the target before it leaves the cluster",
 				[]string{"bucket", "passthrough"}, "bucket")
@@ -244,6 +253,7 @@ func promptCategorySpecific(pr prompter, a *runDatasetPushArgs) (bool, error) {
 			prompted = true
 		}
 		if cat == "time_to_event_prediction" && a.Spec.TimeColumn == "" {
+			p.PromptHint("The column holding the duration / time-to-event.  e.g. time, tenure_days")
 			ans, err := pr.Input("Time column", "the duration/time column name", "time", nil)
 			if err != nil {
 				return prompted, err
