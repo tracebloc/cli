@@ -97,6 +97,9 @@ Exit codes:
 func runDatasetRm(ctx context.Context, a runDatasetRmArgs) error {
 	p := a.Printer
 	p.Banner("tracebloc", "delete a pushed dataset")
+	p.Para(`This permanently removes a dataset you pushed earlier: it drops the table from
+the cluster and deletes the dataset's files on the shared storage. It can't be
+undone — re-pushing the data is the only way back.`)
 
 	// 1. Validate the name before we build any PVC path from it
 	//    (push.PlanTeardown panics on an unsafe name by design).
@@ -160,6 +163,7 @@ func runDatasetRm(ctx context.Context, a runDatasetRmArgs) error {
 			return &exitError{code: 3, err: errors.New(
 				"refusing to delete without confirmation: pass --yes or run on a terminal")}
 		}
+		p.PromptHint("This drops the table and removes the files listed above — there's no undo. Pass --yes next time to skip this prompt.")
 		ok, err := a.Prompter.Confirm(fmt.Sprintf("Delete %q and its files?", a.Table), false)
 		if err != nil {
 			if errors.Is(err, errInteractiveCancelled) {

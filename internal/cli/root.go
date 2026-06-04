@@ -93,6 +93,7 @@ what's planned next.`,
 		p.Banner("tracebloc", "declarative data ingestion for your cluster")
 		p.Section("Get started")
 		p.Infof("tracebloc dataset push ./data     — stage + ingest a dataset (guided if you omit flags)")
+		p.Infof("tracebloc dataset rm <table>      — delete a pushed dataset (its table + files)")
 		p.Infof("tracebloc cluster info            — check the CLI can reach your cluster")
 		p.Infof("tracebloc ingest validate f.yaml  — validate an ingest.yaml locally")
 		p.Hintf("Add --help to any command for the full flag list.")
