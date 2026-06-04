@@ -2,12 +2,46 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/tracebloc/cli/internal/ui"
 )
+
+// TestRunDatasetList_OutputJSONEarlyFailureEmitsJSON: with --output-json,
+// a failure before the listing (here a broken kubeconfig, exit 3) still
+// writes a JSON error object to stdout — the stdout-always-JSON contract
+// that #49 established for dataset push. (Bugbot #53)
+func TestRunDatasetList_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "broken.yaml")
+	if err := os.WriteFile(bad, []byte("}{ not valid kubeconfig"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var jsonBuf, human bytes.Buffer
+	err := runDatasetList(context.Background(), runDatasetListArgs{
+		Kubeconfig: bad,
+		OutputJSON: true,
+		Printer:    ui.New(&human, ui.WithColor(false)),
+		JSONOut:    &jsonBuf,
+	})
+
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 3 {
+		t.Fatalf("err = %v, want *exitError code 3", err)
+	}
+	var got map[string]any
+	if e := json.Unmarshal(jsonBuf.Bytes(), &got); e != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", e, jsonBuf.String())
+	}
+	if got["status"] != "error" || got["exit_code"] != float64(3) {
+		t.Errorf("got %+v, want status=error exit_code=3", got)
+	}
+}
 
 // TestRenderDatasetList_Empty: the empty listing shows the count and
 // points the user at `dataset push`.

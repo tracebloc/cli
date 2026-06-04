@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -90,7 +91,23 @@ Exit codes:
 // runDatasetList discovers the cluster, enumerates the ingested tables,
 // and renders them. Mirrors the other dataset verbs' discovery so the
 // exit-code contract is consistent.
-func runDatasetList(ctx context.Context, a runDatasetListArgs) error {
+func runDatasetList(ctx context.Context, a runDatasetListArgs) (err error) {
+	// In --output-json mode, guarantee stdout always carries JSON: the
+	// success path emits the listing and sets jsonEmitted; this defer
+	// covers the early-failure returns (kubeconfig, no release, query)
+	// with a JSON error object, mirroring dataset push. (Bugbot #53)
+	jsonEmitted := false
+	defer func() {
+		if a.OutputJSON && err != nil && !jsonEmitted {
+			code := 1
+			var ee *exitError
+			if errors.As(err, &ee) {
+				code = ee.Code()
+			}
+			writeDatasetListErrorJSON(a.JSONOut, err, code)
+		}
+	}()
+
 	p := a.Printer
 	p.Banner("tracebloc", "datasets in the cluster")
 
@@ -118,6 +135,7 @@ func runDatasetList(ctx context.Context, a runDatasetListArgs) error {
 
 	if a.OutputJSON {
 		writeDatasetListJSON(a.JSONOut, resolved.Namespace, release.ReleaseName, tables)
+		jsonEmitted = true
 		return nil
 	}
 	renderDatasetList(p, resolved.Namespace, tables)
@@ -155,6 +173,22 @@ func writeDatasetListJSON(w io.Writer, namespace, release string, tables []strin
 		Count:     len(tables),
 		Datasets:  tables,
 	}
+	b, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintln(w, string(b))
+}
+
+// writeDatasetListErrorJSON emits a minimal JSON error object for
+// --output-json runs that fail before the listing is produced, so
+// stdout is never empty on failure (parallels dataset push). (Bugbot #53)
+func writeDatasetListErrorJSON(w io.Writer, e error, code int) {
+	res := struct {
+		Status   string `json:"status"`
+		Error    string `json:"error"`
+		ExitCode int    `json:"exit_code"`
+	}{Status: "error", Error: e.Error(), ExitCode: code}
 	b, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
 		return
