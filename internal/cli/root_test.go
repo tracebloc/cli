@@ -41,7 +41,7 @@ func TestRootCmd_HomeScreen(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("bare root failed: %v\n%s", err, out.String())
 	}
-	for _, want := range []string{"tracebloc", "dataset push", "cluster info"} {
+	for _, want := range []string{"tracebloc", "dataset push", "dataset rm", "cluster info"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("home screen missing %q:\n%s", want, out.String())
 		}
