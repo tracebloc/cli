@@ -6,11 +6,11 @@ The customer-facing CLI for the tracebloc declarative ingestion path. Wraps the 
 
 ## Status
 
-**v0.1.0-alpha is published** — the first [release](https://github.com/tracebloc/cli/releases/tag/v0.1.0-alpha), a pre-release for early testers, cut from `develop`. Every phase of the [v0.1 roadmap](https://github.com/tracebloc/client/issues/147) (#148–#153) is merged. The binary implements `version`, `completion`, `ingest validate`, `cluster info`, and the full `dataset push` flow — local schema validation, cluster discovery, data staging, submission, and Job watching, end to end.
+**v0.2.0 is released** — the latest stable [release](https://github.com/tracebloc/cli/releases/latest), cut from `develop`. It builds on v0.1.0 (the first stable, which delivered the full [v0.1 roadmap](https://github.com/tracebloc/client/issues/147), #148–#153) with a friendlier guided `dataset push` and `dataset rm` on the home screen. The binary implements `version`, `completion`, `ingest validate`, `cluster info`, and the full `dataset push` / `dataset rm` flow — local schema validation, cluster discovery, data staging, submission, and Job watching, end to end.
 
 `dataset push` covers **9 of 10 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `text_classification`, `masked_language_modeling`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, and `time_to_event_prediction`. `semantic_segmentation` is pending mask-sidecar support upstream ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)); `instance_segmentation` is not yet implemented.
 
-The release pipeline has shipped [`v0.1.0-alpha`](https://github.com/tracebloc/cli/releases/tag/v0.1.0-alpha): cosign-signed binaries for linux/darwin/windows (amd64/arm64), `SHA256SUMS`, and the install scripts. Install it via [Customer experience](#customer-experience) or [build from source](#building-from-source). (The `install.tracebloc.io` shortcut, the `latest` one-liner, and a Homebrew tap all wait for the first **stable** `v*` tag — see below.)
+The release pipeline ships [`v0.1.0`](https://github.com/tracebloc/cli/releases/latest) as **cosign-signed, multi-arch binaries** — Linux (`amd64`, `arm64`, `386`, `arm`), macOS (`amd64`, `arm64`), and Windows (`amd64`, `arm64`) — each with `SHA256SUMS` and the install scripts. Install via [Customer experience](#customer-experience) or [build from source](#building-from-source). (A Homebrew tap and the `install.tracebloc.io` vanity URL are later follow-ups; the GitHub release URL serves installs today.)
 
 The Helm chart remains a sibling interface for the Kubernetes-native workflow: `helm install tracebloc/ingestor --set-file ingestConfig=./ingest.yaml` (see the chart's [README](https://github.com/tracebloc/client/blob/develop/ingestor/README.md)).
 
@@ -43,13 +43,13 @@ The protocol — the v1 schema + the POST endpoint — is the stable point. Ever
 
 ## Customer experience
 
-> `v0.1.0-alpha` is a **pre-release**, so the `install.tracebloc.io` shortcut isn't wired up yet and GitHub's `latest` skips pre-releases. Install the alpha by explicit tag (below), or [build from source](#building-from-source).
+> Installs the latest stable release. Pin a specific version with `--version vX.Y.Z` (`sh`) or `$env:RELEASE_VERSION` (PowerShell), or [build from source](#building-from-source).
 
 ```bash
-# Install the alpha — pins the pre-release tag (Linux/macOS)
-curl -fsSL https://github.com/tracebloc/cli/releases/download/v0.1.0-alpha/install.sh \
-  | sh -s -- --version v0.1.0-alpha
-# Windows + manual/signed downloads: https://github.com/tracebloc/cli/releases/tag/v0.1.0-alpha
+# Install — Linux / macOS
+curl -fsSL https://github.com/tracebloc/cli/releases/latest/download/install.sh | sh
+# Install — Windows (PowerShell)
+irm https://github.com/tracebloc/cli/releases/latest/download/install.ps1 | iex
 
 # Per dataset
 tracebloc dataset push ./my-data \
@@ -101,11 +101,11 @@ All v0.1 phases are merged:
 | 2 | [#150](https://github.com/tracebloc/client/issues/150) | Cluster discovery + ingestor SA token via TokenRequest | ✅ |
 | 3 | [#151](https://github.com/tracebloc/client/issues/151) | Stage data into the shared PVC via ephemeral Pod | ✅ |
 | 4 | [#152](https://github.com/tracebloc/client/issues/152) | Submit to jobs-manager + watch ingestor Job + summary | ✅ |
-| 5 | [#153](https://github.com/tracebloc/client/issues/153) | GitHub Releases + install.sh distribution (Homebrew tap deferred) | ✅ — [`v0.1.0-alpha`](https://github.com/tracebloc/cli/releases/tag/v0.1.0-alpha) published (pre-release) |
+| 5 | [#153](https://github.com/tracebloc/client/issues/153) | GitHub Releases + install.sh distribution (Homebrew tap deferred) | ✅ — [`v0.1.0`](https://github.com/tracebloc/cli/releases/tag/v0.1.0) released (stable, 8-platform) |
 
 Beyond the original phases, `dataset push` was widened from image-classification-only to 9 of 10 modalities, and the test suite gained unit-coverage wins plus a kind-based integration harness for the real-I/O seams.
 
-**Next (v0.2):** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap; `semantic_segmentation` ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)) and `instance_segmentation`; more `dataset` verbs (`list`, `rm`). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues) (#3–#7).
+**v0.2.0** added a friendlier guided `dataset push` and `dataset rm` on the home screen (#44, #47). **Next:** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap; `semantic_segmentation` ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)) and `instance_segmentation`; more `dataset` verbs (`list`). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues).
 
 Epic: [tracebloc/client#147](https://github.com/tracebloc/client/issues/147).
 

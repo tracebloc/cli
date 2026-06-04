@@ -28,6 +28,26 @@ func TestRootCmd_HelpMentionsBinary(t *testing.T) {
 	}
 }
 
+// TestRootCmd_HomeScreen: a bare `tracebloc` (no subcommand) renders
+// the branded home screen pointing at the key commands, rather than
+// erroring or dumping raw usage.
+func TestRootCmd_HomeScreen(t *testing.T) {
+	root := NewRootCmd(BuildInfo{Version: "test"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("bare root failed: %v\n%s", err, out.String())
+	}
+	for _, want := range []string{"tracebloc", "dataset push", "dataset rm", "cluster info"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("home screen missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 // `completion` is auto-registered by cobra, but it's load-bearing
 // for shell autocomplete UX. Verify it's reachable so a future
 // refactor that accidentally disables it (e.g. by setting

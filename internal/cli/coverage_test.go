@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/push"
+	"github.com/tracebloc/cli/internal/submit"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // TestPrintPushPreflight_RendersKeyFacts pins that the pre-flight
@@ -46,7 +49,9 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printPushPreflight(&buf, layout, release, pvc, spec, false)
+	p := ui.New(&buf, ui.WithColor(false))
+	printLocalSummary(p, layout, spec)
+	printClusterSummary(p, release, pvc)
 	out := buf.String()
 
 	for _, want := range []string{
@@ -55,6 +60,117 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("pre-flight output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestWritePushJSON checks the --output-json result serializes to
+// valid JSON with the expected fields.
+func TestWritePushJSON(t *testing.T) {
+	spec := map[string]any{"table": "reg_train", "category": "tabular_regression", "intent": "train"}
+	s := &submit.Summary{IngestorID: "run-1", TotalRecords: 240, InsertedRecords: 240, APISentRecords: 240}
+
+	var buf bytes.Buffer
+	writePushJSON(&buf, "succeeded", spec, s, "ns1", "ingest-job-x")
+
+	var got pushJSONResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	if got.Status != "succeeded" || got.Table != "reg_train" || got.JobName != "ingest-job-x" {
+		t.Errorf("unexpected result: %+v", got)
+	}
+	if got.Summary == nil || got.Summary.InsertedRecords != 240 {
+		t.Errorf("summary missing/wrong: %+v", got.Summary)
+	}
+}
+
+// TestClassifyPushOutcome pins the --output-json status ↔ exit-code
+// contract (Bugbot #38): the status must agree with the exit code on
+// every path — a partial-failure must NOT report "succeeded", and a
+// watch error must still classify (so JSON gets emitted). wantCode 0
+// means no exitError (success).
+func TestClassifyPushOutcome(t *testing.T) {
+	resp := &submit.SubmitResponse{Namespace: "ns1", JobName: "ingest-job-x"}
+	cases := []struct {
+		name     string
+		res      *submit.Result
+		err      error
+		wantStat string
+		wantCode int
+	}{
+		{"clean", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 10}}}, nil, "succeeded", 0},
+		{"partial", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 7, FailedRecords: 3}}}, nil, "completed_with_failures", 9},
+		{"failed", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeFailed}}, nil, "failed", 9},
+		{"detached", &submit.Result{Submit: resp}, nil, "detached", 0},
+		{"watch error", &submit.Result{Submit: resp}, &submit.WatchError{Err: errors.New("stream broke")}, "watch_error", 9},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotStat, gotErr := classifyPushOutcome(c.res, c.err)
+			if gotStat != c.wantStat {
+				t.Errorf("status = %q, want %q", gotStat, c.wantStat)
+			}
+			code := 0
+			if gotErr != nil {
+				code = gotErr.Code()
+			}
+			if code != c.wantCode {
+				t.Errorf("exit code = %d, want %d", code, c.wantCode)
+			}
+		})
+	}
+}
+
+// TestRunDatasetPush_OutputJSONEarlyFailureEmitsJSON: with --output-json,
+// a failure before the dry-run/submit emit points (here an invalid table,
+// exit 2) still writes a JSON error object to stdout — the stdout-always-
+// JSON contract. (Bugbot #49)
+func TestRunDatasetPush_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
+	var jsonBuf, human bytes.Buffer
+	a := runDatasetPushArgs{
+		LocalPath:  "./x",
+		Spec:       push.SpecArgs{Table: "../bad", Category: "image_classification", Intent: "train"},
+		Printer:    ui.New(&human, ui.WithColor(false)),
+		OutputJSON: true,
+		JSONOut:    &jsonBuf,
+	}
+	err := runDatasetPush(context.Background(), &human, &human, a)
+
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("err = %v, want *exitError code 2", err)
+	}
+	var got pushJSONResult
+	if e := json.Unmarshal(jsonBuf.Bytes(), &got); e != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", e, jsonBuf.String())
+	}
+	if got.Status != "error" || got.ExitCode != 2 || got.Table != "../bad" {
+		t.Errorf("got %+v, want status=error exit_code=2 table=../bad", got)
+	}
+}
+
+// TestExpandHome covers the #37 fix: a leading ~ / ~/… resolves under
+// $HOME, while relative, absolute, and empty paths pass through
+// untouched (the case that bit the interactive prompt — the shell
+// never got a chance to expand the typed ~).
+func TestExpandHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir: %v", err)
+	}
+	cases := []struct{ in, want string }{
+		{"~", home},
+		{"~/x", filepath.Join(home, "x")},
+		{"~/tb-fixtures/tab-reg", filepath.Join(home, "tb-fixtures", "tab-reg")},
+		{"./x", "./x"},
+		{"/abs/path", "/abs/path"},
+		{"relative/x", "relative/x"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := expandHome(c.in); got != c.want {
+			t.Errorf("expandHome(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -81,6 +197,24 @@ func TestExitError_Methods(t *testing.T) {
 	}
 }
 
+// TestRunDatasetRm_InvalidTableExitsTwo: rm validates the table name
+// before any cluster work, so an unsafe name is exit-code-2 territory
+// and never reaches kubeconfig/cluster resolution.
+func TestRunDatasetRm_InvalidTableExitsTwo(t *testing.T) {
+	var buf bytes.Buffer
+	err := runDatasetRm(context.Background(), runDatasetRmArgs{
+		Table:   "../bad",
+		Printer: ui.New(&buf, ui.WithColor(false)),
+	})
+	var ee *exitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("error is not an *exitError: %v", err)
+	}
+	if ee.Code() != 2 {
+		t.Errorf("exit code = %d, want 2 (invalid table name)", ee.Code())
+	}
+}
+
 // TestRunClusterInfo_BadKubeconfigExitsThree: an unreadable/invalid
 // kubeconfig is exit-code-3 territory (the kubeconfig/local-input
 // bucket), surfaced before any cluster work. Covers the Load-error
@@ -92,7 +226,7 @@ func TestRunClusterInfo_BadKubeconfigExitsThree(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := runClusterInfo(context.Background(), &buf, bad, "", "", "", 600)
+	err := runClusterInfo(context.Background(), ui.New(&buf), bad, "", "", "", 600)
 	if err == nil {
 		t.Fatal("runClusterInfo with a broken kubeconfig returned nil; want an exitError")
 	}

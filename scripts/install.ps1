@@ -6,7 +6,7 @@
 #   $env:RELEASE_VERSION='v0.1.0'; irm <url> | iex
 #
 # What it does:
-#   1. Detects arch (amd64 only on Windows; arm64 not yet shipped)
+#   1. Detects arch (amd64 or arm64 on Windows)
 #   2. Resolves the latest release tag (or honors $env:RELEASE_VERSION)
 #   3. Downloads tracebloc-<tag>-windows-amd64.exe + SHA256SUMS
 #   4. Verifies SHA256
@@ -50,16 +50,18 @@ $BinaryName     = 'tracebloc.exe'
 # ---------------------------------------------------------------------
 function Get-Arch {
     # PROCESSOR_ARCHITECTURE is the canonical Windows arch env var:
-    #   AMD64 → x64 binary needed
-    #   ARM64 → Windows on ARM (not yet shipped — see below)
-    $proc = $env:PROCESSOR_ARCHITECTURE
+    #   AMD64 → x64 binary
+    #   ARM64 → Windows on ARM
+    # Caveat: a 32-bit / x64-emulated process on an ARM64 host reports
+    # the PROCESS arch in PROCESSOR_ARCHITECTURE but the NATIVE arch in
+    # PROCESSOR_ARCHITEW6432. Prefer the latter when set so an x64
+    # PowerShell on Windows-on-ARM still installs the native arm64 build.
+    $proc = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
     switch ($proc) {
         'AMD64' { return 'amd64' }
-        'ARM64' {
-            Fail "Windows ARM64 binary isn't released yet. File an issue at https://github.com/tracebloc/cli if you need it."
-        }
+        'ARM64' { return 'arm64' }
         default {
-            Fail "Unsupported PROCESSOR_ARCHITECTURE: $proc"
+            Fail "Unsupported processor architecture: $proc"
         }
     }
 }

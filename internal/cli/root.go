@@ -7,7 +7,11 @@
 package cli
 
 import (
+	"io"
+
 	"github.com/spf13/cobra"
+
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // BuildInfo carries metadata that main.go pulls from -ldflags. We
@@ -65,11 +69,54 @@ what's planned next.`,
 		SilenceUsage:  true,
 	}
 
+	// Persistent flags apply to the root and every subcommand. --plain
+	// disables color + decorative output; ui.New also auto-plains on a
+	// non-TTY and honors $NO_COLOR, so this is the explicit opt-out for
+	// CI / log capture where stdout might still look like a terminal.
+	root.PersistentFlags().Bool("plain", false,
+		"disable color and decorative output (also honors $NO_COLOR)")
+
 	// Subcommands. New phases append here.
 	root.AddCommand(newVersionCmd(info))
 	root.AddCommand(newIngestCmd())
 	root.AddCommand(newClusterCmd())
 	root.AddCommand(newDatasetCmd())
 
+	// Bare `tracebloc` (no subcommand) renders a friendly home screen
+	// instead of cobra's raw usage dump. Subcommands and --help are
+	// unaffected — cobra dispatches those before this RunE runs.
+	root.RunE = func(cmd *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return cmd.Help() // an arg that wasn't a known subcommand
+		}
+		p := printerFor(cmd)
+		p.Banner("tracebloc", "declarative data ingestion for your cluster")
+		p.Section("Get started")
+		p.Infof("tracebloc dataset push ./data     — stage + ingest a dataset (guided if you omit flags)")
+		p.Infof("tracebloc dataset rm <table>      — delete a pushed dataset (its table + files)")
+		p.Infof("tracebloc cluster info            — check the CLI can reach your cluster")
+		p.Infof("tracebloc ingest validate f.yaml  — validate an ingest.yaml locally")
+		p.Hintf("Add --help to any command for the full flag list.")
+		return nil
+	}
+
 	return root
+}
+
+// printerFor builds a ui.Printer for a command's stdout, honoring the
+// persistent --plain flag. Color / TTY / NO_COLOR auto-detection lives
+// in ui.New; --plain just forces it off. Commands call this at the top
+// of their RunE.
+func printerFor(cmd *cobra.Command) *ui.Printer {
+	return printerForWriter(cmd, cmd.OutOrStdout())
+}
+
+// printerForWriter is printerFor for an explicit writer — used by
+// dataset push's --output-json mode, which routes human output to
+// stderr so stdout carries only the JSON result.
+func printerForWriter(cmd *cobra.Command, w io.Writer) *ui.Printer {
+	if plain, _ := cmd.Flags().GetBool("plain"); plain {
+		return ui.New(w, ui.WithColor(false))
+	}
+	return ui.New(w)
 }

@@ -7,6 +7,8 @@ import (
 	"io"
 
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // Options bundles every dependency Run needs. The CLI builds one
@@ -47,9 +49,14 @@ type Options struct {
 
 	// Out is the customer-facing log stream. Submit writes the
 	// 201 announcement here, then either streams the Pod's logs
-	// to it (live watch) or prints the Job name (detach). The
-	// rendered summary panel also goes here.
+	// to it (live watch) or prints the Job name (detach).
 	Out io.Writer
+
+	// Printer renders the final ingestion summary (RenderSummary).
+	// nil is fine — Run falls back to ui.New(Out), so callers that
+	// don't thread the --plain decision still get a sensible
+	// (auto-detected) rendering.
+	Printer *ui.Printer
 }
 
 // Result is what Run reports back to the CLI orchestrator.
@@ -162,8 +169,12 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	// Both Succeeded and Failed paths print it — on Failed, the
 	// banner tells the customer what got partially through.
 	if wr.Summary != nil {
+		p := opts.Printer
+		if p == nil {
+			p = ui.New(opts.Out)
+		}
 		_, _ = fmt.Fprintln(opts.Out)
-		_, _ = fmt.Fprint(opts.Out, RenderPanel(wr.Summary))
+		RenderSummary(p, wr.Summary)
 	}
 
 	return &Result{Submit: resp, Watch: wr}, nil

@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -15,14 +17,16 @@ import (
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/schema"
 	"github.com/tracebloc/cli/internal/submit"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // newDatasetCmd wires the `tracebloc dataset` subtree. The dominant
 // verb is `push`, completed in Phase 3 (tracebloc/client#151) across
 // PR-a (pre-flight: spec synth, validation, layout walk, cluster
 // discovery) and PR-b (this one: ephemeral stage Pod + tar-over-
-// exec stream + progress bar + SIGINT-safe cleanup). Future verbs
-// (`dataset list`, `dataset rm`) hang off this parent in v0.2.
+// exec stream + progress bar + SIGINT-safe cleanup). `dataset rm`
+// (#30) removes a pushed dataset's in-cluster artifacts; `dataset
+// list` hangs off this parent later.
 func newDatasetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dataset",
@@ -38,6 +42,7 @@ ingestor Job to completion (streaming logs + the final summary).
 before the first push.`,
 	}
 	cmd.AddCommand(newDatasetPushCmd())
+	cmd.AddCommand(newDatasetRmCmd())
 	return cmd
 }
 
@@ -82,7 +87,9 @@ func newDatasetPushCmd() *cobra.Command {
 		numberOfKeypoints int
 
 		// Operations flags.
-		dryRun bool
+		dryRun     bool
+		noInput    bool
+		outputJSON bool
 
 		// Ingestor SA name override. Used as the ServiceAccountName
 		// of the ephemeral stage Pod, so the Pod inherits whatever
@@ -145,11 +152,34 @@ Exit codes:
   8   jobs-manager rejected the submit (4xx/5xx other than auth)
   9   ingestion Job exited non-zero, or completed with row-level
       failures the summary panel reports`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDatasetPush(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
+			var localPath string
+			if len(args) > 0 {
+				localPath = args[0]
+			}
+			// Guided mode: on a terminal (and unless --no-input), prompt
+			// for whatever's still missing. Off a TTY / with --no-input,
+			// prompter stays nil and runDatasetPush keeps flag-only
+			// behavior.
+			interactive := !noInput && !outputJSON && isInteractiveTTY()
+			var pr prompter
+			if interactive {
+				pr = surveyPrompter{}
+			}
+			// In --output-json mode, human output goes to stderr so
+			// stdout carries only the JSON result.
+			humanOut := cmd.OutOrStdout()
+			printer := printerFor(cmd)
+			var jsonOut io.Writer
+			if outputJSON {
+				humanOut = cmd.ErrOrStderr()
+				printer = printerForWriter(cmd, cmd.ErrOrStderr())
+				jsonOut = cmd.OutOrStdout()
+			}
+			return runDatasetPush(cmd.Context(), humanOut, cmd.ErrOrStderr(),
 				runDatasetPushArgs{
-					LocalPath:  args[0],
+					LocalPath:  localPath,
 					Kubeconfig: kubeconfigPath,
 					Context:    contextOverride,
 					Namespace:  nsOverride,
@@ -166,6 +196,12 @@ Exit codes:
 					Detach:         detach,
 					IdempotencyKey: idempotencyKey,
 					ImageDigest:    imageDigest,
+					Printer:        printer,
+					Interactive:    interactive,
+					Prompter:       pr,
+					CategorySet:    cmd.Flags().Changed("category"),
+					OutputJSON:     outputJSON,
+					JSONOut:        jsonOut,
 				})
 		},
 	}
@@ -207,6 +243,10 @@ Exit codes:
 
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"validate + discover + walk, but don't create any cluster resources")
+	cmd.Flags().BoolVar(&noInput, "no-input", false,
+		"disable interactive prompts; fail on missing required values (for CI/scripts)")
+	cmd.Flags().BoolVar(&outputJSON, "output-json", false,
+		"emit a machine-readable JSON result on stdout (human output → stderr; implies --no-input)")
 	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
 		"override the ingestor ServiceAccount name (default: \"ingestor\"); "+
 			"set this if you customized ingestionAuthz.serviceAccountName in the parent client chart")
@@ -244,11 +284,51 @@ type runDatasetPushArgs struct {
 	IngestorSAName string
 	StagePodImage  string
 
+	// Printer renders the pre-flight summary + status output. Built in
+	// the RunE from the persistent --plain flag (see printerFor).
+	Printer *ui.Printer
+
+	// Interactive guided mode (#28). When Interactive is true,
+	// runDatasetPush prompts (via Prompter) for any missing core inputs
+	// before validation. CategorySet records whether --category was
+	// passed explicitly (its non-empty default would otherwise look
+	// like a deliberate choice). Prompter is nil off a TTY / --no-input.
+	Interactive bool
+	Prompter    prompter
+	CategorySet bool
+
+	// OutputJSON routes human output to stderr and emits a JSON result
+	// to JSONOut (stdout); set together by the RunE in --output-json
+	// mode (which also forces non-interactive).
+	OutputJSON bool
+	JSONOut    io.Writer
+
 	// Phase 4 (#152) fields. See the flag declarations for the
 	// per-knob rationale; all three are optional.
 	Detach         bool
 	IdempotencyKey string
 	ImageDigest    string
+}
+
+// expandHome expands a leading ~ or ~/… to $HOME, leaving every other
+// path (relative, absolute, empty) untouched. It mirrors
+// cluster.expandPath — kept as a small local copy rather than coupling
+// the dataset path-handling to the cluster package's internals; if a
+// third caller appears, promote both to a shared pathutil.
+func expandHome(path string) string {
+	if path == "" || path[0] != '~' {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Can't resolve $HOME — leave it and let the downstream
+		// Discover* error mention the literal path, which is more
+		// useful than a generic failure here.
+		return path
+	}
+	// path[1:] is "" for "~" (→ home) and "/x" for "~/x" (→ home/x);
+	// filepath.Join cleans the join either way.
+	return filepath.Join(home, path[1:])
 }
 
 // runDatasetPush is the full Phase 3 implementation: pre-flight
@@ -260,7 +340,62 @@ type runDatasetPushArgs struct {
 // need the cluster runs before any that does, so a customer with
 // a bad label-column or oversized dataset gets the diagnostic in
 // milliseconds without a kubeconfig round-trip.
-func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPushArgs) error {
+func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPushArgs) (err error) {
+	// In --output-json mode, guarantee stdout always carries a JSON
+	// object. The dry-run + post-submit paths emit a result and set
+	// jsonEmitted; this defer covers every early-failure return (bad
+	// table, discovery, staging, token, port-forward) with a JSON error
+	// object, so `… --output-json | jq` never sees empty stdout. (Bugbot #49)
+	jsonEmitted := false
+	defer func() {
+		if a.OutputJSON && err != nil && !jsonEmitted {
+			code := 1
+			var ee *exitError
+			if errors.As(err, &ee) {
+				code = ee.Code()
+			}
+			writePushErrorJSON(a.JSONOut, a.Spec, err, code)
+		}
+	}()
+
+	// Intro header: brand + a plain-English explainer of what a push
+	// does, so a first-time user understands it before any prompts.
+	// Routed through a.Printer, so --output-json keeps it on stderr and
+	// --plain/non-TTY degrade cleanly. (#31)
+	a.Printer.Banner("tracebloc", "dataset push")
+	a.Printer.Para(strings.TrimSpace(`
+This uploads a dataset from your machine into your tracebloc workspace so models
+can be trained on it. Your files are sent to the Kubernetes cluster your
+workspace was installed on — tracebloc checks them and loads them into a table
+your training runs read from. Your data stays on that cluster the whole time;
+contributors train against it without ever seeing the raw files.`))
+	a.Printer.Hintf("Learn more: https://docs.tracebloc.io")
+
+	// 0. Guided mode: prompt for any missing core inputs before
+	//    validation. Flags already provided win; non-TTY / --no-input
+	//    leaves Prompter nil and skips straight to the flag-only path.
+	if a.Interactive && a.Prompter != nil {
+		if err := runInteractive(a.Printer, a.Prompter, &a, a.CategorySet); err != nil {
+			if errors.Is(err, errInteractiveCancelled) {
+				a.Printer.Infof("Cancelled — nothing was pushed.")
+				return nil
+			}
+			return &exitError{code: 3, err: fmt.Errorf("interactive setup: %w", err)}
+		}
+	}
+	if a.LocalPath == "" {
+		return &exitError{code: 3, err: errors.New(
+			"local dataset path is required — pass it as an argument, or run " +
+				"on a terminal without --no-input for guided prompts")}
+	}
+	// Expand a leading ~ ourselves. The shell expands an unquoted ~ on
+	// the command line, but a path typed at the interactive prompt (or
+	// a quoted/literal ~ arg) reaches us unexpanded — and filepath.Abs
+	// would just prepend the CWD, yielding ".../cwd/~/...". Mirrors
+	// cluster.expandPath; done here so it covers both entry points
+	// before any push.Discover* call. (#37)
+	a.LocalPath = expandHome(a.LocalPath)
+
 	// 1. Validate the table name BEFORE anything else. It's both
 	//    the MySQL identifier and the /data/shared/<table>/ PVC
 	//    subdirectory — an unsanitized traversal name (../../etc)
@@ -312,10 +447,9 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	//    data CSV. The walk also yields what the per-category
 	//    resolution below needs (the image list for target-size, the
 	//    CSV for schema inference).
-	var (
-		layout *push.LocalLayout
-		err    error
-	)
+	// err is the function's named return (see the --output-json defer
+	// at the top), so it's not redeclared here.
+	var layout *push.LocalLayout
 	switch {
 	case push.IsTabular(a.Spec.Category):
 		layout, err = push.DiscoverTabular(a.LocalPath)
@@ -330,6 +464,9 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	if err != nil {
 		return &exitError{code: 3, err: err}
 	}
+
+	a.Printer.Step(1, 4, "Check your dataset")
+	a.Printer.Hintf("Reading your files locally first — nothing has touched the cluster yet — so a layout or settings problem shows up right away.")
 
 	// 3a. Per-category spec resolution from the local data, so the
 	//     synthesized spec carries the right fields before validation.
@@ -434,10 +571,14 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 2, err: errors.New("synthesized spec failed schema validation; check the flag values above")}
 	}
 
+	printLocalSummary(a.Printer, layout, spec)
+
 	// 5. Cluster discovery — same kubeconfig path as `cluster info`.
 	//    Errors mirror that command's exit-code contract (3 for
 	//    kubeconfig, 4 for missing release) so behaviour is
 	//    consistent across pre-flight commands.
+	a.Printer.Step(2, 4, "Connect to your workspace's cluster")
+	a.Printer.Hintf("Using your kubeconfig to find the tracebloc release in your workspace and the shared storage your dataset will live on.")
 	resolved, err := cluster.Load(cluster.KubeconfigOptions{
 		Path:      a.Kubeconfig,
 		Context:   a.Context,
@@ -466,16 +607,19 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		return &exitError{code: 4, err: err}
 	}
 
-	// 7. Print the pre-flight summary. The output is the same in
-	//    dry-run and live mode — only the "what happens next" line
-	//    differs. Customers iterating on a bad layout see this
-	//    every attempt, so it's worth keeping skimmable: one fact
-	//    per line, aligned by column.
-	printPushPreflight(out, layout, release, pvc, spec, a.DryRun)
+	// 7. Show what we found on the cluster — the customer's last look
+	//    before any bytes move.
+	printClusterSummary(a.Printer, release, pvc)
 
-	// 8. Dry-run stop. Acknowledged success.
+	// 8. Dry-run stop. Acknowledged success, plus a reminder of the
+	//    live-only steps (stage + ingest) the customer just skipped.
 	if a.DryRun {
-		_, _ = fmt.Fprintln(out, "Dry-run complete — no cluster resources were created.")
+		a.Printer.Successf("Dry-run complete — your dataset and cluster check out; nothing was created.")
+		a.Printer.Hintf("A real run continues with step 3 (stage your files) and step 4 (run the ingestion).")
+		if a.OutputJSON {
+			writePushJSON(a.JSONOut, "dry-run", spec, nil, "", "")
+			jsonEmitted = true
+		}
 		return nil
 	}
 
@@ -487,6 +631,8 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	//    Exit code 7 ("staging failed") is distinct from the
 	//    pre-flight codes so customers can branch on whether the
 	//    failure was their environment vs the actual data transfer.
+	a.Printer.Step(3, 4, "Stage your files")
+	a.Printer.Hintf("A short-lived helper pod mounts the shared storage and your files stream into it — like `kubectl cp`, but set up and cleaned up for you.")
 	progress := push.NewProgress(out, layout.TotalBytes,
 		fmt.Sprintf("Staging %s", a.Spec.Table))
 	// Defer Finish so a failure path that returns BEFORE
@@ -522,7 +668,8 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 	//     min) because the full Phase 4 lifecycle — submit + watch
 	//     + log stream — can run that long for large ingestions.
 	//     The chart's helm flow uses the same token-mint code path.
-	_, _ = fmt.Fprintln(out)
+	a.Printer.Step(4, 4, "Run the ingestion")
+	a.Printer.Hintf("Submitting the run to your workspace, then watching as it validates your data and loads it into the table — progress streams below.")
 	tok, err := cluster.MintIngestorToken(ctx, cs, resolved.Namespace,
 		release.IngestorSAName, 3600, nil)
 	if err != nil {
@@ -571,127 +718,212 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		ImageDigest:      a.ImageDigest,
 		Detach:           a.Detach,
 		Out:              out,
+		Printer:          a.Printer,
 	})
-	if err != nil {
-		switch {
-		case submit.IsAuthError(err):
-			return &exitError{code: 5, err: err}
-		case submit.IsWatchError(err):
-			// Watch-phase failure: jobs-manager already accepted
-			// the run, the cluster is doing the work, the CLI
-			// just couldn't follow along. Exit 9 (ingest-side)
-			// not 8 (submit-side). Bugbot flagged the
-			// previously-undifferentiated mapping on PR #10.
-			return &exitError{code: 9, err: err}
-		default:
-			return &exitError{code: 8, err: err}
+	// Classify once: a machine-readable status + the process exit error
+	// in lockstep, so --output-json emits exactly one result object on
+	// EVERY path (success / partial / failure / submit-or-watch error)
+	// whose status matches the exit code. (Bugbot #38.)
+	status, exitErr := classifyPushOutcome(submitRes, err)
+
+	if a.OutputJSON {
+		var summary *submit.Summary
+		var ns, jobName string
+		if submitRes != nil {
+			if submitRes.Watch != nil {
+				summary = submitRes.Watch.Summary
+			}
+			if submitRes.Submit != nil {
+				ns, jobName = submitRes.Submit.Namespace, submitRes.Submit.JobName
+			}
 		}
+		writePushJSON(a.JSONOut, status, spec, summary, ns, jobName)
+		jsonEmitted = true
 	}
 
-	// Detach paths (--detach flag OR SIGINT-mid-watch) are
-	// success — cluster keeps running; the orchestrator already
-	// printed the reconnect hint.
-	if submitRes.Watch == nil || submitRes.Watch.Outcome == submit.JobOutcomeDetached {
-		return nil
-	}
-
-	// Watch outcomes. Both Failed and Unknown route to exit 9
-	// (Unknown = finalJobStatus timed out without seeing a
-	// terminal condition, which we can't claim as success).
-	// Bugbot flagged the prior switch's missing Unknown branch
-	// on PR #10.
-	switch submitRes.Watch.Outcome {
-	case submit.JobOutcomeFailed:
-		return &exitError{code: 9, err: errors.New("ingestion Job exited non-zero — see logs above")}
-	case submit.JobOutcomeUnknown:
-		return &exitError{code: 9, err: errors.New(
-			"ingestion Job's final status couldn't be determined within the watch window — " +
-				"check `kubectl get job -n " + submitRes.Submit.Namespace + " " + submitRes.Submit.JobName + "` for the outcome")}
-	case submit.JobOutcomeSucceeded:
-		if submitRes.Watch.Summary != nil && submitRes.Watch.Summary.HasFailures() {
-			return &exitError{code: 9, err: errors.New(
-				"ingestion Job completed but the summary reports failures — see panel above")}
-		}
+	if exitErr != nil {
+		return exitErr
 	}
 	return nil
 }
 
-// printPushPreflight is the customer-facing summary. Mirrors
-// `cluster info`'s layout for consistency: section header,
-// indented key:value rows. Kept here (not on the layout/release/pvc
-// types) because the formatting is policy and lives with the CLI,
-// not the data.
-func printPushPreflight(
-	out io.Writer,
-	layout *push.LocalLayout,
-	release *cluster.ParentRelease,
-	pvc *cluster.SharedPVC,
-	spec map[string]any,
-	dryRun bool,
-) {
-	// Explicit-discard the writer errors throughout — same rationale
-	// as cli/cluster.go and cli/ingest.go: a pipe-write failure
-	// shouldn't convert success into failure. The exit code is
-	// the contract.
+// classifyPushOutcome maps the result of submit.Run to a machine-
+// readable status string + the process exit error, kept in lockstep so
+// --output-json's status always agrees with the exit code (a nil
+// *exitError = success, exit 0). It also covers the error paths
+// (auth/submit/watch) so --output-json can still emit a result object
+// when submit.Run returns an error. (Bugbot #38.)
+func classifyPushOutcome(res *submit.Result, err error) (string, *exitError) {
+	if err != nil {
+		switch {
+		case submit.IsAuthError(err):
+			return "auth_error", &exitError{code: 5, err: err}
+		case submit.IsWatchError(err):
+			// jobs-manager accepted the run; the cluster is doing the
+			// work, the CLI just couldn't follow along — ingest-side
+			// (exit 9), not submit-side (8).
+			return "watch_error", &exitError{code: 9, err: err}
+		default:
+			return "submit_error", &exitError{code: 8, err: err}
+		}
+	}
+	// --detach (no watch) or SIGINT-mid-watch: success; cluster runs on.
+	if res == nil || res.Watch == nil || res.Watch.Outcome == submit.JobOutcomeDetached {
+		return "detached", nil
+	}
+	switch res.Watch.Outcome {
+	case submit.JobOutcomeFailed:
+		return "failed", &exitError{code: 9, err: errors.New("ingestion Job exited non-zero — see logs above")}
+	case submit.JobOutcomeUnknown:
+		return "unknown", &exitError{code: 9, err: errors.New(
+			"ingestion Job's final status couldn't be determined within the watch window — " +
+				"check `kubectl get job -n " + res.Submit.Namespace + " " + res.Submit.JobName + "` for the outcome")}
+	case submit.JobOutcomeSucceeded:
+		// Job exited 0, but rows can still have failed — exit 9, and the
+		// JSON status must say so, NOT "succeeded". (Bugbot #38.)
+		if res.Watch.Summary != nil && res.Watch.Summary.HasFailures() {
+			return "completed_with_failures", &exitError{code: 9, err: errors.New(
+				"ingestion Job completed but the summary reports failures — see panel above")}
+		}
+		return "succeeded", nil
+	}
+	return "unknown", nil
+}
+
+// printLocalSummary shows what the CLI found on disk plus the ingest
+// settings it assembled — the detail under step 1 ("Check your
+// dataset"). Split from the cluster summary so each sits under its own
+// numbered step. Mirrors `cluster info`'s section/Field layout.
+func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]any) {
 	cat, _ := spec["category"].(string)
 
-	_, _ = fmt.Fprintf(out, "Local dataset:\n")
-	_, _ = fmt.Fprintf(out, "  root:          %s\n", layout.Root)
+	p.Section("Local dataset")
+	p.Field("root", layout.Root)
 	switch {
 	case push.IsTabular(cat):
-		_, _ = fmt.Fprintf(out, "  data CSV:      %s\n", layout.LabelsCSV)
+		p.Field("data CSV", layout.LabelsCSV)
 		if sch, ok := spec["schema"].(map[string]string); ok {
-			_, _ = fmt.Fprintf(out, "  columns:       %d\n", len(sch))
+			p.Field("columns", fmt.Sprintf("%d", len(sch)))
 		}
 	case push.IsText(cat):
 		dir := push.TextSidecarDir(cat)
-		_, _ = fmt.Fprintf(out, "  labels.csv:    %s\n", layout.LabelsCSV)
-		_, _ = fmt.Fprintf(out, "  %-15s%d files\n", dir+":", len(layout.Sidecars[dir]))
+		p.Field("labels.csv", layout.LabelsCSV)
+		p.Field(dir, fmt.Sprintf("%d files", len(layout.Sidecars[dir])))
 		if _, ok := layout.ExtraFiles["tokenizer.json"]; ok {
-			_, _ = fmt.Fprintf(out, "  %-15s%s\n", "tokenizer:", "tokenizer.json")
+			p.Field("tokenizer", "tokenizer.json")
 		}
 	default:
-		_, _ = fmt.Fprintf(out, "  labels.csv:    %s\n", layout.LabelsCSV)
-		_, _ = fmt.Fprintf(out, "  images:        %d files\n", len(layout.Images))
+		p.Field("labels.csv", layout.LabelsCSV)
+		p.Field("images", fmt.Sprintf("%d files", len(layout.Images)))
 		if anns := layout.Sidecars["annotations"]; len(anns) > 0 {
-			_, _ = fmt.Fprintf(out, "  annotations:   %d files\n", len(anns))
+			p.Field("annotations", fmt.Sprintf("%d files", len(anns)))
 		}
 	}
-	_, _ = fmt.Fprintf(out, "  total size:    %s\n", push.HumanBytes(layout.TotalBytes))
-	_, _ = fmt.Fprintln(out)
+	p.Field("total size", push.HumanBytes(layout.TotalBytes))
 
-	_, _ = fmt.Fprintf(out, "Target cluster:\n")
-	_, _ = fmt.Fprintf(out, "  release:       %s (chart %s)\n", release.ReleaseName, release.ChartVersion)
-	_, _ = fmt.Fprintf(out, "  jobs-manager:  %s\n", release.JobsManagerService)
-	_, _ = fmt.Fprintf(out, "  shared PVC:    %s (%s)\n", pvc.ClaimName, pvc.Phase)
-	if !pvc.IsReadWriteMany() {
-		// Warn but don't block — RWO clusters still work, the
-		// scheduler will co-locate the stage Pod with the existing
-		// mounter. Phase 3 PR-b will surface the same warning at
-		// pod-create time too.
-		_, _ = fmt.Fprintf(out, "  access:        %v (warn: not ReadWriteMany — stage Pod will co-locate)\n", pvc.AccessModes)
-	}
-	_, _ = fmt.Fprintln(out)
-
-	_, _ = fmt.Fprintf(out, "Synthesized ingest spec:\n")
-	_, _ = fmt.Fprintf(out, "  table:         %s\n", spec["table"])
-	_, _ = fmt.Fprintf(out, "  category:      %s\n", spec["category"])
-	_, _ = fmt.Fprintf(out, "  intent:        %s\n", spec["intent"])
+	p.Section("Ingest settings")
+	p.Field("table", fmt.Sprintf("%v", spec["table"]))
+	p.Field("category", fmt.Sprintf("%v", spec["category"]))
+	p.Field("intent", fmt.Sprintf("%v", spec["intent"]))
 	switch lbl := spec["label"].(type) {
 	case string:
-		_, _ = fmt.Fprintf(out, "  label column:  %s\n", lbl)
+		p.Field("label column", lbl)
 	case map[string]any:
-		_, _ = fmt.Fprintf(out, "  label column:  %v (policy: %v)\n", lbl["column"], lbl["policy"])
+		p.Field("label column", fmt.Sprintf("%v (policy: %v)", lbl["column"], lbl["policy"]))
 	}
 	if tc, ok := spec["time_column"].(string); ok && tc != "" {
-		_, _ = fmt.Fprintf(out, "  time column:   %s\n", tc)
+		p.Field("time column", tc)
 	}
-	_, _ = fmt.Fprintf(out, "  destination:   %s\n", push.FinalDestPrefix(spec["table"].(string)))
-	_, _ = fmt.Fprintln(out)
+	p.Field("destination", push.FinalDestPrefix(spec["table"].(string)))
+}
 
-	if !dryRun {
-		_, _ = fmt.Fprintf(out, "Next: stage %d files (%s) for table %q\n",
-			layout.FileCount(), push.HumanBytes(layout.TotalBytes), spec["table"])
-		_, _ = fmt.Fprintln(out)
+// printClusterSummary shows the discovered workspace cluster target —
+// the detail under step 2 ("Connect to your workspace's cluster").
+func printClusterSummary(p *ui.Printer, release *cluster.ParentRelease, pvc *cluster.SharedPVC) {
+	p.Section("Target cluster")
+	p.Field("release", fmt.Sprintf("%s (chart %s)", release.ReleaseName, release.ChartVersion))
+	p.Field("jobs-manager", release.JobsManagerService)
+	p.Field("shared PVC", fmt.Sprintf("%s (%s)", pvc.ClaimName, pvc.Phase))
+	if !pvc.IsReadWriteMany() {
+		// Warn but don't block — RWO clusters still work; the scheduler
+		// co-locates the stage Pod with the existing mounter.
+		p.Warnf("PVC is %v, not ReadWriteMany — the stage Pod will co-locate with the existing mounter", pvc.AccessModes)
 	}
+}
+
+// pushJSONResult is the machine-readable shape emitted by --output-json.
+// It's a presentation type owned by the CLI layer, so submit.Summary
+// stays json-tag-free and this wire format can evolve independently.
+type pushJSONResult struct {
+	Status    string           `json:"status"` // dry-run|succeeded|completed_with_failures|failed|detached|unknown|auth_error|submit_error|watch_error|error
+	Table     string           `json:"table"`
+	Category  string           `json:"category"`
+	Intent    string           `json:"intent"`
+	Namespace string           `json:"namespace,omitempty"`
+	JobName   string           `json:"job_name,omitempty"`
+	Summary   *pushJSONSummary `json:"summary,omitempty"`
+	Error     string           `json:"error,omitempty"`
+	ExitCode  int              `json:"exit_code,omitempty"`
+}
+
+type pushJSONSummary struct {
+	IngestorID           string  `json:"ingestor_id,omitempty"`
+	TotalRecords         int64   `json:"total_records"`
+	InsertedRecords      int64   `json:"inserted_records"`
+	SentToAPI            int64   `json:"sent_to_api"`
+	SkippedRecords       int64   `json:"skipped_records"`
+	FileTransferFailures int64   `json:"file_transfer_failures"`
+	DBInsertFailures     int64   `json:"db_insert_failures"`
+	SuccessRate          float64 `json:"success_rate"`
+}
+
+// writePushJSON serializes the push result to w (stdout in
+// --output-json mode). Errors are dropped: marshaling our own struct
+// can't fail in practice, and the exit code remains the contract.
+func writePushJSON(w io.Writer, status string, spec map[string]any, s *submit.Summary, ns, jobName string) {
+	res := pushJSONResult{
+		Status:    status,
+		Table:     fmt.Sprintf("%v", spec["table"]),
+		Category:  fmt.Sprintf("%v", spec["category"]),
+		Intent:    fmt.Sprintf("%v", spec["intent"]),
+		Namespace: ns,
+		JobName:   jobName,
+	}
+	if s != nil {
+		res.Summary = &pushJSONSummary{
+			IngestorID:           s.IngestorID,
+			TotalRecords:         s.TotalRecords,
+			InsertedRecords:      s.InsertedRecords,
+			SentToAPI:            s.APISentRecords,
+			SkippedRecords:       s.SkippedRecords,
+			FileTransferFailures: s.FileTransferFailures,
+			DBInsertFailures:     s.FailedRecords,
+			SuccessRate:          s.SuccessRate(),
+		}
+	}
+	b, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintln(w, string(b))
+}
+
+// writePushErrorJSON emits a JSON error object for --output-json runs
+// that fail before a result is produced (validation, discovery,
+// staging, token, port-forward). Keeps the stdout-always-JSON contract
+// so a script parsing it never hits empty output on failure. (Bugbot #49)
+func writePushErrorJSON(w io.Writer, sp push.SpecArgs, e error, code int) {
+	res := pushJSONResult{
+		Status:   "error",
+		Table:    sp.Table,
+		Category: sp.Category,
+		Intent:   sp.Intent,
+		Error:    e.Error(),
+		ExitCode: code,
+	}
+	b, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintln(w, string(b))
 }

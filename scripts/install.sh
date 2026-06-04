@@ -93,12 +93,14 @@ detect_os() {
 detect_arch() {
     uname_m="$(uname -m)"
     case "$uname_m" in
-        x86_64|amd64)        echo "amd64" ;;
-        arm64|aarch64)       echo "arm64" ;;
+        x86_64|amd64)                   echo "amd64" ;;
+        arm64|aarch64)                  echo "arm64" ;;
+        i386|i686)                      echo "386" ;;
+        armv6l|armv7l|armv8l|armhf|arm) echo "arm" ;;
         *)
             echo "Error: unsupported arch: $uname_m" >&2
-            echo "tracebloc CLI is released for amd64 + arm64; if you need" >&2
-            echo "another arch, please file an issue at github.com/tracebloc/cli." >&2
+            echo "tracebloc CLI ships linux binaries for amd64, arm64, 386, and arm;" >&2
+            echo "if you need another arch, please file an issue at github.com/tracebloc/cli." >&2
             exit 1
             ;;
     esac

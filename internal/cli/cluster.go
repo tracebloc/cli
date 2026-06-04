@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/tracebloc/cli/internal/cluster"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // newClusterCmd wires the `tracebloc cluster` subtree. Today it has
@@ -86,7 +87,7 @@ Exit codes:
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClusterInfo(
 				cmd.Context(),
-				cmd.OutOrStdout(),
+				printerFor(cmd),
 				kubeconfigPath, contextOverride, nsOverride,
 				ingestorSAName,
 				tokenExpiry,
@@ -111,11 +112,13 @@ Exit codes:
 
 func runClusterInfo(
 	ctx context.Context,
-	out interface{ Write([]byte) (int, error) },
+	p *ui.Printer,
 	kubeconfigPath, contextOverride, nsOverride string,
 	ingestorSAOverride string,
 	tokenExpiry int64,
 ) error {
+	p.Banner("tracebloc", "cluster diagnostics")
+
 	resolved, err := cluster.Load(cluster.KubeconfigOptions{
 		Path:      kubeconfigPath,
 		Context:   contextOverride,
@@ -133,16 +136,10 @@ func runClusterInfo(
 		return &exitError{code: 3, err: err}
 	}
 
-	// Explicit-discard the writer errors: same rationale as
-	// internal/cli/ingest.go — the exit code is the contract, and a
-	// pipe-write failure shouldn't convert success into failure. If
-	// the downstream consumer disappears mid-write we still finish
-	// cleanly. errcheck wants this acknowledged.
-	_, _ = fmt.Fprintf(out, "Kubeconfig:\n")
-	_, _ = fmt.Fprintf(out, "  context:     %s\n", resolved.Context)
-	_, _ = fmt.Fprintf(out, "  server:      %s\n", resolved.ServerURL)
-	_, _ = fmt.Fprintf(out, "  namespace:   %s\n", resolved.Namespace)
-	_, _ = fmt.Fprintln(out)
+	p.Section("Kubeconfig")
+	p.Field("context", resolved.Context)
+	p.Field("server", resolved.ServerURL)
+	p.Field("namespace", resolved.Namespace)
 
 	// Discover the parent release.
 	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
@@ -161,18 +158,17 @@ func runClusterInfo(
 		release.IngestorSAName = ingestorSAOverride
 	}
 
-	_, _ = fmt.Fprintf(out, "Parent release:\n")
-	_, _ = fmt.Fprintf(out, "  name:          %s\n", release.ReleaseName)
-	_, _ = fmt.Fprintf(out, "  chart version: %s\n", release.ChartVersion)
-	_, _ = fmt.Fprintf(out, "  app version:   %s\n", release.AppVersion)
-	_, _ = fmt.Fprintf(out, "  jobs-manager:  %s\n", release.JobsManagerService)
-	_, _ = fmt.Fprintf(out, "  ingestor SA:   %s/%s\n", resolved.Namespace, release.IngestorSAName)
+	p.Section("Parent release")
+	p.Field("name", release.ReleaseName)
+	p.Field("chart version", release.ChartVersion)
+	p.Field("app version", release.AppVersion)
+	p.Field("jobs-manager", release.JobsManagerService)
+	p.Field("ingestor SA", fmt.Sprintf("%s/%s", resolved.Namespace, release.IngestorSAName))
 	digest := release.IngestorImageDigest
 	if digest == "" {
 		digest = "<not configured — admin must set images.ingestor.digest>"
 	}
-	_, _ = fmt.Fprintf(out, "  ingestor img:  %s\n", digest)
-	_, _ = fmt.Fprintln(out)
+	p.Field("ingestor img", digest)
 
 	// Mint a token (or fall back). The audience is intentionally
 	// nil today — jobs-manager's TokenReview accepts the default
@@ -187,16 +183,16 @@ func runClusterInfo(
 	}
 
 	hash := sha256.Sum256([]byte(tok.Token))
-	_, _ = fmt.Fprintf(out, "Ingestor SA token:\n")
-	_, _ = fmt.Fprintf(out, "  source:        %s\n", tok.Source)
-	_, _ = fmt.Fprintf(out, "  sha256[:8]:    %s\n", hex.EncodeToString(hash[:8]))
+	p.Section("Ingestor SA token")
+	p.Field("source", tok.Source.String())
+	p.Field("sha256[:8]", hex.EncodeToString(hash[:8]))
 	if tok.ExpirationSeconds > 0 {
 		exp := time.Duration(tok.ExpirationSeconds) * time.Second
-		_, _ = fmt.Fprintf(out, "  expires in:    ~%s (server may cap shorter)\n", exp)
+		p.Field("expires in", fmt.Sprintf("~%s (server may cap shorter)", exp))
 	} else {
-		_, _ = fmt.Fprintf(out, "  expires in:    never (static-secret fallback)\n")
+		p.Field("expires in", "never (static-secret fallback)")
 	}
-	_, _ = fmt.Fprintln(out)
-	_, _ = fmt.Fprintln(out, "Ready for `tracebloc dataset push`.")
+
+	p.Successf("Ready for `tracebloc dataset push`.")
 	return nil
 }
