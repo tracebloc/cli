@@ -6,7 +6,7 @@ The customer-facing CLI for the tracebloc declarative ingestion path. Wraps the 
 
 ## Status
 
-**v0.1.0 is released** — the first stable [release](https://github.com/tracebloc/cli/releases/latest), cut from `develop` (superseding the earlier `v0.1.0-alpha` preview). Every phase of the [v0.1 roadmap](https://github.com/tracebloc/client/issues/147) (#148–#153) is merged. The binary implements `version`, `completion`, `ingest validate`, `cluster info`, and the full `dataset push` flow — local schema validation, cluster discovery, data staging, submission, and Job watching, end to end.
+**v0.2.0 is released** — the latest stable [release](https://github.com/tracebloc/cli/releases/latest), cut from `develop`. It builds on v0.1.0 (the first stable, which delivered the full [v0.1 roadmap](https://github.com/tracebloc/client/issues/147), #148–#153) with a friendlier guided `dataset push` and `dataset rm` on the home screen. The binary implements `version`, `completion`, `ingest validate`, `cluster info`, and the full `dataset push` / `dataset rm` flow — local schema validation, cluster discovery, data staging, submission, and Job watching, end to end.
 
 `dataset push` covers **9 of 10 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `text_classification`, `masked_language_modeling`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, and `time_to_event_prediction`. `semantic_segmentation` is pending mask-sidecar support upstream ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)); `instance_segmentation` is not yet implemented.
 
@@ -101,11 +101,11 @@ All v0.1 phases are merged:
 | 2 | [#150](https://github.com/tracebloc/client/issues/150) | Cluster discovery + ingestor SA token via TokenRequest | ✅ |
 | 3 | [#151](https://github.com/tracebloc/client/issues/151) | Stage data into the shared PVC via ephemeral Pod | ✅ |
 | 4 | [#152](https://github.com/tracebloc/client/issues/152) | Submit to jobs-manager + watch ingestor Job + summary | ✅ |
-| 5 | [#153](https://github.com/tracebloc/client/issues/153) | GitHub Releases + install.sh distribution (Homebrew tap deferred) | ✅ — [`v0.1.0`](https://github.com/tracebloc/cli/releases/latest) released (stable, 8-platform) |
+| 5 | [#153](https://github.com/tracebloc/client/issues/153) | GitHub Releases + install.sh distribution (Homebrew tap deferred) | ✅ — [`v0.1.0`](https://github.com/tracebloc/cli/releases/tag/v0.1.0) released (stable, 8-platform) |
 
 Beyond the original phases, `dataset push` was widened from image-classification-only to 9 of 10 modalities, and the test suite gained unit-coverage wins plus a kind-based integration harness for the real-I/O seams.
 
-**Next (v0.2):** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap; `semantic_segmentation` ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)) and `instance_segmentation`; more `dataset` verbs (`list`, `rm`). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues) (#3–#7).
+**v0.2.0** added a friendlier guided `dataset push` and `dataset rm` on the home screen (#44, #47). **Next:** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap; `semantic_segmentation` ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)) and `instance_segmentation`; more `dataset` verbs (`list`). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues).
 
 Epic: [tracebloc/client#147](https://github.com/tracebloc/client/issues/147).
 
