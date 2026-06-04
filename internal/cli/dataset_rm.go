@@ -182,6 +182,15 @@ undone — re-pushing the data is the only way back.`)
 	p.Infof("Removing in-cluster artifacts…")
 	res, err := push.Teardown(ctx, cs, resolved.RestConfig, resolved.Namespace, plan)
 	if err != nil {
+		// Teardown is two sequential destructive ops; if the table drop
+		// succeeded but file removal didn't, say so — both ops are
+		// idempotent, so re-running completes the cleanup. (Bugbot #49)
+		if res.DroppedTable {
+			return &exitError{code: 7, err: fmt.Errorf(
+				"teardown incomplete — the table %s.%s was dropped, but removing its files failed; "+
+					"re-run `tracebloc dataset rm %s` to remove the leftover files: %w",
+				plan.Database, plan.Table, a.Table, err)}
+		}
 		return &exitError{code: 7, err: fmt.Errorf("teardown failed: %w", err)}
 	}
 

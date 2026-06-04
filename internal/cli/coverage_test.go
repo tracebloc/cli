@@ -122,6 +122,34 @@ func TestClassifyPushOutcome(t *testing.T) {
 	}
 }
 
+// TestRunDatasetPush_OutputJSONEarlyFailureEmitsJSON: with --output-json,
+// a failure before the dry-run/submit emit points (here an invalid table,
+// exit 2) still writes a JSON error object to stdout — the stdout-always-
+// JSON contract. (Bugbot #49)
+func TestRunDatasetPush_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
+	var jsonBuf, human bytes.Buffer
+	a := runDatasetPushArgs{
+		LocalPath:  "./x",
+		Spec:       push.SpecArgs{Table: "../bad", Category: "image_classification", Intent: "train"},
+		Printer:    ui.New(&human, ui.WithColor(false)),
+		OutputJSON: true,
+		JSONOut:    &jsonBuf,
+	}
+	err := runDatasetPush(context.Background(), &human, &human, a)
+
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("err = %v, want *exitError code 2", err)
+	}
+	var got pushJSONResult
+	if e := json.Unmarshal(jsonBuf.Bytes(), &got); e != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", e, jsonBuf.String())
+	}
+	if got.Status != "error" || got.ExitCode != 2 || got.Table != "../bad" {
+		t.Errorf("got %+v, want status=error exit_code=2 table=../bad", got)
+	}
+}
+
 // TestExpandHome covers the #37 fix: a leading ~ / ~/… resolves under
 // $HOME, while relative, absolute, and empty paths pass through
 // untouched (the case that bit the interactive prompt — the shell

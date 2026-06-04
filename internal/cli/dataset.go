@@ -340,7 +340,24 @@ func expandHome(path string) string {
 // need the cluster runs before any that does, so a customer with
 // a bad label-column or oversized dataset gets the diagnostic in
 // milliseconds without a kubeconfig round-trip.
-func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPushArgs) error {
+func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPushArgs) (err error) {
+	// In --output-json mode, guarantee stdout always carries a JSON
+	// object. The dry-run + post-submit paths emit a result and set
+	// jsonEmitted; this defer covers every early-failure return (bad
+	// table, discovery, staging, token, port-forward) with a JSON error
+	// object, so `… --output-json | jq` never sees empty stdout. (Bugbot #49)
+	jsonEmitted := false
+	defer func() {
+		if a.OutputJSON && err != nil && !jsonEmitted {
+			code := 1
+			var ee *exitError
+			if errors.As(err, &ee) {
+				code = ee.Code()
+			}
+			writePushErrorJSON(a.JSONOut, a.Spec, err, code)
+		}
+	}()
+
 	// Intro header: brand + a plain-English explainer of what a push
 	// does, so a first-time user understands it before any prompts.
 	// Routed through a.Printer, so --output-json keeps it on stderr and
@@ -430,10 +447,9 @@ contributors train against it without ever seeing the raw files.`))
 	//    data CSV. The walk also yields what the per-category
 	//    resolution below needs (the image list for target-size, the
 	//    CSV for schema inference).
-	var (
-		layout *push.LocalLayout
-		err    error
-	)
+	// err is the function's named return (see the --output-json defer
+	// at the top), so it's not redeclared here.
+	var layout *push.LocalLayout
 	switch {
 	case push.IsTabular(a.Spec.Category):
 		layout, err = push.DiscoverTabular(a.LocalPath)
@@ -602,6 +618,7 @@ contributors train against it without ever seeing the raw files.`))
 		a.Printer.Hintf("A real run continues with step 3 (stage your files) and step 4 (run the ingestion).")
 		if a.OutputJSON {
 			writePushJSON(a.JSONOut, "dry-run", spec, nil, "", "")
+			jsonEmitted = true
 		}
 		return nil
 	}
@@ -721,6 +738,7 @@ contributors train against it without ever seeing the raw files.`))
 			}
 		}
 		writePushJSON(a.JSONOut, status, spec, summary, ns, jobName)
+		jsonEmitted = true
 	}
 
 	if exitErr != nil {
@@ -837,13 +855,15 @@ func printClusterSummary(p *ui.Printer, release *cluster.ParentRelease, pvc *clu
 // It's a presentation type owned by the CLI layer, so submit.Summary
 // stays json-tag-free and this wire format can evolve independently.
 type pushJSONResult struct {
-	Status    string           `json:"status"` // dry-run|succeeded|completed_with_failures|failed|detached|unknown|auth_error|submit_error|watch_error
+	Status    string           `json:"status"` // dry-run|succeeded|completed_with_failures|failed|detached|unknown|auth_error|submit_error|watch_error|error
 	Table     string           `json:"table"`
 	Category  string           `json:"category"`
 	Intent    string           `json:"intent"`
 	Namespace string           `json:"namespace,omitempty"`
 	JobName   string           `json:"job_name,omitempty"`
 	Summary   *pushJSONSummary `json:"summary,omitempty"`
+	Error     string           `json:"error,omitempty"`
+	ExitCode  int              `json:"exit_code,omitempty"`
 }
 
 type pushJSONSummary struct {
@@ -880,6 +900,26 @@ func writePushJSON(w io.Writer, status string, spec map[string]any, s *submit.Su
 			DBInsertFailures:     s.FailedRecords,
 			SuccessRate:          s.SuccessRate(),
 		}
+	}
+	b, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintln(w, string(b))
+}
+
+// writePushErrorJSON emits a JSON error object for --output-json runs
+// that fail before a result is produced (validation, discovery,
+// staging, token, port-forward). Keeps the stdout-always-JSON contract
+// so a script parsing it never hits empty output on failure. (Bugbot #49)
+func writePushErrorJSON(w io.Writer, sp push.SpecArgs, e error, code int) {
+	res := pushJSONResult{
+		Status:   "error",
+		Table:    sp.Table,
+		Category: sp.Category,
+		Intent:   sp.Intent,
+		Error:    e.Error(),
+		ExitCode: code,
 	}
 	b, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
