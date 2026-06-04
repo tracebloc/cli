@@ -8,8 +8,8 @@ have to reverse-engineer the surface area on release day.
 ## What runs automatically on `git push origin v0.1.0`
 
 1. `.github/workflows/release.yml` fires.
-2. Matrix build of 5 platform binaries (linux/{amd64,arm64},
-   darwin/{amd64,arm64}, windows/amd64).
+2. Matrix build of 8 platform binaries (linux/{amd64,arm64,386,arm},
+   darwin/{amd64,arm64}, windows/{amd64,arm64}).
 3. Each binary is signed with cosign keyless OIDC; the per-binary
    `.cert` + `.sig` files are produced.
 4. SHA256SUMS file is aggregated across the matrix.
@@ -73,7 +73,7 @@ The workflow takes 5-10 minutes. Monitor at
 
 ### 3. Verify the release
 
-- [ ] All 5 binaries attached to the GitHub Release
+- [ ] All 8 binaries attached to the GitHub Release
 - [ ] SHA256SUMS file present
 - [ ] install.sh + install.ps1 present
 - [ ] Each binary has a `.cert` + `.sig` pair
