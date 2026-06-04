@@ -3,8 +3,8 @@
 # Triggered by pushing a vX.Y.Z tag (or manually via
 # workflow_dispatch). Produces:
 #
-#   - Cross-compiled binaries for linux/{amd64,arm64},
-#     darwin/{amd64,arm64}, windows/amd64
+#   - Cross-compiled binaries for linux/{amd64,arm64,386,arm},
+#     darwin/{amd64,arm64}, windows/{amd64,arm64}
 #   - Cosign keyless signature for each binary (Sigstore Rekor;
 #     same machinery as tracebloc/data-ingestors' image release)
 #   - SHA256SUMS file covering every binary
@@ -56,12 +56,20 @@ jobs:
             arch: amd64
           - os: linux
             arch: arm64
+          - os: linux
+            arch: '386'
+          - os: linux
+            arch: arm
+            goarm: '6'   # armv6 baseline runs on armv6 + armv7 (Pi Zero → Pi 4)
           - os: darwin
             arch: amd64
           - os: darwin
             arch: arm64
           - os: windows
             arch: amd64
+            ext: .exe
+          - os: windows
+            arch: arm64
             ext: .exe
     steps:
       - name: Checkout
@@ -97,6 +105,9 @@ jobs:
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
+          # GOARM only applies when GOARCH=arm; empty for every other
+          # target, which Go ignores.
+          GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: '0'
         run: |
           mkdir -p dist
