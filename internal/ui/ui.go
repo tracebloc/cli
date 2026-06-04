@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/fatih/color"
 	"golang.org/x/term"
@@ -106,6 +107,16 @@ func (p *Printer) Banner(title, subtitle string) {
 		p.out("  %s\n", subtitle)
 	}
 	p.out("\n")
+}
+
+// Para prints a normal-weight paragraph, each line indented to match
+// Banner/Section bodies. It splits on embedded newlines so multi-line
+// prose keeps the indent. Use for explanatory prose — distinct from
+// Hintf (dim one-liners) and Infof (· bullets).
+func (p *Printer) Para(text string) {
+	for _, line := range strings.Split(text, "\n") {
+		p.out("  %s\n", line)
+	}
 }
 
 // Step prints a major-step header: "Step n/total  label" in bold cyan.

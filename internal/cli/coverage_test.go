@@ -50,7 +50,8 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	printPushPreflight(p, layout, release, pvc, spec, false)
+	printLocalSummary(p, layout, spec)
+	printClusterSummary(p, release, pvc)
 	out := buf.String()
 
 	for _, want := range []string{
