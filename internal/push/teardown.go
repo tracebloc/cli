@@ -23,10 +23,9 @@ const IngestionDatabase = "training_test_datasets"
 //
 // It deliberately does NOT include the central tracebloc backend
 // catalog entry: the CLI has no direct line to that backend (only the
-// in-cluster ingestor does, with its own creds), so removing it is the
-// cross-repo follow-up (tracebloc/cli#39). A successfully-ingested
-// dataset torn down this way leaves a stale catalog entry until #39
-// lands.
+// in-cluster ingestor does, with its own creds). The backend removes
+// the dataset's catalog metadata automatically once these in-cluster
+// artifacts are gone, so there's no CLI-side catalog teardown to do.
 type TeardownPlan struct {
 	Database string   // MySQL schema (IngestionDatabase)
 	Table    string   // table name — MUST have passed ValidateTableName
@@ -59,11 +58,10 @@ type TeardownResult struct {
 //   - rm -rf the PVC dirs by exec-ing inside the jobs-manager pod,
 //     which mounts the shared PVC at SharedRoot.
 //
-// DESIGN NOTE (under review): this exec-into-existing-pods approach is
-// the "CLI-direct teardown". The alternative under discussion is a
-// server-side jobs-manager delete endpoint that could also remove the
-// backend catalog entry (#39) in one place. It assumes (a) a pod whose
-// name contains "mysql" exposes $MYSQL_ROOT_PASSWORD, and (b) the
+// DESIGN NOTE: this exec-into-existing-pods approach is the
+// "CLI-direct teardown" (the alternative considered was a server-side
+// jobs-manager delete endpoint). It assumes (a) a pod whose name
+// contains "mysql" exposes $MYSQL_ROOT_PASSWORD, and (b) the
 // jobs-manager pod mounts the shared PVC at SharedRoot — both true for
 // the current parent chart, but worth confirming before this ships.
 func Teardown(ctx context.Context, cs kubernetes.Interface, cfg *rest.Config, namespace string, plan TeardownPlan) (TeardownResult, error) {
