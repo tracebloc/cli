@@ -1,7 +1,7 @@
 name: Build
 
 # Runs on every PR + every push to develop/main. Validates the binary
-# builds cleanly across all 5 release-target platforms, the tests pass,
+# builds cleanly across all 8 release-target platforms, the tests pass,
 # and the linter is green. Release-time signing + tag artifacts live
 # in release.yml (Phase 5).
 
@@ -115,12 +115,20 @@ jobs:
             arch: amd64
           - os: linux
             arch: arm64
+          - os: linux
+            arch: '386'
+          - os: linux
+            arch: arm
+            goarm: '6'   # keep in lock-step with release.yml's matrix
           - os: darwin
             arch: amd64
           - os: darwin
             arch: arm64
           - os: windows
             arch: amd64
+            ext: .exe
+          - os: windows
+            arch: arm64
             ext: .exe
     steps:
       - uses: actions/checkout@v4
@@ -135,6 +143,7 @@ jobs:
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
+          GOARM: ${{ matrix.goarm }}   # only applies when GOARCH=arm
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist
