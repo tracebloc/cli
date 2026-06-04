@@ -26,7 +26,7 @@ import (
 // discovery) and PR-b (this one: ephemeral stage Pod + tar-over-
 // exec stream + progress bar + SIGINT-safe cleanup). `dataset rm`
 // (#30) removes a pushed dataset's in-cluster artifacts; `dataset
-// list` hangs off this parent later.
+// list` lists the ingested datasets.
 func newDatasetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dataset",
@@ -42,6 +42,7 @@ ingestor Job to completion (streaming logs + the final summary).
 before the first push.`,
 	}
 	cmd.AddCommand(newDatasetPushCmd())
+	cmd.AddCommand(newDatasetListCmd())
 	cmd.AddCommand(newDatasetRmCmd())
 	return cmd
 }
