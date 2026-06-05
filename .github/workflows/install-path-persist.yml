@@ -1,0 +1,87 @@
+name: Install PATH persist (cross-repo)
+
+# Pre-merge guard, from the CLI side, against the PATH-persistence class:
+# a change to THIS repo's scripts/install.sh that puts the `tracebloc` binary
+# somewhere a fresh terminal can't find (e.g. writing PATH only to ~/.profile,
+# which a fresh NON-login bash never reads) must fail CI before it merges.
+#
+# It does NOT re-implement the check here. The fresh-shell harness lives in
+# tracebloc/client (scripts/tests/path-persist.sh) so there's a single source of
+# truth used by both repos. This workflow just checks that harness out and points
+# it at the install.sh from THIS PR (a local file path passed via
+# TRACEBLOC_CLI_REF), so a regression in our installer is caught here rather than
+# only after release.
+#
+# Heavy-ish (per-distro containers), so — mirroring this repo's e2e.yml — it runs
+# on the nightly schedule + manual dispatch, and on a PR ONLY when it carries the
+# `e2e` label.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # nightly, offset from e2e.yml's 03:00 to spread load
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - 'scripts/install.sh'
+      - '.github/workflows/install-path-persist.yml'
+
+permissions:
+  contents: read
+
+env:
+  # Which ref of tracebloc/client carries the path-persist harness.
+  # TODO(client#214): switch to 'develop' once the harness PR has merged. Until
+  # then the harness only exists on its feature branch, so we pin that branch.
+  CLIENT_HARNESS_REF: test/install-journey-737-fresh-shell-e2e
+
+jobs:
+  path-persist:
+    name: Fresh-shell PATH guard — ${{ matrix.distro }}
+    runs-on: ubuntu-latest
+    # Skip on PRs that aren't explicitly opted in via the `e2e` label; always run
+    # on schedule / manual dispatch (same gate as e2e.yml).
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e')
+    strategy:
+      fail-fast: false
+      matrix:
+        # A representative slice of the client-side distro matrix — enough to
+        # catch a PATH-persistence regression in install.sh across the apt / dnf /
+        # zypper / busybox shell-init families without paying for the full set on
+        # every cli run (the full matrix runs in the client repo).
+        distro:
+          - 'ubuntu:24.04'
+          - 'debian:12'
+          - 'fedora:latest'
+          - 'opensuse/leap:15.6'
+    steps:
+      # 1. This PR's CLI source — we test THIS install.sh, not the released one.
+      - name: Checkout this CLI PR
+        uses: actions/checkout@v4
+        with:
+          path: cli
+
+      # 2. The fresh-shell harness from tracebloc/client (single source of truth).
+      - name: Checkout the client path-persist harness
+        uses: actions/checkout@v4
+        with:
+          repository: tracebloc/client
+          ref: ${{ env.CLIENT_HARNESS_REF }}
+          path: client
+
+      # 3. Run the harness in a fresh container per distro, pointed at THIS PR's
+      #    install.sh via a local file path (TRACEBLOC_CLI_REF). The script treats
+      #    a non-URL TRACEBLOC_CLI_REF as a local path and runs it directly, so a
+      #    PATH regression in our installer fails here pre-merge. Both repos are
+      #    mounted read-only at /src; the path is the in-container location of the
+      #    checked-out cli/scripts/install.sh.
+      - name: Fresh-shell PATH check against this PR's install.sh
+        env:
+          DISTRO: ${{ matrix.distro }}
+        run: |
+          docker run --rm \
+            -e TRACEBLOC_CLI_REF=/src/cli/scripts/install.sh \
+            -v "$PWD:/src:ro" -w /src "$DISTRO" \
+            bash client/scripts/tests/path-persist.sh
