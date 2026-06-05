@@ -163,6 +163,13 @@ func (p *Printer) PromptHint(format string, a ...any) {
 	p.out("\n  %s\n", p.paint(fmt.Sprintf(format, a...), color.FgCyan))
 }
 
+// Newline emits a single blank line. Used to detach a closing line or
+// call-to-action (e.g. cluster info's "Ready" line, a dry-run / deletion
+// result) from the field block above it, so it doesn't get lost.
+func (p *Printer) Newline() {
+	p.out("\n")
+}
+
 // PromptHeader prints a bold-white label before a user-input prompt.
 func (p *Printer) PromptHeader(label string) {
 	p.out("\n  %s\n", p.paint(label, color.Bold, color.FgWhite))

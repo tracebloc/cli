@@ -193,6 +193,7 @@ func runClusterInfo(
 		p.Field("expires in", "never (static-secret fallback)")
 	}
 
+	p.Newline()
 	p.Successf("Ready for `tracebloc dataset push`.")
 	return nil
 }

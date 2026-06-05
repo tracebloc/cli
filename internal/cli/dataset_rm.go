@@ -151,6 +151,7 @@ undone — re-pushing the data is the only way back.`)
 
 	// 5. Dry-run stop.
 	if a.DryRun {
+		p.Newline()
 		p.Successf("Dry-run — nothing was deleted.")
 		return nil
 	}
@@ -193,6 +194,7 @@ undone — re-pushing the data is the only way back.`)
 		return &exitError{code: 7, err: fmt.Errorf("teardown failed: %w", err)}
 	}
 
+	p.Newline()
 	p.Successf("Deleted %s.%s and %d PVC path(s).", plan.Database, plan.Table, len(res.RemovedPaths))
 	p.Infof("The dataset's catalog metadata will be removed automatically — no further action needed.")
 	return nil

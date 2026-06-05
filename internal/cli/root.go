@@ -97,6 +97,7 @@ what's planned next.`,
 		p.Infof("tracebloc dataset rm <table>      — delete a pushed dataset (its table + files)")
 		p.Infof("tracebloc cluster info            — check the CLI can reach your cluster")
 		p.Infof("tracebloc ingest validate f.yaml  — validate an ingest.yaml locally")
+		p.Newline()
 		p.Hintf("Add --help to any command for the full flag list.")
 		return nil
 	}
