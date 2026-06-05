@@ -14,6 +14,16 @@
 #   6. Installs to /usr/local/bin/tracebloc (falls back to $HOME/.local/bin
 #      with PATH advice if /usr/local/bin isn't writable)
 #
+# Uninstall:
+#   curl -fsSL .../install.sh | sh -s -- --uninstall
+#   ...removes the tracebloc binary from the install prefix and strips the
+#   marked PATH block (the "# Added by the tracebloc CLI installer" line
+#   plus the export/fish_add_path line right after it) that the installer
+#   appended to your shell rc. It touches ONLY that two-line block and
+#   leaves the rest of the file byte-identical. If the rc is a symlink or
+#   read-only (managed dotfiles, chezmoi, Nix home-manager) it advises you
+#   what to remove by hand instead of writing through it.
+#
 # Why /bin/sh + POSIX-only constructs:
 #   The customer's distro might not have bash. /bin/sh is POSIX-mandated.
 #   No bashisms (no [[ ]], no <(), no ${var/...}). Tested against dash,
@@ -28,6 +38,12 @@ INSTALL_PREFIX="${INSTALL_PREFIX:-/usr/local/bin}"
 RELEASE_VERSION="${RELEASE_VERSION:-latest}"
 GITHUB_REPO="tracebloc/cli"
 BINARY_NAME="tracebloc"
+DO_UNINSTALL=0
+
+# The exact marker line the installer writes above the PATH line. The
+# uninstall path keys off this string, so install and uninstall MUST agree
+# on it — keep them in lock-step. (Used by the append block far below too.)
+RC_MARKER="# Added by the tracebloc CLI installer"
 
 usage() {
     cat <<EOF
@@ -35,11 +51,16 @@ tracebloc CLI installer
 
 Usage:
   install.sh [--version <tag>] [--prefix <dir>] [--help]
+  install.sh --uninstall [--prefix <dir>]
 
 Options:
   --version <tag>   Install a specific version (e.g. v0.1.0). Default: latest.
   --prefix <dir>    Install directory. Default: /usr/local/bin (falls back to
-                    \$HOME/.local/bin if not writable).
+                    \$HOME/.local/bin if not writable). On --uninstall, the
+                    prefix to remove the binary from (both the default prefix
+                    and the \$HOME/.local/bin fallback are checked anyway).
+  --uninstall       Remove the tracebloc binary and strip the marked PATH
+                    block the installer added to your shell rc. No download.
   --help            Show this help.
 
 Environment overrides:
@@ -60,6 +81,10 @@ while [ $# -gt 0 ]; do
         --prefix)
             INSTALL_PREFIX="$2"
             shift 2
+            ;;
+        --uninstall)
+            DO_UNINSTALL=1
+            shift
             ;;
         --help|-h)
             usage
@@ -108,6 +133,275 @@ detect_arch() {
 
 OS="$(detect_os)"
 ARCH="$(detect_arch)"
+
+# --------------------------------------------------------------------
+# Shell-rc routing — shared by the install (append) and --uninstall
+# (strip) paths so they always target the same file.
+#
+# Returns the rc path for the user's $SHELL on stdout, OR exits non-zero
+# when $SHELL is unset/unknown/exotic (csh, tcsh, nu, …). A non-zero
+# return means "we can't safely guess a single rc" — callers fall back to
+# printing advice rather than mutating the wrong file. (#61 silently
+# defaulted these to ~/.profile, which a non-login bash never reads — see
+# #741.)
+# --------------------------------------------------------------------
+rc_for_shell() {
+    _shell_name="$(basename "${SHELL:-}")"
+    case "$_shell_name" in
+        zsh)  echo "$HOME/.zshrc" ;;
+        bash)
+            # macOS Terminal opens a login shell (reads .bash_profile);
+            # Linux terminals are interactive non-login (read .bashrc).
+            if [ "$OS" = "darwin" ]; then echo "$HOME/.bash_profile"; else echo "$HOME/.bashrc"; fi
+            ;;
+        fish) echo "$HOME/.config/fish/config.fish" ;;
+        # $SHELL unset, or a shell whose rc syntax we don't emit
+        # (csh/tcsh use `setenv`, nu uses its own config) — refuse to
+        # guess. Caller advises instead.
+        *) return 1 ;;
+    esac
+}
+
+# The PATH line to add for a given shell. fish has its own helper;
+# everything else gets a POSIX `export`.
+path_line_for_shell() {
+    _shell_name="$(basename "${SHELL:-}")"
+    if [ "$_shell_name" = "fish" ]; then
+        echo "fish_add_path $PREFIX"
+    else
+        echo "export PATH=\"$PREFIX:\$PATH\""
+    fi
+}
+
+# True (0) when we must NOT write through to $1: it's a symlink, or it
+# exists but isn't writable, or we can't create it in its parent dir.
+# Symlinks are the chezmoi / dotfiles-repo / Nix home-manager case —
+# appending would mutate the link target, polluting version control. In
+# all of these we advise instead of writing (#741).
+#
+# For the not-yet-existing case we mkdir -p the parent first (preserving
+# #61's behavior of creating e.g. ~/.config/fish), and only call it
+# "managed" if even that can't be made writable.
+rc_is_managed() {
+    _rc="$1"
+    if [ -L "$_rc" ]; then
+        return 0   # symlink → managed; never write through it
+    fi
+    if [ -e "$_rc" ]; then
+        [ -w "$_rc" ] && return 1 || return 0   # exists: writable?
+    fi
+    # Doesn't exist yet — create the parent dir if needed, then check we
+    # can actually write into it.
+    _dir="$(dirname "$_rc")"
+    mkdir -p "$_dir" 2>/dev/null || true
+    [ -d "$_dir" ] && [ -w "$_dir" ] && return 1 || return 0
+}
+
+# Print the "add this by hand" advice block. $1 = rc path (for the
+# message), $2 = the PATH line to add.
+advise_path_manual() {
+    _rc="$1"; _line="$2"
+    echo ""
+    echo "Note: $PREFIX is not on \$PATH and the installer did not modify your"
+    echo "shell config (it looks managed — a symlink, read-only, or an unknown"
+    echo "shell). Add this line to ${_rc:-your shell rc}, then open a new terminal:"
+    echo ""
+    echo "  $_line"
+    echo ""
+}
+
+# Persist $PREFIX onto PATH by appending our marked block to the user's
+# shell rc — the install-side counterpart to strip_rc_block. install.ps1
+# persists user PATH on Windows (SetEnvironmentVariable, User scope); this
+# brings Unix to parity. The old print-only advice (#61's predecessor)
+# silently failed on Ubuntu: ~/.profile adds ~/.local/bin only at *login*
+# and only if it already existed, but the installer creates it mid-session,
+# so a new (non-login) terminal reading ~/.bashrc never picks it up.
+#
+# Reads $PREFIX. No-ops (with a friendly message) when $PREFIX is already
+# on PATH. Never fatal: anything it can't safely do becomes printed advice.
+#
+# Note: the block starts with a leading '\n' separator, so append→uninstall
+# round-trips byte-identically for any rc that ends in a newline (the
+# universal real-world case). An rc whose last line lacks a trailing newline
+# gains one — POSIX-correct, harmless for an rc, and the only non-identical
+# case (asserted in scripts/tests/install.bats).
+append_path_to_rc() {
+    case ":$PATH:" in
+        *":$PREFIX:"*) return 0 ;;  # already on PATH — nothing to do
+    esac
+
+    _line="$(path_line_for_shell)"
+
+    # Route to the rc the user's shell actually reads. If $SHELL is unset
+    # or exotic (csh, nu, …) rc_for_shell fails — we refuse to guess a
+    # wrong file and just advise instead (#741).
+    if _rc="$(rc_for_shell)"; then
+        if grep -qsF "$PREFIX" "$_rc" 2>/dev/null; then
+            # rc already references it — leave it alone (idempotent).
+            echo ""
+            echo "$PREFIX is already referenced in $_rc; left it as-is."
+            echo "Open a new terminal — or load it now:  . \"$_rc\""
+            echo ""
+        elif rc_is_managed "$_rc"; then
+            # Symlink / read-only / managed dotfiles — writing through
+            # would mutate a tracked target or fail. Advise instead.
+            advise_path_manual "$_rc" "$_line"
+        elif printf '\n%s\n%s\n' "$RC_MARKER" "$_line" >> "$_rc" 2>/dev/null; then
+            echo ""
+            echo "Added $PREFIX to your PATH in $_rc."
+            echo "Open a new terminal — or load it now:  . \"$_rc\""
+            echo "(Undo any time with:  install.sh --uninstall)"
+            echo ""
+        else
+            # Last-resort: the writability probe passed but the append
+            # still failed (race, odd FS). Don't fail the install — advise.
+            advise_path_manual "$_rc" "$_line"
+        fi
+    else
+        advise_path_manual "" "$_line"
+    fi
+}
+
+# --------------------------------------------------------------------
+# Uninstall — strip ONLY our marked block from the rc and remove the
+# binary. No network. Idempotent: running it on an already-clean system
+# is a no-op that still exits 0.
+#
+# The block the installer wrote is (see append_path_to_rc):
+#
+#     <blank line>                            ← separator we added
+#     # Added by the tracebloc CLI installer  ← RC_MARKER
+#     export PATH="<prefix>:$PATH"            (or: fish_add_path <prefix>)
+#
+# To round-trip the file to byte-identical, we drop all three: the marker,
+# the line right after it, AND the single blank separator line immediately
+# before it (only if it IS blank — a non-blank preceding line is real
+# content and is kept). Removing just the two visible lines would orphan
+# the separator newline (caught by the round-trip bats test).
+#
+# Portable editing only — write a temp file and mv it over (the repo's
+# sync-schema.sh convention); no `sed -i`, whose -i semantics differ
+# between GNU and BSD/macOS.
+# --------------------------------------------------------------------
+strip_rc_block() {
+    _rc="$1"
+
+    [ -f "$_rc" ] || return 0          # nothing to strip
+    grep -qF "$RC_MARKER" "$_rc" 2>/dev/null || return 0   # no block → no-op
+
+    # Managed rc (symlink/read-only): don't write through it — tell the
+    # user what to delete. Still "succeeds" (non-fatal).
+    if rc_is_managed "$_rc"; then
+        echo "Note: $_rc looks managed (symlink or read-only); not editing it."
+        echo "Remove this block by hand (the marker line, the line after it,"
+        echo "and the blank line just before it):"
+        echo ""
+        echo "  $RC_MARKER"
+        echo ""
+        return 0
+    fi
+
+    # One-line lookbehind: each line is held and only printed on the NEXT
+    # iteration, so when we reach the marker we can still suppress a held
+    # blank separator. `skip` drops the PATH line right after the marker.
+    # We write to a temp file in the rc's own dir (same filesystem → mv is
+    # atomic) and only swap it in on success.
+    _dir="$(dirname "$_rc")"
+    _tmp="$(mktemp "$_dir/.tracebloc-rc.XXXXXX")" || {
+        echo "Warning: couldn't create a temp file next to $_rc; left it untouched." >&2
+        return 0
+    }
+    if awk -v marker="$RC_MARKER" '
+        skip == 1 { skip = 0; next }            # PATH line after marker — drop
+        $0 == marker {
+            # Drop the marker. Discard a held blank separator; flush a
+            # held non-blank (real content) so we keep it.
+            if (have_held && held != "") print held
+            have_held = 0
+            skip = 1
+            next
+        }
+        { if (have_held) print held; held = $0; have_held = 1 }  # delayed print
+        END { if (have_held) print held }
+    ' "$_rc" > "$_tmp" 2>/dev/null && mv "$_tmp" "$_rc" 2>/dev/null; then
+        echo "Removed the tracebloc PATH block from $_rc."
+    else
+        rm -f "$_tmp" 2>/dev/null || true
+        echo "Warning: couldn't rewrite $_rc; left it untouched." >&2
+    fi
+}
+
+uninstall() {
+    echo "Uninstalling tracebloc CLI..."
+
+    # 1) Remove the binary from the chosen prefix AND the fallback dir,
+    #    so an uninstall cleans up regardless of which path install took.
+    _removed_bin=0
+    for _dir in "$INSTALL_PREFIX" "$HOME/.local/bin"; do
+        _bin="$_dir/$BINARY_NAME"
+        if [ -f "$_bin" ] || [ -L "$_bin" ]; then
+            if rm -f "$_bin" 2>/dev/null; then
+                echo "Removed $_bin"
+                _removed_bin=1
+            else
+                echo "Note: couldn't remove $_bin (permission?). Remove it manually:" >&2
+                echo "  sudo rm -f \"$_bin\"" >&2
+            fi
+        fi
+    done
+    [ "$_removed_bin" = "0" ] && echo "No tracebloc binary found in $INSTALL_PREFIX or $HOME/.local/bin."
+
+    # 2) Strip our marked PATH block. We scan EVERY rc the installer could
+    #    plausibly have written to — not just the one $SHELL/$OS routes to
+    #    right now. The user may have installed under a different shell, or
+    #    changed shells since, so the block can live in a file other than
+    #    today's route. strip_rc_block no-ops on any file lacking the
+    #    marker, so over-scanning is safe and idempotent.
+    _stripped_any=0
+    for _cand in \
+        "$HOME/.zshrc" \
+        "$HOME/.bashrc" \
+        "$HOME/.bash_profile" \
+        "$HOME/.config/fish/config.fish" \
+        "$HOME/.profile"
+    do
+        if [ -f "$_cand" ] && grep -qF "$RC_MARKER" "$_cand" 2>/dev/null; then
+            strip_rc_block "$_cand"
+            _stripped_any=1
+        fi
+    done
+    if [ "$_stripped_any" = "0" ]; then
+        echo "No tracebloc PATH block found in your shell rc files."
+        # $SHELL unset/exotic means we never managed an rc — say so so the
+        # user knows to check any hand-added line themselves.
+        if ! rc_for_shell >/dev/null 2>&1; then
+            echo "(Shell '${SHELL:-unset}' has no rc the installer manages; remove any"
+            echo " tracebloc PATH line you added by hand.)"
+        fi
+    fi
+
+    echo ""
+    echo "✓ tracebloc CLI uninstalled."
+    echo "  Open a new terminal so the PATH change takes effect."
+}
+
+# Test hook: when sourced with TRACEBLOC_INSTALL_SH_SOURCE_ONLY=1, every
+# function above is now defined — return before any download / install /
+# uninstall side effect so the bats suite can exercise them in isolation.
+# (POSIX sh has no $BASH_SOURCE, so an explicit env gate is the portable
+# way to make this script sourceable for testing.)
+if [ "${TRACEBLOC_INSTALL_SH_SOURCE_ONLY:-0}" = "1" ]; then
+    # Intended to be *sourced* by the bats suite, where `return` is valid.
+    # (The suite unsets this var before executing the script for real, so
+    # this branch is never hit in a normal run.)
+    return 0
+fi
+
+if [ "$DO_UNINSTALL" = "1" ]; then
+    uninstall
+    exit 0
+fi
 
 # --------------------------------------------------------------------
 # Resolve the release tag if "latest".
