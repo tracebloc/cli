@@ -34,7 +34,7 @@ type BuildInfo struct {
 func NewRootCmd(info BuildInfo) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "tracebloc",
-		Short: "tracebloc — declarative data ingestion for your cluster",
+		Short: "tracebloc — interactive data ingestion for your cluster",
 		Long: `tracebloc is the customer-facing CLI for the tracebloc declarative
 ingestion path. It wraps the same POST /internal/submit-ingestion-run
 protocol the tracebloc/ingestor Helm chart uses, so any cluster running
@@ -90,12 +90,14 @@ what's planned next.`,
 			return cmd.Help() // an arg that wasn't a known subcommand
 		}
 		p := printerFor(cmd)
-		p.Banner("tracebloc", "declarative data ingestion for your cluster")
+		p.Banner("tracebloc", "interactive data ingestion for your cluster")
 		p.Section("Get started")
-		p.Infof("tracebloc dataset push ./data     — stage + ingest a dataset (guided if you omit flags)")
+		p.Infof("tracebloc dataset push            — stage + ingest a dataset interactively (or use --help to see flags)")
+		p.Infof("tracebloc dataset list            — list datasets ingested in the cluster")
 		p.Infof("tracebloc dataset rm <table>      — delete a pushed dataset (its table + files)")
 		p.Infof("tracebloc cluster info            — check the CLI can reach your cluster")
 		p.Infof("tracebloc ingest validate f.yaml  — validate an ingest.yaml locally")
+		p.Newline()
 		p.Hintf("Add --help to any command for the full flag list.")
 		return nil
 	}

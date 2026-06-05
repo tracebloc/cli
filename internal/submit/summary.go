@@ -358,7 +358,7 @@ func RenderSummary(p *ui.Printer, s *Summary) {
 	p.Field("success rate", fmt.Sprintf("%.1f%%", s.SuccessRate()))
 
 	p.Section("What's next")
-	p.Infof("View it in the dashboard: https://ai.tracebloc.io")
+	p.Infof("View it in the dashboard: https://ai.tracebloc.io/metadata")
 	p.Hintf("The table is staged and ready for training jobs.")
 }
 

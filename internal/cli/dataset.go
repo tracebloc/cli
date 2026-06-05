@@ -26,7 +26,7 @@ import (
 // discovery) and PR-b (this one: ephemeral stage Pod + tar-over-
 // exec stream + progress bar + SIGINT-safe cleanup). `dataset rm`
 // (#30) removes a pushed dataset's in-cluster artifacts; `dataset
-// list` hangs off this parent later.
+// list` lists the ingested datasets.
 func newDatasetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dataset",
@@ -42,6 +42,7 @@ ingestor Job to completion (streaming logs + the final summary).
 before the first push.`,
 	}
 	cmd.AddCommand(newDatasetPushCmd())
+	cmd.AddCommand(newDatasetListCmd())
 	cmd.AddCommand(newDatasetRmCmd())
 	return cmd
 }
@@ -614,6 +615,7 @@ contributors train against it without ever seeing the raw files.`))
 	// 8. Dry-run stop. Acknowledged success, plus a reminder of the
 	//    live-only steps (stage + ingest) the customer just skipped.
 	if a.DryRun {
+		a.Printer.Newline()
 		a.Printer.Successf("Dry-run complete — your dataset and cluster check out; nothing was created.")
 		a.Printer.Hintf("A real run continues with step 3 (stage your files) and step 4 (run the ingestion).")
 		if a.OutputJSON {

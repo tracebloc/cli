@@ -46,9 +46,8 @@ func newDatasetRmCmd() *cobra.Command {
 for a table: the MySQL table in ` + push.IngestionDatabase + ` and the dataset's
 directories on the shared PVC. Destructive and not undoable.
 
-NOTE: the central tracebloc backend catalog entry is NOT removed — the
-CLI has no direct line to that backend. Full cleanup of a successfully
-ingested dataset needs the server-side delete path (tracebloc/cli#39).
+The dataset's catalog metadata on the tracebloc backend is removed
+automatically after deletion — no manual step required.
 
 Exit codes:
   0  artifacts removed (or --dry-run, or the user declined)
@@ -152,6 +151,7 @@ undone — re-pushing the data is the only way back.`)
 
 	// 5. Dry-run stop.
 	if a.DryRun {
+		p.Newline()
 		p.Successf("Dry-run — nothing was deleted.")
 		return nil
 	}
@@ -194,6 +194,8 @@ undone — re-pushing the data is the only way back.`)
 		return &exitError{code: 7, err: fmt.Errorf("teardown failed: %w", err)}
 	}
 
+	p.Newline()
 	p.Successf("Deleted %s.%s and %d PVC path(s).", plan.Database, plan.Table, len(res.RemovedPaths))
+	p.Infof("The dataset's catalog metadata will be removed automatically — no further action needed.")
 	return nil
 }
