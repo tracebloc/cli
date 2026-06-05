@@ -259,12 +259,51 @@ echo "Verify with:"
 echo "  $PREFIX/$BINARY_NAME version"
 echo ""
 
-# PATH guidance for the fallback case.
+# PATH handling for the fallback case. install.ps1 persists the PATH
+# entry on Windows (SetEnvironmentVariable, User scope) — do the same on
+# Unix by writing to the rc file the user's shell actually reads. The old
+# print-only advice silently failed on Ubuntu: ~/.profile adds
+# ~/.local/bin only at *login* and only if it already existed, but the
+# installer creates it mid-session, so a new (non-login) terminal reading
+# ~/.bashrc never picks it up.
 case ":$PATH:" in
-    *":$PREFIX:"*) ;;  # already on PATH
+    *":$PREFIX:"*) ;;  # already on PATH — nothing to do
     *)
-        echo "Note: $PREFIX is not on \$PATH. Add this to your shell rc file:"
-        echo "  export PATH=\"\$PATH:$PREFIX\""
+        shell_name="$(basename "${SHELL:-sh}")"
+        case "$shell_name" in
+            zsh)  rc="$HOME/.zshrc" ;;
+            bash)
+                # macOS Terminal opens a login shell (reads .bash_profile);
+                # Linux terminals are interactive non-login (read .bashrc).
+                if [ "$OS" = "darwin" ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi
+                ;;
+            fish) rc="$HOME/.config/fish/config.fish" ;;
+            *)    rc="$HOME/.profile" ;;
+        esac
+
+        if [ "$shell_name" = "fish" ]; then
+            path_line="fish_add_path $PREFIX"
+        else
+            path_line="export PATH=\"$PREFIX:\$PATH\""
+        fi
+
+        added=0
+        mkdir -p "$(dirname "$rc")" 2>/dev/null || true
+        if grep -qsF "$PREFIX" "$rc" 2>/dev/null; then
+            added=1   # rc already references it — leave it alone (idempotent)
+        elif printf '\n# Added by the tracebloc CLI installer\n%s\n' "$path_line" >> "$rc" 2>/dev/null; then
+            added=1
+        fi
+
+        echo ""
+        if [ "$added" = "1" ]; then
+            echo "Added $PREFIX to your PATH in $rc."
+            echo "Open a new terminal — or load it now:  . \"$rc\""
+        else
+            echo "Note: $PREFIX is not on \$PATH and the installer couldn't update your shell config."
+            echo "Add this line, then open a new terminal:"
+            echo "  $path_line"
+        fi
         echo ""
         ;;
 esac
