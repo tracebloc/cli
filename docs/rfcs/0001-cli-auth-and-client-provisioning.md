@@ -186,24 +186,69 @@ installs *after* the cluster.) Keep CLI-install failure non-fatal only for the
 - The device-flow HTTP client must honor `HTTPS_PROXY`/`NO_PROXY` + custom CAs —
   reuse the corporate-proxy hardening already shipped in the installer (#172).
 
-### 6.6 Name unification (simplification)
+### 6.6 Name → namespace: derive once, then freeze
 
 Today there are effectively two names: `first_name` (display) and `namespace`
-(k8s, chosen at install). Proposal: **ask for one human-readable name**, use it as
-`first_name`, and **derive the `namespace` slug** from it (DNS-1123,
-collision-suffixed) instead of asking twice. Backfill existing clients with
-`first_name → display`, leave their `namespace` untouched.
+(k8s, chosen separately at install). Asking for both is redundant and confusing.
 
-### 6.7 Location capture
+**Proposal: ask for one human-readable name, store it as `first_name`, and *derive*
+the `namespace` slug from it — once, at creation. After that the two are
+decoupled: the display name stays mutable; the namespace is frozen forever.**
+
+Why decouple rather than keep them coupled:
+
+- **Kubernetes namespaces are immutable.** You cannot rename one, and the name is
+  baked into resource names (`<ns>-jobs-manager`, `<ns>-requests-proxy`), DNS, and
+  PVCs. If name and slug stayed coupled, the first display-name rename would force
+  either a stale/disagreeing slug or a destroy-and-rebuild of the running client.
+  Deriving once and freezing avoids this — and matches the model, which already
+  separates `first_name` (mutable) from `namespace`.
+
+Derivation rules:
+
+- **Slugify:** lowercase, transliterate unicode, spaces/punctuation → `-`, collapse
+  repeats, strip to DNS-1123 (`[a-z0-9-]`, ≤63 chars, no leading/trailing `-`).
+- **Collision-suffix:** append `-2`, `-3`, … when the slug already exists (two
+  clients may share a display name; namespaces must be unique).
+- **Empty-slug guard:** a name that slugifies to empty (e.g. all-CJK) falls back to
+  `client-<short-id>`.
+- **Hide from the junior, expose to the power user:** show the derived slug as a
+  confirmation line (`slug: munich-hospital-radiology ✔`); offer `--namespace` to
+  override for multi-client hosts / naming conventions.
+- **Backfill:** existing clients keep their current `namespace`; only set
+  `first_name` as the display backfill — never re-derive an existing slug.
+
+> **Sequencing caveat (open question §11.2):** `namespace` is currently reported by
+> the client *heartbeat*, not set at `POST /edge-device/`. The installer must use
+> the CLI-derived slug as `TB_NAMESPACE` so the provisioned slug and the
+> install-time namespace can't disagree. A reference slug implementation + a run
+> against existing production namespaces (collision/empty-slug check) accompanies
+> this RFC.
+
+### 6.7 Location: soft-required (required, but pre-filled)
+
+`location` is **optional at the model layer today** (`CharField(..., blank=True)`,
+serializer doesn't force it), so a client can be created with no location and
+`carbon_intensity` defaults to `0` — i.e. it silently reads as "carbon-free". That
+quietly corrupts the exact metric tracebloc sells.
+
+**Proposal: treat location as *soft-required* in the new flow — the user must make
+an explicit choice, but it's pre-filled so it costs nothing in the common case.**
 
 - Prompt: *"Where does this machine physically run? (used to calculate carbon
   footprint)"*.
 - **Auto-detect a default**, then **require confirmation** (never assume silently):
   - **Cloud instance metadata first** (AWS/GCP/Azure region → zone; e.g. EC2
-    `eu-central-1` → `DE`). High confidence.
+    `eu-central-1` → `DE`). High confidence → usually one keystroke (Enter).
   - **GeoIP fallback** — flagged *low confidence*, because on-prem boxes egress
     through corporate proxies often in another country (the #172 segment).
 - Input is a pick from `ZONE_CHOICES` (structured), not free text.
+- **Never accept a silent empty.** The only skip is an explicit, labeled
+  *"Set later — carbon reporting unavailable until you do"* choice that visibly
+  marks the client location-unset (no fake zero) and nudges in the dashboard.
+- **Keep the DB `blank=True`** for backward compatibility (existing location-less
+  clients keep working); enforce "soft-required" at the provisioning UX layer, not
+  with a DB constraint.
 - Mutable post-install (`--location` / dashboard); changing it affects **future**
   readings only (historical gCO₂ not re-based) — TBD, see §11.
 
@@ -297,6 +342,58 @@ TRACEBLOC_ENROLL_TOKEN=… TRACEBLOC_CLIENT_NAME="Lab A" TRACEBLOC_LOCATION=DE \
   proxy/CA-aware HTTP client.
 - `client` (installer): reorder CLI install + auth before Helm; dual-mode env
   fallbacks; name/location prompts; idempotent re-run detection.
+
+## Appendix B — name→slug reference rule & validation
+
+Reference algorithm (CLI ports to Go; Python shown for prototyping):
+
+```python
+import re, unicodedata
+
+def slugify_dns1123(name: str) -> str:
+    s = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    s = re.sub(r"[^a-z0-9]+", "-", s.lower())   # non-alnum -> hyphen
+    s = re.sub(r"-+", "-", s).strip("-")         # collapse repeats, trim
+    return s[:63].rstrip("-")                     # DNS-1123 label ≤63
+
+def derive(name, existing: set) -> str:
+    base = slugify_dns1123(name) or f"client-{short_id()}"  # empty-slug guard
+    slug, n = base, 2
+    while slug in existing:                                  # collision suffix
+        suf = f"-{n}"; slug = base[:63-len(suf)].rstrip("-") + suf; n += 1
+    return slug
+```
+
+Prototype run (2026-06-05) — every output is DNS-1123-valid (`[a-z0-9]([a-z0-9-]*[a-z0-9])?`, ≤63):
+
+| Input | Slug | Note |
+|---|---|---|
+| `divya` | `divya` | existing ns — backfill-safe, unchanged |
+| `Munich Hospital — Radiology` | `munich-hospital-radiology` | em-dash + spaces |
+| `GPU Server` ×3 | `gpu-server`, `gpu-server-2`, `gpu-server-3` | collision suffix |
+| `  Acme   Research  Lab #1  ` | `acme-research-lab-1` | trim + collapse |
+| `Klinikum München Röntgen` | `klinikum-munchen-rontgen` | transliteration |
+| `São Paulo Edge` | `sao-paulo-edge` | transliteration |
+| `北京医院` | `client-<id>` | all-CJK → empty-slug guard |
+| `---` | `client-<id>` | punctuation-only → guard |
+| `a`×80 / very long name | (truncated to 63) | length cap |
+
+**Known sharp edge:** a mixed name like `東京-Lab` slugifies to just `lab` (only the
+ASCII survives transliteration) — semantically lossy. Acceptable for a hidden slug
+(display name is preserved), but worth surfacing the derived slug for confirmation.
+
+**Validate against full production data before locking the rule** — run in the
+backend and check for collisions or empty-slug fallbacks against real names:
+
+```python
+# manage.py shell
+from metaApi.models import EdgeDevice
+rows = EdgeDevice.objects.values_list("first_name", "namespace")
+# Re-derive slug from first_name, compare to stored namespace; report:
+#  - names whose derived slug != current namespace (migration mismatch)
+#  - derived-slug collisions within an account
+#  - names that hit the empty-slug guard
+```
 
 ## Appendix — closest prior art
 
