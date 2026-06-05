@@ -92,11 +92,12 @@ what's planned next.`,
 		p := printerFor(cmd)
 		p.Banner("tracebloc", "interactive data ingestion for your cluster")
 		p.Section("Get started")
-		p.Infof("tracebloc dataset push ./data     — stage + ingest a dataset (guided if you omit flags)")
+		p.Infof("tracebloc dataset push            — stage + ingest a dataset interactively (or use --help to see flags)")
 		p.Infof("tracebloc dataset list            — list datasets ingested in the cluster")
 		p.Infof("tracebloc dataset rm <table>      — delete a pushed dataset (its table + files)")
 		p.Infof("tracebloc cluster info            — check the CLI can reach your cluster")
 		p.Infof("tracebloc ingest validate f.yaml  — validate an ingest.yaml locally")
+		p.Newline()
 		p.Hintf("Add --help to any command for the full flag list.")
 		return nil
 	}

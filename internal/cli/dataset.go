@@ -615,6 +615,7 @@ contributors train against it without ever seeing the raw files.`))
 	// 8. Dry-run stop. Acknowledged success, plus a reminder of the
 	//    live-only steps (stage + ingest) the customer just skipped.
 	if a.DryRun {
+		a.Printer.Newline()
 		a.Printer.Successf("Dry-run complete — your dataset and cluster check out; nothing was created.")
 		a.Printer.Hintf("A real run continues with step 3 (stage your files) and step 4 (run the ingestion).")
 		if a.OutputJSON {
