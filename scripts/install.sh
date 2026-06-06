@@ -291,7 +291,14 @@ case ":$PATH:" in
         mkdir -p "$(dirname "$rc")" 2>/dev/null || true
         if grep -qsF "$PREFIX" "$rc" 2>/dev/null; then
             added=1   # rc already references it — leave it alone (idempotent)
-        elif printf '\n# Added by the tracebloc CLI installer\n%s\n' "$path_line" >> "$rc" 2>/dev/null; then
+        # Group the append so the redirection-open error (e.g. an
+        # existing but read-only rc, or an unwritable parent dir) is
+        # suppressed too: `cmd >> "$rc" 2>/dev/null` leaks the shell's
+        # "Permission denied" because the >> open is attempted before
+        # 2>/dev/null applies. Wrapping in { ... } 2>/dev/null puts the
+        # stderr redirect in scope first, so the fallback message below
+        # is the only thing the user sees.
+        elif { printf '\n# Added by the tracebloc CLI installer\n%s\n' "$path_line" >> "$rc"; } 2>/dev/null; then
             added=1
         fi
 
