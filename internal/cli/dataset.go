@@ -483,7 +483,7 @@ contributors train against it without ever seeing the raw files.`))
 			}
 			a.Spec.Schema = sch
 		} else {
-			sch, skipped, ierr := push.InferSchema(layout.LabelsCSV)
+			sch, skipped, empty, ierr := push.InferSchema(layout.LabelsCSV)
 			if ierr != nil {
 				return &exitError{code: 3, err: fmt.Errorf("inferring schema from CSV: %w", ierr)}
 			}
@@ -494,6 +494,11 @@ contributors train against it without ever seeing the raw files.`))
 			if len(skipped) > 0 {
 				_, _ = fmt.Fprintf(out,
 					"  (skipped framework-managed column(s): %s)\n", strings.Join(skipped, ", "))
+			}
+			if len(empty) > 0 {
+				_, _ = fmt.Fprintf(out,
+					"  (warning: %d column(s) had no values in the sample and were typed FLOAT (nullable): %s)\n",
+					len(empty), strings.Join(empty, ", "))
 			}
 		}
 	case push.IsImage(a.Spec.Category):
