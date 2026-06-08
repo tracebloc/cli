@@ -66,7 +66,7 @@ func TestInferSchema(t *testing.T) {
 	csv := writeFile(t, dir, "data.csv",
 		"count,age,price,name\n1,30,9.99,alice\n2,40,19.5,bob\n")
 
-	schema, _, err := InferSchema(csv)
+	schema, _, _, err := InferSchema(csv)
 	if err != nil {
 		t.Fatalf("InferSchema: %v", err)
 	}
@@ -83,21 +83,25 @@ func TestInferSchema(t *testing.T) {
 	}
 }
 
-// TestInferSchema_EmptyColumnIsVarchar: a column with no non-empty
-// sampled value can't be typed, so it falls back to VARCHAR(255)
-// rather than being mislabeled INT/FLOAT.
-func TestInferSchema_EmptyColumnIsVarchar(t *testing.T) {
+// TestInferSchema_EmptyColumnIsFloat: a column with no non-empty sampled
+// value can't be typed from data; it's returned as a nullable FLOAT (not
+// VARCHAR — an all-NULL VARCHAR is what the ingestor's string validator
+// rejects) and reported in the `empty` return so the caller can warn.
+func TestInferSchema_EmptyColumnIsFloat(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeFile(t, dir, "data.csv", "filled,empty\n1,\n2,\n")
-	schema, _, err := InferSchema(csv)
+	schema, _, empty, err := InferSchema(csv)
 	if err != nil {
 		t.Fatalf("InferSchema: %v", err)
 	}
-	if schema["empty"] != "VARCHAR(255)" {
-		t.Errorf("schema[empty] = %q, want VARCHAR(255)", schema["empty"])
+	if schema["empty"] != "FLOAT" {
+		t.Errorf("schema[empty] = %q, want FLOAT", schema["empty"])
 	}
 	if schema["filled"] != "INT" {
 		t.Errorf("schema[filled] = %q, want INT", schema["filled"])
+	}
+	if len(empty) != 1 || empty[0] != "empty" {
+		t.Errorf("empty = %v, want [empty]", empty)
 	}
 }
 
@@ -109,7 +113,7 @@ func TestInferSchema_SkipsReservedColumns(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeFile(t, dir, "data.csv", "id,feature_00,label\n1,1.5,0\n2,2.5,1\n")
 
-	schema, skipped, err := InferSchema(csv)
+	schema, skipped, _, err := InferSchema(csv)
 	if err != nil {
 		t.Fatalf("InferSchema: %v", err)
 	}

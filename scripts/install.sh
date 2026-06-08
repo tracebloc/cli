@@ -259,15 +259,90 @@ echo "Verify with:"
 echo "  $PREFIX/$BINARY_NAME version"
 echo ""
 
-# PATH guidance for the fallback case.
-case ":$PATH:" in
-    *":$PREFIX:"*) ;;  # already on PATH
-    *)
-        echo "Note: $PREFIX is not on \$PATH. Add this to your shell rc file:"
-        echo "  export PATH=\"\$PATH:$PREFIX\""
-        echo ""
-        ;;
+# PATH handling. install.ps1 persists the PATH entry on Windows
+# (SetEnvironmentVariable, User scope) — do the same on Unix by writing to
+# the rc file the user's shell actually reads. The old print-only advice
+# silently failed on Ubuntu: ~/.profile adds ~/.local/bin only at *login*
+# and only if it already existed, but the installer creates it mid-session,
+# so a new (non-login) terminal reading ~/.bashrc never picks it up.
+#
+# Decide whether to persist a PATH entry to the user's shell rc:
+#   - a user-local prefix (under $HOME — the unprivileged `curl | sh` fallback)
+#     ALWAYS needs one, even when a one-off `export` already put it on $PATH for
+#     this shell (that won't survive into a new terminal);
+#   - a non-$HOME prefix that ISN'T on $PATH (e.g. `--prefix /opt/tracebloc`)
+#     also needs one;
+#   - a non-$HOME prefix already on $PATH (e.g. the default /usr/local/bin) is
+#     on PATH for every shell and needs nothing.
+# ($HOME is stripped of a trailing slash first so a HOME like "/home/u/" can't
+# misclassify "/home/u/.local/bin" via a "/home/u//*" pattern it won't match.)
+home_dir="${HOME%/}"
+persist=no
+case "$PREFIX" in
+    "$home_dir"/*) persist=yes ;;
+    *) case ":$PATH:" in *":$PREFIX:"*) ;; *) persist=yes ;; esac ;;
 esac
+
+if [ "$persist" = "yes" ]; then
+    shell_name="$(basename "${SHELL:-sh}")"
+    case "$shell_name" in
+        zsh)  rc="$HOME/.zshrc" ;;
+        bash)
+            # macOS Terminal opens a login shell (reads .bash_profile);
+            # Linux terminals are interactive non-login (read .bashrc).
+            if [ "$OS" = "darwin" ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi
+            ;;
+        fish) rc="$HOME/.config/fish/config.fish" ;;
+        *)    rc="$HOME/.profile" ;;
+    esac
+
+    if [ "$shell_name" = "fish" ]; then
+        path_line="fish_add_path $PREFIX"
+    else
+        path_line="export PATH=\"$PREFIX:\$PATH\""
+    fi
+
+    # Track three outcomes precisely so the message can neither over- nor
+    # under-claim: already configured / freshly added / couldn't write.
+    state=failed
+    mkdir -p "$(dirname "$rc")" 2>/dev/null || true
+    # Idempotency: only an actual, non-comment PATH op that references $PREFIX
+    # counts as "already configured" — a bare comment or an unrelated line that
+    # merely mentions the dir must NOT pass, or we'd claim success while a new
+    # shell still can't find the binary (#61). Match PATH= / PATH+= /
+    # fish_add_path / zsh's path+=() (case-insensitive); the [^A-Za-z_] guard
+    # keeps PYTHONPATH=/MYPATH= out.
+    if grep -v '^[[:space:]]*#' "$rc" 2>/dev/null \
+         | grep -iE '(^|[^A-Za-z_])path[+]?=|fish_add_path' \
+         | grep -qF "$PREFIX"; then
+        state=present   # rc already persists it — leave it alone
+    # Group the append so the redirection-open error (e.g. a read-only rc, or
+    # an unwritable parent dir) is suppressed too: `cmd >> "$rc" 2>/dev/null`
+    # leaks the shell's "Permission denied" because the >> open is attempted
+    # before 2>/dev/null applies. Wrapping in { ... } 2>/dev/null puts the
+    # stderr redirect in scope first.
+    elif { printf '\n# Added by the tracebloc CLI installer\n%s\n' "$path_line" >> "$rc"; } 2>/dev/null; then
+        state=added
+    fi
+
+    echo ""
+    case "$state" in
+        added)
+            echo "Added $PREFIX to your PATH in $rc."
+            echo "Open a new terminal — or load it now:  . \"$rc\""
+            ;;
+        present)
+            echo "$PREFIX is already in your PATH config ($rc) — nothing to add."
+            echo "If a new terminal can't find it yet, open one — or load it now:  . \"$rc\""
+            ;;
+        *)
+            echo "Note: the installer couldn't update your shell config ($rc)."
+            echo "Add this line to it (or your shell's startup file), then open a new terminal:"
+            echo "  $path_line"
+            ;;
+    esac
+    echo ""
+fi
 
 echo "First steps:"
 echo "  $BINARY_NAME cluster info        # confirm CLI can reach your cluster"
