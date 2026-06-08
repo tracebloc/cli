@@ -259,16 +259,22 @@ echo "Verify with:"
 echo "  $PREFIX/$BINARY_NAME version"
 echo ""
 
-# PATH handling for the fallback case. install.ps1 persists the PATH
-# entry on Windows (SetEnvironmentVariable, User scope) — do the same on
-# Unix by writing to the rc file the user's shell actually reads. The old
-# print-only advice silently failed on Ubuntu: ~/.profile adds
-# ~/.local/bin only at *login* and only if it already existed, but the
-# installer creates it mid-session, so a new (non-login) terminal reading
-# ~/.bashrc never picks it up.
-case ":$PATH:" in
-    *":$PREFIX:"*) ;;  # already on PATH — nothing to do
-    *)
+# PATH handling. install.ps1 persists the PATH entry on Windows
+# (SetEnvironmentVariable, User scope) — do the same on Unix by writing to
+# the rc file the user's shell actually reads. The old print-only advice
+# silently failed on Ubuntu: ~/.profile adds ~/.local/bin only at *login*
+# and only if it already existed, but the installer creates it mid-session,
+# so a new (non-login) terminal reading ~/.bashrc never picks it up.
+#
+# Branch on the install location, NOT the current session's $PATH. A
+# user-local prefix (the unprivileged `curl | sh` fallback, under $HOME)
+# always wants a persisted rc entry — even when a one-off `export` already
+# put it on $PATH for *this* shell, because that won't survive into a new
+# terminal. A system prefix (e.g. /usr/local/bin) is already on PATH for
+# every shell and can't be persisted via a per-user rc, so we only nudge if
+# it somehow isn't on PATH.
+case "$PREFIX" in
+    "$HOME"/*)
         shell_name="$(basename "${SHELL:-sh}")"
         case "$shell_name" in
             zsh)  rc="$HOME/.zshrc" ;;
@@ -289,8 +295,17 @@ case ":$PATH:" in
 
         added=0
         mkdir -p "$(dirname "$rc")" 2>/dev/null || true
-        if grep -qsF "$PREFIX" "$rc" 2>/dev/null; then
-            added=1   # rc already references it — leave it alone (idempotent)
+        # Idempotency: only an actual, non-comment PATH-setting line that
+        # references $PREFIX counts as "already configured". A bare comment
+        # or an unrelated line that merely mentions the directory must NOT
+        # pass — otherwise we'd print a false "Added to PATH" while a new
+        # shell still can't find the binary (the very failure #61 fixes).
+        # Strip comment lines, keep real PATH=/fish_add_path lines, then
+        # fixed-match the prefix.
+        if grep -v '^[[:space:]]*#' "$rc" 2>/dev/null \
+             | grep -E '(^|[^A-Za-z_])PATH=|fish_add_path' \
+             | grep -qF "$PREFIX"; then
+            added=1   # rc already persists it — leave it alone (idempotent)
         # Group the append so the redirection-open error (e.g. an
         # existing but read-only rc, or an unwritable parent dir) is
         # suppressed too: `cmd >> "$rc" 2>/dev/null` leaks the shell's
@@ -312,6 +327,19 @@ case ":$PATH:" in
             echo "  $path_line"
         fi
         echo ""
+        ;;
+    *)
+        # System prefix — already on PATH for every shell out of the box, so
+        # normally nothing to do. Only nudge if it somehow isn't on PATH.
+        case ":$PATH:" in
+            *":$PREFIX:"*) ;;
+            *)
+                echo ""
+                echo "Note: $PREFIX is not on \$PATH. Add it, then open a new terminal:"
+                echo "  export PATH=\"$PREFIX:\$PATH\""
+                echo ""
+                ;;
+        esac
         ;;
 esac
 
