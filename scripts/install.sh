@@ -272,9 +272,12 @@ echo ""
 # put it on $PATH for *this* shell, because that won't survive into a new
 # terminal. A system prefix (e.g. /usr/local/bin) is already on PATH for
 # every shell and can't be persisted via a per-user rc, so we only nudge if
-# it somehow isn't on PATH.
+# it somehow isn't on PATH. ($HOME is stripped of a trailing slash first, so
+# a HOME like "/home/u/" can't misclassify a user-local prefix as a system
+# one via a "/home/u//*" pattern that the single-slash path won't match.)
+home_dir="${HOME%/}"
 case "$PREFIX" in
-    "$HOME"/*)
+    "$home_dir"/*)
         shell_name="$(basename "${SHELL:-sh}")"
         case "$shell_name" in
             zsh)  rc="$HOME/.zshrc" ;;
