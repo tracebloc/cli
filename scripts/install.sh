@@ -296,39 +296,45 @@ case "$PREFIX" in
             path_line="export PATH=\"$PREFIX:\$PATH\""
         fi
 
-        added=0
+        # Track three outcomes precisely so the message can neither over- nor
+        # under-claim: already configured / freshly added / couldn't write.
+        state=failed
         mkdir -p "$(dirname "$rc")" 2>/dev/null || true
-        # Idempotency: only an actual, non-comment PATH-setting line that
-        # references $PREFIX counts as "already configured". A bare comment
-        # or an unrelated line that merely mentions the directory must NOT
-        # pass — otherwise we'd print a false "Added to PATH" while a new
-        # shell still can't find the binary (the very failure #61 fixes).
-        # Strip comment lines, keep real PATH=/fish_add_path lines, then
-        # fixed-match the prefix.
+        # Idempotency: only an actual, non-comment PATH op that references
+        # $PREFIX counts as "already configured" — a bare comment or an
+        # unrelated line that merely mentions the dir must NOT pass, or we'd
+        # claim success while a new shell still can't find the binary (#61).
+        # Match PATH= / PATH+= / fish_add_path / zsh's path+=() (case-
+        # insensitive); the [^A-Za-z_] guard keeps PYTHONPATH=/MYPATH= out.
         if grep -v '^[[:space:]]*#' "$rc" 2>/dev/null \
-             | grep -E '(^|[^A-Za-z_])PATH=|fish_add_path' \
+             | grep -iE '(^|[^A-Za-z_])path[+]?=|fish_add_path' \
              | grep -qF "$PREFIX"; then
-            added=1   # rc already persists it — leave it alone (idempotent)
-        # Group the append so the redirection-open error (e.g. an
-        # existing but read-only rc, or an unwritable parent dir) is
-        # suppressed too: `cmd >> "$rc" 2>/dev/null` leaks the shell's
-        # "Permission denied" because the >> open is attempted before
-        # 2>/dev/null applies. Wrapping in { ... } 2>/dev/null puts the
-        # stderr redirect in scope first, so the fallback message below
-        # is the only thing the user sees.
+            state=present   # rc already persists it — leave it alone
+        # Group the append so the redirection-open error (e.g. a read-only
+        # rc, or an unwritable parent dir) is suppressed too: `cmd >> "$rc"
+        # 2>/dev/null` leaks the shell's "Permission denied" because the >>
+        # open is attempted before 2>/dev/null applies. Wrapping in { ... }
+        # 2>/dev/null puts the stderr redirect in scope first.
         elif { printf '\n# Added by the tracebloc CLI installer\n%s\n' "$path_line" >> "$rc"; } 2>/dev/null; then
-            added=1
+            state=added
         fi
 
         echo ""
-        if [ "$added" = "1" ]; then
-            echo "Added $PREFIX to your PATH in $rc."
-            echo "Open a new terminal — or load it now:  . \"$rc\""
-        else
-            echo "Note: $PREFIX is not on \$PATH and the installer couldn't update your shell config."
-            echo "Add this line, then open a new terminal:"
-            echo "  $path_line"
-        fi
+        case "$state" in
+            added)
+                echo "Added $PREFIX to your PATH in $rc."
+                echo "Open a new terminal — or load it now:  . \"$rc\""
+                ;;
+            present)
+                echo "$PREFIX is already in your PATH config ($rc) — nothing to add."
+                echo "If a new terminal can't find it yet, open one — or load it now:  . \"$rc\""
+                ;;
+            *)
+                echo "Note: the installer couldn't update your shell config ($rc)."
+                echo "Add this line to it (or your shell's startup file), then open a new terminal:"
+                echo "  $path_line"
+                ;;
+        esac
         echo ""
         ;;
     *)
