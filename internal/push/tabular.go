@@ -145,8 +145,10 @@ func ParseSchema(s string) (map[string]string, error) {
 // InferSchema reads the CSV header and a sample of rows and infers a
 // column→SQL-type map: all-integer columns → INT, otherwise
 // all-numeric → FLOAT, otherwise VARCHAR(255). Empty cells are
-// ignored when judging a column; a column with no non-empty sampled
-// value falls back to VARCHAR(255).
+// ignored when judging a column; a column with NO non-empty sampled
+// value is typed as a nullable FLOAT (not VARCHAR — an all-NULL VARCHAR
+// is exactly what the ingestor's string validator rejects) and returned
+// in `empty` so the caller can warn.
 //
 // It's a convenience so customers don't hand-write a --schema for the
 // common case. Non-numeric specials (timestamps, dates, booleans)
@@ -155,20 +157,20 @@ func ParseSchema(s string) (map[string]string, error) {
 // Framework-managed columns (see reservedColumns — id, data_id, …)
 // are skipped and returned as the second value so the caller can tell
 // the customer they weren't included.
-func InferSchema(csvPath string) (schema map[string]string, skipped []string, err error) {
+func InferSchema(csvPath string) (schema map[string]string, skipped, empty []string, err error) {
 	f, err := os.Open(csvPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
 
 	r := csv.NewReader(f)
 	header, err := r.Read()
 	if err != nil {
-		return nil, nil, fmt.Errorf("reading CSV header from %s: %w", csvPath, err)
+		return nil, nil, nil, fmt.Errorf("reading CSV header from %s: %w", csvPath, err)
 	}
 	if len(header) == 0 {
-		return nil, nil, fmt.Errorf("CSV %s has no columns", csvPath)
+		return nil, nil, nil, fmt.Errorf("CSV %s has no columns", csvPath)
 	}
 
 	// Per-column running judgement.
@@ -186,7 +188,7 @@ func InferSchema(csvPath string) (schema map[string]string, skipped []string, er
 			break
 		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("reading CSV row from %s: %w", csvPath, err)
+			return nil, nil, nil, fmt.Errorf("reading CSV row from %s: %w", csvPath, err)
 		}
 		for i := 0; i < len(header) && i < len(row); i++ {
 			v := strings.TrimSpace(row[i])
@@ -221,9 +223,19 @@ func InferSchema(csvPath string) (schema map[string]string, skipped []string, er
 			schema[col] = "INT"
 		case sawValue[i] && couldBeFloat[i]:
 			schema[col] = "FLOAT"
+		case !sawValue[i]:
+			// Entirely empty in the sample (e.g. an unmeasured analyte in a
+			// sparse panel). It can't be typed from data; default to a
+			// nullable FLOAT rather than VARCHAR — a tabular feature column
+			// is numeric far more often than text, and an all-NULL VARCHAR
+			// is exactly the shape the ingestor's string validator rejects.
+			// Reported in `empty` so the caller can warn / the user can
+			// --schema-override.
+			schema[col] = "FLOAT"
+			empty = append(empty, col)
 		default:
 			schema[col] = "VARCHAR(255)"
 		}
 	}
-	return schema, skipped, nil
+	return schema, skipped, empty, nil
 }
