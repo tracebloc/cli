@@ -59,6 +59,8 @@ tracebloc dataset push ./my-data \
   --label-column label
 ```
 
+> **`tracebloc: command not found` after installing?** The binary installs to `~/.local/bin` when `/usr/local/bin` isn't writable, and an already-running shell won't see the new PATH entry until you open a new terminal (or `. ~/.bashrc`). See **[Troubleshooting installation](docs/troubleshooting.md)**.
+
 What that runs under the curtain:
 
 1. Reads kubeconfig, discovers the parent `tracebloc/client` release in the cluster
