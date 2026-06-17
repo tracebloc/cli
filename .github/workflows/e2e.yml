@@ -21,8 +21,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   integration:
+    timeout-minutes: 30
     name: Integration (kind)
     runs-on: ubuntu-latest
     # Skip on PRs that aren't explicitly opted in via the `e2e` label;
