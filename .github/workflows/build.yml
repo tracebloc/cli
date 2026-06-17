@@ -14,8 +14,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   schema-drift:
+    timeout-minutes: 10
     name: Schema drift check
     # Verifies the embedded internal/schema/ingest.v1.json matches
     # tracebloc/data-ingestors' master. A green PR that silently
@@ -30,6 +35,7 @@ jobs:
         run: ./scripts/sync-schema.sh --check
 
   test:
+    timeout-minutes: 15
     name: Test
     runs-on: ubuntu-latest
     steps:
@@ -52,6 +58,7 @@ jobs:
         run: go test -race -cover ./...
 
   lint:
+    timeout-minutes: 10
     name: Lint
     runs-on: ubuntu-latest
     steps:
@@ -103,6 +110,7 @@ jobs:
           misspell -error .
 
   build:
+    timeout-minutes: 20
     name: Build (${{ matrix.os }}/${{ matrix.arch }})
     runs-on: ubuntu-latest
     strategy:
