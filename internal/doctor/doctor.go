@@ -182,14 +182,23 @@ func checkPods(ctx context.Context, cs kubernetes.Interface, ns string) Result {
 	}
 }
 
-// podCrashLooping reports whether any container is in CrashLoopBackOff or has
-// restarted past the threshold.
+// podCrashLooping reports whether a pod is ACTIVELY crash-looping.
+//
+// Two false positives are deliberately excluded (Bugbot on PR #89; mirrors the
+// controller's recovered-container fix in client-runtime#117):
+//   - Terminal pods (Succeeded/Failed) carry a historical RestartCount — a
+//     batch/ingestion pod that retried before completing is done, not unhealthy.
+//   - A high RestartCount on a container that is CURRENTLY running means the pod
+//     recovered on retry; only the active-backoff or not-running case counts.
 func podCrashLooping(p corev1.Pod) bool {
+	if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		return false
+	}
 	for _, c := range p.Status.ContainerStatuses {
 		if c.State.Waiting != nil && c.State.Waiting.Reason == "CrashLoopBackOff" {
 			return true
 		}
-		if c.RestartCount >= crashRestartThreshold {
+		if c.RestartCount >= crashRestartThreshold && c.State.Running == nil {
 			return true
 		}
 	}

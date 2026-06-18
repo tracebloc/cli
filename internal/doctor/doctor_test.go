@@ -82,6 +82,34 @@ func crashPod(name string) *corev1.Pod {
 	}
 }
 
+// succeededPod is a finished job pod that retried before completing — a high
+// RestartCount here is historical, not a current crash-loop (Bugbot on #89).
+func succeededPod(name string, restarts int32) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Status: corev1.PodStatus{
+			Phase:             corev1.PodSucceeded,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "c", RestartCount: restarts}},
+		},
+	}
+}
+
+// recoveredPod restarted several times but its container is running again now —
+// recovered, not crash-looping (cf. controller recovered-container fix, #117).
+func recoveredPod(name string, restarts int32) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:         "c",
+				RestartCount: restarts,
+				State:        corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+}
+
 func pendingPod(name string, age time.Duration) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -124,6 +152,8 @@ func TestCheckPods(t *testing.T) {
 		{"crash-loop", crashPod("bad"), StatusFail},
 		{"pending-old", pendingPod("stuck", -10*time.Minute), StatusWarn},
 		{"pending-fresh", pendingPod("fresh", -time.Minute), StatusOK},
+		{"succeeded-high-restarts", succeededPod("done", 5), StatusOK},
+		{"recovered-running", recoveredPod("recovered", 5), StatusOK},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
