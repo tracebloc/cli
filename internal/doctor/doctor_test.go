@@ -1,0 +1,245 @@
+package doctor
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/tracebloc/cli/internal/cluster"
+)
+
+const ns = "tracebloc"
+
+func bg() context.Context { return context.Background() }
+
+// jobsManagerDep mirrors the chart labels DiscoverParentRelease keys off
+// (see internal/cluster/discover_test.go) so the fake clientset discovers it.
+func jobsManagerDep(release string, env ...corev1.EnvVar) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      release + "-jobs-manager",
+			Namespace: ns,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "client",
+				"app.kubernetes.io/instance":   release,
+				"app.kubernetes.io/managed-by": "Helm",
+				"app.kubernetes.io/version":    "1.3.5",
+				"helm.sh/chart":                "client-1.3.5",
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "api", Env: env}},
+				},
+			},
+		},
+	}
+}
+
+func requestsProxyDep(release string, ready int32) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: release + "-requests-proxy", Namespace: ns},
+		Status:     appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: ready},
+	}
+}
+
+func boundPVC() *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: cluster.SharedPVCClaimName, Namespace: ns},
+		Spec:       corev1.PersistentVolumeClaimSpec{AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+}
+
+func runningPod(name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Status: corev1.PodStatus{
+			Phase:             corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "c", RestartCount: 0}},
+		},
+	}
+}
+
+func crashPod(name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "c",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			}},
+		},
+	}
+}
+
+func pendingPod(name string, age time.Duration) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			CreationTimestamp: metav1.NewTime(time.Now().Add(age)),
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+}
+
+func TestWorst(t *testing.T) {
+	if got := Worst(nil); got != StatusOK {
+		t.Fatalf("Worst(nil) = %v, want ok", got)
+	}
+	rs := []Result{{Status: StatusOK}, {Status: StatusFail}, {Status: StatusWarn}}
+	if got := Worst(rs); got != StatusFail {
+		t.Fatalf("Worst = %v, want fail", got)
+	}
+}
+
+func TestCheckReachable(t *testing.T) {
+	if r := checkReachable(nil, errors.New("boom"), ns); r.Status != StatusFail {
+		t.Fatalf("error => %v, want fail", r.Status)
+	}
+	rel := &cluster.ParentRelease{ReleaseName: "tb", ChartVersion: "1.3.5", AppVersion: "1.3.5"}
+	r := checkReachable(rel, nil, ns)
+	if r.Status != StatusOK || !strings.Contains(r.Detail, "tb") {
+		t.Fatalf("release => %v / %q, want ok mentioning the release", r.Status, r.Detail)
+	}
+}
+
+func TestCheckPods(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want Status
+	}{
+		{"healthy", runningPod("ok"), StatusOK},
+		{"crash-loop", crashPod("bad"), StatusFail},
+		{"pending-old", pendingPod("stuck", -10*time.Minute), StatusWarn},
+		{"pending-fresh", pendingPod("fresh", -time.Minute), StatusOK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewClientset(tc.pod)
+			if r := checkPods(bg(), cs, ns); r.Status != tc.want {
+				t.Fatalf("checkPods = %v (%q), want %v", r.Status, r.Detail, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckPVC(t *testing.T) {
+	if r := checkPVC(bg(), fake.NewClientset(boundPVC()), ns); r.Status != StatusOK {
+		t.Fatalf("bound PVC => %v, want ok", r.Status)
+	}
+	if r := checkPVC(bg(), fake.NewClientset(), ns); r.Status != StatusFail {
+		t.Fatalf("missing PVC => %v, want fail", r.Status)
+	}
+}
+
+func TestCheckProxy(t *testing.T) {
+	tests := []struct {
+		name   string
+		env    map[string]string
+		want   Status
+		substr string
+	}{
+		{"requests-proxy set", map[string]string{"REQUESTS_PROXY_URL": "http://requests-proxy-service:8888"}, StatusOK, "requests-proxy="},
+		{"corporate proxy", map[string]string{"REQUESTS_PROXY_URL": "http://x", "HTTPS_PROXY": "http://corp:3128"}, StatusOK, "corporate HTTP(S)_PROXY set"},
+		{"empty", map[string]string{}, StatusWarn, "REQUESTS_PROXY_URL"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := checkProxy(tc.env)
+			if r.Status != tc.want || !strings.Contains(r.Detail, tc.substr) {
+				t.Fatalf("checkProxy = %v / %q, want %v containing %q", r.Status, r.Detail, tc.want, tc.substr)
+			}
+		})
+	}
+}
+
+func TestCheckBackendEgress(t *testing.T) {
+	okProbe := func(context.Context, string) error { return nil }
+	failProbe := func(context.Context, string) error { return errors.New("dns failure") }
+
+	if r := checkBackendEgress(bg(), map[string]string{"CLIENT_ENV": "dev"}, okProbe); r.Status != StatusOK || !strings.Contains(r.Detail, "dev-api.tracebloc.io") {
+		t.Fatalf("reachable dev => %v / %q", r.Status, r.Detail)
+	}
+	if r := checkBackendEgress(bg(), map[string]string{}, failProbe); r.Status != StatusFail || !strings.Contains(r.Detail, "api.tracebloc.io") {
+		t.Fatalf("unreachable default => %v / %q", r.Status, r.Detail)
+	}
+}
+
+func TestBackendHost(t *testing.T) {
+	tests := map[string]string{
+		"dev":   "dev-api.tracebloc.io",
+		"stg":   "stg-api.tracebloc.io",
+		"prod":  "api.tracebloc.io",
+		"":      "api.tracebloc.io",
+		"weird": "api.tracebloc.io",
+	}
+	for in, want := range tests {
+		if got := backendHost(in); got != want {
+			t.Errorf("backendHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCheckRequestsProxy(t *testing.T) {
+	rel := &cluster.ParentRelease{ReleaseName: "tb"}
+	tests := []struct {
+		name string
+		dep  *appsv1.Deployment // nil => deployment absent
+		want Status
+	}{
+		{"ready", requestsProxyDep("tb", 1), StatusOK},
+		{"not-ready", requestsProxyDep("tb", 0), StatusFail},
+		{"missing", nil, StatusFail},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewClientset()
+			if tc.dep != nil {
+				cs = fake.NewClientset(tc.dep)
+			}
+			if r := checkRequestsProxy(bg(), cs, ns, rel); r.Status != tc.want {
+				t.Fatalf("checkRequestsProxy = %v (%q), want %v", r.Status, r.Detail, tc.want)
+			}
+		})
+	}
+}
+
+func TestRun_HealthyCluster(t *testing.T) {
+	const rel = "tb"
+	cs := fake.NewClientset(
+		jobsManagerDep(rel,
+			corev1.EnvVar{Name: "REQUESTS_PROXY_URL", Value: "http://requests-proxy-service:8888"},
+			corev1.EnvVar{Name: "CLIENT_ENV", Value: "dev"},
+		),
+		requestsProxyDep(rel, 1),
+		boundPVC(),
+		runningPod("tb-jobs-manager-abc"),
+	)
+
+	results := Run(bg(), cs, Options{
+		Namespace: ns,
+		HTTPProbe: func(context.Context, string) error { return nil },
+	})
+
+	if len(results) != 6 {
+		t.Fatalf("want 6 checks, got %d", len(results))
+	}
+	if w := Worst(results); w != StatusOK {
+		for _, r := range results {
+			t.Logf("%-32s %-4s %s", r.Name, r.Status, r.Detail)
+		}
+		t.Fatalf("healthy cluster worst = %v, want ok", w)
+	}
+}
