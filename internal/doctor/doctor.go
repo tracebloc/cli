@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -72,9 +73,8 @@ func Worst(results []Result) Status {
 // Tunables. Exported-as-vars (not consts) so a future flag could override
 // them; kept conservative to avoid false positives on a busy cluster.
 const (
-	crashRestartThreshold = 3               // restarts before we call it crash-looping
-	pendingGrace          = 5 * time.Minute // a pod Pending longer than this is flagged
-	httpProbeTimeout      = 8 * time.Second
+	pendingGrace     = 5 * time.Minute // a pod Pending longer than this is flagged
+	httpProbeTimeout = 8 * time.Second
 )
 
 // Options configures a diagnosis run. The zero value is usable: Namespace
@@ -182,24 +182,27 @@ func checkPods(ctx context.Context, cs kubernetes.Interface, ns string) Result {
 	}
 }
 
-// podCrashLooping reports whether a pod is ACTIVELY crash-looping.
+// podCrashLooping reports whether a pod has a container actively stuck in
+// CrashLoopBackOff — the state Kubernetes sets for a container that keeps
+// crashing. Both init AND app containers are checked: an init container in
+// CrashLoopBackOff keeps the pod Pending and blocks startup silently (Bugbot
+// on PR #89).
 //
-// Two false positives are deliberately excluded (Bugbot on PR #89; mirrors the
-// controller's recovered-container fix in client-runtime#117):
-//   - Terminal pods (Succeeded/Failed) carry a historical RestartCount — a
-//     batch/ingestion pod that retried before completing is done, not unhealthy.
-//   - A high RestartCount on a container that is CURRENTLY running means the pod
-//     recovered on retry; only the active-backoff or not-running case counts.
+// We deliberately do NOT infer crash-looping from RestartCount: a high count
+// is equally produced by a pod that recovered on retry, a job that retried
+// before Succeeding, or a completed init container — all healthy (Bugbot on
+// PR #89; cf. the controller's recovered-container fix, client-runtime#117).
+// The terminal-phase guard is belt-and-suspenders: a Succeeded/Failed pod has
+// no waiting containers anyway.
 func podCrashLooping(p corev1.Pod) bool {
 	if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 		return false
 	}
-	for _, c := range p.Status.ContainerStatuses {
-		if c.State.Waiting != nil && c.State.Waiting.Reason == "CrashLoopBackOff" {
-			return true
-		}
-		if c.RestartCount >= crashRestartThreshold && c.State.Running == nil {
-			return true
+	for _, group := range [][]corev1.ContainerStatus{p.Status.InitContainerStatuses, p.Status.ContainerStatuses} {
+		for _, c := range group {
+			if c.State.Waiting != nil && c.State.Waiting.Reason == "CrashLoopBackOff" {
+				return true
+			}
 		}
 	}
 	return false
@@ -292,7 +295,7 @@ func backendHost(clientEnv string) string {
 // experiment silently stays Pending, the exact class this epic targets.
 func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string, release *cluster.ParentRelease) Result {
 	const name = "Service Bus egress (requests-proxy)"
-	dep := getDeployment(ctx, cs, ns, requestsProxyNames(release))
+	dep := findDeployment(ctx, cs, ns, requestsProxyNames(release), "requests-proxy")
 	if dep == nil {
 		return Result{
 			Name:   name,
@@ -317,7 +320,7 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 // returns an empty map when the deployment can't be fetched.
 func jobsManagerEnv(ctx context.Context, cs kubernetes.Interface, ns string, release *cluster.ParentRelease) map[string]string {
 	env := map[string]string{}
-	dep := getDeployment(ctx, cs, ns, jobsManagerNames(release))
+	dep := findDeployment(ctx, cs, ns, jobsManagerNames(release), "jobs-manager")
 	if dep == nil || len(dep.Spec.Template.Spec.Containers) == 0 {
 		return env
 	}
@@ -338,6 +341,28 @@ func getDeployment(ctx context.Context, cs kubernetes.Interface, ns string, cand
 		d, err := cs.AppsV1().Deployments(ns).Get(ctx, n, metav1.GetOptions{})
 		if err == nil {
 			return d
+		}
+	}
+	return nil
+}
+
+// findDeployment returns the first existing deployment among candidates (exact
+// Get), falling back to a namespace-wide list matched by name suffix. The
+// fallback matters when the parent release couldn't be discovered (release nil
+// => only the unprefixed candidate name), yet the chart installed a
+// release-prefixed deployment like "<release>-requests-proxy" — e.g. when
+// multiple parent releases were detected (Bugbot on PR #89).
+func findDeployment(ctx context.Context, cs kubernetes.Interface, ns string, candidates []string, suffix string) *appsv1.Deployment {
+	if d := getDeployment(ctx, cs, ns, candidates); d != nil {
+		return d
+	}
+	deps, err := cs.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	for i := range deps.Items {
+		if n := deps.Items[i].Name; n == suffix || strings.HasSuffix(n, "-"+suffix) {
+			return &deps.Items[i]
 		}
 	}
 	return nil
