@@ -351,12 +351,18 @@ func getDeployment(ctx context.Context, cs kubernetes.Interface, ns string, cand
 	return nil
 }
 
-// findDeployment returns the first existing deployment among candidates (exact
-// Get), falling back to a namespace-wide list matched by name suffix. The
-// fallback matters when the parent release couldn't be discovered (release nil
-// => only the unprefixed candidate name), yet the chart installed a
-// release-prefixed deployment like "<release>-requests-proxy" — e.g. when
-// multiple parent releases were detected (Bugbot on PR #89).
+// findDeployment returns the deployment for a chart component: first by exact
+// name (the release-prefixed candidate, a fast Get), else by a namespace-wide
+// list matched on name suffix. The suffix fallback covers a nil release (parent
+// discovery failed) whose deployments are release-prefixed.
+//
+// The fallback resolves ONLY when exactly one deployment carries the suffix.
+// With more than one — a namespace running multiple parent releases, which
+// DiscoverParentRelease already refuses to disambiguate — there's no way to
+// attribute them to a single release, and picking arbitrarily would let
+// different checks (jobsManagerEnv vs checkRequestsProxy) describe different
+// releases in one run. So we return nil and let the check report
+// can't-determine rather than present mixed data as fact (Bugbot on PR #89).
 func findDeployment(ctx context.Context, cs kubernetes.Interface, ns string, candidates []string, suffix string) *appsv1.Deployment {
 	if d := getDeployment(ctx, cs, ns, candidates); d != nil {
 		return d
@@ -365,12 +371,16 @@ func findDeployment(ctx context.Context, cs kubernetes.Interface, ns string, can
 	if err != nil {
 		return nil
 	}
+	var match *appsv1.Deployment
 	for i := range deps.Items {
 		if n := deps.Items[i].Name; n == suffix || strings.HasSuffix(n, "-"+suffix) {
-			return &deps.Items[i]
+			if match != nil {
+				return nil // ambiguous across releases — don't guess
+			}
+			match = &deps.Items[i]
 		}
 	}
-	return nil
+	return match
 }
 
 // jobsManagerNames / requestsProxyNames mirror the chart's naming: the

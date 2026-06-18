@@ -273,6 +273,20 @@ func TestCheckRequestsProxy_NilReleaseFindsPrefixed(t *testing.T) {
 	}
 }
 
+// With multiple parent releases in one namespace (the case DiscoverParentRelease
+// refuses) and no discovered release, the suffix fallback must NOT pick one
+// arbitrarily — guessing could let different checks describe different releases
+// in a single run (Bugbot on #89). It should report can't-determine, not OK.
+func TestCheckRequestsProxy_NilReleaseAmbiguous(t *testing.T) {
+	cs := fake.NewClientset(
+		requestsProxyDep("relA", 1), // "relA-requests-proxy"
+		requestsProxyDep("relB", 1), // "relB-requests-proxy"
+	)
+	if r := checkRequestsProxy(bg(), cs, ns, nil); r.Status == StatusOK {
+		t.Fatalf("ambiguous multi-release => %v (%q), want not-OK (no guessing)", r.Status, r.Detail)
+	}
+}
+
 func TestRun_HealthyCluster(t *testing.T) {
 	const rel = "tb"
 	cs := fake.NewClientset(
