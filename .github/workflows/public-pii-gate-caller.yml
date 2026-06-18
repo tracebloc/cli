@@ -8,6 +8,14 @@ on:
   pull_request:
     types: [opened, edited, reopened, synchronize, labeled, unlabeled]
 
+# Grant the scopes the reusable workflow needs. Required because the repo's
+# default workflow token permission is "read" (contents only); without this
+# the called workflow's pull-requests:read request exceeds the caller's grant
+# and the run fails at startup with no jobs.
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   pii-gate:
     uses: tracebloc/.github/.github/workflows/public-pii-gate.yml@main
