@@ -357,20 +357,28 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		req += fmt.Sprintf(", %s=%s", gpuName, gpuReq.String())
 	}
 
-	var cpuMemFits, gpuFits bool
+	// A pod gets ALL its requested resources from ONE node, so evaluate each
+	// node as a whole — never OR cpu/mem and GPU across different nodes, which
+	// would pass even when no single node can run the job (Bugbot on PR #91).
+	var cpuMemFits, fullFits bool
 	for i := range nodes.Items {
 		n := nodes.Items[i]
 		if !nodeReady(n) {
 			continue
 		}
 		alloc := n.Status.Allocatable
-		if alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0 {
-			cpuMemFits = true
-		}
+		nodeCPUMem := alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0
+		nodeGPU := !gpuRequested
 		if gpuRequested {
 			if q, present := alloc[gpuName]; present && q.Cmp(gpuReq) >= 0 {
-				gpuFits = true
+				nodeGPU = true
 			}
+		}
+		if nodeCPUMem {
+			cpuMemFits = true
+		}
+		if nodeCPUMem && nodeGPU {
+			fullFits = true
 		}
 	}
 
@@ -382,12 +390,12 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			Detail: fmt.Sprintf("no Ready node can fit a training job (needs %s)", req),
 			Remedy: "Add/resize a node to meet the job's requests, or lower RESOURCE_REQUESTS on jobs-manager.",
 		}
-	case gpuRequested && !gpuFits:
+	case gpuRequested && !fullFits:
 		return Result{
 			Name:   name,
 			Status: StatusWarn,
-			Detail: fmt.Sprintf("no node exposes %s — GPU jobs rely on the CPU fallback (needs %s)", gpuName, req),
-			Remedy: "If GPU training is expected, ensure a GPU node + its device plugin are present.",
+			Detail: fmt.Sprintf("no single Ready node satisfies cpu+memory AND %s — GPU jobs rely on the CPU fallback (needs %s)", gpuName, req),
+			Remedy: "If GPU training is expected, ensure one node has both the compute and the GPU capacity, with its device plugin.",
 		}
 	default:
 		return Result{Name: name, Status: StatusOK, Detail: fmt.Sprintf("a Ready node can schedule a training job (%s)", req)}

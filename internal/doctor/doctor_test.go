@@ -408,6 +408,26 @@ func TestCheckNodeFit(t *testing.T) {
 			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
 		}
 	})
+	t.Run("cpu+mem and gpu on different nodes -> warn, not ok", func(t *testing.T) {
+		// The Bugbot #91 case: one node fits cpu/mem, a different node has the
+		// GPU but is too small. No single node runs a GPU job → must NOT be ok.
+		cs := fake.NewClientset(
+			node("big", "4", "16Gi"),                       // cpu/mem, no gpu
+			node("gpu", "1", "1Gi", "nvidia.com/gpu", "2"), // gpu, too small
+		)
+		if r := checkNodeFit(bg(), cs, full); r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want warn (no single node fits all)", r.Status, r.Detail)
+		}
+	})
+	t.Run("single node fits cpu+mem+gpu -> ok", func(t *testing.T) {
+		cs := fake.NewClientset(
+			node("big", "4", "16Gi"),                         // distractor: cpu/mem only
+			node("full", "4", "16Gi", "nvidia.com/gpu", "1"), // satisfies everything
+		)
+		if r := checkNodeFit(bg(), cs, full); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok", r.Status, r.Detail)
+		}
+	})
 	t.Run("not-ready node doesn't count -> fail", func(t *testing.T) {
 		n := node("n1", "8", "32Gi")
 		n.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}
