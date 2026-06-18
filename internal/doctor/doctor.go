@@ -12,6 +12,7 @@ package doctor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -20,6 +21,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -108,6 +110,8 @@ func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 		checkReachable(release, relErr, ns),
 		checkPods(ctx, cs, ns),
 		checkPVC(ctx, cs, ns),
+		checkNodeFit(ctx, cs, jmEnv),
+		checkImagePull(ctx, cs, ns, release),
 		checkProxy(jmEnv),
 		checkBackendEgress(ctx, jmEnv, opts.HTTPProbe),
 		checkRequestsProxy(ctx, cs, ns, release),
@@ -318,6 +322,177 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 		}
 	}
 	return Result{Name: name, Status: StatusOK, Detail: "requests-proxy ready (brokers the 'experiments' queue)"}
+}
+
+// checkNodeFit verifies at least one Ready node can satisfy the resource
+// requests the jobs-manager stamps on spawned training jobs (RESOURCE_REQUESTS
+// / GPU_REQUESTS env) — the "Pending forever, no node big enough" class. GPU is
+// soft: when a GPU is requested but no node exposes it, that's a ⚠ (jobs-manager
+// has a GPU→CPU fallback), not a hard failure.
+func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]string) Result {
+	const name = "Node capacity"
+	cpuReq, memReq, ok := parseCPUMem(env["RESOURCE_REQUESTS"])
+	if !ok {
+		return Result{
+			Name:   name,
+			Status: StatusWarn,
+			Detail: "couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit",
+			Remedy: "kubectl set env deploy/<release>-jobs-manager --list | grep RESOURCE_REQUESTS",
+		}
+	}
+	gpuName, gpuReq, gpuRequested := parseGPU(env["GPU_REQUESTS"])
+
+	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return Result{
+			Name:   name,
+			Status: StatusWarn,
+			Detail: "could not list nodes: " + err.Error(),
+			Remedy: "Ensure your kubeconfig user can list nodes.",
+		}
+	}
+
+	req := fmt.Sprintf("cpu=%s, memory=%s", cpuReq.String(), memReq.String())
+	if gpuRequested {
+		req += fmt.Sprintf(", %s=%s", gpuName, gpuReq.String())
+	}
+
+	var cpuMemFits, gpuFits bool
+	for i := range nodes.Items {
+		n := nodes.Items[i]
+		if !nodeReady(n) {
+			continue
+		}
+		alloc := n.Status.Allocatable
+		if alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0 {
+			cpuMemFits = true
+		}
+		if gpuRequested {
+			if q, present := alloc[gpuName]; present && q.Cmp(gpuReq) >= 0 {
+				gpuFits = true
+			}
+		}
+	}
+
+	switch {
+	case !cpuMemFits:
+		return Result{
+			Name:   name,
+			Status: StatusFail,
+			Detail: fmt.Sprintf("no Ready node can fit a training job (needs %s)", req),
+			Remedy: "Add/resize a node to meet the job's requests, or lower RESOURCE_REQUESTS on jobs-manager.",
+		}
+	case gpuRequested && !gpuFits:
+		return Result{
+			Name:   name,
+			Status: StatusWarn,
+			Detail: fmt.Sprintf("no node exposes %s — GPU jobs rely on the CPU fallback (needs %s)", gpuName, req),
+			Remedy: "If GPU training is expected, ensure a GPU node + its device plugin are present.",
+		}
+	default:
+		return Result{Name: name, Status: StatusOK, Detail: fmt.Sprintf("a Ready node can schedule a training job (%s)", req)}
+	}
+}
+
+// checkImagePull verifies that any registry pull secret the jobs-manager
+// references exists and is a well-formed dockerconfigjson — so private-image
+// pulls don't ImagePullBackOff. (Bad-but-well-formed credentials can't be
+// detected without an actual pull; this catches a missing/empty/malformed
+// secret, the common misconfig.)
+func checkImagePull(ctx context.Context, cs kubernetes.Interface, ns string, release *cluster.ParentRelease) Result {
+	const name = "Image pull secret"
+	dep := findDeployment(ctx, cs, ns, release, "jobs-manager")
+	if dep == nil {
+		return Result{
+			Name:   name,
+			Status: StatusWarn,
+			Detail: "couldn't read jobs-manager to resolve image pull secrets — skipping",
+			Remedy: "Check the parent client release is installed in " + ns + ".",
+		}
+	}
+	secrets := dep.Spec.Template.Spec.ImagePullSecrets
+	if len(secrets) == 0 {
+		return Result{Name: name, Status: StatusOK, Detail: "no image pull secret in use (public/digest-pinned images)"}
+	}
+	for _, ref := range secrets {
+		sec, err := cs.CoreV1().Secrets(ns).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err != nil {
+			return Result{
+				Name:   name,
+				Status: StatusFail,
+				Detail: fmt.Sprintf("image pull secret %q not found", ref.Name),
+				Remedy: "Private image pulls will ImagePullBackOff. Reinstall the chart with valid registry credentials.",
+			}
+		}
+		if sec.Type != corev1.SecretTypeDockerConfigJson {
+			return Result{
+				Name:   name,
+				Status: StatusFail,
+				Detail: fmt.Sprintf("secret %q is type %q, not %s", ref.Name, sec.Type, corev1.SecretTypeDockerConfigJson),
+				Remedy: "Recreate it as a docker-registry secret (kubectl create secret docker-registry).",
+			}
+		}
+		if data := sec.Data[corev1.DockerConfigJsonKey]; len(data) == 0 || !json.Valid(data) {
+			return Result{
+				Name:   name,
+				Status: StatusFail,
+				Detail: fmt.Sprintf("secret %q has an empty or malformed %s", ref.Name, corev1.DockerConfigJsonKey),
+				Remedy: "Recreate the registry secret; its .dockerconfigjson isn't valid JSON.",
+			}
+		}
+	}
+	return Result{Name: name, Status: StatusOK, Detail: fmt.Sprintf("%d image pull secret(s) present and well-formed", len(secrets))}
+}
+
+// parseResourceSpec parses jobs-manager's "k1=v1,k2=v2" resource env into a map.
+func parseResourceSpec(spec string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(spec, ",") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) == 2 && strings.TrimSpace(kv[0]) != "" {
+			out[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+		}
+	}
+	return out
+}
+
+// parseCPUMem extracts the cpu + memory quantities from a RESOURCE_REQUESTS
+// spec; ok is false unless both are present and parseable.
+func parseCPUMem(spec string) (cpu, mem resource.Quantity, ok bool) {
+	m := parseResourceSpec(spec)
+	c, cOK := m["cpu"]
+	mm, mOK := m["memory"]
+	if !cOK || !mOK {
+		return resource.Quantity{}, resource.Quantity{}, false
+	}
+	cpu, errC := resource.ParseQuantity(c)
+	mem, errM := resource.ParseQuantity(mm)
+	if errC != nil || errM != nil {
+		return resource.Quantity{}, resource.Quantity{}, false
+	}
+	return cpu, mem, true
+}
+
+// parseGPU extracts the GPU resource name + quantity from a GPU_REQUESTS spec
+// (e.g. "nvidia.com/gpu=1"). requested is false when absent, unparseable, or 0.
+func parseGPU(spec string) (name corev1.ResourceName, qty resource.Quantity, requested bool) {
+	for k, v := range parseResourceSpec(spec) {
+		q, err := resource.ParseQuantity(v)
+		if err == nil && !q.IsZero() {
+			return corev1.ResourceName(k), q, true
+		}
+	}
+	return "", resource.Quantity{}, false
+}
+
+// nodeReady reports whether a node's Ready condition is True.
+func nodeReady(n corev1.Node) bool {
+	for _, c := range n.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // jobsManagerEnv reads jobs-manager's first-container plain env into a map
