@@ -70,8 +70,9 @@ func Worst(results []Result) Status {
 	return worst
 }
 
-// Tunables. Exported-as-vars (not consts) so a future flag could override
-// them; kept conservative to avoid false positives on a busy cluster.
+// Conservative tunables, kept as package consts to avoid false positives on a
+// busy cluster. If a check ever needs runtime tuning, thread it through Options
+// (like HTTPProbe) rather than making these package vars.
 const (
 	pendingGrace     = 5 * time.Minute // a pod Pending longer than this is flagged
 	httpProbeTimeout = 8 * time.Second
@@ -239,7 +240,11 @@ func checkProxy(env map[string]string) Result {
 		return Result{
 			Name:   name,
 			Status: StatusWarn,
-			Detail: "jobs-manager has no REQUESTS_PROXY_URL (could not read jobs-manager env, or chart too old)",
+			// jobsManagerEnv reads only literal env values, so a chart that sets
+			// REQUESTS_PROXY_URL via a configMap/secret ref reads as empty here —
+			// called out in the remedy so a ref-based install isn't mistaken for
+			// missing wiring.
+			Detail: "jobs-manager has no literal REQUESTS_PROXY_URL (chart too old, or it's set via a configMap/secret ref)",
 			Remedy: "Verify the requests-proxy is wired: kubectl set env deploy/<release>-jobs-manager --list | grep PROXY",
 		}
 	}
@@ -400,5 +405,8 @@ func httpProbe(ctx context.Context, url string) error {
 	if err != nil {
 		return err
 	}
-	return resp.Body.Close()
+	// Connected — the host is reachable regardless of status code. Discard the
+	// close error so a rare post-connect close failure isn't reported as "down".
+	_ = resp.Body.Close()
+	return nil
 }
