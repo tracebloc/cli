@@ -105,12 +105,40 @@ func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, 
 		return 0, nil, fmt.Errorf("building request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Token "+c.Token)
-	}
+	c.setAuth(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("reading response from %s: %w", url, err)
+	}
+	return resp.StatusCode, raw, nil
+}
+
+// setAuth attaches the stored token as a Bearer credential. The login token is
+// a ClientAccessToken, authenticated by the backend's
+// ClientAccessTokenAuthentication (keyword "Bearer", backend#835) — NOT the
+// legacy DRF "Token" scheme.
+func (c *Client) setAuth(req *http.Request) {
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+}
+
+// get sends an authenticated GET and returns the status code + raw response.
+func (c *Client) get(ctx context.Context, path string) (int, []byte, error) {
+	url := c.BaseURL + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, nil, fmt.Errorf("building request: %w", err)
+	}
+	c.setAuth(req)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("GET %s: %w", url, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
@@ -192,4 +220,32 @@ func (c *Client) PollToken(ctx context.Context, deviceCode string) (string, erro
 		return "", ErrAccessDenied
 	}
 	return "", &APIError{StatusCode: status, Body: string(raw), URL: url}
+}
+
+// ── Authenticated calls (Bearer ClientAccessToken) ──
+
+// Identity is the signed-in user, from GET /userinfo/.
+type Identity struct {
+	Email   string `json:"email"`
+	Type    string `json:"type"`
+	Account string `json:"account"`
+}
+
+// WhoAmI fetches the signed-in user from the backend, authenticating with the
+// stored token (Bearer). It confirms the token is live and returns the account
+// — `login` uses it to verify the credential it just obtained. Requires Token.
+func (c *Client) WhoAmI(ctx context.Context) (*Identity, error) {
+	url := c.BaseURL + "/userinfo/"
+	status, raw, err := c.get(ctx, "/userinfo/")
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, &APIError{StatusCode: status, Body: string(raw), URL: url}
+	}
+	var id Identity
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return nil, fmt.Errorf("decoding userinfo response: %w", err)
+	}
+	return &id, nil
 }
