@@ -13,11 +13,13 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// newClusterCmd wires the `tracebloc cluster` subtree. Today it has
-// a single verb — `info` — which is the customer's "is the CLI
-// pointing at the right cluster?" pre-flight before running
-// `dataset push`. Future verbs (e.g. `cluster doctor` for
-// diagnostics, `cluster contexts` for switching) hang off this
+// newClusterCmd wires the `tracebloc cluster` subtree:
+//   - `info`   — the customer's "is the CLI pointing at the right
+//     cluster?" pre-flight before running `dataset push`.
+//   - `doctor` — a read-only health sweep of the running release with
+//     ✔/⚠/✖ checks + remedies (epic client-runtime#116, WS3).
+//
+// Future verbs (e.g. `cluster contexts` for switching) hang off this
 // parent in later phases.
 func newClusterCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -33,6 +35,7 @@ the wrong cluster).`,
 	}
 
 	cmd.AddCommand(newClusterInfoCmd())
+	cmd.AddCommand(newClusterDoctorCmd())
 	return cmd
 }
 
