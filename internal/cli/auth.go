@@ -42,13 +42,21 @@ machine. Honors HTTP(S)_PROXY / NO_PROXY for corporate-proxy networks.`,
 	return cmd
 }
 
+// Test seams: the device flow makes real HTTP calls on a timer, so tests
+// override the client factory (point it at an httptest server) and the poll
+// clock (fire immediately) rather than hitting the network / wall clock.
+var (
+	newAPIClient = api.New
+	pollAfter    = time.After
+)
+
 func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return &exitError{code: 1, err: err}
 	}
 	env := api.ResolveEnv(envFlag)
-	client := api.New(env)
+	client := newAPIClient(env)
 
 	dc, err := client.RequestDeviceCode(ctx)
 	if err != nil {
@@ -87,7 +95,7 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Duration(interval) * time.Second):
+		case <-pollAfter(time.Duration(interval) * time.Second):
 		}
 
 		tok, err := client.PollToken(ctx, dc.DeviceCode)
