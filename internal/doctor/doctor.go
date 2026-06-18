@@ -300,7 +300,7 @@ func backendHost(clientEnv string) string {
 // experiment silently stays Pending, the exact class this epic targets.
 func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string, release *cluster.ParentRelease) Result {
 	const name = "Service Bus egress (requests-proxy)"
-	dep := findDeployment(ctx, cs, ns, requestsProxyNames(release), "requests-proxy")
+	dep := findDeployment(ctx, cs, ns, release, "requests-proxy")
 	if dep == nil {
 		return Result{
 			Name:   name,
@@ -325,7 +325,7 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 // returns an empty map when the deployment can't be fetched.
 func jobsManagerEnv(ctx context.Context, cs kubernetes.Interface, ns string, release *cluster.ParentRelease) map[string]string {
 	env := map[string]string{}
-	dep := findDeployment(ctx, cs, ns, jobsManagerNames(release), "jobs-manager")
+	dep := findDeployment(ctx, cs, ns, release, "jobs-manager")
 	if dep == nil || len(dep.Spec.Template.Spec.Containers) == 0 {
 		return env
 	}
@@ -351,22 +351,34 @@ func getDeployment(ctx context.Context, cs kubernetes.Interface, ns string, cand
 	return nil
 }
 
-// findDeployment returns the deployment for a chart component: first by exact
-// name (the release-prefixed candidate, a fast Get), else by a namespace-wide
-// list matched on name suffix. The suffix fallback covers a nil release (parent
-// discovery failed) whose deployments are release-prefixed.
+// findDeployment locates a chart component's Deployment ("<suffix>", e.g.
+// "requests-proxy"), tied to the discovered release so a check can never be
+// satisfied by a DIFFERENT release's component or a stray bare one (Bugbot on
+// PR #89).
 //
-// The fallback resolves ONLY when exactly one deployment carries the suffix.
-// With more than one — a namespace running multiple parent releases, which
-// DiscoverParentRelease already refuses to disambiguate — there's no way to
-// attribute them to a single release, and picking arbitrarily would let
-// different checks (jobsManagerEnv vs checkRequestsProxy) describe different
-// releases in one run. So we return nil and let the check report
-// can't-determine rather than present mixed data as fact (Bugbot on PR #89).
-func findDeployment(ctx context.Context, cs kubernetes.Interface, ns string, candidates []string, suffix string) *appsv1.Deployment {
-	if d := getDeployment(ctx, cs, ns, candidates); d != nil {
-		return d
+// Release known: take the chart's standard "<release>-<suffix>" name, or a bare
+// "<suffix>" ONLY when its app.kubernetes.io/instance label ties it to this
+// release (older unprefixed charts). A deployment belonging to another release
+// is never accepted — if this release's component is missing, return nil and let
+// the check report it.
+//
+// Release unknown (discovery failed): match by name suffix, but only when
+// EXACTLY ONE deployment carries it. With several (multiple releases, which
+// DiscoverParentRelease refuses to disambiguate) there's no safe attribution, so
+// return nil rather than guess — which would let different checks describe
+// different releases in one run.
+func findDeployment(ctx context.Context, cs kubernetes.Interface, ns string, release *cluster.ParentRelease, suffix string) *appsv1.Deployment {
+	if release != nil && release.ReleaseName != "" {
+		if d := getDeployment(ctx, cs, ns, []string{release.ReleaseName + "-" + suffix}); d != nil {
+			return d
+		}
+		if d := getDeployment(ctx, cs, ns, []string{suffix}); d != nil &&
+			d.Labels["app.kubernetes.io/instance"] == release.ReleaseName {
+			return d
+		}
+		return nil
 	}
+
 	deps, err := cs.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil
@@ -381,24 +393,6 @@ func findDeployment(ctx context.Context, cs kubernetes.Interface, ns string, can
 		}
 	}
 	return match
-}
-
-// jobsManagerNames / requestsProxyNames mirror the chart's naming: the
-// release-prefixed form first, then the bare form for older/unprefixed charts.
-func jobsManagerNames(release *cluster.ParentRelease) []string {
-	names := []string{"jobs-manager"}
-	if release != nil && release.ReleaseName != "" {
-		names = append([]string{release.ReleaseName + "-jobs-manager"}, names...)
-	}
-	return names
-}
-
-func requestsProxyNames(release *cluster.ParentRelease) []string {
-	names := []string{"requests-proxy"}
-	if release != nil && release.ReleaseName != "" {
-		names = append([]string{release.ReleaseName + "-requests-proxy"}, names...)
-	}
-	return names
 }
 
 // httpProbe is the default backend prober: a GET with a short timeout over

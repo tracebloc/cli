@@ -287,6 +287,31 @@ func TestCheckRequestsProxy_NilReleaseAmbiguous(t *testing.T) {
 	}
 }
 
+// With a release discovered, the check must be tied to THAT release: another
+// release's requests-proxy must not be accepted as the discovered release's,
+// or relA goes green on relB's proxy while relA's is actually missing
+// (Bugbot on #89).
+func TestCheckRequestsProxy_DiscoveredReleaseIgnoresOtherReleases(t *testing.T) {
+	rel := &cluster.ParentRelease{ReleaseName: "relA"} // relA has no requests-proxy
+	cs := fake.NewClientset(requestsProxyDep("relB", 1))
+	if r := checkRequestsProxy(bg(), cs, ns, rel); r.Status == StatusOK {
+		t.Fatalf("relA proxy missing, relB present => %v (%q), want not-OK", r.Status, r.Detail)
+	}
+}
+
+// A bare (unprefixed) requests-proxy is accepted only when its instance label
+// ties it to the discovered release — covering older unprefixed charts.
+func TestCheckRequestsProxy_BareNameAcceptedWhenLabelledForRelease(t *testing.T) {
+	rel := &cluster.ParentRelease{ReleaseName: "relA"}
+	bare := requestsProxyDep("relA", 1)
+	bare.Name = "requests-proxy"
+	bare.Labels = map[string]string{"app.kubernetes.io/instance": "relA"}
+	cs := fake.NewClientset(bare)
+	if r := checkRequestsProxy(bg(), cs, ns, rel); r.Status != StatusOK {
+		t.Fatalf("bare requests-proxy labelled for relA => %v (%q), want ok", r.Status, r.Detail)
+	}
+}
+
 func TestRun_HealthyCluster(t *testing.T) {
 	const rel = "tb"
 	cs := fake.NewClientset(
