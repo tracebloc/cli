@@ -42,13 +42,21 @@ machine. Honors HTTP(S)_PROXY / NO_PROXY for corporate-proxy networks.`,
 	return cmd
 }
 
+// Test seams: the device flow makes real HTTP calls on a timer, so tests
+// override the client factory (point it at an httptest server) and the poll
+// clock (fire immediately) rather than hitting the network / wall clock.
+var (
+	newAPIClient = api.New
+	pollAfter    = time.After
+)
+
 func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return &exitError{code: 1, err: err}
 	}
 	env := api.ResolveEnv(envFlag)
-	client := api.New(env)
+	client := newAPIClient(env)
 
 	dc, err := client.RequestDeviceCode(ctx)
 	if err != nil {
@@ -87,7 +95,7 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Duration(interval) * time.Second):
+		case <-pollAfter(time.Duration(interval) * time.Second):
 		}
 
 		tok, err := client.PollToken(ctx, dc.DeviceCode)
@@ -95,11 +103,22 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 		case err == nil:
 			cfg.Env = env
 			cfg.Token = tok
+			// Confirm the freshly-issued token actually authenticates, and
+			// capture the account to show + store. Best-effort: don't fail a
+			// successful sign-in just because this lookup couldn't run.
+			client.Token = tok
+			if id, werr := client.WhoAmI(ctx); werr == nil {
+				cfg.Email = id.Email
+			}
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: 1, err: err}
 			}
 			p.Newline()
-			p.Successf("Signed in. Token saved to ~/.tracebloc (0600).")
+			if cfg.Email != "" {
+				p.Successf("Signed in as %s. Token saved to ~/.tracebloc (0600).", cfg.Email)
+			} else {
+				p.Successf("Signed in. Token saved to ~/.tracebloc (0600).")
+			}
 			return nil
 		case errors.Is(err, api.ErrAuthorizationPending):
 			// not approved yet — keep polling

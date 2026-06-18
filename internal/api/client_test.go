@@ -100,3 +100,41 @@ func TestPollTokenDenied(t *testing.T) {
 		t.Errorf("want access_denied, got %v", err)
 	}
 }
+
+func TestWhoAmI(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/userinfo/" || r.Method != http.MethodGet {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer usertoken123" {
+			t.Errorf("auth header = %q, want %q", got, "Bearer usertoken123")
+		}
+		_, _ = w.Write([]byte(`{"email":"ds@tracebloc.io","type":"DS","account":"Acme"}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	c.Token = "usertoken123"
+	id, err := c.WhoAmI(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Email != "ds@tracebloc.io" || id.Account != "Acme" {
+		t.Errorf("got %+v", id)
+	}
+}
+
+func TestWhoAmIUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"detail":"Invalid token."}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	c.Token = "bad"
+	var ae *APIError
+	if _, err := c.WhoAmI(context.Background()); !errors.As(err, &ae) || ae.StatusCode != http.StatusUnauthorized {
+		t.Errorf("want APIError 401, got %v", err)
+	}
+}
