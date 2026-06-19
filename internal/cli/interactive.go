@@ -16,20 +16,12 @@ import (
 )
 
 // promptCategories is the ordered list offered by the interactive
-// category picker — the categories `dataset push` supports today (the
-// same set runDatasetPush's category gate accepts). semantic_ /
-// instance_segmentation are omitted until they're implemented.
-var promptCategories = []string{
-	"image_classification",
-	"object_detection",
-	"keypoint_detection",
-	"text_classification",
-	"masked_language_modeling",
-	"tabular_classification",
-	"tabular_regression",
-	"time_series_forecasting",
-	"time_to_event_prediction",
-}
+// category picker. It derives from the push registry's CLI-supported
+// set — the exact categories runDatasetPush's gate accepts — so the
+// picker can't drift from what `dataset push` actually supports.
+// semantic_/instance_segmentation are excluded (CLISupported=false)
+// until they're implemented.
+var promptCategories = push.SupportedCategoryIDs()
 
 // prompter is the narrow seam over the interactive library. Production
 // uses surveyPrompter (a real terminal); tests inject a fake that
