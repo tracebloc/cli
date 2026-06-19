@@ -9,6 +9,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -318,10 +319,12 @@ func TestRun_HealthyCluster(t *testing.T) {
 		jobsManagerDep(rel,
 			corev1.EnvVar{Name: "REQUESTS_PROXY_URL", Value: "http://requests-proxy-service:8888"},
 			corev1.EnvVar{Name: "CLIENT_ENV", Value: "dev"},
+			corev1.EnvVar{Name: "RESOURCE_REQUESTS", Value: "cpu=2,memory=8Gi"},
 		),
 		requestsProxyDep(rel, 1),
 		boundPVC(),
 		runningPod("tb-jobs-manager-abc"),
+		node("n1", "4", "16Gi"),
 	)
 
 	results := Run(bg(), cs, Options{
@@ -329,8 +332,8 @@ func TestRun_HealthyCluster(t *testing.T) {
 		HTTPProbe: func(context.Context, string) error { return nil },
 	})
 
-	if len(results) != 6 {
-		t.Fatalf("want 6 checks, got %d", len(results))
+	if len(results) != 8 {
+		t.Fatalf("want 8 checks, got %d", len(results))
 	}
 	if w := Worst(results); w != StatusOK {
 		for _, r := range results {
@@ -338,4 +341,156 @@ func TestRun_HealthyCluster(t *testing.T) {
 		}
 		t.Fatalf("healthy cluster worst = %v, want ok", w)
 	}
+}
+
+func node(name, cpu, mem string, gpu ...string) *corev1.Node {
+	alloc := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse(cpu),
+		corev1.ResourceMemory: resource.MustParse(mem),
+	}
+	if len(gpu) == 2 {
+		alloc[corev1.ResourceName(gpu[0])] = resource.MustParse(gpu[1])
+	}
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: corev1.NodeStatus{
+			Allocatable: alloc,
+			Conditions:  []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
+	}
+}
+
+func TestParseCPUMem(t *testing.T) {
+	cpu, mem, ok := parseCPUMem("cpu=2,memory=8Gi")
+	if !ok || cpu.String() != "2" || mem.String() != "8Gi" {
+		t.Fatalf("parseCPUMem => %q %q %v", cpu.String(), mem.String(), ok)
+	}
+	if _, _, ok := parseCPUMem("cpu=2"); ok {
+		t.Fatalf("missing memory should be !ok")
+	}
+	if _, _, ok := parseCPUMem("cpu=abc,memory=8Gi"); ok {
+		t.Fatalf("unparseable cpu should be !ok")
+	}
+}
+
+func TestParseGPU(t *testing.T) {
+	name, qty, req := parseGPU("nvidia.com/gpu=1")
+	if !req || string(name) != "nvidia.com/gpu" || qty.String() != "1" {
+		t.Fatalf("parseGPU => %q %q %v", name, qty.String(), req)
+	}
+	if _, _, req := parseGPU("nvidia.com/gpu=0"); req {
+		t.Fatalf("zero gpu should be !requested")
+	}
+	if _, _, req := parseGPU(""); req {
+		t.Fatalf("empty should be !requested")
+	}
+}
+
+func TestCheckNodeFit(t *testing.T) {
+	full := map[string]string{"RESOURCE_REQUESTS": "cpu=2,memory=8Gi", "GPU_REQUESTS": "nvidia.com/gpu=1"}
+	cpuOnly := map[string]string{"RESOURCE_REQUESTS": "cpu=2,memory=8Gi"}
+
+	t.Run("fits cpu+mem+gpu", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "4", "16Gi", "nvidia.com/gpu", "2"))
+		if r := checkNodeFit(bg(), cs, full); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok", r.Status, r.Detail)
+		}
+	})
+	t.Run("no node big enough -> fail", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "1", "2Gi"))
+		if r := checkNodeFit(bg(), cs, cpuOnly); r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail", r.Status, r.Detail)
+		}
+	})
+	t.Run("gpu requested but none -> warn", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "4", "16Gi")) // cpu/mem fit, no gpu
+		if r := checkNodeFit(bg(), cs, full); r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
+		}
+	})
+	t.Run("cpu+mem and gpu on different nodes -> warn, not ok", func(t *testing.T) {
+		// The Bugbot #91 case: one node fits cpu/mem, a different node has the
+		// GPU but is too small. No single node runs a GPU job → must NOT be ok.
+		cs := fake.NewClientset(
+			node("big", "4", "16Gi"),                       // cpu/mem, no gpu
+			node("gpu", "1", "1Gi", "nvidia.com/gpu", "2"), // gpu, too small
+		)
+		if r := checkNodeFit(bg(), cs, full); r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want warn (no single node fits all)", r.Status, r.Detail)
+		}
+	})
+	t.Run("single node fits cpu+mem+gpu -> ok", func(t *testing.T) {
+		cs := fake.NewClientset(
+			node("big", "4", "16Gi"),                         // distractor: cpu/mem only
+			node("full", "4", "16Gi", "nvidia.com/gpu", "1"), // satisfies everything
+		)
+		if r := checkNodeFit(bg(), cs, full); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok", r.Status, r.Detail)
+		}
+	})
+	t.Run("not-ready node doesn't count -> fail", func(t *testing.T) {
+		n := node("n1", "8", "32Gi")
+		n.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}
+		cs := fake.NewClientset(n)
+		if r := checkNodeFit(bg(), cs, cpuOnly); r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail (node not ready)", r.Status, r.Detail)
+		}
+	})
+	t.Run("missing RESOURCE_REQUESTS -> warn", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "4", "16Gi"))
+		if r := checkNodeFit(bg(), cs, map[string]string{}); r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
+		}
+	})
+}
+
+func dockerSecret(name string, data []byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: data},
+	}
+}
+
+func jmDepWithPullSecret(release, secretName string) *appsv1.Deployment {
+	d := jobsManagerDep(release)
+	if secretName != "" {
+		d.Spec.Template.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: secretName}}
+	}
+	return d
+}
+
+func TestCheckImagePull(t *testing.T) {
+	rel := &cluster.ParentRelease{ReleaseName: "tb"}
+
+	t.Run("no pull secret -> ok", func(t *testing.T) {
+		cs := fake.NewClientset(jmDepWithPullSecret("tb", ""))
+		if r := checkImagePull(bg(), cs, ns, rel); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok", r.Status, r.Detail)
+		}
+	})
+	t.Run("valid dockerconfigjson -> ok", func(t *testing.T) {
+		cs := fake.NewClientset(
+			jmDepWithPullSecret("tb", "reg"),
+			dockerSecret("reg", []byte(`{"auths":{}}`)),
+		)
+		if r := checkImagePull(bg(), cs, ns, rel); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok", r.Status, r.Detail)
+		}
+	})
+	t.Run("missing secret -> fail", func(t *testing.T) {
+		cs := fake.NewClientset(jmDepWithPullSecret("tb", "reg")) // secret absent
+		if r := checkImagePull(bg(), cs, ns, rel); r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail", r.Status, r.Detail)
+		}
+	})
+	t.Run("malformed dockerconfigjson -> fail", func(t *testing.T) {
+		cs := fake.NewClientset(
+			jmDepWithPullSecret("tb", "reg"),
+			dockerSecret("reg", []byte("not json")),
+		)
+		if r := checkImagePull(bg(), cs, ns, rel); r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail", r.Status, r.Detail)
+		}
+	})
 }
