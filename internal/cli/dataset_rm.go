@@ -178,18 +178,30 @@ undone — re-pushing the data is the only way back.`)
 		}
 	}
 
-	// 7. Execute the in-cluster teardown.
+	// 7. Execute the in-cluster teardown. File removal runs in a
+	//    short-lived pod that shares the stage pod's identity (uid
+	//    65532 + fsGroup 65532), so it owns and can delete the staging
+	//    files on any volume type — including hostPath, where fsGroup is
+	//    a no-op (tracebloc/client#259).
 	p.Infof("Removing in-cluster artifacts…")
-	res, err := push.Teardown(ctx, cs, resolved.RestConfig, resolved.Namespace, plan)
+	res, err := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
+		Namespace:          resolved.Namespace,
+		PVCClaimName:       pvc.ClaimName,
+		PVCMountPath:       pvc.MountPath,
+		Table:              a.Table,
+		ServiceAccountName: release.IngestorSAName,
+		// Image left empty → push.DefaultStagePodImage (alpine; has rm).
+	})
 	if err != nil {
-		// Teardown is two sequential destructive ops; if the table drop
-		// succeeded but file removal didn't, say so — both ops are
-		// idempotent, so re-running completes the cleanup. (Bugbot #49)
+		// Two sequential destructive ops. If the table dropped but file
+		// removal didn't, the drop is idempotent (DROP TABLE IF EXISTS),
+		// so re-running is safe; if it keeps failing, remove the leftover
+		// staging dirs on the node directly.
 		if res.DroppedTable {
 			return &exitError{code: 7, err: fmt.Errorf(
-				"teardown incomplete — the table %s.%s was dropped, but removing its files failed; "+
-					"re-run `tracebloc dataset rm %s` to remove the leftover files: %w",
-				plan.Database, plan.Table, a.Table, err)}
+				"teardown incomplete — the table %s.%s was dropped, but removing its files failed: %w; "+
+					"re-run `tracebloc dataset rm %s`, or delete the leftover staging dirs on the node",
+				plan.Database, plan.Table, err, a.Table)}
 		}
 		return &exitError{code: 7, err: fmt.Errorf("teardown failed: %w", err)}
 	}
