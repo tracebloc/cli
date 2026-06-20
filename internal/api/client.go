@@ -249,3 +249,93 @@ func (c *Client) WhoAmI(ctx context.Context) (*Identity, error) {
 	}
 	return &id, nil
 }
+
+// ── Client provisioning (Bearer-authed) — backend#836, /edge-device/ ──
+
+// ProvisionedClient is a tracebloc client (machine), as returned by the
+// EdgeDevice endpoints.
+type ProvisionedClient struct {
+	ID        int    `json:"id"`
+	Name      string `json:"first_name"`
+	Username  string `json:"username"`
+	Namespace string `json:"namespace"`
+	Location  string `json:"location"`
+	Status    int    `json:"status"`
+}
+
+// CreateClientRequest is the POST /edge-device/ body. The account is stamped
+// server-side from the token; password is the machine credential the caller
+// generates (write-only on the backend).
+type CreateClientRequest struct {
+	Name      string `json:"first_name"`
+	Namespace string `json:"namespace"`
+	Location  string `json:"location"`
+	Password  string `json:"password"`
+}
+
+// AdminContact is one "ask an admin" entry from GET /edge-device/admins/.
+type AdminContact struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+// CreateClient provisions a client. A 403 *APIError means the caller lacks
+// CLIENT_WRITE — callers fall back to ListClientAdmins for the ask-an-admin
+// path (backend#836 Q4).
+func (c *Client) CreateClient(ctx context.Context, req CreateClientRequest) (*ProvisionedClient, error) {
+	url := c.BaseURL + "/edge-device/"
+	status, raw, err := c.post(ctx, "/edge-device/", req)
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, &APIError{StatusCode: status, Body: string(raw), URL: url}
+	}
+	var out ProvisionedClient
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decoding create-client response: %w", err)
+	}
+	return &out, nil
+}
+
+// ListClients returns the clients in the caller's account (GET /edge-device/).
+// Tolerates both a DRF-paginated body and a bare list.
+func (c *Client) ListClients(ctx context.Context) ([]ProvisionedClient, error) {
+	url := c.BaseURL + "/edge-device/"
+	status, raw, err := c.get(ctx, "/edge-device/")
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, &APIError{StatusCode: status, Body: string(raw), URL: url}
+	}
+	var list []ProvisionedClient
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return list, nil
+	}
+	var paged struct {
+		Results []ProvisionedClient `json:"results"`
+	}
+	if err := json.Unmarshal(raw, &paged); err != nil {
+		return nil, fmt.Errorf("decoding client list: %w", err)
+	}
+	return paged.Results, nil
+}
+
+// ListClientAdmins returns who in the account can provision (the ask-an-admin
+// path), from GET /edge-device/admins/ (backend#836 Q4).
+func (c *Client) ListClientAdmins(ctx context.Context) ([]AdminContact, error) {
+	url := c.BaseURL + "/edge-device/admins/"
+	status, raw, err := c.get(ctx, "/edge-device/admins/")
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, &APIError{StatusCode: status, Body: string(raw), URL: url}
+	}
+	var out []AdminContact
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decoding admins response: %w", err)
+	}
+	return out, nil
+}
