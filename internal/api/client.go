@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -298,28 +299,62 @@ func (c *Client) CreateClient(ctx context.Context, req CreateClientRequest) (*Pr
 	return &out, nil
 }
 
-// ListClients returns the clients in the caller's account (GET /edge-device/).
-// Tolerates both a DRF-paginated body and a bare list.
+// maxListPages bounds how many pages ListClients will follow — a backstop
+// against a misbehaving `next` chain, set well above any real account.
+const maxListPages = 100
+
+// ListClients returns ALL clients in the caller's account (GET /edge-device/).
+// The endpoint is DRF-paginated, so this follows `next` to the end — list,
+// `use <id>`, and create-time collision detection must see every client, not
+// just the first page. Also tolerates a bare (unpaginated) list body.
 func (c *Client) ListClients(ctx context.Context) ([]ProvisionedClient, error) {
-	url := c.BaseURL + "/edge-device/"
-	status, raw, err := c.get(ctx, "/edge-device/")
+	var all []ProvisionedClient
+	path := "/edge-device/"
+	for pageNum := 0; path != ""; pageNum++ {
+		if pageNum >= maxListPages {
+			return nil, fmt.Errorf("client list exceeded %d pages — aborting", maxListPages)
+		}
+		reqURL := c.BaseURL + path
+		status, raw, err := c.get(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		if status < 200 || status >= 300 {
+			return nil, &APIError{StatusCode: status, Body: string(raw), URL: reqURL}
+		}
+		// Unpaginated deployment → a bare array; return it as-is.
+		var bare []ProvisionedClient
+		if err := json.Unmarshal(raw, &bare); err == nil {
+			return append(all, bare...), nil
+		}
+		var body struct {
+			Next    string              `json:"next"`
+			Results []ProvisionedClient `json:"results"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return nil, fmt.Errorf("decoding client list: %w", err)
+		}
+		all = append(all, body.Results...)
+		path = nextPath(body.Next)
+	}
+	return all, nil
+}
+
+// nextPath reduces a DRF `next` link (an absolute URL) to the path+query this
+// client appends to BaseURL. Returns "" for an empty/unparseable link, which
+// ends the pagination loop.
+func nextPath(next string) string {
+	if next == "" {
+		return ""
+	}
+	u, err := url.Parse(next)
 	if err != nil {
-		return nil, err
+		return ""
 	}
-	if status < 200 || status >= 300 {
-		return nil, &APIError{StatusCode: status, Body: string(raw), URL: url}
+	if u.RawQuery != "" {
+		return u.Path + "?" + u.RawQuery
 	}
-	var list []ProvisionedClient
-	if err := json.Unmarshal(raw, &list); err == nil {
-		return list, nil
-	}
-	var paged struct {
-		Results []ProvisionedClient `json:"results"`
-	}
-	if err := json.Unmarshal(raw, &paged); err != nil {
-		return nil, fmt.Errorf("decoding client list: %w", err)
-	}
-	return paged.Results, nil
+	return u.Path
 }
 
 // ListClientAdmins returns who in the account can provision (the ask-an-admin

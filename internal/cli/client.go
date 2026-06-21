@@ -108,11 +108,23 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, name, loca
 		return &exitError{code: 1, err: err}
 	}
 
+	// Gather inputs first (flags win; prompt only what's missing, and only on a
+	// TTY), then show one review + confirm — matching the dataset-push flow.
 	if name == "" {
 		if pr == nil {
-			return &exitError{code: 1, err: errors.New("--name is required (non-interactive)")}
+			return errMissingFlag("--name")
 		}
 		if name, err = pr.Input("Client name", "shown on your dashboard + carbon reports", "", validateNonEmpty); err != nil {
+			return mapClientErr(err)
+		}
+	}
+	if location == "" {
+		if pr == nil {
+			return errMissingFlag("--location")
+		}
+		// Never silent-empty: the prompt requires a non-empty zone. (Cloud /
+		// GeoIP auto-detect of a suggested default is a fast-follow.)
+		if location, err = pr.Input("Location zone (e.g. DE)", "physical zone, for the carbon footprint", "", validateNonEmpty); err != nil {
 			return mapClientErr(err)
 		}
 	}
@@ -133,24 +145,14 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, name, loca
 	}
 
 	if pr != nil && !yes {
-		ok, cerr := pr.Confirm(fmt.Sprintf("Provision client %q with namespace %q?", name, namespace), true)
+		renderClientReview(p, name, namespace, location)
+		ok, cerr := pr.Confirm("Provision this client?", true)
 		if cerr != nil {
 			return mapClientErr(cerr)
 		}
 		if !ok {
 			p.Hintf("Cancelled.")
 			return nil
-		}
-	}
-
-	if location == "" {
-		if pr == nil {
-			return &exitError{code: 1, err: errors.New("--location is required (non-interactive)")}
-		}
-		// Never silent-empty: the prompt requires a non-empty zone. (Cloud /
-		// GeoIP auto-detect of a suggested default is a fast-follow.)
-		if location, err = pr.Input("Location zone (e.g. DE)", "physical zone, for the carbon footprint", "", validateNonEmpty); err != nil {
-			return mapClientErr(err)
 		}
 	}
 
@@ -249,6 +251,21 @@ func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
 	}
 	return &exitError{code: 1, err: fmt.Errorf(
 		"no client %s in your account — run `tracebloc client list` to see the ids", id)}
+}
+
+// renderClientReview shows the assembled inputs before the confirm prompt, so
+// the user sees the derived namespace and location before anything is created.
+func renderClientReview(p *ui.Printer, name, namespace, location string) {
+	p.Section("Review")
+	p.Field("name", name)
+	p.Field("namespace", namespace)
+	p.Field("location", location)
+}
+
+// errMissingFlag reports a required flag absent in a non-interactive run (no TTY
+// to prompt — CI, a pipe, or output redirected).
+func errMissingFlag(flag string) error {
+	return &exitError{code: 1, err: fmt.Errorf("%s is required (non-interactive — no TTY to prompt)", flag)}
 }
 
 // validateNonEmpty rejects blank prompt input.

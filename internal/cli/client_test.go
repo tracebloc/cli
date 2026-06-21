@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -122,5 +123,111 @@ func TestClientUse(t *testing.T) {
 	}
 	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "99"); err == nil {
 		t.Error("expected an error for an unknown client id")
+	}
+}
+
+func TestClientCreate_Interactive(t *testing.T) {
+	var body api.CreateClientRequest
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":9,"first_name":"Lab One","username":"u-9","namespace":"lab-one","location":"DE"}`))
+		}
+	})
+	confirmYes := true
+	pr := &fakePrompter{
+		answers: map[string]string{
+			"Client name":             "Lab One",
+			"Location zone (e.g. DE)": "DE",
+		},
+		confirm: &confirmYes,
+	}
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), pr, "", "", false); err != nil {
+		t.Fatalf("interactive create: %v", err)
+	}
+	if !posted {
+		t.Fatal("expected a POST after the user confirmed")
+	}
+	if body.Name != "Lab One" || body.Namespace != "lab-one" || body.Location != "DE" {
+		t.Errorf("create body = %+v", body)
+	}
+	if !strings.Contains(out.String(), "Review") {
+		t.Errorf("expected a review section before the confirm, got:\n%s", out.String())
+	}
+}
+
+func TestClientCreate_InteractiveCancel(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posted = true
+		}
+		_, _ = w.Write([]byte(`[]`))
+	})
+	confirmNo := false
+	pr := &fakePrompter{
+		answers: map[string]string{
+			"Client name":             "Lab Two",
+			"Location zone (e.g. DE)": "US",
+		},
+		confirm: &confirmNo,
+	}
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), pr, "", "", false); err != nil {
+		t.Fatalf("declining the confirm should be a clean exit, got: %v", err)
+	}
+	if posted {
+		t.Error("no client should be created when the user declines the confirm")
+	}
+	if !strings.Contains(out.String(), "Cancelled") {
+		t.Errorf("expected a Cancelled note, got:\n%s", out.String())
+	}
+}
+
+func TestClientList_Paginated(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`{"count":2,"next":null,"results":[{"id":2,"first_name":"beta","namespace":"beta"}]}`))
+			return
+		}
+		// page 1: an absolute `next` link, like real DRF pagination
+		_, _ = fmt.Fprintf(w, `{"count":2,"next":"http://%s/edge-device/?page=2","results":[{"id":1,"first_name":"alpha","namespace":"alpha"}]}`, r.Host)
+	})
+	var out bytes.Buffer
+	if err := runClientList(context.Background(), ui.New(&out)); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"alpha", "beta"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("paginated list missing %q (next not followed?):\n%s", want, out.String())
+		}
+	}
+}
+
+func TestClientCreate_CollisionSuffix(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			// an existing client already holds "my-client"
+			_, _ = w.Write([]byte(`[{"id":1,"first_name":"My Client","namespace":"my-client"}]`))
+		case r.Method == http.MethodPost:
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":2,"first_name":"My Client","username":"u-2","namespace":"my-client-2","location":"DE"}`))
+		}
+	})
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, "My Client", "DE", true); err != nil {
+		t.Fatal(err)
+	}
+	if body.Namespace != "my-client-2" {
+		t.Errorf("namespace = %q, want my-client-2 (collision suffix not applied)", body.Namespace)
 	}
 }

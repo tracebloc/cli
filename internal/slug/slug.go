@@ -31,6 +31,8 @@ func Slugify(name string) string {
 	}
 	s := strings.ToLower(toASCII(name))
 	s = nonAlnum.ReplaceAllString(s, "-")
+	// Redundant after the run-collapse above, but slug.py runs the identical
+	// second pass — mirror it so the two stay structurally in lock-step.
 	s = multiDash.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
 	if len(s) > MaxLabelLength {
@@ -42,7 +44,10 @@ func Slugify(name string) string {
 // Derive returns a UNIQUE DNS-1123 slug for name, avoiding taken. On collision
 // it appends -2, -3, … within the 63-char cap. If name slugifies to empty it
 // falls back to fallback; with an empty fallback it errors (an empty slug must
-// never silently become a namespace). Mirrors slug.derive_slug.
+// never silently become a namespace). Mirrors slug.derive_slug — except Go has
+// no nil string, so fallback=="" is treated as "no fallback" (erroring); the
+// Python distinguishes None from "" but no caller passes "", and erroring is
+// the safer side of that edge.
 func Derive(name string, taken []string, fallback string) (string, error) {
 	base := Slugify(name)
 	if base == "" {
