@@ -16,6 +16,7 @@ import (
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
+	"github.com/tracebloc/cli/internal/geo"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -73,6 +74,15 @@ func stubInClusterClient(t *testing.T, lc *cluster.InClusterClient, err error) {
 		return lc, err
 	}
 	t.Cleanup(func() { readInClusterClient = orig })
+}
+
+// stubDetect replaces the location auto-detector so command tests stay hermetic
+// (no real cloud-metadata / GeoIP probes).
+func stubDetect(t *testing.T, z *geo.Zone) {
+	t.Helper()
+	orig := detectZone
+	detectZone = func(context.Context) *geo.Zone { return z }
+	t.Cleanup(func() { detectZone = orig })
 }
 
 func TestClientCreate_Success(t *testing.T) {
@@ -279,6 +289,7 @@ func TestClientCreate_Interactive(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":9,"first_name":"Lab One","username":"u-9","namespace":"lab-one","location":"DE"}`))
 		}
 	})
+	stubDetect(t, nil) // hermetic: no real cloud/GeoIP probes
 	confirmYes := true
 	pr := &fakePrompter{
 		answers: map[string]string{
@@ -310,6 +321,7 @@ func TestClientCreate_InteractiveCancel(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`[]`))
 	})
+	stubDetect(t, nil)
 	confirmNo := false
 	pr := &fakePrompter{
 		answers: map[string]string{
@@ -676,5 +688,33 @@ func TestClientCreate_ReRunReviewShowsAdoptedNamespace(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "lab-one-2") {
 		t.Errorf("review showed a bumped namespace — the cluster's own client wasn't excluded from collision detection:\n%s", out.String())
+	}
+}
+
+func TestClientCreate_AcceptsDetectedZone(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":3,"first_name":"Edge","username":"u-3","namespace":"edge","location":"FR"}`))
+		}
+	})
+	// Detector suggests FR; the user accepts it — no scripted answer for the
+	// location prompt, so the fake returns the pre-filled default.
+	stubDetect(t, &geo.Zone{Code: "FR", Source: "aws", Confidence: geo.High})
+	confirmYes := true
+	pr := &fakePrompter{
+		answers: map[string]string{"Client name": "Edge"},
+		confirm: &confirmYes,
+	}
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), pr, clientCreateOpts{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.Location != "FR" {
+		t.Errorf("location = %q, want FR (detected zone accepted as the default)", body.Location)
 	}
 }
