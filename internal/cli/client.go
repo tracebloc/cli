@@ -17,6 +17,7 @@ import (
 	"github.com/tracebloc/cli/internal/geo"
 	"github.com/tracebloc/cli/internal/slug"
 	"github.com/tracebloc/cli/internal/ui"
+	"github.com/tracebloc/cli/internal/zones"
 )
 
 // newClientCmd wires the `tracebloc client` subtree — provisioning + selecting
@@ -123,21 +124,27 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, name, loca
 			return mapClientErr(err)
 		}
 	}
-	if location == "" {
+	if location != "" {
+		// --location given: validate up front so an invalid zone fails here with
+		// a suggestion, not as an opaque backend 400 at create time.
+		if verr := validateZone(location); verr != nil {
+			return &exitError{code: 1, err: verr}
+		}
+	} else {
 		if pr == nil {
 			return errMissingFlag("--location")
 		}
 		// Auto-detect a suggested zone (cloud metadata → IP geolocation) and
 		// pre-fill it as the prompt default; the user confirms with Enter or
-		// overrides. Never silent (it's a prompt), never empty (validateNonEmpty).
+		// overrides. validateZone keeps the input a real zone; never empty/silent.
 		suggested := ""
 		help := "electricityMaps zone for the carbon footprint (e.g. DE)"
-		if z := detectZone(ctx); z != nil {
+		if z := detectZone(ctx); z != nil && zones.Valid(z.Code) {
 			suggested = z.Code
 			help = fmt.Sprintf("detected %s via %s (%s confidence) — Enter to accept, or type your zone",
 				z.Code, z.Source, z.Confidence)
 		}
-		if location, err = pr.Input("Location zone (e.g. DE)", help, suggested, validateNonEmpty); err != nil {
+		if location, err = pr.Input("Location zone (e.g. DE)", help, suggested, validateZone); err != nil {
 			return mapClientErr(err)
 		}
 	}
@@ -287,6 +294,21 @@ func validateNonEmpty(s string) error {
 		return errors.New("required")
 	}
 	return nil
+}
+
+// validateZone rejects a location that isn't a known zone (what the backend's
+// ChoiceField accepts), with close-match suggestions — so an invalid zone fails
+// at the prompt/flag with guidance instead of as an opaque backend 400.
+func validateZone(s string) error {
+	s = strings.TrimSpace(s)
+	if zones.Valid(s) {
+		return nil
+	}
+	msg := fmt.Sprintf("%q is not a valid location zone", s)
+	if sugg := zones.Suggest(s, 3); len(sugg) > 0 {
+		msg += " — did you mean: " + strings.Join(sugg, ", ") + "?"
+	}
+	return errors.New(msg)
 }
 
 // mapClientErr turns a cancelled interactive prompt into a clean exit.

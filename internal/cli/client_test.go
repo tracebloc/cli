@@ -271,3 +271,18 @@ func TestClientCreate_AcceptsDetectedZone(t *testing.T) {
 		t.Errorf("location = %q, want FR (detected zone accepted as the default)", body.Location)
 	}
 }
+
+func TestClientCreate_RejectsInvalidZone(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no API call expected for an invalid zone; got %s %s", r.Method, r.URL.Path)
+	})
+	// --location given but not a real zone → fails up front with a suggestion,
+	// before any API call.
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, "My Client", "Germany", true)
+	if err == nil || !strings.Contains(err.Error(), "not a valid location zone") {
+		t.Fatalf("want invalid-zone error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "DE") {
+		t.Errorf("expected a DE suggestion, got: %v", err)
+	}
+}
