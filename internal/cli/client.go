@@ -14,6 +14,7 @@ import (
 
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/config"
+	"github.com/tracebloc/cli/internal/geo"
 	"github.com/tracebloc/cli/internal/slug"
 	"github.com/tracebloc/cli/internal/ui"
 )
@@ -102,6 +103,10 @@ func authedClient() (*api.Client, *config.Config, error) {
 	return client, cfg, nil
 }
 
+// detectZone suggests a location zone (cloud metadata → GeoIP). A seam so tests
+// stay hermetic (no network).
+var detectZone = geo.Detect
+
 func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, name, location string, yes bool) error {
 	client, cfg, err := authedClient()
 	if err != nil {
@@ -122,9 +127,17 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, name, loca
 		if pr == nil {
 			return errMissingFlag("--location")
 		}
-		// Never silent-empty: the prompt requires a non-empty zone. (Cloud /
-		// GeoIP auto-detect of a suggested default is a fast-follow.)
-		if location, err = pr.Input("Location zone (e.g. DE)", "physical zone, for the carbon footprint", "", validateNonEmpty); err != nil {
+		// Auto-detect a suggested zone (cloud metadata → IP geolocation) and
+		// pre-fill it as the prompt default; the user confirms with Enter or
+		// overrides. Never silent (it's a prompt), never empty (validateNonEmpty).
+		suggested := ""
+		help := "electricityMaps zone for the carbon footprint (e.g. DE)"
+		if z := detectZone(ctx); z != nil {
+			suggested = z.Code
+			help = fmt.Sprintf("detected %s via %s (%s confidence) — Enter to accept, or type your zone",
+				z.Code, z.Source, z.Confidence)
+		}
+		if location, err = pr.Input("Location zone (e.g. DE)", help, suggested, validateNonEmpty); err != nil {
 			return mapClientErr(err)
 		}
 	}
