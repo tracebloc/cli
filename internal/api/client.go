@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -248,4 +249,128 @@ func (c *Client) WhoAmI(ctx context.Context) (*Identity, error) {
 		return nil, fmt.Errorf("decoding userinfo response: %w", err)
 	}
 	return &id, nil
+}
+
+// ── Client provisioning (Bearer-authed) — backend#836, /edge-device/ ──
+
+// ProvisionedClient is a tracebloc client (machine), as returned by the
+// EdgeDevice endpoints.
+type ProvisionedClient struct {
+	ID        int    `json:"id"`
+	Name      string `json:"first_name"`
+	Username  string `json:"username"`
+	Namespace string `json:"namespace"`
+	Location  string `json:"location"`
+	Status    int    `json:"status"`
+}
+
+// CreateClientRequest is the POST /edge-device/ body. The account is stamped
+// server-side from the token; password is the machine credential the caller
+// generates (write-only on the backend).
+type CreateClientRequest struct {
+	Name      string `json:"first_name"`
+	Namespace string `json:"namespace"`
+	Location  string `json:"location"`
+	Password  string `json:"password"`
+}
+
+// AdminContact is one "ask an admin" entry from GET /edge-device/admins/.
+type AdminContact struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+// CreateClient provisions a client. A 403 *APIError means the caller lacks
+// CLIENT_WRITE — callers fall back to ListClientAdmins for the ask-an-admin
+// path (backend#836 Q4).
+func (c *Client) CreateClient(ctx context.Context, req CreateClientRequest) (*ProvisionedClient, error) {
+	url := c.BaseURL + "/edge-device/"
+	status, raw, err := c.post(ctx, "/edge-device/", req)
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, &APIError{StatusCode: status, Body: string(raw), URL: url}
+	}
+	var out ProvisionedClient
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decoding create-client response: %w", err)
+	}
+	return &out, nil
+}
+
+// maxListPages bounds how many pages ListClients will follow — a backstop
+// against a misbehaving `next` chain, set well above any real account.
+const maxListPages = 100
+
+// ListClients returns ALL clients in the caller's account (GET /edge-device/).
+// The endpoint is DRF-paginated, so this follows `next` to the end — list,
+// `use <id>`, and create-time collision detection must see every client, not
+// just the first page. Also tolerates a bare (unpaginated) list body.
+func (c *Client) ListClients(ctx context.Context) ([]ProvisionedClient, error) {
+	var all []ProvisionedClient
+	path := "/edge-device/"
+	for pageNum := 0; path != ""; pageNum++ {
+		if pageNum >= maxListPages {
+			return nil, fmt.Errorf("client list exceeded %d pages — aborting", maxListPages)
+		}
+		reqURL := c.BaseURL + path
+		status, raw, err := c.get(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		if status < 200 || status >= 300 {
+			return nil, &APIError{StatusCode: status, Body: string(raw), URL: reqURL}
+		}
+		// Unpaginated deployment → a bare array; return it as-is.
+		var bare []ProvisionedClient
+		if err := json.Unmarshal(raw, &bare); err == nil {
+			return append(all, bare...), nil
+		}
+		var body struct {
+			Next    string              `json:"next"`
+			Results []ProvisionedClient `json:"results"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return nil, fmt.Errorf("decoding client list: %w", err)
+		}
+		all = append(all, body.Results...)
+		path = nextPath(body.Next)
+	}
+	return all, nil
+}
+
+// nextPath reduces a DRF `next` link (an absolute URL) to the path+query this
+// client appends to BaseURL. Returns "" for an empty/unparseable link, which
+// ends the pagination loop.
+func nextPath(next string) string {
+	if next == "" {
+		return ""
+	}
+	u, err := url.Parse(next)
+	if err != nil {
+		return ""
+	}
+	if u.RawQuery != "" {
+		return u.Path + "?" + u.RawQuery
+	}
+	return u.Path
+}
+
+// ListClientAdmins returns who in the account can provision (the ask-an-admin
+// path), from GET /edge-device/admins/ (backend#836 Q4).
+func (c *Client) ListClientAdmins(ctx context.Context) ([]AdminContact, error) {
+	url := c.BaseURL + "/edge-device/admins/"
+	status, raw, err := c.get(ctx, "/edge-device/admins/")
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, &APIError{StatusCode: status, Body: string(raw), URL: url}
+	}
+	var out []AdminContact
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decoding admins response: %w", err)
+	}
+	return out, nil
 }
