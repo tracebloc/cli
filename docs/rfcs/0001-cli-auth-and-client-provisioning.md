@@ -611,16 +611,25 @@ $ tracebloc client delete lab-a   # confirms; refuses if online/holds data; offe
 
 ## 11. Phased rollout
 
+**Critical path (Phase 1)** — the CLI is mostly done or quick; it is *gated on*
+backend + frontend work, not the reverse (R1): device endpoints (backend#835)
+**and** the frontend `/activate` page unblock `login`; the RBAC read/write split
+(backend#836) unblocks `list` + the picker (D3); namespace uniqueness (backend#863)
+unblocks safe idempotent `create` — *after* the R4 collision check.
+
 - **Phase 0** (no backend work, partly shipped): stop sending users to "create a
   client first"; add `--token` / `TRACEBLOC_ENROLL_TOKEN` so the secret isn't typed
   inline. The CLI auth scaffold (cli#83) is already merged.
-- **Phase 1** (the unlock): device-flow endpoints + activation page (backend#835);
-  RBAC read/write split + namespace uniqueness (backend#836, #863); revise `client
-  create` to silent + idempotent + never-show + auto name/location; add `client
+- **Phase 1 — backend + frontend first:** device-flow endpoints (backend#835); the
+  `/activate` page (frontend — **assign an owner, R1**); RBAC read/write split + a
+  `unique` `cluster_id` field (backend#836); namespace uniqueness *after the R4
+  check* (backend#863).
+- **Phase 1 — CLI, once the above land:** revise `client create` to silent +
+  idempotent (cluster anchor) + never-show + auto name/location; add `client
   delete`; slug + picker for `use`/`delete`; selected-vs-connected in `list`; wire
   the active client → cluster context (§7.3); installer reorder. Dual-mode.
-- **Phase 2** (hardening): short-lived auto-refreshing client tokens, revocation,
-  a `client rotate` verb, enrollment keys for fleets.
+- **Phase 2** (hardening): short-lived auto-refreshing tokens + **server-side token
+  revocation (R2)**; a `client rotate` verb; atomic fleet enrollment (R5).
 
 ## 12. Open questions — resolved on backend#830 (owner to confirm the two product calls)
 
@@ -657,6 +666,74 @@ Remaining genuinely-open item: confirm the cluster identifier (proposed: the
   credential to values/secret (`0600`) before Helm; share the one-per-cluster
   cluster-id anchor with the CLI; dual-mode env fallbacks; idempotent re-run /
   orphan resume.
+
+## 14. Risks & dependencies
+
+The §7 loopholes are bugs *inside* the flow. These are the risks *around* it —
+delivery sequencing, security blast radius, and migration. **R1–R5 are the ones to
+act on**; the rest are watch-items.
+
+### R1 — Critical path crosses three repos, and one piece is unowned
+
+`login` is merged but inert until the device endpoints (backend#835) ship; the
+slug + picker (D3) and "ask an admin" need the RBAC read/write split (backend#836)
+— today one permission gates both *list* and *create*, so a normal user can't even
+list to pick; and the **`/activate` page is frontend work** (the Next.js app), not
+covered by the backend / cli / client breakdown (§13). *Mitigation:* make the
+dependency chain explicit (§11) and **assign the activation page before Phase 1** —
+it is the single point of failure for the whole device flow.
+
+### R2 — The blast radius is the user token, not the machine credential
+
+The device-issued user token is account-scoped (create/delete *any* client),
+long-lived, stored `0600` on every edge box, and `logout` only clears it locally —
+DRF tokens are static, so a leaked token stays valid for its full life regardless
+of logout. One compromised box = fleet-wide client control until expiry. D2 hid the
+*small* secret and left the *big* one on disk. *Mitigation (§9):* scope the device
+token to provisioning, short TTL + refresh, **discard it after install on
+unattended boxes** (unneeded once the machine credential is in the cluster), and add
+a server-side revoke (Phase 2).
+
+### R3 — The cluster anchor has a precondition
+
+Keying idempotency on the cluster identity (§7.2) assumes the cluster's k8s API is
+already up when `create` runs — true for managed/EKS, but the bare-metal "bootstrap
+k3s *then* install tracebloc" path now has a hard order: **k8s up → read cluster-id
+→ create → helm install** (§6.4 must mean the *tracebloc* chart, not the base
+cluster). And the `kube-system` UID changes on a cluster rebuild → a rebuilt
+cluster reads as new and mints a new client, orphaning the old. *Mitigation:* state
+the ordering in §6.4 + the installer; treat "rebuilt cluster = new client" as
+intended and let `client delete` reap the orphan.
+
+### R4 — The namespace-uniqueness migration can hit an immutability wall
+
+backend#863 wants `UniqueConstraint(account, namespace)` + "resolve existing
+collisions first" — but k8s namespaces are **immutable**, so an existing collision
+can't be renamed in a migration; resolving it is destroy + rebuild of a running
+client. *Mitigation:* run the read-only collision check (Appendix A) against
+staging/prod **before** committing to the constraint, so we know whether this is a
+paper cut or a wall. Runnable today.
+
+### R5 — Fleet provisioning is a thundering herd on that constraint
+
+Automation across N identically-named boxes (`TRACEBLOC_ENROLL_TOKEN`,
+Ansible/Terraform) all derive the same base slug, TOCTOU-collide, and retry against
+the unique constraint at once. The cluster-id dedup covers same-box re-runs, not
+N-different-boxes-same-name. *Mitigation:* atomic server-side suffix allocation, or
+a per-box name convention in the automation contract (name + location are already
+per-box via env, §8.3).
+
+### Watch-items (not blockers)
+
+- **`client list` "connected" is two data sources** (§12): local kube-context
+  reachability ("connected *here*") vs the backend heartbeat ("online *somewhere*")
+  — different columns, and per-row cluster probing is slow.
+- **Transient credential file:** the values/secret written pre-Helm (§7.9) is a
+  third home for the secret — specify its cleanup post-install.
+- **Heartbeat staleness** makes the delete "is it online?" guard advisory; the
+  teardown step is the real safety (§7.4).
+- **`/device/code` is unauthenticated public surface** — rate-limit + sufficient
+  `user_code` entropy, or it's a DoS / guessing target (§8).
 
 ## Appendix A — name→slug reference rule & validation
 
@@ -701,17 +778,50 @@ hand-run that wants to override.
 **The CLI collision suffix is advisory; the DB constraint is authoritative.**
 The `-2/-3` dedup is best-effort UX (TOCTOU between list and create); backend#863's
 `UniqueConstraint(account, namespace)` is what actually prevents a collision under
-a race or a direct API call. Validate the rule against full production data before
-locking:
+a race or a direct API call. Run this **read-only** check (R4) against staging/prod
+*before* adding the constraint — it reports the `(account, namespace)` collisions
+that would block it, plus slug drift:
 
 ```python
-# manage.py shell
+# READ-ONLY.  python manage.py shell < check_namespace_collisions.py
+from collections import Counter
 from metaApi.models import EdgeDevice
-rows = EdgeDevice.objects.values_list("first_name", "namespace")
-# Re-derive slug from first_name, compare to stored namespace; report:
-#  - names whose derived slug != current namespace (migration mismatch)
-#  - derived-slug collisions within an account
-#  - names that hit the empty-slug guard
+try:
+    from common.utils.slug import slugify_dns1123          # the authoritative rule
+except Exception:                                           # fallback = RFC Appendix A rule
+    import re, unicodedata
+    def slugify_dns1123(name):
+        s = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
+        s = re.sub(r"[^a-z0-9]+", "-", s.lower())
+        return re.sub(r"-+", "-", s).strip("-")[:63].rstrip("-")
+
+rows = list(EdgeDevice.objects.values("id", "account_id", "first_name", "namespace"))
+print(f"EdgeDevices: {len(rows)}")
+
+# (1) THE BLOCKER for UniqueConstraint(account, namespace): existing duplicates.
+acct_ns = Counter((r["account_id"], r["namespace"]) for r in rows if r["namespace"])
+blockers = {k: c for k, c in acct_ns.items() if c > 1}
+print(f"(1) (account, namespace) collisions [BLOCK the per-account constraint]: {len(blockers)}")
+for (acct, ns), c in sorted(blockers.items(), key=lambda x: -x[1]):
+    ids = [r["id"] for r in rows if r["account_id"] == acct and r["namespace"] == ns]
+    print(f"    account={acct} namespace={ns!r} x{c}  ids={ids}")
+
+# (2) global namespace collisions [only matter if you pick a global constraint].
+g = Counter(r["namespace"] for r in rows if r["namespace"])
+print(f"(2) global namespace collisions: {sum(1 for v in g.values() if v > 1)}")
+
+# (3) blank namespace (never heartbeated) + (4) name->slug drift (informational).
+print(f"(3) blank namespace: {sum(1 for r in rows if not r['namespace'])}")
+drift = [(r["id"], r["first_name"], slugify_dns1123(r["first_name"]), r["namespace"])
+         for r in rows if r["namespace"] and slugify_dns1123(r["first_name"]) != r["namespace"]]
+empty = [r["id"] for r in rows if not slugify_dns1123(r["first_name"])]
+print(f"(4) name->slug != stored namespace: {len(drift)};  slugify-to-empty: {len(empty)}")
+for rid, nm, d, ns in drift[:30]:
+    print(f"    id={rid} name={nm!r} derived={d!r} stored={ns!r}")
+
+print("\nVERDICT: (1) must be 0 before adding UniqueConstraint(account, namespace).")
+print("If > 0, those clients share a namespace — and k8s namespaces are immutable,")
+print("so resolving a collision is destroy + rebuild, not a rename (RFC R4).")
 ```
 
 ## Appendix B — closest prior art
