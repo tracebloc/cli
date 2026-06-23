@@ -15,6 +15,12 @@
 > gaps: cross-account adoption (§6.3/§7.2/R6), the existing-fleet `cluster_id`
 > backfill via the heartbeat (§4.5/§10/R7), server-side `logout` revoke (§7.5/§9),
 > and the orphan password-reset gate (§7.9). cluster-id + Q1 + Q5 are confirmed (§12).
+>
+> **Rev 4 (2026-06-23)** adds a hardening pass from an independent security + product
+> review: bootstrap supply-chain (R8), audit trail (R9), multi-env config clobber
+> (R10, a confirmed bug), version negotiation (R11), clean uninstall (R12), plus
+> machine-credential revoke + authenticated `cluster_id` (§9), the silent-failure
+> story (§8.5), adopt-keeps-namespace (§7.2), and delete-mid-experiment (§7.4).
 
 ## 0. Decisions settled in this revision
 
@@ -265,6 +271,11 @@ cluster's identity as the anchor (§7.2), so the k8s API must be up first (the
 installer bootstraps the base cluster before calling `create`; a clear error if
 none is reachable). `create` never *creates* a cluster.
 
+Global: `--verbose` / `TRACEBLOC_LOG_LEVEL` for diagnosability (§8.5), and a
+`--uninstall` teardown on `client delete` / the installer for clean offboarding
+(R12). `tracebloc cluster doctor` extends to also check auth/config/token state, so
+it can diagnose a failed *provision*, not just cluster health.
+
 ### 6.3 Backend additions (in `tracebloc/backend`)
 
 - `POST /device/code` → `{ device_code, user_code, verification_uri,
@@ -469,6 +480,13 @@ namespace** (read the in-cluster `TB_CLIENT_ID` and adopt it), regardless of
 takes over. Without 2a as a hard guard, the first re-run on every *existing* box
 would mint a duplicate and orphan the live client.
 
+**Adopt keeps the existing namespace.** On the adopt branches (2a/2b), identity and
+`namespace` come from the existing client/cluster — the silent flow's
+hostname-derived slug and collision suffix apply **only** on the mint branch (step
+3). A re-run from a different jump host (or after a hostname change) must never
+re-derive a slug for an adopted client: that would drift the backend or mismatch the
+live, immutable `TB_NAMESPACE`.
+
 ### 7.3 "Selected" is not "connected" — **[decision]**
 
 **Risk.** `client use` sets a *local pointer*. But `dataset push` talks to the
@@ -497,12 +515,15 @@ identity vanished).
 
 - **Confirms** (the *one* justified interactive prompt — destructive; D1's "no
   prompts" is about *setup*, not destruction).
-- **Refuses/warns** if the client is online (recent heartbeat) or holds datasets.
+- **Refuses/warns** if the client is online (recent heartbeat), holds datasets, or
+  has a **running experiment / training job** — the heartbeat guard is advisory, so
+  gate on live job state too; a delete (or a `cluster_id`-changing rebuild) mid-run
+  silently loses work. `--force` to override.
 - **Offers to tear down** the local Helm release for the active client.
 - **Checks RBAC** (write `403` → "ask an admin", §6.3).
 - **Clears the stale active pointer** afterward (§7.5).
 
-### 7.5 Stale / cross-account active client (confirmed bug today)
+### 7.5 Stale active client — cross-account *and* cross-env (confirmed bug today)
 
 **Risk.** The active client is cached locally. **`logout` today clears only the
 token + email and leaves `ActiveClientID` set** ([auth.go](internal/cli/auth.go));
@@ -517,6 +538,11 @@ wrong-but-valid target).
 - **`logout` also revokes the token server-side** (backend#845), not just locally —
   a DRF token is static, so a copied/leaked token survives a local-only clear for
   its full life (R2).
+- **Scope the active client to the *environment* too, not just the account (R10).**
+  `~/.tracebloc` holds one `Env`+`Token`+`ActiveClientID`; `login --env` overwrites
+  env+token but today leaves the *old* env's `ActiveClientID` stranded → prod
+  commands silently hit a dev client. Either key config by env (a profile map) or
+  clear / reselect the active client whenever `login` changes `Env`.
 - Cheap re-validation on each client/data command: if the active client isn't in
   the signed-in account, drop it → *"your selected client is gone — pick one."*
 
@@ -597,7 +623,7 @@ $ bash <(curl -fsSL https://tracebloc.io/i.sh)
 ✔ Signed in as asad@acme.com
   Setting up this machine as “gpu-box-01” in 🇩🇪 DE   (rename later — display only; handle stays gpu-box-01)
 ✔ Provisioned — credential written to the cluster (not shown; managed by name)
-✔ Installing (first run pulls images — a few minutes)……
+→ Installing… (streaming rollout)  jobs-manager ✔  requests-proxy ✔  resource-monitor …  ~3 min
 ✔ Connected — this machine is 🟢 Online   https://ai.tracebloc.io/clients
 ```
 
@@ -633,6 +659,24 @@ $ tracebloc client use            # bare → arrow-key picker
 $ tracebloc client delete lab-a   # confirms; refuses if online/holds data; offers teardown
 ```
 
+### 8.5 When setup fails (headless, no prompts)
+
+The flow is zero-prompt on a box with no human at the console, so the *failure*
+path has to stand on its own — otherwise "easy when it works" becomes "stuck when
+it doesn't":
+
+- Always write a persistent `~/.tracebloc/install-<ts>.log`; add `--verbose` /
+  `TRACEBLOC_LOG_LEVEL` that streams the device-flow → provision → Helm steps (today
+  the CLI has no verbosity flag, only `--plain`).
+- On any failure, print **the exact resume command** (re-running is idempotent —
+  §7.2/§8.2) and point at `tracebloc cluster doctor`, **extended to also check
+  auth/config/token state** (today it's cluster-health only, so it can't diagnose a
+  failed *provision*).
+- Stream per-Deployment rollout progress with an overall timeout and a "still
+  pulling images" heartbeat, so a slow first run is distinguishable from a wedge —
+  and *"🟢 Connected" must reflect a real readiness probe, not a sleep* (the core
+  Deployments need readiness/liveness probes for that to be honest).
+
 ## 9. Security considerations
 
 - **The credential never enters the terminal, scrollback, clipboard, shell history,
@@ -656,6 +700,30 @@ $ tracebloc client delete lab-a   # confirms; refuses if online/holds data; offe
   clear alone leaves a static DRF token valid for its full life (R2).
 - Least privilege: list/use need only the read scope; create/delete need the write
   scope (§6.3, Q4).
+- **Bootstrap supply-chain (R8) — the dominant gap for a regulated buyer.** "The CLI
+  binary is cosign-signed" covers only the leaf. The `curl|bash` entry pulls ~14
+  sub-scripts from a *mutable branch ref* with no checksum/signature, and the CLI
+  installer's cosign check is **skipped when cosign is absent** (the default),
+  degrading to a SHA256 fetched over the *same channel* as the binary. The most
+  privileged code (writes the credential, runs Helm) is the least verified. *Fix:*
+  pin to an immutable release tag, verify each sub-script against a signed manifest,
+  and make signature verification mandatory on the default path.
+- **Audit trail (R9) — table-stakes for SOC 2 / HIPAA.** Emit an append-only event
+  (actor, account, `cluster_id`, time, source IP) for every device-flow approval,
+  client mint/adopt/delete, credential issue/reset (§7.9), cross-account `409` (R6 —
+  an *attempted* tenant crossing), and logout/revoke. None exists today.
+- **Revoke a *compromised machine credential* in phase 1**, not just delete+recreate:
+  a stolen edge-node key needs a first-class backend "revoke this client now"
+  (invalidate the hash, force re-enroll) independent of cluster teardown — and don't
+  gate the §7.9 reset on heartbeat recency alone (the heartbeat isn't authenticated).
+- **Authenticate the `cluster_id` claim.** The heartbeat now *reports* `cluster_id`
+  (§4.5/R7) with no proof the reporter runs on that cluster — a client could claim an
+  arbitrary `cluster_id` and corrupt the backfill / "connected" state. Bind the claim
+  to the machine credential; treat a mismatch as an alert, not a backfill.
+- **Tenancy boundary (state it).** The 1:1 client↔cluster rule + `cluster_id`
+  uniqueness implies **one account per cluster** — make that the explicit isolation
+  invariant; if multi-namespace-per-cluster is ever allowed, document the namespace
+  trust boundary (it gates `DiscoverSharedPVC`, §7.3 targeting, and the shared etcd).
 
 ## 10. Backwards compatibility & migration
 
@@ -691,11 +759,18 @@ unblocks safe idempotent `create` — *after* the R4 collision check.
   `unique` `cluster_id` field (backend#836); namespace uniqueness *after the R4
   check* (backend#863).
 - **Phase 1 — CLI, once the above land:** revise `client create` to silent +
-  idempotent (cluster anchor) + never-show + auto name/location; add `client
-  delete`; slug + picker for `use`/`delete`; selected-vs-connected in `list`; wire
-  the active client → cluster context (§7.3); installer reorder. Dual-mode.
+  idempotent (cluster anchor) + never-show + auto name/location; add `client delete`
+  (+ `--uninstall`, R12); slug + picker for `use`/`delete`; selected-vs-connected in
+  `list`; wire the active client → cluster context (§7.3); env-scope the active
+  pointer (R10); send a CLI version header (R11); `--verbose` + failure flow (§8.5);
+  installer reorder. Dual-mode.
+- **Phase 1 — security must-haves (regulated buyer):** bootstrap supply-chain
+  hardening (R8); the provisioning/auth **audit trail** (R9); a machine-credential
+  **revoke**; and **authenticated `cluster_id`** claims (§9). Not deferrable for the
+  on-prem/regulated sell.
 - **Phase 2** (hardening): short-lived auto-refreshing tokens + **server-side token
-  revocation (R2)**; a `client rotate` verb; atomic fleet enrollment (R5).
+  revocation (R2)**; a `client rotate` verb; atomic fleet enrollment (R5); picker
+  filter/search at fleet scale.
 
 ## 12. Open questions — resolved on backend#830 (owner to confirm the two product calls)
 
@@ -725,7 +800,9 @@ demoted to **cosmetic cross-cluster dedup**, not an idempotency guarantee.
   `409`), plus `cluster_id` on the heartbeat contract + a backfill for existing
   clients (R7) (#836); server-side token revoke for `logout` (#845); `namespace`
   `UniqueConstraint(account, namespace)` + collision migration after the R4 check
-  (#863).
+  (#863). Plus an append-only **audit trail** (R9), a **machine-credential revoke**
+  endpoint, **authenticated `cluster_id`** claims on the heartbeat (§9), and a
+  **min-supported CLI version** advertised for skew handling (R11).
 - **`cli`**: revise `client create` → silent + idempotent (get-or-create keyed on
   the cluster identity — read the target cluster's `kube-system` UID, adopt a live
   in-namespace release or an orphaned client before minting) + never-show + auto
@@ -733,16 +810,23 @@ demoted to **cosmetic cross-cluster dedup**, not an idempotency guarantee.
   picker for `use`/`delete`; selected-vs-connected `list`; bind active client →
   cluster context for the dataset commands; scope the active pointer to the account,
   clear **and server-side revoke** on logout (#845); `auth status` token expiry.
+  Also: a `User-Agent: tracebloc-cli/<ver>` version header (R11); env-scoped config /
+  profiles (R10); `--verbose` + `~/.tracebloc/install-*.log` and `cluster doctor`
+  auth/config checks (§8.5); `client delete --uninstall` (R12).
 - **`client` (installer)**: reorder CLI install + auth before Helm; write the
   credential to values/secret (`0600`) before Helm; share the one-per-cluster
   cluster-id anchor with the CLI; dual-mode env fallbacks; idempotent re-run /
-  orphan resume.
+  orphan resume. Plus **supply-chain hardening** (immutable release tag, sub-scripts
+  verified against a signed manifest, mandatory signature check — R8); a first-class
+  **uninstall/offboard** path (tear down the release, de-register the `EdgeDevice`,
+  clear local state — R12); and streamed per-Deployment rollout progress (§8.5).
 
 ## 14. Risks & dependencies
 
 The §7 loopholes are bugs *inside* the flow. These are the risks *around* it —
-delivery sequencing, security blast radius, and migration. **R1–R7 are the ones to
-act on** (R6–R7 are the review's blocking finds); the rest are watch-items.
+delivery sequencing, security blast radius, and migration. **R1–R12 are the ones to
+act on** (R6–R9 are the blocking finds; R8–R12 came from the latest hardening pass);
+the rest are watch-items.
 
 ### R1 — Critical path crosses three repos, and one piece is unowned
 
@@ -816,6 +900,46 @@ orphan the running client. *Mitigation:* backfill `cluster_id` from the heartbea
 (§4.5 / §10) **and** keep the §7.2 step-2a "never mint over a live in-namespace
 release" guard for the pre-backfill window. **Ship before the idempotent installer.**
 
+### R8 — Bootstrap supply-chain is unverified (blocking, security)
+
+`curl|bash` pulls ~14 sub-scripts from a mutable branch ref (no checksum/signature),
+and the CLI installer's cosign check is skipped when cosign is absent (the default),
+falling back to a same-channel SHA256. The most privileged code is the least
+verified — upstream of every §9 mitigation. *Mitigation:* immutable release tag +
+signed sub-script manifest + mandatory signature verification (§9). *(installer / cli
+repos; named here.)*
+
+### R9 — No audit trail (blocking, compliance)
+
+No who-did-what-when record of provisioning / login / delete / credential-reset /
+cross-account `409`. SOC 2 / HIPAA require it; the §2 regulated-org thesis depends on
+it. *Mitigation:* append-only audit events from the backend, exportable (§9).
+*(backend.)*
+
+### R10 — Multi-env config clobber (confirmed bug today)
+
+`~/.tracebloc` holds one `Env`+`Token`+`ActiveClientID`; `login --env` overwrites
+env+token but strands the previous env's `ActiveClientID`, so a dev/stg/prod user
+silently targets the wrong client. §7.5 handled only cross-*account*. *Mitigation:*
+env-scoped config (profiles) or clear/reselect the active client on `Env` change
+(§7.5). *(cli.)*
+
+### R11 — No CLI↔backend↔chart version negotiation (future-proof)
+
+The api client sends no `User-Agent`/version header, there's no min-version
+handshake, and the chart `appVersion` isn't reported — three repos on different
+cadences + a new contract = undefined failures on skew. *Mitigation:* CLI sends a
+version header; backend advertises a min-supported version with a clear "upgrade
+required" message; `chart_version` on the heartbeat. *(cli + backend + chart.)*
+
+### R12 — No clean uninstall / offboarding (ease-of-use, future-proof)
+
+There's no inverse of install: nothing stops the heartbeat, de-registers the box, or
+clears local state, so every retired/rebuilt box becomes an R3 orphan. *Mitigation:*
+`client delete --uninstall` / installer `--uninstall` that tears down the release,
+de-registers the `EdgeDevice`, and clears `~/.tracebloc` — the intended cure for R3
+rebuild-orphans. *(cli + installer.)*
+
 ### Watch-items (not blockers)
 
 - **`client list` "connected" is two data sources** (§12): local kube-context
@@ -827,6 +951,18 @@ release" guard for the pre-backfill window. **Ship before the idempotent install
   teardown step is the real safety (§7.4).
 - **`/device/code` is unauthenticated public surface** — rate-limit + sufficient
   `user_code` entropy, or it's a DoS / guessing target (§8).
+- **Compromised-client (FL) threat model** — name what a valid machine credential
+  can/can't do to *other* tenants' training (poisoned gradients, dataset-size lies,
+  model exfiltration), and link the FL-runtime doc that owns Byzantine defenses.
+- **Data-residency attestation** — the auto-detected `location` (§6.7) is
+  residency-grade but used only for carbon; record its provenance and expose a
+  per-client residency attestation (a GDPR signal) separate from the mutable zone.
+- **Emoji / flag glyphs** mojibake in CI logs and Windows consoles — gate *glyphs*
+  (not just color) on a TTY, ASCII fallbacks (`[ok]`/`[x]`), and prefer the plain
+  zone code (`DE`) over a flag emoji.
+- **`--token` re-apply** should run the same cluster-id get-or-create (a Terraform
+  re-apply of the *same* box is then a no-op) and fail clearly if the k8s API isn't
+  reachable yet (R5 covers *different* boxes, not same-box re-apply).
 
 ## Appendix A — name→slug reference rule & validation
 
