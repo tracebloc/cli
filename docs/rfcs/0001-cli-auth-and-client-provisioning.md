@@ -75,6 +75,10 @@ There are **two** things being authenticated, with opposite lifetimes:
 | Auth | Browser SSO/MFA | A long-lived machine credential |
 | Created at | `ai.tracebloc.io` | Provisioned by backend |
 
+**A client is attached 1:1 to a cluster** — one cluster holds exactly one client,
+and a client connected to a live cluster is *in use*. Client identity is therefore
+*per-cluster*: that is the anchor the whole lifecycle keys on (§7.2).
+
 Today both collapse into one **Client ID + password**. The fix is **not** "browser
 auth instead of credentials" — it's: *authenticate the human in the browser, and
 let that authorization mint the machine credential automatically.* (This is the
@@ -264,6 +268,13 @@ credential and routes it straight into the cluster (never to stdout — D2/§9).
 - **Enforce `namespace` uniqueness** per-account at the DB layer
   ([backend#863]) — the CLI's collision suffix is advisory + racy; only a
   `UniqueConstraint(account, namespace)` actually guarantees it (§6.6).
+- **Record the attached cluster + enforce one client per cluster** — add a
+  `cluster_id` to `EdgeDevice` (no such field today — only `namespace`) carrying
+  the target cluster's stable fingerprint (proposed: its `kube-system` namespace
+  UID) with `unique=True`. This is the durable attachment record that makes
+  `client create` idempotent across CLI-config loss and the pre-install orphan
+  window (§7.2), and a stronger backstop than the namespace constraint: `create`
+  becomes get-or-create keyed on `cluster_id`. ([backend#836])
 
 ### 6.4 Installer reorder (in `tracebloc/client`)
 
@@ -273,8 +284,8 @@ installs *after* the cluster.) The credential is written to the chart's
 values/secret (mode `0600`) **before** `helm install` runs, so an interrupted
 install can be resumed without re-minting (§7.9). Keep CLI-install failure
 non-fatal only for the *dataset* convenience path, not for the auth path. The
-installer's existing one-client-per-machine guard and the CLI's idempotent
-`create` must read the **same** anchor (§7.2).
+installer's existing one-per-cluster guard and the CLI's idempotent
+`create` must key on the **same** cluster identity (§7.2).
 
 ### 6.5 Fallbacks — automation (air-gap is out of scope)
 
@@ -317,7 +328,9 @@ Derivation rules (reference algorithm + validation in Appendix A):
   repeats, strip to DNS-1123 (`[a-z0-9-]`, ≤63 chars, no leading/trailing `-`).
 - **Collision-suffix:** append `-2`, `-3`, … against the account's existing
   namespaces. This is the friendly UX layer; the **DB constraint** (backend#863)
-  is what actually guarantees uniqueness against races / direct API calls.
+  is what actually guarantees uniqueness against races / direct API calls. It
+  fires only for *different* clusters that derive the same base name — never for
+  the same cluster re-running, which the cluster anchor catches first (§7.2).
 - **Empty-slug guard:** a name that slugifies to empty (e.g. all-CJK) falls back to
   `client-<short-id>`.
 - **Surface, don't ask:** show the derived slug in progress
@@ -375,20 +388,38 @@ the *credential* is truly hidden; the *name* is the interface.
 
 ### 7.2 Re-running setup must not mint a duplicate client — **[decision]**
 
-**Risk.** Run the installer (or `client create`) twice on one host → two backend
-clients, doubled "capacity", a confusing dashboard. **One client per host** is the
-rule, and today `create` always mints.
+**Invariant.** A client is attached to exactly one cluster, and a cluster holds
+exactly one client (1:1, §3.1). Identity is *per-cluster*, so "does this host
+already have a client?" is really *"is this cluster already attached to a
+client?"* — and a cluster can always answer that.
 
-**Resolution.** `create` becomes **idempotent** — *"ensure this machine has a
-client."* It checks for an existing client bound to this host before minting.
-This needs a durable **machine → client anchor**:
+**Risk.** Run the installer (or `client create`) twice against one cluster → two
+backend clients, doubled "capacity", a confusing dashboard. Today `create` always
+mints — and worse, the collision suffix (§6.6) turns the re-run into a *new* slug
+(`gpu-server` → `gpu-server-2`), actively manufacturing the duplicate, because the
+slug is derived against the account's namespaces *including this cluster's own*.
 
-- **Primary anchor: the cluster's installed Helm `clientId`.** It survives loss of
-  `~/.tracebloc` and is the source of truth; the CLI config is just a cache.
-- The installer already has a one-per-machine guard — both **must read the same
-  anchor**, so the CLI and the installer agree on "is this host already a client?"
-- A re-run with a healthy anchor → resume into the existing client (re-select it),
-  no mint.
+**Resolution.** `create` is **get-or-create keyed on the cluster**, not a mint.
+The anchor is the **cluster identity** (proposed: the `kube-system` namespace UID —
+the conventional stable fingerprint), readable *before* anything is installed, so
+it exists from t=0 — which the CLI config, a mere cache, cannot provide once it is
+lost:
+
+1. Read the target cluster's identity.
+2. **Is this cluster already attached?**
+   - *(a) Live resources present* — a tracebloc Secret / `TB_CLIENT_ID` in the
+     namespace → adopt it, reconcile/upgrade. **No mint.** (the normal re-run)
+   - *(b) None yet, but the backend has a client recorded for this `cluster_id`* →
+     adopt the orphan and resume. **No mint.** (config-lost / interrupted, §7.9)
+3. **Otherwise** → mint, stamp `cluster_id` on the new client, write the credential
+   (`0600`) before Helm, install.
+
+One-client-per-cluster is enforced server-side by the `unique` `cluster_id`
+(§6.3): a second attach returns the existing client, never a duplicate, even under
+a race. The installer's one-per-cluster guard and the CLI now agree because they
+key on the **same** cluster identity. The `-2`/`-3` suffix is demoted to
+disambiguating cosmetic name clashes *across different clusters* — it can no longer
+produce a same-cluster duplicate, because the cluster-id is checked first.
 
 ### 7.3 "Selected" is not "connected" — **[decision]**
 
@@ -481,14 +512,19 @@ backend but no cluster runs it. A naive re-run mints a *second* orphan. Worse, i
 the CLI minted the password and didn't route it anywhere before Helm failed, the
 plaintext is lost (backend stores only the hash) and the orphan is unusable.
 
-**Resolution.** Two mechanisms, both from §7.2:
+**Resolution.** The orphan is found by its `cluster_id` (§7.2 step 2b): the re-run
+reads the same cluster identity, the backend returns the recorded client, and the
+CLI **resumes into it** instead of minting a second.
 
 - The CLI writes the machine credential into the chart's values/secret (`0600`)
-  **before** invoking Helm. An interrupted install leaves that file in place, so a
-  re-run **resumes into the same client** (anchor match) instead of re-minting.
-- Concurrent races (two `create`s at once) are the namespace-uniqueness gap — the
-  DB `UniqueConstraint` (backend#863) is the backstop; the loser retries with the
-  next collision suffix.
+  **before** invoking Helm. An interrupted install leaves that file in place, so
+  the resume reuses the credential and just re-runs Helm.
+- If the credential was lost (no values file — e.g. a fresh box), resume **resets**
+  the orphan's password (a `PATCH` on the existing `EdgeDevice`) and rewrites it —
+  safe, because an orphan never successfully connected, so no running pod uses the
+  old one.
+- Concurrent attaches to one cluster are serialized by the `unique` `cluster_id`
+  constraint (§6.3); the loser fetches and adopts the winner.
 
 ## 8. UX — drafted flows
 
@@ -517,10 +553,10 @@ are *surfaced* and correctable, not asked (D1, D2).
 
 ### 8.2 Returning / re-run (already enrolled)
 
-Detect the machine→client anchor on the box (§7.2) → **skip auth and setup
-entirely** → resume into the existing client and reconcile / upgrade. Idempotent
-re-runs are non-negotiable; a re-run after a failed install resumes the same
-client rather than minting a second (§7.9).
+Read the target cluster's identity → it's already attached to a client (§7.2) →
+**skip auth and setup entirely** → resume into that client and reconcile / upgrade.
+Idempotent re-runs are non-negotiable; a re-run after a failed install resumes the
+same client rather than minting a second (§7.9).
 
 ### 8.3 Automation (non-interactive, online)
 
@@ -597,26 +633,30 @@ the tracking epic ([backend#830]). Most are dictated by the code:
 | Q2 | Namespace derivation | `name → slug → set both EdgeDevice.namespace + TB_NAMESPACE` (heartbeat re-reports namespace, so they must be equal — §6.6). |
 | Q3 | Location-change semantics | **Future-only**, already clean — gCO₂ is a frozen per-experiment snapshot, never re-derived. |
 | Q4 | RBAC | **Split read from write**; write `403` → "pick existing / ask an admin" (§6.3, §7.4). |
-| Q5 | Multi-client / re-parenting | Multi-client per account/host is free; **re-parenting deferred** (the viewset force-stamps `account`). **← owner nod** |
+| Q5 | Multi-client / re-parenting | **One client per cluster** (1:1, enforced by `unique` `cluster_id` — §6.3 / §7.2); "multi-client per host" means multi-*cluster*, one client each. **Re-parenting deferred** (the viewset force-stamps `account`). **← owner nod** |
 | Q6 | Device-flow IdP | **Reuse the existing web login as-is**; `/activate` is a token-authed endpoint binding to `request.user` — no new IdP wiring. |
 
-Remaining genuinely-open item: the §7.3 "connected" check needs a cheap,
-reliable signal that a kube-context hosts the active client — leaning on
-`DiscoverParentRelease` + heartbeat recency; validate the latency before locking.
+Remaining genuinely-open item: confirm the cluster identifier (proposed: the
+`kube-system` namespace UID; `EdgeDevice` has no `cluster_id` today). The §7.3
+"connected" check then falls out of it — cluster-id match + heartbeat recency.
 
 ## 13. Work breakdown (cross-repo; tracked on backend#830)
 
 - **`backend`**: `/device/code` + `/device/token` + activation page (#835);
-  provisioning hardening + RBAC read/write split (#836); `namespace`
-  `UniqueConstraint(account, namespace)` + collision migration (#863).
-- **`cli`**: revise `client create` → silent + idempotent + never-show +
-  auto name/location (cli#84/#92); location auto-detect (cli#93); `client delete`;
-  slug + picker for `use`/`delete`; selected-vs-connected `list`; bind active
-  client → cluster context for the dataset commands; scope the active pointer to
-  the account + clear on logout; `auth status` token expiry.
+  provisioning hardening + RBAC read/write split + a `cluster_id` field
+  (`unique=True`) with get-or-create-by-cluster on `POST /edge-device/` (#836);
+  `namespace` `UniqueConstraint(account, namespace)` + collision migration (#863).
+- **`cli`**: revise `client create` → silent + idempotent (get-or-create keyed on
+  the cluster identity — read the target cluster's `kube-system` UID, adopt a live
+  or orphaned client before minting) + never-show + auto name/location
+  (cli#84/#92); location auto-detect (cli#93); `client delete`; slug + picker for
+  `use`/`delete`; selected-vs-connected `list`; bind active client → cluster
+  context for the dataset commands; scope the active pointer to the account + clear
+  on logout; `auth status` token expiry.
 - **`client` (installer)**: reorder CLI install + auth before Helm; write the
-  credential to values/secret (`0600`) before Helm; share the one-per-host anchor
-  with the CLI; dual-mode env fallbacks; idempotent re-run / orphan resume.
+  credential to values/secret (`0600`) before Helm; share the one-per-cluster
+  cluster-id anchor with the CLI; dual-mode env fallbacks; idempotent re-run /
+  orphan resume.
 
 ## Appendix A — name→slug reference rule & validation
 
