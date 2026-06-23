@@ -155,10 +155,12 @@ fields required.**
 `POST /edge-device/` (`EdgeDeviceViewSet`, permission `CanManageClient`). Writable
 fields are exactly `('first_name', 'account', 'location', 'password')`
 (`edge_device_serializer.py:94`). `username`/email are auto-generated server-side
-(`create()`); `namespace` is **not** set here today — it's reported later by the
-client heartbeat (`EdgeDeviceHeartbeatView`). A CLI holding a user token can call
-this endpoint to auto-provision a client. (Namespace sequencing is the catch — see
-§6.6.)
+(`create()`); `namespace` is **not** set here today — the client heartbeat
+(`EdgeDeviceHeartbeatView`) stores whatever the client reports, **verbatim: no slug
+derivation, no format validation, no uniqueness** (`common/utils/edge_device_utils.py`
+keeps `client_info.namespace` as-is). A CLI holding a user token can call this
+endpoint to auto-provision a client. (Namespace sequencing is the catch — see §6.6;
+the slug rule + uniqueness are net-new — R4.)
 
 ### 4.3 Auth — the device grant is half-built
 
@@ -329,6 +331,12 @@ installer's existing one-per-cluster guard and the CLI's idempotent
 Today there are effectively two names: `first_name` (display) and `namespace`
 (k8s). Asking for both is redundant; in the silent flow we ask for **neither**
 (§6.7) — we derive both from the hostname.
+
+> **All of this is net-new.** Today the backend does *no* namespace processing — it
+> stores the client-reported `namespace` verbatim (§4.2), with no slug derivation,
+> no format validation, and no uniqueness. The slug rule below, setting `namespace`
+> at create, and the §6.3 constraint are all new work; the slug rule currently lives
+> only in the CLI (`cli/internal/slug`) + Appendix A, not in the backend.
 
 **Proposal: derive the `namespace` slug from the name once, at creation, set it on
 *both* `EdgeDevice.namespace` and the install-time `TB_NAMESPACE`, and freeze it.**
@@ -772,12 +780,17 @@ intended, and add a **reaper / teardown hook** (or a dashboard sweep) so orphane
 
 ### R4 — The namespace-uniqueness migration can hit an immutability wall
 
-backend#863 wants `UniqueConstraint(account, namespace)` + "resolve existing
-collisions first" — but k8s namespaces are **immutable**, so an existing collision
-can't be renamed in a migration; resolving it is destroy + rebuild of a running
-client. *Mitigation:* run the read-only collision check (Appendix A) against
-staging/prod **before** committing to the constraint, so we know whether this is a
-paper cut or a wall. Runnable today.
+**Nothing prevents namespace collisions today** — the backend stores the
+client-reported `namespace` verbatim (§4.2): no validation, no dedup, no uniqueness.
+The only guard is the CLI's advisory `-2/-3` suffix, which a race, an older client,
+or a direct API call all bypass. So backend#863's `UniqueConstraint(account,
+namespace)` must assume existing duplicates and **resolve them in the migration
+first** — and because `namespace` *is* the live k8s namespace (**immutable**), a real
+collision can't be renamed; resolving it is destroy + rebuild of a running client.
+*Mitigation:* the **code** already tells us collisions are unprevented; only the
+**data** tells us whether any *exist* (paper cut vs wall), so the read-only collision
+check (Appendix A) is the implementer's pre-migration step against staging/prod — not
+an RFC blocker.
 
 ### R5 — Fleet provisioning is a thundering herd on that constraint
 
