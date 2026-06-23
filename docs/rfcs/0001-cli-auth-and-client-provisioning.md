@@ -9,6 +9,12 @@
 > auth handshake turned out to be the *easy* half; the design now leads with the
 > **client lifecycle on a machine** (§7), which is where the real bugs hide. Three
 > product decisions are settled (§0).
+>
+> **Rev 3 (2026-06-23)** makes the **cluster the idempotency anchor** (1:1
+> client↔cluster, keyed on the `kube-system` UID) and closes the review's blocking
+> gaps: cross-account adoption (§6.3/§7.2/R6), the existing-fleet `cluster_id`
+> backfill via the heartbeat (§4.5/§10/R7), server-side `logout` revoke (§7.5/§9),
+> and the orphan password-reset gate (§7.9). cluster-id + Q1 + Q5 are confirmed (§12).
 
 ## 0. Decisions settled in this revision
 
@@ -21,8 +27,9 @@ the review. They are now decided; the rest of the doc assumes them.
 | D2 | **The machine credential is never shown.** | `client create` prints only name + status. The credential is written straight into the cluster secret (mode `0600`) + stored hashed in the backend, and never touches stdout, scrollback, the clipboard, or `~/.tracebloc`. Rotation = delete + recreate. (§7.1, §7.8, §9) |
 | D3 | **Clients are referred to by a human handle, never a secret or backend id.** | The handle is the per-account-unique namespace **slug** (e.g. `munich-hospital-radiology`); bare `use` / `delete` open an arrow-key picker. The UUID / username / password are never displayed. (§7.1) |
 
-Two scope calls from the epic still want an explicit owner nod (§12): **air-gap
-out of scope** (Q1) and **re-parenting deferred** (Q5).
+The cluster identifier (`kube-system` UID) and the two epic scope calls — **air-gap
+out of scope** (Q1) and **one client per cluster / re-parenting deferred** (Q5) —
+are now confirmed (§12).
 
 ## 1. Summary
 
@@ -184,6 +191,9 @@ to `/edge-device-heartbeat/`. Carbon is computed backend-side from
 auto-detect or report location — confirming location must be captured at
 provisioning time, which is exactly what this RFC does (silently — §6.7). The
 heartbeat *does* re-report `namespace` on every ping, which constrains §6.6.
+**It must also begin reporting `cluster_id`** (§6.3): that powers the §7.3
+"connected" check *and* backfills `cluster_id` onto every already-running client
+(§10, R7).
 
 ### 4.6 How data commands target a cluster today (sets up §7.3)
 
@@ -248,6 +258,10 @@ tracebloc dataset push|list|rm  # act on the ACTIVE client's cluster (§7.3)    
 
 `login` stores a short-lived **user** token. `client create` mints the **machine**
 credential and routes it straight into the cluster (never to stdout — D2/§9).
+`client create` **operates against an already-reachable cluster** — it reads that
+cluster's identity as the anchor (§7.2), so the k8s API must be up first (the
+installer bootstraps the base cluster before calling `create`; a clear error if
+none is reachable). `create` never *creates* a cluster.
 
 ### 6.3 Backend additions (in `tracebloc/backend`)
 
@@ -270,11 +284,21 @@ credential and routes it straight into the cluster (never to stdout — D2/§9).
   `UniqueConstraint(account, namespace)` actually guarantees it (§6.6).
 - **Record the attached cluster + enforce one client per cluster** — add a
   `cluster_id` to `EdgeDevice` (no such field today — only `namespace`) carrying
-  the target cluster's stable fingerprint (proposed: its `kube-system` namespace
-  UID) with `unique=True`. This is the durable attachment record that makes
-  `client create` idempotent across CLI-config loss and the pre-install orphan
-  window (§7.2), and a stronger backstop than the namespace constraint: `create`
-  becomes get-or-create keyed on `cluster_id`. ([backend#836])
+  the target cluster's stable fingerprint (the `kube-system` namespace UID) with
+  `unique=True`. This is the durable attachment record that makes `client create`
+  idempotent across CLI-config loss and the pre-install orphan window (§7.2), and a
+  stronger backstop than the namespace constraint: `create` becomes get-or-create
+  keyed on `cluster_id`. Two musts, because the `kube-system` UID is **not a
+  secret** (anyone with cluster access reads it):
+  - **Account-scoped get-or-create.** Return the existing client **only if it's in
+    the requester's account**; a `cluster_id` already bound to a *different* account
+    is an explicit **409 conflict**, never a silent adoption — otherwise re-pointing
+    a cluster from another account would hijack the first account's client (R6).
+  - **Backfill existing clients.** `cluster_id` is net-new, so every current client
+    has it null; it is populated by the heartbeat (§4.5) — see the §10 migration
+    (R7). Until a client is backfilled, the installer must not mint over it (§7.2
+    step 2a is the guard).
+  - ([backend#836]; server-side token revoke for `logout` lands as backend#845.)
 
 ### 6.4 Installer reorder (in `tracebloc/client`)
 
@@ -386,6 +410,12 @@ backend UUID / username / password. `use <slug>` / `delete <slug>` take the slug
 run bare, they drop into an arrow-key **picker** over the account's clients. Only
 the *credential* is truly hidden; the *name* is the interface.
 
+**Rename is cosmetic.** The slug is frozen at creation (it *is* the k8s namespace —
+§6.6); renaming a client changes only `first_name` (the display name), **not** the
+handle — the slug you type in `use`/`delete` stays the original. The picker is right
+for a handful of clients; an account with dozens needs filter/search (phase 2,
+alongside the enrollment-key path).
+
 ### 7.2 Re-running setup must not mint a duplicate client — **[decision]**
 
 **Invariant.** A client is attached to exactly one cluster, and a cluster holds
@@ -416,10 +446,20 @@ lost:
 
 One-client-per-cluster is enforced server-side by the `unique` `cluster_id`
 (§6.3): a second attach returns the existing client, never a duplicate, even under
-a race. The installer's one-per-cluster guard and the CLI now agree because they
-key on the **same** cluster identity. The `-2`/`-3` suffix is demoted to
-disambiguating cosmetic name clashes *across different clusters* — it can no longer
-produce a same-cluster duplicate, because the cluster-id is checked first.
+a race — but only **within the requester's account**; a `cluster_id` bound to
+another account is a `409` conflict, never a silent adoption (R6). The installer's
+one-per-cluster guard and the CLI now agree because they key on the **same** cluster
+identity. The `-2`/`-3` suffix is demoted to disambiguating cosmetic name clashes
+*across different clusters* — it can no longer produce a same-cluster duplicate,
+because the cluster-id is checked first.
+
+**Existing fleet — `cluster_id` is null until backfilled (R7).** Current clients
+predate the anchor, so step 2b can't match them yet. Step 2a is the safety net: the
+installer **never mints when a live tracebloc release already occupies the target
+namespace** (read the in-cluster `TB_CLIENT_ID` and adopt it), regardless of
+`cluster_id`. The heartbeat backfill (§4.5/§10) then populates `cluster_id` so 2b
+takes over. Without 2a as a hard guard, the first re-run on every *existing* box
+would mint a duplicate and orphan the live client.
 
 ### 7.3 "Selected" is not "connected" — **[decision]**
 
@@ -466,6 +506,9 @@ wrong-but-valid target).
 
 - `logout` clears the active-client pointer (and `login` to a different account
   drops it if the client isn't in the new account).
+- **`logout` also revokes the token server-side** (backend#845), not just locally —
+  a DRF token is static, so a copied/leaked token survives a local-only clear for
+  its full life (R2).
 - Cheap re-validation on each client/data command: if the active client isn't in
   the signed-in account, drop it → *"your selected client is gone — pick one."*
 
@@ -521,8 +564,10 @@ CLI **resumes into it** instead of minting a second.
   the resume reuses the credential and just re-runs Helm.
 - If the credential was lost (no values file — e.g. a fresh box), resume **resets**
   the orphan's password (a `PATCH` on the existing `EdgeDevice`) and rewrites it —
-  safe, because an orphan never successfully connected, so no running pod uses the
-  old one.
+  but **only after confirming the client is offline** (no recent heartbeat). A
+  client that connected once and *then* lost its local values file still has a
+  running pod using the old credential; a blind reset would break it. Gate the reset
+  on heartbeat recency, not just "no values file."
 - Concurrent attaches to one cluster are serialized by the `unique` `cluster_id`
   constraint (§6.3); the loser fetches and adopts the winner.
 
@@ -542,7 +587,7 @@ $ bash <(curl -fsSL https://tracebloc.io/i.sh)
 # (user opens URL on laptop → logs in / signs up → approves "WDJB-MJHT")
 
 ✔ Signed in as asad@acme.com
-  Setting up this machine as “gpu-box-01” in 🇩🇪 DE   (rename later: tracebloc client use --name)
+  Setting up this machine as “gpu-box-01” in 🇩🇪 DE   (rename later — display only; handle stays gpu-box-01)
 ✔ Provisioned — credential written to the cluster (not shown; managed by name)
 ✔ Installing (first run pulls images — a few minutes)……
 ✔ Connected — this machine is 🟢 Online   https://ai.tracebloc.io/clients
@@ -589,13 +634,18 @@ $ tracebloc client delete lab-a   # confirms; refuses if online/holds data; offe
 - Password leaves the installer process space entirely — the CLI only ever holds a
   device code, then a scoped user token, then routes the per-client credential to
   the cluster.
-- Device-code phishing: short `user_code` TTL, bind the code to the account, and
-  show *what is being authorized* on the approval page.
+- Device-code phishing (RFC 8628): bind `user_code` → account, short TTL (the impl
+  uses 10 min), **rate-limit `/device/code` + `/device/token`** (they are
+  unauthenticated public surface — a DoS / guessing target), and an approval page
+  that names the device and warns *"only approve if you started this on that box."*
 - Secret-at-rest: write cluster credentials `0600`. (Observed `drwxrwxrwx` data
   dirs and a world-ish `values.yaml` on an existing box — tighten when we start
-  auto-writing credentials.)
+  auto-writing credentials.) Note the credential also lands **base64 in the k8s /
+  Helm release Secret (etcd)** — acceptable for single-tenant on-prem, but state it
+  as a conscious call (encrypt etcd at rest where the customer requires it).
 - Tokens: store the user token `0600` in `~/.tracebloc`; `logout` clears it **and**
-  the active-client pointer (§7.5).
+  the active-client pointer **and revokes it server-side** (backend#845) — a local
+  clear alone leaves a static DRF token valid for its full life (R2).
 - Least privilege: list/use need only the read scope; create/delete need the write
   scope (§6.3, Q4).
 
@@ -604,8 +654,16 @@ $ tracebloc client delete lab-a   # confirms; refuses if online/holds data; offe
 - Dual-mode: Client ID + password and `--token` paths keep working for one
   deprecation cycle.
 - Backfill `first_name` for existing clients; do not touch `namespace`.
+- **`cluster_id` backfill (blocking — R7).** The anchor is net-new, so every
+  existing client has `cluster_id=null` and get-or-create-by-cluster can't match
+  them. Backfill it from the **heartbeat** (§4.5): a running client reports its
+  cluster's `kube-system` UID on the next ping, populating `cluster_id` in place.
+  Until a given client is backfilled, the installer relies on the §7.2 step-2a
+  live-release guard so a re-run never mints over it. **Ship the heartbeat change +
+  backfill before the idempotent installer**, or every existing customer
+  double-provisions on their next upgrade.
 - The DB namespace uniqueness constraint (backend#863) must ship with a migration
-  that resolves any *existing* collisions first.
+  that resolves any *existing* collisions first — run the Appendix A check (R4).
 - Deprecate the manual `/clients` "create" path only after device flow is GA;
   keep `/clients` as **manage/revoke**.
 
@@ -638,30 +696,35 @@ the tracking epic ([backend#830]). Most are dictated by the code:
 
 | Q | Topic | Resolution |
 |---|---|---|
-| Q1 | Air-gap segment | **Out of scope.** Egress-restricted-but-online (TLS-inspecting proxy, #172) is in; true no-egress is not. **← owner nod** |
+| Q1 | Air-gap segment | **Out of scope** (confirmed). Egress-restricted-but-online (TLS-inspecting proxy, #172) is in; true no-egress is not. |
 | Q2 | Namespace derivation | `name → slug → set both EdgeDevice.namespace + TB_NAMESPACE` (heartbeat re-reports namespace, so they must be equal — §6.6). |
 | Q3 | Location-change semantics | **Future-only**, already clean — gCO₂ is a frozen per-experiment snapshot, never re-derived. |
 | Q4 | RBAC | **Split read from write**; write `403` → "pick existing / ask an admin" (§6.3, §7.4). |
-| Q5 | Multi-client / re-parenting | **One client per cluster** (1:1, enforced by `unique` `cluster_id` — §6.3 / §7.2); "multi-client per host" means multi-*cluster*, one client each. **Re-parenting deferred** (the viewset force-stamps `account`). **← owner nod** |
+| Q5 | Multi-client / re-parenting | **One client per cluster** (confirmed; 1:1, enforced by `unique` `cluster_id` — §6.3 / §7.2); "multi-client per host" means multi-*cluster*, one client each. **Re-parenting deferred** (the viewset force-stamps `account`). |
 | Q6 | Device-flow IdP | **Reuse the existing web login as-is**; `/activate` is a token-authed endpoint binding to `request.user` — no new IdP wiring. |
 
-Remaining genuinely-open item: confirm the cluster identifier (proposed: the
-`kube-system` namespace UID; `EdgeDevice` has no `cluster_id` today). The §7.3
-"connected" check then falls out of it — cluster-id match + heartbeat recency.
+**Cluster identifier — confirmed:** the `kube-system` namespace UID (`EdgeDevice`
+gains a `cluster_id` for it — §6.3). The §7.3 "connected" check falls out of it:
+cluster-id match + heartbeat recency. With `cluster_id` as the authoritative
+one-per-cluster guard, the per-account namespace `UniqueConstraint` (backend#863) is
+demoted to **cosmetic cross-cluster dedup**, not an idempotency guarantee.
 
 ## 13. Work breakdown (cross-repo; tracked on backend#830)
 
 - **`backend`**: `/device/code` + `/device/token` + activation page (#835);
   provisioning hardening + RBAC read/write split + a `cluster_id` field
-  (`unique=True`) with get-or-create-by-cluster on `POST /edge-device/` (#836);
-  `namespace` `UniqueConstraint(account, namespace)` + collision migration (#863).
+  (`unique=True`) with **account-scoped** get-or-create-by-cluster (cross-account =
+  `409`), plus `cluster_id` on the heartbeat contract + a backfill for existing
+  clients (R7) (#836); server-side token revoke for `logout` (#845); `namespace`
+  `UniqueConstraint(account, namespace)` + collision migration after the R4 check
+  (#863).
 - **`cli`**: revise `client create` → silent + idempotent (get-or-create keyed on
   the cluster identity — read the target cluster's `kube-system` UID, adopt a live
-  or orphaned client before minting) + never-show + auto name/location
-  (cli#84/#92); location auto-detect (cli#93); `client delete`; slug + picker for
-  `use`/`delete`; selected-vs-connected `list`; bind active client → cluster
-  context for the dataset commands; scope the active pointer to the account + clear
-  on logout; `auth status` token expiry.
+  in-namespace release or an orphaned client before minting) + never-show + auto
+  name/location (cli#84/#92); location auto-detect (cli#93); `client delete`; slug +
+  picker for `use`/`delete`; selected-vs-connected `list`; bind active client →
+  cluster context for the dataset commands; scope the active pointer to the account,
+  clear **and server-side revoke** on logout (#845); `auth status` token expiry.
 - **`client` (installer)**: reorder CLI install + auth before Helm; write the
   credential to values/secret (`0600`) before Helm; share the one-per-cluster
   cluster-id anchor with the CLI; dual-mode env fallbacks; idempotent re-run /
@@ -670,8 +733,8 @@ Remaining genuinely-open item: confirm the cluster identifier (proposed: the
 ## 14. Risks & dependencies
 
 The §7 loopholes are bugs *inside* the flow. These are the risks *around* it —
-delivery sequencing, security blast radius, and migration. **R1–R5 are the ones to
-act on**; the rest are watch-items.
+delivery sequencing, security blast radius, and migration. **R1–R7 are the ones to
+act on** (R6–R7 are the review's blocking finds); the rest are watch-items.
 
 ### R1 — Critical path crosses three repos, and one piece is unowned
 
@@ -691,8 +754,9 @@ DRF tokens are static, so a leaked token stays valid for its full life regardles
 of logout. One compromised box = fleet-wide client control until expiry. D2 hid the
 *small* secret and left the *big* one on disk. *Mitigation (§9):* scope the device
 token to provisioning, short TTL + refresh, **discard it after install on
-unattended boxes** (unneeded once the machine credential is in the cluster), and add
-a server-side revoke (Phase 2).
+unattended boxes** (unneeded once the machine credential is in the cluster), and
+**revoke server-side on logout now** — backend#845 already supports it (§7.5/§9),
+not a Phase-2 deferral.
 
 ### R3 — The cluster anchor has a precondition
 
@@ -703,7 +767,8 @@ k3s *then* install tracebloc" path now has a hard order: **k8s up → read clust
 cluster). And the `kube-system` UID changes on a cluster rebuild → a rebuilt
 cluster reads as new and mints a new client, orphaning the old. *Mitigation:* state
 the ordering in §6.4 + the installer; treat "rebuilt cluster = new client" as
-intended and let `client delete` reap the orphan.
+intended, and add a **reaper / teardown hook** (or a dashboard sweep) so orphaned
+`EdgeDevice`s from rebuilds don't accumulate — their `cluster_id` never returns.
 
 ### R4 — The namespace-uniqueness migration can hit an immutability wall
 
@@ -722,6 +787,21 @@ the unique constraint at once. The cluster-id dedup covers same-box re-runs, not
 N-different-boxes-same-name. *Mitigation:* atomic server-side suffix allocation, or
 a per-box name convention in the automation contract (name + location are already
 per-box via env, §8.3).
+
+### R6 — Cross-account cluster adoption (blocking)
+
+The `kube-system` UID is not a secret, so a *global* `cluster_id` + blind
+get-or-create would let account B — pointed at account A's cluster — silently adopt
+A's client. *Mitigation:* account-scoped get-or-create; a cross-account `cluster_id`
+is a `409` conflict (§6.3 / §7.2).
+
+### R7 — Existing fleet has no `cluster_id` → re-run double-provisions (blocking)
+
+`cluster_id` is net-new, so every current client is null and get-or-create-by-cluster
+won't match it — the next installer re-run on a live box would mint a duplicate and
+orphan the running client. *Mitigation:* backfill `cluster_id` from the heartbeat
+(§4.5 / §10) **and** keep the §7.2 step-2a "never mint over a live in-namespace
+release" guard for the pre-backfill window. **Ship before the idempotent installer.**
 
 ### Watch-items (not blockers)
 
@@ -775,10 +855,12 @@ ASCII survives transliteration) — semantically lossy. Acceptable for a derived
 (display name is preserved), and the slug is surfaced in progress for the rare
 hand-run that wants to override.
 
-**The CLI collision suffix is advisory; the DB constraint is authoritative.**
-The `-2/-3` dedup is best-effort UX (TOCTOU between list and create); backend#863's
-`UniqueConstraint(account, namespace)` is what actually prevents a collision under
-a race or a direct API call. Run this **read-only** check (R4) against staging/prod
+**On "authoritative":** with cluster-id confirmed as the one-per-cluster guard
+(§7.2), **`cluster_id` is authoritative for idempotency**; the per-account namespace
+`UniqueConstraint` (backend#863) is **cosmetic cross-cluster dedup** — it keeps two
+*different* clusters' slugs distinct, but is no longer what prevents a same-cluster
+duplicate. The CLI `-2/-3` suffix remains best-effort UX (TOCTOU). Run this
+**read-only** check (R4) against staging/prod
 *before* adding the constraint — it reports the `(account, namespace)` collisions
 that would block it, plus slug drift:
 
