@@ -25,6 +25,12 @@
 > **Rev 5 (2026-06-23)** adds **Appendix C — the implementation-grade API & data
 > contracts** (grounded in the shipped CLI client) to pin before parallel work, so
 > the doc can be built from directly without a separate SDD.
+>
+> **Rev 6 (2026-06-23)** closes the two anchor residuals flagged on #96: `cluster_id`
+> is set/backfilled by the **CLI/installer** (the kubeconfig-holder that can read the
+> `kube-system` UID) — **not** the heartbeat, whose sender can't (§4.5/§10/C.4/R7);
+> and §7.2's account-scoped check now gates **adoption itself**, so the live-release
+> path can't bypass the cross-account `409` (R6).
 
 ## 0. Decisions settled in this revision
 
@@ -202,10 +208,9 @@ to `/edge-device-heartbeat/`. Carbon is computed backend-side from
 `EdgeDevice.carbon_intensity` (location-driven). The heartbeat does **not**
 auto-detect or report location — confirming location must be captured at
 provisioning time, which is exactly what this RFC does (silently — §6.7). The
-heartbeat *does* re-report `namespace` on every ping, which constrains §6.6.
-**It must also begin reporting `cluster_id`** (§6.3): that powers the §7.3
-"connected" check *and* backfills `cluster_id` onto every already-running client
-(§10, R7).
+heartbeat *does* re-report `namespace` on every ping, which constrains §6.6. (It
+does **not** carry `cluster_id`: the heartbeat sender can't read the `kube-system`
+UID — the CLI/installer sets `cluster_id` instead — §7.2, R7.)
 
 ### 4.6 How data commands target a cluster today (sets up §7.3)
 
@@ -320,9 +325,10 @@ it can diagnose a failed *provision*, not just cluster health.
     is an explicit **409 conflict**, never a silent adoption — otherwise re-pointing
     a cluster from another account would hijack the first account's client (R6).
   - **Backfill existing clients.** `cluster_id` is net-new, so every current client
-    has it null; it is populated by the heartbeat (§4.5) — see the §10 migration
-    (R7). Until a client is backfilled, the installer must not mint over it (§7.2
-    step 2a is the guard).
+    has it null. The **CLI/installer** PATCHes it on the next run — it holds the
+    operator kubeconfig and can read the `kube-system` UID, which the heartbeat
+    sender can't (§10, R7). Until then, the §7.2 step-2a live-release guard stops a
+    re-mint. (The backend accepts a CLI-supplied `cluster_id`; see C.3.)
   - ([backend#836]; server-side token revoke for `logout` lands as backend#845.)
 
 ### 6.4 Installer reorder (in `tracebloc/client`)
@@ -466,31 +472,36 @@ the conventional stable fingerprint), readable *before* anything is installed, s
 it exists from t=0 — which the CLI config, a mere cache, cannot provide once it is
 lost:
 
-1. Read the target cluster's identity.
-2. **Is this cluster already attached?**
-   - *(a) Live resources present* — a tracebloc Secret / `TB_CLIENT_ID` in the
-     namespace → adopt it, reconcile/upgrade. **No mint.** (the normal re-run)
-   - *(b) None yet, but the backend has a client recorded for this `cluster_id`* →
-     adopt the orphan and resume. **No mint.** (config-lost / interrupted, §7.9)
-3. **Otherwise** → mint, stamp `cluster_id` on the new client, write the credential
+1. Read the target cluster's identity (the `kube-system` UID) — and, if a tracebloc
+   release already sits in the namespace, the in-cluster `TB_CLIENT_ID`.
+2. **Ask the backend, account-scoped: is this cluster already mine?** This runs
+   *before* any adoption, so the live-release path can't bypass it (R6):
+   - **Owned by this account** — matched by `cluster_id`, or by the live
+     `TB_CLIENT_ID` (whose null `cluster_id` the CLI backfills now) → adopt,
+     reconcile/upgrade. **No mint.** (normal re-run / orphan resume, §7.9)
+   - **Bound to a *different* account** → `409`, refuse — **never silent-adopt**,
+     even when a live release occupies the namespace.
+3. **Not attached anywhere** → mint, stamp `cluster_id`, write the credential
    (`0600`) before Helm, install.
 
-One-client-per-cluster is enforced server-side by the `unique` `cluster_id`
-(§6.3): a second attach returns the existing client, never a duplicate, even under
-a race — but only **within the requester's account**; a `cluster_id` bound to
-another account is a `409` conflict, never a silent adoption (R6). The installer's
-one-per-cluster guard and the CLI now agree because they key on the **same** cluster
-identity. The `-2`/`-3` suffix is demoted to disambiguating cosmetic name clashes
-*across different clusters* — it can no longer produce a same-cluster duplicate,
+One-client-per-cluster is enforced server-side by the `unique` `cluster_id` (§6.3):
+a second attach returns the existing client, never a duplicate, even under a race.
+Because step 2's account-scoped check gates **adoption itself** (not just the mint),
+reading a live `TB_CLIENT_ID` off the cluster can't sidestep the cross-account
+`409`. The installer's one-per-cluster guard and the CLI agree because they key on
+the **same** cluster identity. The `-2`/`-3` suffix only disambiguates cosmetic name
+clashes *across different clusters* — it can't produce a same-cluster duplicate,
 because the cluster-id is checked first.
 
 **Existing fleet — `cluster_id` is null until backfilled (R7).** Current clients
-predate the anchor, so step 2b can't match them yet. Step 2a is the safety net: the
-installer **never mints when a live tracebloc release already occupies the target
-namespace** (read the in-cluster `TB_CLIENT_ID` and adopt it), regardless of
-`cluster_id`. The heartbeat backfill (§4.5/§10) then populates `cluster_id` so 2b
-takes over. Without 2a as a hard guard, the first re-run on every *existing* box
-would mint a duplicate and orphan the live client.
+predate the anchor, so a bare `cluster_id` lookup can't match them yet. The guard:
+the installer **never mints when a live tracebloc release already occupies the
+target namespace** — it reads the in-cluster `TB_CLIENT_ID`, confirms (account-scoped,
+step 2) that the client is this account's, **PATCHes the freshly-read `cluster_id`
+onto it** (the CLI/installer holds the kubeconfig and can read the `kube-system` UID;
+the heartbeat sender can't), and adopts. After that the cluster_id lookup takes over.
+Without this guard, the first re-run on every *existing* box would mint a duplicate
+and orphan the live client.
 
 **Adopt keeps the existing namespace.** On the adopt branches (2a/2b), identity and
 `namespace` come from the existing client/cluster — the silent flow's
@@ -737,10 +748,12 @@ it doesn't":
   a stolen edge-node key needs a first-class backend "revoke this client now"
   (invalidate the hash, force re-enroll) independent of cluster teardown — and don't
   gate the §7.9 reset on heartbeat recency alone (the heartbeat isn't authenticated).
-- **Authenticate the `cluster_id` claim.** The heartbeat now *reports* `cluster_id`
-  (§4.5/R7) with no proof the reporter runs on that cluster — a client could claim an
-  arbitrary `cluster_id` and corrupt the backfill / "connected" state. Bind the claim
-  to the machine credential; treat a mismatch as an alert, not a backfill.
+- **`cluster_id` is set by the authenticated CLI, never self-reported.** The
+  CLI/installer reads the real `kube-system` UID with the operator's kubeconfig and
+  sets `cluster_id` on a Bearer-authed call (create / adopt-backfill — §7.2), so
+  there's no unauthenticated client self-report to spoof and the heartbeat does
+  **not** carry it. Backend: reject a `cluster_id` change on an already-set client
+  except via an authorized re-enroll.
 - **Tenancy boundary (state it).** The 1:1 client↔cluster rule + `cluster_id`
   uniqueness implies **one account per cluster** — make that the explicit isolation
   invariant; if multi-namespace-per-cluster is ever allowed, document the namespace
@@ -752,13 +765,13 @@ it doesn't":
   deprecation cycle.
 - Backfill `first_name` for existing clients; do not touch `namespace`.
 - **`cluster_id` backfill (blocking — R7).** The anchor is net-new, so every
-  existing client has `cluster_id=null` and get-or-create-by-cluster can't match
-  them. Backfill it from the **heartbeat** (§4.5): a running client reports its
-  cluster's `kube-system` UID on the next ping, populating `cluster_id` in place.
-  Until a given client is backfilled, the installer relies on the §7.2 step-2a
-  live-release guard so a re-run never mints over it. **Ship the heartbeat change +
-  backfill before the idempotent installer**, or every existing customer
-  double-provisions on their next upgrade.
+  existing client has `cluster_id=null` and a `cluster_id` lookup can't match them.
+  The **CLI/installer** backfills it on the next run: it reads the `kube-system` UID
+  (operator kubeconfig) and PATCHes it onto the adopted client (§7.2, C.3). The
+  heartbeat sender can't read that UID, so it is **not** the carrier. Until a box is
+  re-run, the §7.2 step-2a live-release guard stops a re-mint — so **that guard must
+  ship with or before the idempotent installer**, or existing customers
+  double-provision on their next upgrade.
 - The DB namespace uniqueness constraint (backend#863) must ship with a migration
   that resolves any *existing* collisions first — run the Appendix A check (R4).
 - Deprecate the manual `/clients` "create" path only after device flow is GA;
@@ -817,15 +830,16 @@ demoted to **cosmetic cross-cluster dedup**, not an idempotency guarantee.
 
 - **`backend`**: `/device/code` + `/device/token` + activation page (#835);
   provisioning hardening + RBAC read/write split + a `cluster_id` field
-  (`unique=True`) with **account-scoped** get-or-create-by-cluster (cross-account =
-  `409`), plus `cluster_id` on the heartbeat contract + a backfill for existing
-  clients (R7) (#836); server-side token revoke for `logout` (#845); `namespace`
+  (`unique=True`) with an **account-scoped** get-or-create that gates **adoption**
+  (cross-account = `409`, even on the live-release path — R6/§7.2) and accepts a
+  CLI-supplied `cluster_id` (set at create, PATCHed on adopt-backfill — R7) (#836);
+  server-side token revoke for `logout` (#845); `namespace`
   `UniqueConstraint(account, namespace)` + collision migration after the R4 check
   (#863). Plus an append-only **audit trail** (R9), a **machine-credential revoke**
-  endpoint, **authenticated `cluster_id`** claims on the heartbeat (§9), and a
-  **min-supported CLI version** advertised for skew handling (R11).
+  endpoint, and a **min-supported CLI version** advertised for skew handling (R11).
 - **`cli`**: revise `client create` → silent + idempotent (get-or-create keyed on
-  the cluster identity — read the target cluster's `kube-system` UID, adopt a live
+  the cluster identity — read the target cluster's `kube-system` UID, confirm
+  account-scoped ownership, then adopt + backfill `cluster_id` onto a live
   in-namespace release or an orphaned client before minting) + never-show + auto
   name/location (cli#84/#92); location auto-detect (cli#93); `client delete`; slug +
   picker for `use`/`delete`; selected-vs-connected `list`; bind active client →
@@ -915,11 +929,13 @@ is a `409` conflict (§6.3 / §7.2).
 
 ### R7 — Existing fleet has no `cluster_id` → re-run double-provisions (blocking)
 
-`cluster_id` is net-new, so every current client is null and get-or-create-by-cluster
-won't match it — the next installer re-run on a live box would mint a duplicate and
-orphan the running client. *Mitigation:* backfill `cluster_id` from the heartbeat
-(§4.5 / §10) **and** keep the §7.2 step-2a "never mint over a live in-namespace
-release" guard for the pre-backfill window. **Ship before the idempotent installer.**
+`cluster_id` is net-new, so every current client is null and a `cluster_id` lookup
+won't match it — a naive re-run on a live box would mint a duplicate and orphan the
+running client. *Mitigation:* the **CLI/installer** backfills `cluster_id` (it reads
+the `kube-system` UID with the operator kubeconfig and PATCHes it on adopt — the
+heartbeat sender can't read that UID), **and** the §7.2 step-2a "never mint over a
+live in-namespace release" guard covers the window until a box is re-run. **Ship the
+guard with/before the idempotent installer.**
 
 ### R8 — Bootstrap supply-chain is unverified (blocking, security)
 
@@ -1142,16 +1158,19 @@ GET    /edge-device/            → { next, results: [ProvisionedClient] }  # ac
 GET    /edge-device/admins/     → [ { name, email } ]                      # Q4 ask-an-admin
 DELETE /edge-device/<id>/  [NEW] → 204                                     # `client delete` (§7.4);
                                    #   guards are client-side + server RBAC
+PATCH  /edge-device/<id>/  [NEW] { cluster_id } → 200    # adopt-backfill (R7): set cluster_id on
+                                   #   an existing (null) client the CLI found live in-cluster;
+                                   #   account-scoped; 409 if already set to another cluster
 ```
 
-### C.4 Heartbeat — add `cluster_id` `[NEW]` (R7) + authenticity (§9)
+### C.4 Heartbeat — unchanged for `cluster_id` (R7)
 
-```http
-POST /edge-device-heartbeat/     # client-authenticated (existing endpoint)
- client_info += { cluster_id }   # backfills existing clients (§10); powers "connected" (§7.3)
- RULE: accept cluster_id ONLY if it matches the value the client was minted against;
-       a mismatch is an audit alert, NOT a silent backfill (§9).
-```
+The heartbeat sender (jobs-manager) has no `namespaces` RBAC and **cannot read the
+`kube-system` UID**, so it does **not** carry `cluster_id`. The CLI/installer sets
+and backfills `cluster_id` instead (C.3 create + adopt-`PATCH`; the kubeconfig-holder
+reads the UID and the call is Bearer-authed — no self-reported claim to spoof, §9).
+The heartbeat keeps reporting `namespace`/`status`; "connected" (§7.3) = recent
+heartbeat + the CLI-set `cluster_id`.
 
 ### C.5 Audit events — backend `[NEW]` (R9), append-only + exportable
 
@@ -1194,7 +1213,9 @@ class Meta:
 
 **Migration order (R4 / R7) — do not reorder:**
 1. Add `cluster_id` (nullable, indexed) — no constraint yet.
-2. Ship the heartbeat `cluster_id` (C.4) → running clients self-backfill.
+2. Ship the §7.2 step-2a live-release guard + the CLI/installer adopt-backfill (the
+   CLI PATCHes `cluster_id` on the next run — C.3) so existing boxes populate it and
+   never double-mint in the meantime.
 3. Add the **namespace** `UniqueConstraint` *only after* the Appendix A collision
    check is clean (R4).
 4. Add the **cluster_id** `UniqueConstraint` once backfill coverage is acceptable.
