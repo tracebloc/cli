@@ -329,7 +329,9 @@ it can diagnose a failed *provision*, not just cluster health.
     operator kubeconfig and can read the `kube-system` UID, which the heartbeat
     sender can't (§10, R7). Until then, the §7.2 step-2a live-release guard stops a
     re-mint. (The backend accepts a CLI-supplied `cluster_id`; see C.3.)
-  - ([backend#836]; server-side token revoke for `logout` lands as backend#845.)
+  - (Anchor field + get-or-create + 409 + adopt-backfill: [backend#883],
+    split out of #836 — which ships namespace validation + RBAC only (see PR
+    [backend#862]). Server-side token revoke for `logout` lands as backend#845.)
 
 ### 6.4 Installer reorder (in `tracebloc/client`)
 
@@ -1136,7 +1138,7 @@ GET  /activate           # frontend, token-authed (R1): "connect machine X to ac
                          #   binds approval to request.user (RFC §6.3)
 ```
 
-### C.3 Provisioning — backend#836, `/edge-device/` (Bearer)
+### C.3 Provisioning — `/edge-device/` (Bearer) — backend#836 (namespace + RBAC); the `[NEW]` `cluster_id` items: backend#883
 
 ```http
 POST /edge-device/       # get-or-create, account-scoped on cluster_id
@@ -1235,4 +1237,6 @@ class Meta:
 [backend#830]: https://github.com/tracebloc/backend/issues/830
 [backend#835]: https://github.com/tracebloc/backend/issues/835
 [backend#836]: https://github.com/tracebloc/backend/issues/836
+[backend#862]: https://github.com/tracebloc/backend/pull/862
 [backend#863]: https://github.com/tracebloc/backend/issues/863
+[backend#883]: https://github.com/tracebloc/backend/issues/883
