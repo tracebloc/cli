@@ -1,8 +1,11 @@
 package push
 
 import (
+	"encoding/json"
 	"sort"
 	"testing"
+
+	"github.com/tracebloc/cli/internal/schema"
 )
 
 // The registry is the single source of truth; these pin its contents and
@@ -13,7 +16,8 @@ func TestRegistryKnownCategories(t *testing.T) {
 	want := []string{
 		"image_classification", "object_detection", "keypoint_detection",
 		"semantic_segmentation", "instance_segmentation",
-		"text_classification", "masked_language_modeling", "causal_language_modeling",
+		"text_classification", "token_classification",
+		"masked_language_modeling", "causal_language_modeling",
 		"tabular_classification", "tabular_regression",
 		"time_series_forecasting", "time_to_event_prediction",
 	}
@@ -42,7 +46,7 @@ func TestSupportedCategories(t *testing.T) {
 	}
 	// segmentation + causal_language_modeling are known but not yet pushable,
 	// and must explain why.
-	for _, id := range []string{"semantic_segmentation", "instance_segmentation", "causal_language_modeling"} {
+	for _, id := range []string{"semantic_segmentation", "instance_segmentation", "causal_language_modeling", "token_classification"} {
 		if !IsKnown(id) {
 			t.Errorf("%s should be known", id)
 		}
@@ -79,6 +83,37 @@ func TestPredicatesDeriveFromRegistry(t *testing.T) {
 	if IsImage("nope") || IsTabular("nope") || IsText("nope") ||
 		IsRegressionClass("nope") || IsCLISupported("nope") {
 		t.Error("predicates should all be false for an unknown category")
+	}
+}
+
+// TestRegistryCoversSchemaCategories pins registry⇄schema parity: every
+// category the ingest schema accepts must be known to the registry, or a
+// schema-valid `dataset push --category=X` is wrongly rejected as
+// "unrecognized" (the token_classification drift, Bugbot v0.4.0 RC). The
+// existing tests only pin the registry against a hand-written list, which
+// stays internally consistent while drifting from the schema — this closes
+// that gap. The reverse direction isn't required: the registry may carry a
+// known-but-unsupported alias the v1 schema doesn't list yet (e.g.
+// instance_segmentation), which is gated out before schema validation.
+func TestRegistryCoversSchemaCategories(t *testing.T) {
+	var doc struct {
+		Properties struct {
+			Category struct {
+				Enum []string `json:"enum"`
+			} `json:"category"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(schema.V1Bytes, &doc); err != nil {
+		t.Fatalf("parse embedded schema: %v", err)
+	}
+	if len(doc.Properties.Category.Enum) == 0 {
+		t.Fatal("no category enum found in the embedded schema (parse path wrong?)")
+	}
+	for _, id := range doc.Properties.Category.Enum {
+		if !IsKnown(id) {
+			t.Errorf("schema category %q missing from the registry — `dataset push --category=%s` "+
+				"would be rejected as unrecognized despite passing schema validation", id, id)
+		}
 	}
 }
 

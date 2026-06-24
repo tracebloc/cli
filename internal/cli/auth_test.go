@@ -119,7 +119,7 @@ func TestLogin_Denied(t *testing.T) {
 
 func TestLogout(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	if err := (&config.Config{Token: "x", Email: "e@co"}).Save(); err != nil {
+	if err := (&config.Config{Token: "x", Email: "e@co", ActiveClientID: "7"}).Save(); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runCmd(t, "logout")
@@ -129,6 +129,11 @@ func TestLogout(t *testing.T) {
 	cfg, _ := config.Load()
 	if cfg.SignedIn() {
 		t.Error("expected to be signed out")
+	}
+	// The active-client pointer is account-scoped — it must not survive logout,
+	// or it bleeds into the next account's session.
+	if cfg.ActiveClientID != "" {
+		t.Errorf("active_client_id = %q after logout, want cleared", cfg.ActiveClientID)
 	}
 	if !strings.Contains(out, "Signed out") {
 		t.Errorf("got:\n%s", out)

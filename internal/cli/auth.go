@@ -151,6 +151,11 @@ func newLogoutCmd() *cobra.Command {
 			}
 			cfg.Token = ""
 			cfg.Email = ""
+			// Also drop the active-client pointer: it's account-scoped, so leaving
+			// it would bleed into the next account's session (a later `login` as a
+			// different user would inherit a stale active client in `auth status` /
+			// `client list`).
+			cfg.ActiveClientID = ""
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: 1, err: err}
 			}
