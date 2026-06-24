@@ -21,6 +21,10 @@
 > (R10, a confirmed bug), version negotiation (R11), clean uninstall (R12), plus
 > machine-credential revoke + authenticated `cluster_id` (§9), the silent-failure
 > story (§8.5), adopt-keeps-namespace (§7.2), and delete-mid-experiment (§7.4).
+>
+> **Rev 5 (2026-06-23)** adds **Appendix C — the implementation-grade API & data
+> contracts** (grounded in the shipped CLI client) to pin before parallel work, so
+> the doc can be built from directly without a separate SDD.
 
 ## 0. Decisions settled in this revision
 
@@ -1060,6 +1064,135 @@ print("so resolving a collision is destroy + rebuild, not a rename (RFC R4).")
 Tailscale (daemon enrollment via browser → node key — nearly our exact shape),
 GitHub CLI (device-flow ergonomics), AWS SSO (headless device flow), cloudflared
 (browser-authorized long-running tunnel).
+
+## Appendix C — API & data contracts (pin before parallel work)
+
+Everything above is design altitude; this is the wire contract the repos must agree
+on. Shapes are **grounded in the CLI client already shipped/in-flight**
+(`internal/api/client.go`) — the backend must match these or reconcile deliberately.
+`[NEW]` marks net-new backend work; everything else the CLI already encodes.
+
+### C.1 Conventions
+
+- **Base URLs:** dev `https://dev-api.tracebloc.io` · stg `https://stg-api.tracebloc.io`
+  · prod `https://api.tracebloc.io` (CLI `ResolveEnv`).
+- **Auth:** `Authorization: Bearer <token>` (ClientAccessToken — keyword **`Bearer`**,
+  *not* DRF's `Token`).
+- **Versioning `[NEW]` (R11):** every CLI request sends
+  `User-Agent: tracebloc-cli/<ver> (<os>/<arch>)`; backend MAY reply `426 Upgrade
+  Required` + `{ error: "upgrade_required", min_version }` below the floor.
+
+### C.2 Device Authorization Grant (RFC 8628) — backend#835 `[NEW]`
+
+```http
+POST /device/code        # unauthenticated; rate-limit (§9). CLI sends no body.
+ 200 { device_code, user_code, verification_uri, verification_uri_complete,
+       expires_in, interval }
+
+POST /device/token       # unauthenticated; rate-limit. Polled every `interval`s.
+ req  { device_code }
+ 200  { token }                            # approved
+ 400  { error: "authorization_pending" }   # keep polling
+ 400  { error: "slow_down" }               # keep polling, interval++
+ 400  { error: "expired_token" }           # terminal
+ 400  { error: "access_denied" }           # terminal (denied in browser)
+        # CLI keys off these EXACT error strings; pending/slow_down are non-terminal.
+
+GET  /userinfo/          # Bearer → { email, type, account }  (CLI confirms token post-login)
+GET  /activate           # frontend, token-authed (R1): "connect machine X to account Y",
+                         #   binds approval to request.user (RFC §6.3)
+```
+
+### C.3 Provisioning — backend#836, `/edge-device/` (Bearer)
+
+```http
+POST /edge-device/       # get-or-create, account-scoped on cluster_id
+ req  { first_name, namespace, location, password, cluster_id[NEW] }
+        # account stamped from the token (Q5); password CLI-generated, write-only
+ 201  <ProvisionedClient>          # minted a new client
+ 200  <ProvisionedClient>  [NEW]   # adopted the existing client for this cluster_id
+                                   #   (same account) — the idempotent re-run (§7.2)
+ 409  { error:"cluster_conflict", cluster_id }  [NEW]
+                                   # cluster_id bound to ANOTHER account — never
+                                   #   silent-adopt (R6)
+ 403  → ask-an-admin               # no CLIENT_WRITE (§7.4 / Q4)
+
+ProvisionedClient = { id, first_name, username, namespace, location, status,
+                      cluster_id[NEW] }
+        # status = the online/offline code `client list` renders; cluster_id NEW
+
+GET    /edge-device/            → { next, results: [ProvisionedClient] }  # account's clients (paginated)
+GET    /edge-device/admins/     → [ { name, email } ]                      # Q4 ask-an-admin
+DELETE /edge-device/<id>/  [NEW] → 204                                     # `client delete` (§7.4);
+                                   #   guards are client-side + server RBAC
+```
+
+### C.4 Heartbeat — add `cluster_id` `[NEW]` (R7) + authenticity (§9)
+
+```http
+POST /edge-device-heartbeat/     # client-authenticated (existing endpoint)
+ client_info += { cluster_id }   # backfills existing clients (§10); powers "connected" (§7.3)
+ RULE: accept cluster_id ONLY if it matches the value the client was minted against;
+       a mismatch is an audit alert, NOT a silent backfill (§9).
+```
+
+### C.5 Audit events — backend `[NEW]` (R9), append-only + exportable
+
+```
+event = { id, ts, actor{ email, account }, action, cluster_id?, client_id?, source_ip, meta }
+action ∈ { device.approve, client.create, client.adopt, client.delete,
+           credential.issue, credential.reset, client.conflict_409,
+           auth.login, auth.logout, token.revoke }
+```
+
+### C.6 Revoke — backend#845 `[NEW]`
+
+```http
+POST /auth/revoke        # Bearer → 204   # `logout` calls this; invalidates the token
+                         #   server-side (a local clear leaves it valid — R2)
+```
+
+Machine-credential revoke ("kill a compromised node *now*", §9) is a **separate**
+EdgeDevice action, distinct from `DELETE`: invalidate the password hash + force
+re-enroll, without tearing down the cluster install.
+
+### C.7 Data model — backend `[NEW]`
+
+```python
+# EdgeDevice gains one field (the kube-system namespace UID — a UUID string):
+cluster_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+
+class Meta:
+    constraints = [
+        # a physical cluster maps to exactly ONE client — GLOBAL unique:
+        models.UniqueConstraint(fields=["cluster_id"],
+            condition=Q(cluster_id__isnull=False), name="uniq_edgedevice_cluster"),
+        # backend#863, per-account namespace (cosmetic cross-cluster dedup):
+        models.UniqueConstraint(fields=["account","namespace"],
+            name="uniq_account_namespace"),
+    ]
+# Account-scoping for adoption lives in the POST logic (C.3), not the constraint:
+# global-unique cluster_id + a 409 when the requester's account differs (R6).
+```
+
+**Migration order (R4 / R7) — do not reorder:**
+1. Add `cluster_id` (nullable, indexed) — no constraint yet.
+2. Ship the heartbeat `cluster_id` (C.4) → running clients self-backfill.
+3. Add the **namespace** `UniqueConstraint` *only after* the Appendix A collision
+   check is clean (R4).
+4. Add the **cluster_id** `UniqueConstraint` once backfill coverage is acceptable.
+
+### C.8 CLI config — `~/.tracebloc/config.json` `[NEW]` (R10)
+
+```jsonc
+// v2 — env-scoped (migrate v1 by wrapping it under profiles[env]); mode 0600
+{ "version": 2, "current_env": "prod",
+  "profiles": {
+    "dev":  { "email", "token", "expires_at", "active_client_id" },
+    "stg":  { … }, "prod": { … } } }
+// One active_client_id PER env → fixes the cross-env clobber (R10).
+// `login --env X` switches current_env without clearing the other profiles.
+```
 
 [backend#830]: https://github.com/tracebloc/backend/issues/830
 [backend#835]: https://github.com/tracebloc/backend/issues/835
