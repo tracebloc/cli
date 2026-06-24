@@ -360,6 +360,72 @@ func TestClientCreate_CredentialFileMint(t *testing.T) {
 	if kv["TRACEBLOC_CLIENT_ID"] != "5" || kv["TB_NAMESPACE"] != "my-ns" || kv["TRACEBLOC_CLIENT_PASSWORD"] == "" {
 		t.Errorf("credential file = %v (want id=5, ns=my-ns, non-empty password)", kv)
 	}
+	// never-show, the real invariant: the minted password VALUE must not appear
+	// in stdout under any label (the string checks above are just a proxy).
+	if strings.Contains(out.String(), kv["TRACEBLOC_CLIENT_PASSWORD"]) {
+		t.Errorf("minted password leaked to the terminal:\n%s", out.String())
+	}
+}
+
+// TestClientCreate_CredentialFilePreexistingPerms locks in the 0600 guarantee
+// when the target already exists with looser perms — os.WriteFile would have
+// kept the stale mode and leaked the secret group/other-readable.
+func TestClientCreate_CredentialFilePreexistingPerms(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"c","username":"u-5","namespace":"my-ns","location":"DE","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	credPath := filepath.Join(t.TempDir(), "cred.env")
+	// A stale, world-readable file already sits at the target path.
+	if err := os.WriteFile(credPath, []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), nil,
+		clientCreateOpts{name: "c", location: "DE", yes: true, credentialFile: credPath}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	info, err := os.Stat(credPath)
+	if err != nil {
+		t.Fatalf("credential file not written: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("credential file mode = %o over a pre-existing 0644 target, want 600", perm)
+	}
+}
+
+// TestClientCreate_CredentialFileWriteFailFatal asserts a credential-file write
+// failure is fatal — the minted password is the only copy, so a failed write must
+// surface an error, never a silent drop. The target's parent is a regular file, so
+// the directory create (hence the write) fails deterministically.
+func TestClientCreate_CredentialFileWriteFailFatal(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"c","username":"u-5","namespace":"my-ns","location":"DE","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	notADir := filepath.Join(t.TempDir(), "iam-a-file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credPath := filepath.Join(notADir, "cred.env") // parent is a file → write fails
+	var out bytes.Buffer
+	err := runClientCreate(context.Background(), ui.New(&out), nil,
+		clientCreateOpts{name: "c", location: "DE", yes: true, credentialFile: credPath})
+	if err == nil {
+		t.Fatal("expected a fatal error when the credential file can't be written, got nil")
+	}
 }
 
 func TestClientCreate_CredentialFileAdopt(t *testing.T) {

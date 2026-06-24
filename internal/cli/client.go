@@ -284,8 +284,16 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 // so the secret lands in a 0600 file, never the terminal (RFC §9 never-show). The
 // values are constrained charsets (numeric id, hex password, DNS-1123 slug), so
 // no shell-escaping is needed.
+//
+// Written via a 0600 temp file + atomic rename rather than os.WriteFile: WriteFile
+// only applies its perm bits when it *creates* the file, so a pre-existing target
+// (a stale file, or one an attacker pre-creates world-readable) would keep its old
+// mode and leak the secret — the 0600 guarantee must hold unconditionally. The temp
+// also avoids following a symlink at the target and never leaves a half-written
+// credential behind.
 func writeClientCredential(path string, lines []string) error {
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("creating credential-file directory: %w", err)
 		}
@@ -293,7 +301,24 @@ func writeClientCredential(path string, lines []string) error {
 	body := "# tracebloc client credential — written by `tracebloc client create`.\n" +
 		"# Mode 0600; sourced by the installer. Do not commit or share.\n" +
 		strings.Join(lines, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	// CreateTemp makes the file 0600 by construction, in the target dir so the
+	// rename stays on one filesystem.
+	f, err := os.CreateTemp(dir, ".cred-*")
+	if err != nil {
+		return fmt.Errorf("writing credential file %s: %w", path, err)
+	}
+	tmp := f.Name()
+	if _, err := f.WriteString(body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("writing credential file %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("writing credential file %s: %w", path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("writing credential file %s: %w", path, err)
 	}
 	return nil
