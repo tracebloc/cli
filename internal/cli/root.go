@@ -81,6 +81,11 @@ what's planned next.`,
 	root.AddCommand(newIngestCmd())
 	root.AddCommand(newClusterCmd())
 	root.AddCommand(newDatasetCmd())
+	// RFC-0001 (backend#830): browser sign-in + client provisioning.
+	root.AddCommand(newLoginCmd())
+	root.AddCommand(newLogoutCmd())
+	root.AddCommand(newAuthCmd())
+	root.AddCommand(newClientCmd())
 
 	// Bare `tracebloc` (no subcommand) renders a friendly home screen
 	// instead of cobra's raw usage dump. Subcommands and --help are

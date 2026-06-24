@@ -222,8 +222,7 @@ Exit codes:
 	cmd.Flags().StringVar(&table, "table", "",
 		"destination table name (MySQL identifier; matches /data/shared/<table>/ on the PVC)")
 	cmd.Flags().StringVar(&category, "category", "image_classification",
-		"task category: image_classification, tabular_classification, tabular_regression, "+
-			"time_series_forecasting, time_to_event_prediction")
+		"task category, one of: "+push.SupportedCategoriesList())
 	cmd.Flags().StringVar(&intent, "intent", "",
 		"intent: train|test")
 	cmd.Flags().StringVar(&labelColumn, "label-column", "",
@@ -422,24 +421,23 @@ contributors train against it without ever seeing the raw files.`))
 	case a.Spec.Category == "":
 		// Left empty by a caller; let the schema produce the canonical
 		// "category is required" error downstream.
-	case push.IsTabular(a.Spec.Category) || push.IsText(a.Spec.Category) ||
-		a.Spec.Category == "image_classification" ||
-		a.Spec.Category == "object_detection" ||
-		a.Spec.Category == "keypoint_detection":
+	case push.IsCLISupported(a.Spec.Category):
 		// supported
-	case push.IsImage(a.Spec.Category):
-		// semantic_segmentation / instance_segmentation
+	case push.IsKnown(a.Spec.Category):
+		// A recognized category dataset push doesn't implement yet — image
+		// (semantic_segmentation / instance_segmentation) or text
+		// (causal_language_modeling). Routed here (not the default branch) so the
+		// user gets the registry's per-category pending-support reason, not a
+		// misleading "unrecognized category". Supported categories were already
+		// caught above, so IsKnown here means known-but-unsupported.
+		spec, _ := push.Lookup(a.Spec.Category)
 		return &exitError{code: 2, err: fmt.Errorf(
-			"category %q isn't supported by the CLI yet. semantic_segmentation is "+
-				"blocked on the ingestor's mask-sidecar support (data-ingestors#136), and "+
-				"instance_segmentation isn't implemented. Supported image categories: "+
-				"image_classification, object_detection, keypoint_detection.", a.Spec.Category)}
+			"category %q isn't supported by the CLI yet (%s). Supported categories: %s.",
+			a.Spec.Category, spec.UnsupportedNote, push.SupportedCategoriesList())}
 	default:
 		return &exitError{code: 2, err: fmt.Errorf(
-			"category %q isn't a recognized task category. Supported: image_classification, "+
-				"object_detection, keypoint_detection, text_classification, "+
-				"masked_language_modeling, tabular_classification, tabular_regression, "+
-				"time_series_forecasting, time_to_event_prediction.", a.Spec.Category)}
+			"category %q isn't a recognized task category. Supported categories: %s.",
+			a.Spec.Category, push.SupportedCategoriesList())}
 	}
 
 	// 3. Walk the local directory FIRST (local "fail fast"), dispatched

@@ -5,11 +5,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 )
 
 // IngestionDatabase is the MySQL schema jobs-manager ingests tables
@@ -49,24 +49,30 @@ type TeardownResult struct {
 	RemovedPaths []string
 }
 
-// Teardown performs the in-cluster teardown described by plan, mirroring
-// the manual kubectl-exec cleanup:
+// Teardown performs the in-cluster teardown described by plan:
 //
 //   - DROP the MySQL table by exec-ing `mysql` inside the mysql pod,
 //     referencing the pod's own $MYSQL_ROOT_PASSWORD — so no database
 //     credential ever transits the CLI.
-//   - rm -rf the PVC dirs by exec-ing inside the jobs-manager pod,
-//     which mounts the shared PVC at SharedRoot.
+//   - rm -rf the PVC dirs from a short-lived pod that mirrors the CLI's
+//     stage pod (uid 65532 + fsGroup 65532, shared PVC mounted) — built
+//     from podOpts via BuildStagePodSpec.
 //
-// DESIGN NOTE: this exec-into-existing-pods approach is the
-// "CLI-direct teardown" (the alternative considered was a server-side
-// jobs-manager delete endpoint). It assumes (a) a pod whose name
-// contains "mysql" exposes $MYSQL_ROOT_PASSWORD, and (b) the
-// jobs-manager pod mounts the shared PVC at SharedRoot — both true for
-// the current parent chart, but worth confirming before this ships.
-func Teardown(ctx context.Context, cs kubernetes.Interface, cfg *rest.Config, namespace string, plan TeardownPlan) (TeardownResult, error) {
+// Why an ephemeral stage-identity pod and NOT the long-lived
+// jobs-manager pod (tracebloc/client#259): the staging files under
+// SharedRoot/.tracebloc-staging/<table> are written by the stage pod as
+// uid 65532 (and the ingestor's SharedRoot/<table> files as uid 65534).
+// The jobs-manager pod runs as a different non-root uid with no shared
+// fsGroup, so its `rm` hit EACCES on 65532-owned files in a
+// non-group-writable directory and left orphans. A teardown pod that
+// runs as the same uid that wrote the staging files OWNS them, so it
+// deletes them by ownership — which works on hostPath (where fsGroup is
+// a no-op, kubernetes/kubernetes#138411) and CSI alike.
+//
+// DESIGN NOTE: still assumes a pod whose name contains "mysql" exposes
+// $MYSQL_ROOT_PASSWORD (true for the current parent chart).
+func Teardown(ctx context.Context, cs kubernetes.Interface, exec Executor, namespace string, plan TeardownPlan, podOpts PodSpecOptions) (TeardownResult, error) {
 	var res TeardownResult
-	exec := &SPDYExecutor{Config: cfg, Client: cs}
 
 	// 1. DROP the table — mysql pod, localhost, its own root password.
 	mysqlPod, mysqlContainer, err := findRunningPod(ctx, cs, namespace, "mysql")
@@ -82,14 +88,28 @@ func Teardown(ctx context.Context, cs kubernetes.Interface, cfg *rest.Config, na
 	}
 	res.DroppedTable = true
 
-	// 2. rm the PVC dirs — jobs-manager pod mounts the shared PVC.
-	jmPod, jmContainer, err := findRunningPod(ctx, cs, namespace, "jobs-manager")
+	// 2. rm the PVC dirs from an ephemeral stage-identity pod (see the
+	//    doc note above + #259). The pod owns the staging files it
+	//    deletes, so this works on hostPath and CSI.
+	podOpts.Namespace = namespace
+	podName, err := CreateStagePod(ctx, cs, podOpts)
 	if err != nil {
-		return res, fmt.Errorf("locating jobs-manager pod: %w", err)
+		return res, fmt.Errorf("creating teardown pod: %w", err)
+	}
+	// Always clean up the teardown pod — even if the wait/exec fails or
+	// the parent ctx is cancelled. Fresh ctx so the delete still reaches
+	// the API. Mirrors push.Stage's deferred cleanup.
+	defer func() {
+		delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = DeleteStagePod(delCtx, cs, namespace, podName)
+	}()
+	if _, err := WaitForStagePodReady(ctx, cs, namespace, podName); err != nil {
+		return res, fmt.Errorf("waiting for teardown pod: %w", err)
 	}
 	stderr.Reset()
 	rmCmd := append([]string{"rm", "-rf"}, plan.PVCPaths...)
-	if err := exec.Exec(ctx, namespace, jmPod, jmContainer, rmCmd, nil, nil, &stderr); err != nil {
+	if err := exec.Exec(ctx, namespace, podName, "stage", rmCmd, nil, nil, &stderr); err != nil {
 		return res, fmt.Errorf("removing PVC paths: %w%s", err, stderrSuffix(&stderr))
 	}
 	res.RemovedPaths = plan.PVCPaths
