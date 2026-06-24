@@ -423,10 +423,13 @@ contributors train against it without ever seeing the raw files.`))
 		// "category is required" error downstream.
 	case push.IsCLISupported(a.Spec.Category):
 		// supported
-	case push.IsImage(a.Spec.Category):
-		// A known image category dataset push doesn't implement yet
-		// (semantic_segmentation / instance_segmentation). The per-category
-		// reason + the supported list both come from the registry.
+	case push.IsKnown(a.Spec.Category):
+		// A recognized category dataset push doesn't implement yet — image
+		// (semantic_segmentation / instance_segmentation) or text
+		// (causal_language_modeling). Routed here (not the default branch) so the
+		// user gets the registry's per-category pending-support reason, not a
+		// misleading "unrecognized category". Supported categories were already
+		// caught above, so IsKnown here means known-but-unsupported.
 		spec, _ := push.Lookup(a.Spec.Category)
 		return &exitError{code: 2, err: fmt.Errorf(
 			"category %q isn't supported by the CLI yet (%s). Supported categories: %s.",
