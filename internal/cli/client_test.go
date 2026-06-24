@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -323,6 +325,89 @@ func TestClientCreate_AdoptIdempotent(t *testing.T) {
 	if cfg.ActiveClientID != "8" {
 		t.Errorf("active client = %q, want 8 (adopted id)", cfg.ActiveClientID)
 	}
+}
+
+func TestClientCreate_CredentialFileMint(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"c","username":"u-5","namespace":"my-ns","location":"DE","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	credPath := filepath.Join(t.TempDir(), "cred.env")
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), nil,
+		clientCreateOpts{name: "c", location: "DE", yes: true, credentialFile: credPath}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// never-show: the secret must NOT hit the terminal.
+	if strings.Contains(out.String(), "Machine credential") || strings.Contains(out.String(), "password") {
+		t.Errorf("credential must not be printed when --credential-file is set, got:\n%s", out.String())
+	}
+	// the file is 0600 and carries the sourceable credential.
+	info, err := os.Stat(credPath)
+	if err != nil {
+		t.Fatalf("credential file not written: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("credential file mode = %o, want 600", perm)
+	}
+	kv := parseEnvFile(t, credPath)
+	if kv["TRACEBLOC_CLIENT_ID"] != "5" || kv["TB_NAMESPACE"] != "my-ns" || kv["TRACEBLOC_CLIENT_PASSWORD"] == "" {
+		t.Errorf("credential file = %v (want id=5, ns=my-ns, non-empty password)", kv)
+	}
+}
+
+func TestClientCreate_CredentialFileAdopt(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK) // adopt
+			_, _ = w.Write([]byte(`{"id":8,"first_name":"existing","username":"u-8","namespace":"ex-ns","location":"DE","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	credPath := filepath.Join(t.TempDir(), "cred.env")
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), nil,
+		clientCreateOpts{name: "c", location: "DE", yes: true, credentialFile: credPath}); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	kv := parseEnvFile(t, credPath)
+	// adopt emits id + namespace + the ADOPTED marker, but NO password (the
+	// existing one stands; it's write-only on the backend).
+	if kv["TRACEBLOC_CLIENT_ID"] != "8" || kv["TB_NAMESPACE"] != "ex-ns" || kv["TRACEBLOC_CLIENT_ADOPTED"] != "1" {
+		t.Errorf("adopt credential file = %v (want id=8, ns=ex-ns, ADOPTED=1)", kv)
+	}
+	if _, hasPw := kv["TRACEBLOC_CLIENT_PASSWORD"]; hasPw {
+		t.Errorf("adopt must not write a password (none issued), got:\n%v", kv)
+	}
+}
+
+// parseEnvFile reads a KEY=value env file (skipping # comments) into a map.
+func parseEnvFile(t *testing.T, path string) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read credential file: %v", err)
+	}
+	kv := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok {
+			kv[k] = v
+		}
+	}
+	return kv
 }
 
 func TestClientCreate_ClusterConflict(t *testing.T) {
