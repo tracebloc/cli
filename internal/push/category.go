@@ -68,6 +68,8 @@ var categoryRegistry = []CategorySpec{
 		UnsupportedNote: "blocked on the ingestor's mask-sidecar support (data-ingestors#136)"},
 	{ID: "instance_segmentation", Family: FamilyImage, Label: "Instance segmentation", CLISupported: false,
 		UnsupportedNote: "not implemented"},
+	{ID: "causal_language_modeling", Family: FamilyText, Label: "Causal language modeling", CLISupported: false,
+		UnsupportedNote: "schema-recognized (data-ingestors#805); `tracebloc ingest` discover/build for its raw-.txt / prompt\\tcompletion `texts` layout is pending"},
 }
 
 // categoryByID indexes the registry for O(1) lookup, built once.
