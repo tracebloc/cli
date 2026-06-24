@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,12 +12,15 @@ import (
 	"testing"
 
 	"github.com/tracebloc/cli/internal/api"
+	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
 // withClientBackend points the client commands at an httptest server (via the
-// newAPIClient seam) and writes a signed-in config to a temp dir.
+// newAPIClient seam) and writes a signed-in config to a temp dir. It also stubs
+// readClusterID to "no cluster" by default, so create tests never touch a real
+// kubeconfig/cluster — tests that exercise the anchor override it via stubClusterID.
 func withClientBackend(t *testing.T, h http.HandlerFunc) {
 	t.Helper()
 	srv := httptest.NewServer(h)
@@ -30,6 +34,22 @@ func withClientBackend(t *testing.T, h http.HandlerFunc) {
 		return &api.Client{BaseURL: srv.URL, HTTP: srv.Client()}
 	}
 	t.Cleanup(func() { newAPIClient = orig })
+
+	origCID := readClusterID
+	readClusterID = func(context.Context, cluster.KubeconfigOptions) (string, error) {
+		return "", errors.New("no cluster reachable (test default)")
+	}
+	t.Cleanup(func() { readClusterID = origCID })
+}
+
+// stubClusterID overrides the cluster-anchor read for a single test.
+func stubClusterID(t *testing.T, uid string, err error) {
+	t.Helper()
+	orig := readClusterID
+	readClusterID = func(context.Context, cluster.KubeconfigOptions) (string, error) {
+		return uid, err
+	}
+	t.Cleanup(func() { readClusterID = orig })
 }
 
 func TestClientCreate_Success(t *testing.T) {
@@ -50,7 +70,7 @@ func TestClientCreate_Success(t *testing.T) {
 		}
 	})
 	var out bytes.Buffer
-	if err := runClientCreate(context.Background(), ui.New(&out), nil, "my-client", "DE", true); err != nil {
+	if err := runClientCreate(context.Background(), ui.New(&out), nil, clientCreateOpts{name: "my-client", location: "DE", yes: true}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if body.Namespace != "my-client" || body.Location != "DE" || body.Password == "" {
@@ -78,7 +98,7 @@ func TestClientCreate_AskAnAdmin(t *testing.T) {
 		}
 	})
 	var out bytes.Buffer
-	err := runClientCreate(context.Background(), ui.New(&out), nil, "my-client", "DE", true)
+	err := runClientCreate(context.Background(), ui.New(&out), nil, clientCreateOpts{name: "my-client", location: "DE", yes: true})
 	if err == nil || !strings.Contains(err.Error(), "CLIENT_WRITE") {
 		t.Errorf("want permission error, got %v", err)
 	}
@@ -89,7 +109,7 @@ func TestClientCreate_AskAnAdmin(t *testing.T) {
 
 func TestClientCreate_RequiresLogin(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // no config → not signed in
-	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, "x", "DE", true)
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "x", location: "DE", yes: true})
 	if err == nil || !strings.Contains(err.Error(), "login") {
 		t.Errorf("want not-signed-in error, got %v", err)
 	}
@@ -149,7 +169,7 @@ func TestClientCreate_Interactive(t *testing.T) {
 		confirm: &confirmYes,
 	}
 	var out bytes.Buffer
-	if err := runClientCreate(context.Background(), ui.New(&out), pr, "", "", false); err != nil {
+	if err := runClientCreate(context.Background(), ui.New(&out), pr, clientCreateOpts{}); err != nil {
 		t.Fatalf("interactive create: %v", err)
 	}
 	if !posted {
@@ -180,7 +200,7 @@ func TestClientCreate_InteractiveCancel(t *testing.T) {
 		confirm: &confirmNo,
 	}
 	var out bytes.Buffer
-	if err := runClientCreate(context.Background(), ui.New(&out), pr, "", "", false); err != nil {
+	if err := runClientCreate(context.Background(), ui.New(&out), pr, clientCreateOpts{}); err != nil {
 		t.Fatalf("declining the confirm should be a clean exit, got: %v", err)
 	}
 	if posted {
@@ -224,10 +244,129 @@ func TestClientCreate_CollisionSuffix(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":2,"first_name":"My Client","username":"u-2","namespace":"my-client-2","location":"DE"}`))
 		}
 	})
-	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, "My Client", "DE", true); err != nil {
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "My Client", location: "DE", yes: true}); err != nil {
 		t.Fatal(err)
 	}
 	if body.Namespace != "my-client-2" {
 		t.Errorf("namespace = %q, want my-client-2 (collision suffix not applied)", body.Namespace)
+	}
+}
+
+func TestClientCreate_AnchorMint(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated) // 201 = minted
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"c","username":"u-5","namespace":"c","location":"DE","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), nil, clientCreateOpts{name: "c", location: "DE", yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.ClusterID != "uid-1" {
+		t.Errorf("cluster_id sent = %q, want uid-1 (anchor not wired into the request)", body.ClusterID)
+	}
+	if !strings.Contains(out.String(), "Machine credential") {
+		t.Errorf("mint should print the credential, got:\n%s", out.String())
+	}
+}
+
+func TestClientCreate_AdoptIdempotent(t *testing.T) {
+	posts := 0
+	var lastBody api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			posts++
+			_ = json.NewDecoder(r.Body).Decode(&lastBody)
+			w.WriteHeader(http.StatusOK) // 200 = adopted an existing client
+			_, _ = w.Write([]byte(`{"id":8,"first_name":"existing","username":"u-8","namespace":"existing","location":"DE","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+
+	run := func() string {
+		var out bytes.Buffer
+		if err := runClientCreate(context.Background(), ui.New(&out), nil, clientCreateOpts{name: "c", location: "DE", yes: true}); err != nil {
+			t.Fatalf("adopt: %v", err)
+		}
+		return out.String()
+	}
+	// Two runs against the same cluster — real re-run idempotency: each POSTs once,
+	// both adopt the SAME existing client, neither prints a credential.
+	first, second := run(), run()
+	if posts != 2 {
+		t.Fatalf("posts = %d, want 2 (each run POSTs once)", posts)
+	}
+	for i, out := range []string{first, second} {
+		if !strings.Contains(out, "adopted") {
+			t.Errorf("run %d: adopt should say so, got:\n%s", i, out)
+		}
+		if strings.Contains(out, "Machine credential") {
+			t.Errorf("run %d: adopt must NOT print a credential, got:\n%s", i, out)
+		}
+	}
+	// The credential is still SENT on every create (the backend uses it only on a
+	// mint, §7.2) even though it's never printed on adopt.
+	if lastBody.Password == "" {
+		t.Error("password should still be sent in the adopt POST body")
+	}
+	cfg, _ := config.Load()
+	if cfg.ActiveClientID != "8" {
+		t.Errorf("active client = %q, want 8 (adopted id)", cfg.ActiveClientID)
+	}
+}
+
+func TestClientCreate_ClusterConflict(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusConflict) // 409 = bound to another account (R6)
+			_, _ = w.Write([]byte(`{"error":"cluster_conflict","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "c", location: "DE", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "different tracebloc account") {
+		t.Errorf("want a cluster_conflict error, got %v", err)
+	}
+}
+
+func TestClientCreate_NoClusterAnchorWarns(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":3,"first_name":"c","username":"u-3","namespace":"c","location":"DE"}`))
+		}
+	})
+	// readClusterID left at the withClientBackend default (returns an error).
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), nil, clientCreateOpts{name: "c", location: "DE", yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.ClusterID != "" {
+		t.Errorf("cluster_id sent = %q, want empty (no anchor when cluster unreadable)", body.ClusterID)
+	}
+	if !strings.Contains(out.String(), "without a cluster anchor") {
+		t.Errorf("expected a never-silent hint about the missing anchor, got:\n%s", out.String())
+	}
+	// The no-anchor path must still complete a full mint — the credential is shown.
+	if !strings.Contains(out.String(), "Machine credential") {
+		t.Errorf("no-anchor fallback should still print the credential, got:\n%s", out.String())
 	}
 }
