@@ -123,7 +123,9 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 		case errors.Is(err, api.ErrAuthorizationPending):
 			// not approved yet — keep polling
 		case errors.Is(err, api.ErrSlowDown):
-			interval++
+			// RFC 8628 §3.5: on slow_down the client MUST increase the poll
+			// interval by 5 seconds for this and all subsequent polls.
+			interval += 5
 		case errors.Is(err, api.ErrExpiredToken):
 			return &exitError{code: 1, err: errors.New("the sign-in code expired — re-run `tracebloc login`")}
 		case errors.Is(err, api.ErrAccessDenied):
