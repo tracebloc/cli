@@ -234,3 +234,22 @@ func TestListClients_UnparseableNextLink_IsError(t *testing.T) {
 		t.Fatal("expected an error on an unparseable next link, got nil (silent truncation)")
 	}
 }
+
+// TestListClients_BareArrayUnpaginated covers the unpaginated deployment shape
+// (a bare JSON array) — still returned as-is after the bare-decode was guarded
+// to the first page.
+func TestListClients_BareArrayUnpaginated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":1,"first_name":"a","namespace":"a"},{"id":2,"first_name":"b","namespace":"b"}]`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	got, err := c.ListClients(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
+		t.Fatalf("want 2 clients [1,2] from a bare array, got %+v", got)
+	}
+}
