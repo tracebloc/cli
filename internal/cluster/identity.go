@@ -3,10 +3,17 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
+
+// clusterIDReadTimeout bounds the best-effort anchor read in ClusterID: a
+// kubeconfig pointing at an unreachable API server would otherwise hang the
+// kube-system GET for the OS TCP timeout, stalling a `client create` that is
+// meant to degrade to a non-anchored mint instead.
+const clusterIDReadTimeout = 8 * time.Second
 
 // ClusterID reads the kube-system namespace UID — the stable per-cluster
 // fingerprint RFC-0001 keys client idempotency on (§6.3 / §7.2; backend#883).
@@ -18,6 +25,9 @@ func ClusterID(ctx context.Context, opts KubeconfigOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Best-effort read — callers must not block on it (see the doc above), so cap
+	// it; otherwise an unreachable API server hangs the GET below.
+	rc.RestConfig.Timeout = clusterIDReadTimeout
 	cs, err := NewClientset(rc)
 	if err != nil {
 		return "", err

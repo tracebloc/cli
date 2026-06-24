@@ -223,11 +223,13 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		// where the backend instead matches a live in-cluster TB_CLIENT_ID whose
 		// cluster_id is still null and the CLI backfills it via PATCH, is the
 		// installer's orchestration — #838 — not done here.)
-		if serr := cfg.Save(); serr != nil {
-			return &exitError{code: 1, err: serr}
-		}
 		p.Successf("This cluster is already registered as client %q (namespace %s) — adopted it.", pc.Name, pc.Namespace)
 		p.Hintf("No new credential issued; the existing one stands. This machine is set to enroll as client %d.", pc.ID)
+		// Mirror the mint path: a config-save failure shouldn't bury the result —
+		// hint how to set the pointer by hand and still exit clean.
+		if serr := cfg.Save(); serr != nil {
+			p.Hintf("Couldn't save the active-client pointer (%v) — run `tracebloc client use %d` to set it.", serr, pc.ID)
+		}
 		return nil
 	}
 	// Mint: print the credential FIRST — it's the only copy (the backend stores
