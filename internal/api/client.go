@@ -333,10 +333,14 @@ func (c *Client) ListClients(ctx context.Context) ([]ProvisionedClient, error) {
 		if status < 200 || status >= 300 {
 			return nil, &APIError{StatusCode: status, Body: string(raw), URL: reqURL}
 		}
-		// Unpaginated deployment → a bare array; return it as-is.
-		var bare []ProvisionedClient
-		if err := json.Unmarshal(raw, &bare); err == nil {
-			return append(all, bare...), nil
+		// Unpaginated deployment → a bare array. Only valid as the sole response
+		// (a paginated chain is a `{next,results}` object on every page), so guard
+		// to page 0 — a stray bare body mid-chain must not silently end the loop.
+		if pageNum == 0 {
+			var bare []ProvisionedClient
+			if err := json.Unmarshal(raw, &bare); err == nil {
+				return bare, nil
+			}
 		}
 		var body struct {
 			Next    string              `json:"next"`

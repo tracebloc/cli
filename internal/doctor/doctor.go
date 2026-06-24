@@ -288,7 +288,10 @@ func checkBackendEgress(ctx context.Context, env map[string]string, probe func(c
 // runtime's own mapping (controller.py). Unset/unknown defaults to prod, the
 // chart's CLIENT_ENV default.
 func backendHost(clientEnv string) string {
-	switch clientEnv {
+	// Normalize like the API client (api.ResolveEnv/BaseURL lower-case), so a
+	// non-lowercase CLIENT_ENV on the edge box doesn't fall through to prod and
+	// make the doctor probe the wrong backend.
+	switch strings.ToLower(strings.TrimSpace(clientEnv)) {
 	case "dev":
 		return "dev-api.tracebloc.io"
 	case "stg":

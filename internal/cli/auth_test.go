@@ -87,6 +87,55 @@ func TestLogin_FullFlow(t *testing.T) {
 	}
 }
 
+// TestLogin_SlowDownBacksOffByFive pins RFC 8628 §3.5: on `slow_down` the poll
+// interval must increase by 5 seconds, not 1. Captures the durations handed to
+// the pollAfter seam.
+func TestLogin_SlowDownBacksOffByFive(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	var polls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/device/code":
+			_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"X","verification_uri":"https://x/activate","expires_in":600,"interval":5}`))
+		case "/device/token":
+			polls++
+			if polls == 1 {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"slow_down"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"token":"cat_ok"}`))
+		case "/userinfo/":
+			_, _ = w.Write([]byte(`{"email":"e@co","account":"A"}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	origClient, origAfter := newAPIClient, pollAfter
+	newAPIClient = func(string) *api.Client { return &api.Client{BaseURL: srv.URL, HTTP: srv.Client()} }
+	var waits []time.Duration
+	pollAfter = func(d time.Duration) <-chan time.Time {
+		waits = append(waits, d)
+		ch := make(chan time.Time, 1)
+		ch <- time.Time{}
+		return ch
+	}
+	t.Cleanup(func() { newAPIClient = origClient; pollAfter = origAfter })
+
+	if _, err := runCmd(t, "login"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if len(waits) < 2 {
+		t.Fatalf("expected >=2 polls, got waits=%v", waits)
+	}
+	if waits[0] != 5*time.Second {
+		t.Errorf("first poll wait = %v, want 5s (server interval)", waits[0])
+	}
+	if waits[1] != 10*time.Second {
+		t.Errorf("post-slow_down wait = %v, want 10s (interval+5 per RFC 8628), not 6s", waits[1])
+	}
+}
+
 func TestLogin_BackendUnsupported(t *testing.T) {
 	withTestBackend(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

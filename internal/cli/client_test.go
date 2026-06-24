@@ -521,3 +521,31 @@ func TestClientCreate_NoClusterAnchorWarns(t *testing.T) {
 		t.Errorf("no-anchor fallback should still print the credential, got:\n%s", out.String())
 	}
 }
+
+// TestClientCreate_ReRunReviewShowsAdoptedNamespace pins that on an idempotent
+// re-run, the client already anchored to this cluster is excluded from collision
+// detection — so the review shows the namespace that's actually adopted
+// (lab-one), not a bumped lab-one-2.
+func TestClientCreate_ReRunReviewShowsAdoptedNamespace(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			// An existing client already anchored to THIS cluster (uid-1).
+			_, _ = w.Write([]byte(`[{"id":1,"first_name":"Lab One","username":"u-1","namespace":"lab-one","location":"DE","cluster_id":"uid-1"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			w.WriteHeader(http.StatusOK) // adopt
+			_, _ = w.Write([]byte(`{"id":1,"first_name":"Lab One","username":"u-1","namespace":"lab-one","location":"DE","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	confirmYes := true
+	pr := &fakePrompter{answers: map[string]string{}, confirm: &confirmYes}
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), pr,
+		clientCreateOpts{name: "Lab One", location: "DE"}); err != nil {
+		t.Fatalf("re-run create: %v", err)
+	}
+	if strings.Contains(out.String(), "lab-one-2") {
+		t.Errorf("review showed a bumped namespace — the cluster's own client wasn't excluded from collision detection:\n%s", out.String())
+	}
+}

@@ -167,6 +167,13 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	var existing []string
 	if clients, lerr := client.ListClients(ctx); lerr == nil {
 		for _, c := range clients {
+			// Skip the client already anchored to this cluster: a re-run adopts it
+			// (the backend keys on cluster_id), so its namespace isn't a collision.
+			// Counting it would bump the derived slug and show a namespace in the
+			// review that doesn't match the one actually adopted.
+			if clusterID != "" && c.ClusterID == clusterID {
+				continue
+			}
 			if c.Namespace != "" {
 				existing = append(existing, c.Namespace)
 			}

@@ -232,6 +232,11 @@ func TestBackendHost(t *testing.T) {
 		"prod":  "api.tracebloc.io",
 		"":      "api.tracebloc.io",
 		"weird": "api.tracebloc.io",
+		// Case/space-insensitive, matching the API client's env resolution — a
+		// non-lowercase CLIENT_ENV must not fall through to prod.
+		"DEV":   "dev-api.tracebloc.io",
+		"Stg":   "stg-api.tracebloc.io",
+		" dev ": "dev-api.tracebloc.io",
 	}
 	for in, want := range tests {
 		if got := backendHost(in); got != want {
