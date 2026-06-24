@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -39,7 +41,7 @@ in your account.  Requires sign-in first (` + "`tracebloc login`" + `).`,
 }
 
 func newClientCreateCmd() *cobra.Command {
-	var name, location, kubeconfigPath, contextOverride string
+	var name, location, kubeconfigPath, contextOverride, credentialFile string
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -47,7 +49,7 @@ func newClientCreateCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClientCreate(cmd.Context(), printerFor(cmd), clientPrompter(),
-				clientCreateOpts{name: name, location: location, kubeconfigPath: kubeconfigPath, contextOverride: contextOverride, yes: yes})
+				clientCreateOpts{name: name, location: location, kubeconfigPath: kubeconfigPath, contextOverride: contextOverride, credentialFile: credentialFile, yes: yes})
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "",
@@ -58,14 +60,16 @@ func newClientCreateCmd() *cobra.Command {
 		"path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config) — read to anchor the client to this cluster")
 	cmd.Flags().StringVar(&contextOverride, "context", "",
 		"kubeconfig context for the target cluster (default: current-context)")
+	cmd.Flags().StringVar(&credentialFile, "credential-file", "",
+		"write the machine credential to this path (mode 0600, sourceable env) instead of printing it — for the installer to feed the chart (never shown on the terminal)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
 	return cmd
 }
 
 // clientCreateOpts bundles the `client create` inputs (flags + resolved prompts).
 type clientCreateOpts struct {
-	name, location, kubeconfigPath, contextOverride string
-	yes                                             bool
+	name, location, kubeconfigPath, contextOverride, credentialFile string
+	yes                                                             bool
 }
 
 func newClientListCmd() *cobra.Command {
@@ -225,6 +229,20 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		// installer's orchestration — #838 — not done here.)
 		p.Successf("This cluster is already registered as client %q (namespace %s) — adopted it.", pc.Name, pc.Namespace)
 		p.Hintf("No new credential issued; the existing one stands. This machine is set to enroll as client %d.", pc.ID)
+		if opts.credentialFile != "" {
+			// No password to hand over on adopt (it's write-only on the backend and
+			// the existing one stands). Emit id + namespace + an ADOPTED marker so the
+			// installer reconciles the existing release rather than expecting a fresh
+			// credential (#838).
+			if werr := writeClientCredential(opts.credentialFile, []string{
+				"TRACEBLOC_CLIENT_ID=" + strconv.Itoa(pc.ID),
+				"TB_NAMESPACE=" + pc.Namespace,
+				"TRACEBLOC_CLIENT_ADOPTED=1",
+			}); werr != nil {
+				return &exitError{code: 1, err: werr}
+			}
+			p.Hintf("Wrote client id + namespace to %s (no new credential — the existing one stands).", opts.credentialFile)
+		}
 		// Mirror the mint path: a config-save failure shouldn't bury the result —
 		// hint how to set the pointer by hand and still exit clean.
 		if serr := cfg.Save(); serr != nil {
@@ -232,15 +250,76 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		}
 		return nil
 	}
-	// Mint: print the credential FIRST — it's the only copy (the backend stores
-	// only the hash), so a later config-save failure must never cost it.
+	// Mint. With --credential-file the secret goes to a 0600 file (never the
+	// terminal — RFC §9 "secure by invisibility") for the installer to source;
+	// otherwise it's printed (the interim, until the installer drives this).
 	p.Successf("Provisioned client %q (namespace %s).", pc.Name, pc.Namespace)
-	p.Section("Machine credential — needed by the installer to connect this client")
-	p.Field("client id", strconv.Itoa(pc.ID))
-	p.Field("username", pc.Username)
-	p.Field("password", password)
+	if opts.credentialFile != "" {
+		if werr := writeClientCredential(opts.credentialFile, []string{
+			"TRACEBLOC_CLIENT_ID=" + strconv.Itoa(pc.ID),
+			"TRACEBLOC_CLIENT_PASSWORD=" + password,
+			"TB_NAMESPACE=" + pc.Namespace,
+		}); werr != nil {
+			// The credential is the only copy — a write failure must be fatal, not a
+			// silent drop (the installer would have nothing to connect with).
+			return &exitError{code: 1, err: werr}
+		}
+		p.Hintf("Credential written to %s (mode 0600, not shown). This machine is set to enroll as client %d.", opts.credentialFile, pc.ID)
+	} else {
+		// Print the credential FIRST — it's the only copy (the backend stores only
+		// the hash), so a later config-save failure must never cost it.
+		p.Section("Machine credential — needed by the installer to connect this client")
+		p.Field("client id", strconv.Itoa(pc.ID))
+		p.Field("username", pc.Username)
+		p.Field("password", password)
+	}
 	if serr := cfg.Save(); serr != nil {
 		p.Hintf("Couldn't save the active-client pointer (%v) — run `tracebloc client use %d` to set it.", serr, pc.ID)
+	}
+	return nil
+}
+
+// writeClientCredential writes the machine credential to path (mode 0600) as a
+// shell-sourceable env file — the installer (#838) sources it to feed the chart,
+// so the secret lands in a 0600 file, never the terminal (RFC §9 never-show). The
+// values are constrained charsets (numeric id, hex password, DNS-1123 slug), so
+// no shell-escaping is needed.
+//
+// Written via a 0600 temp file + atomic rename rather than os.WriteFile: WriteFile
+// only applies its perm bits when it *creates* the file, so a pre-existing target
+// (a stale file, or one an attacker pre-creates world-readable) would keep its old
+// mode and leak the secret — the 0600 guarantee must hold unconditionally. The temp
+// also avoids following a symlink at the target and never leaves a half-written
+// credential behind.
+func writeClientCredential(path string, lines []string) error {
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("creating credential-file directory: %w", err)
+		}
+	}
+	body := "# tracebloc client credential — written by `tracebloc client create`.\n" +
+		"# Mode 0600; sourced by the installer. Do not commit or share.\n" +
+		strings.Join(lines, "\n") + "\n"
+	// CreateTemp makes the file 0600 by construction, in the target dir so the
+	// rename stays on one filesystem.
+	f, err := os.CreateTemp(dir, ".cred-*")
+	if err != nil {
+		return fmt.Errorf("writing credential file %s: %w", path, err)
+	}
+	tmp := f.Name()
+	if _, err := f.WriteString(body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("writing credential file %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("writing credential file %s: %w", path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("writing credential file %s: %w", path, err)
 	}
 	return nil
 }
