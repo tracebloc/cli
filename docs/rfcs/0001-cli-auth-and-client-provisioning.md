@@ -111,7 +111,7 @@ a hand-off between them:
 - **Account context** — *"you are a signed-in user."* You hold a user token and
   manage the *clients* (machines) in your account: create, list, select, delete.
 - **Client context** — *"a client is active **and connected**."* Commands now act
-  on the active client's **cluster** (on-prem data never leaves it): push a
+  on the active client's **cluster** (on-prem data never leaves it): ingest a
   dataset, list datasets, delete a dataset.
 
 The bridge between them — *create or select ⇒ a client is active on this machine*
@@ -129,9 +129,9 @@ pointer while the data commands need a *reachable cluster*. §7 is devoted to it
 | account | `client list` | ⚠️ in flight | **revise** → show *selected* vs *connected* |
 | account | `client delete` | 🆕 | **new** — destructive guards (§7.4) |
 | account | `logout` · `auth status` | ✅ merged (cli#83) | revise → scope active client to account; show token expiry |
-| client | `dataset push` (ingest) | ✅ built | bind target to the active client's cluster (§7.3) |
-| client | `dataset list` | ✅ built | same |
-| client | `dataset rm` (delete) | ✅ built | same |
+| client | `data ingest` | ✅ built (was `dataset push`) | bind target to the active client's cluster (§7.3) |
+| client | `data list` | ✅ built (was `dataset list`) | same |
+| client | `data delete` | ✅ built (was `dataset rm`) | same |
 
 ## 4. What already exists (grounded findings, refreshed 2026-06-23)
 
@@ -209,7 +209,7 @@ heartbeat *does* re-report `namespace` on every ping, which constrains §6.6.
 
 ### 4.6 How data commands target a cluster today (sets up §7.3)
 
-`dataset push` / `dataset rm` resolve their cluster from
+`data ingest` / `data delete` (today `dataset push` / `dataset rm`) resolve their cluster from
 `--kubeconfig` / `--context` / `-n <namespace>` flags (default `$KUBECONFIG` →
 `~/.kube/config`, current-context), then discover the parent release + shared PVC
 by reading the chart's Deployment labels (`cluster.DiscoverParentRelease`,
@@ -265,8 +265,16 @@ tracebloc client list           # show each client's slug + selected/connected s
 tracebloc client use [<slug>]   # select by slug; bare → arrow-key picker (§7.1, §7.3)     [revise]
 tracebloc client delete [<slug>]# guarded teardown; bare → picker (§7.4)                   [new]
 
-tracebloc dataset push|list|rm  # act on the ACTIVE client's cluster (§7.3)                [revise]
+tracebloc data ingest|list|delete  # act on the ACTIVE client's cluster (§7.3)             [revise]
 ```
+
+**Data verbs — `ingest`, never `push` (locked, 2026-06-23).** The data commands are
+`data ingest / list / delete`. *ingest*, not *push*: the data is loaded **into** the
+client's own on-prem cluster and never leaves it — *push* wrongly implies sending it to
+a remote (git/cloud) and undermines the product's core trust message. *delete*, not *rm*:
+spelled-out and consistent with `client delete`, for beginner clarity. `dataset` +
+`push`/`rm` stay as hidden aliases for one deprecation cycle. (Convention applies to all
+copy, not just the command name.)
 
 `login` stores a short-lived **user** token. `client create` mints the **machine**
 credential and routes it straight into the cluster (never to stdout — D2/§9).
@@ -324,7 +332,7 @@ the Helm install, because the minted credential feeds the chart. (Today the CLI
 installs *after* the cluster.) The credential is written to the chart's
 values/secret (mode `0600`) **before** `helm install` runs, so an interrupted
 install can be resumed without re-minting (§7.9). Keep CLI-install failure
-non-fatal only for the *dataset* convenience path, not for the auth path. The
+non-fatal only for the *data* convenience path, not for the auth path. The
 installer's existing one-per-cluster guard and the CLI's idempotent
 `create` must key on the **same** cluster identity (§7.2).
 
@@ -493,7 +501,7 @@ live, immutable `TB_NAMESPACE`.
 
 ### 7.3 "Selected" is not "connected" — **[decision]**
 
-**Risk.** `client use` sets a *local pointer*. But `dataset push` talks to the
+**Risk.** `client use` sets a *local pointer*. But `data ingest` talks to the
 client's **cluster** (§4.6). If the active client lives on another machine, ingest
 can't reach it from here — and today the data commands don't even consult the
 pointer, so they'd silently act on whatever `~/.kube/config` points at.
@@ -504,7 +512,7 @@ pointer, so they'd silently act on whatever `~/.kube/config` points at.
   resolve a kube-context that hosts `<ns>-jobs-manager` (reuse
   `DiscoverParentRelease`). `--context` / `-n` still override.
 - If no reachable context hosts the active client (it runs elsewhere), **fail
-  clearly**: *"client `X` runs on another machine — run dataset commands there, or
+  clearly**: *"client `X` runs on another machine — run `data` commands there, or
   `tracebloc client use` a local one."* No silent wrong-target.
 - `client list` distinguishes **selected** (the local pointer) from **connected**
   (cluster reachable + recent heartbeat = 🟢).
@@ -610,6 +618,15 @@ CLI **resumes into it** instead of minting a second.
   constraint (§6.3); the loser fetches and adopts the winner.
 
 ## 8. UX — drafted flows
+
+> **Tracked as four acceptance families** on the epic (#830) — **#877** connect/install ·
+> **#878** manage clients · **#879** data · **#880** uninstall — that FR runs end-to-end,
+> while the build work stays in the per-component tickets (§13). All four follow one
+> **2-phase shape**: a single human gate (browser sign-in), then unattended, idempotent
+> convergence. The design is graded against seven principles — front-loaded human gate ·
+> idempotency-as-backbone · never-silent / never-lie · quiet-by-default · failure-UX
+> first-class · secure-by-invisibility · installer = thin CLI orchestrator. The
+> connect/install flow's full ordered step-spec lives with #877.
 
 ### 8.1 First-time, headless box (zero prompts)
 
@@ -812,7 +829,7 @@ demoted to **cosmetic cross-cluster dedup**, not an idempotency guarantee.
   in-namespace release or an orphaned client before minting) + never-show + auto
   name/location (cli#84/#92); location auto-detect (cli#93); `client delete`; slug +
   picker for `use`/`delete`; selected-vs-connected `list`; bind active client →
-  cluster context for the dataset commands; scope the active pointer to the account,
+  cluster context for the `data` commands; scope the active pointer to the account,
   clear **and server-side revoke** on logout (#845); `auth status` token expiry.
   Also: a `User-Agent: tracebloc-cli/<ver>` version header (R11); env-scoped config /
   profiles (R10); `--verbose` + `~/.tracebloc/install-*.log` and `cluster doctor`
