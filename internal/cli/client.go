@@ -13,10 +13,16 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/tracebloc/cli/internal/api"
+	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/slug"
 	"github.com/tracebloc/cli/internal/ui"
 )
+
+// readClusterID reads the cluster's kube-system UID — the RFC-0001 idempotency
+// anchor (§7.2 / backend#883). A package var so tests can stub it without a
+// reachable cluster.
+var readClusterID = cluster.ClusterID
 
 // newClientCmd wires the `tracebloc client` subtree — provisioning + selecting
 // the client (machine) this host enrolls as. Consumes the backend provisioning
@@ -33,22 +39,33 @@ in your account.  Requires sign-in first (` + "`tracebloc login`" + `).`,
 }
 
 func newClientCreateCmd() *cobra.Command {
-	var name, location string
+	var name, location, kubeconfigPath, contextOverride string
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Provision a new client for this machine (--name, --location)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runClientCreate(cmd.Context(), printerFor(cmd), clientPrompter(), name, location, yes)
+			return runClientCreate(cmd.Context(), printerFor(cmd), clientPrompter(),
+				clientCreateOpts{name: name, location: location, kubeconfigPath: kubeconfigPath, contextOverride: contextOverride, yes: yes})
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "",
 		"human-readable client name (shown on your dashboard + carbon reports)")
 	cmd.Flags().StringVar(&location, "location", "",
 		"location zone for carbon footprint (e.g. DE); prompted if omitted")
+	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
+		"path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config) — read to anchor the client to this cluster")
+	cmd.Flags().StringVar(&contextOverride, "context", "",
+		"kubeconfig context for the target cluster (default: current-context)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
 	return cmd
+}
+
+// clientCreateOpts bundles the `client create` inputs (flags + resolved prompts).
+type clientCreateOpts struct {
+	name, location, kubeconfigPath, contextOverride string
+	yes                                             bool
 }
 
 func newClientListCmd() *cobra.Command {
@@ -102,11 +119,13 @@ func authedClient() (*api.Client, *config.Config, error) {
 	return client, cfg, nil
 }
 
-func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, name, location string, yes bool) error {
+func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clientCreateOpts) error {
 	client, cfg, err := authedClient()
 	if err != nil {
 		return &exitError{code: 1, err: err}
 	}
+
+	name, location := opts.name, opts.location
 
 	// Gather inputs first (flags win; prompt only what's missing, and only on a
 	// TTY), then show one review + confirm — matching the dataset-push flow.
@@ -129,6 +148,16 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, name, loca
 		}
 	}
 
+	// Read the cluster anchor (kube-system UID) so create is get-or-create keyed on
+	// it — re-running on the same cluster adopts the existing client instead of
+	// minting a duplicate (RFC-0001 §7.2 / backend#883). Best-effort + never silent:
+	// if the cluster isn't reachable we provision WITHOUT an anchor (a plain mint)
+	// and say so, rather than blocking.
+	clusterID, cidErr := readClusterID(ctx, cluster.KubeconfigOptions{Path: opts.kubeconfigPath, Context: opts.contextOverride})
+	if cidErr != nil {
+		p.Hintf("Couldn't read the target cluster's identity — provisioning without a cluster anchor, so re-running won't be idempotent. Point --kubeconfig/--context at the reachable cluster to enable that.")
+	}
+
 	// Derive the namespace slug from the name, avoiding collisions with existing
 	// clients (best-effort: if the list call fails we still derive a base slug).
 	var existing []string
@@ -144,8 +173,8 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, name, loca
 		return &exitError{code: 1, err: err}
 	}
 
-	if pr != nil && !yes {
-		renderClientReview(p, name, namespace, location)
+	if pr != nil && !opts.yes {
+		renderClientReview(p, name, namespace, location, clusterID)
 		ok, cerr := pr.Confirm("Provision this client?", true)
 		if cerr != nil {
 			return mapClientErr(cerr)
@@ -157,33 +186,60 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, name, loca
 	}
 
 	// The machine credential: the CLI generates the password, the backend stores
-	// it (write-only). The client-runtime authenticates with username+password.
+	// it (write-only). Sent on every create but used only when minting — on an
+	// idempotent adopt the backend keeps the existing client's credential (§7.2),
+	// so the generated value is never printed in that case.
 	password := randHex(24)
-	pc, err := client.CreateClient(ctx, api.CreateClientRequest{
+	pc, adopted, err := client.CreateClient(ctx, api.CreateClientRequest{
 		Name:      name,
 		Namespace: namespace,
 		Location:  location,
 		Password:  password,
+		ClusterID: clusterID,
 	})
 	if err != nil {
 		var ae *api.APIError
-		if errors.As(err, &ae) && ae.StatusCode == http.StatusForbidden {
-			return askAnAdmin(ctx, p, client)
+		if errors.As(err, &ae) {
+			switch ae.StatusCode {
+			case http.StatusForbidden:
+				return askAnAdmin(ctx, p, client)
+			case http.StatusConflict:
+				// Per RFC C.3 the only 409 on POST /edge-device/ is cluster_conflict
+				// (R6): this cluster_id is bound to another account.
+				return &exitError{code: 1, err: errors.New(
+					"this cluster is already registered to a different tracebloc account — " +
+						"sign in to that account, or ask your admin (cluster_conflict)")}
+			}
 		}
 		return &exitError{code: 1, err: err}
 	}
 
 	cfg.ActiveClientID = strconv.Itoa(pc.ID)
-	if serr := cfg.Save(); serr != nil {
-		return &exitError{code: 1, err: serr}
-	}
 
 	p.Newline()
+	if adopted {
+		// Idempotent re-run: the backend matched this cluster_id to an existing
+		// client and returned it — no new credential. (The existing-fleet R7 case,
+		// where the backend instead matches a live in-cluster TB_CLIENT_ID whose
+		// cluster_id is still null and the CLI backfills it via PATCH, is the
+		// installer's orchestration — #838 — not done here.)
+		if serr := cfg.Save(); serr != nil {
+			return &exitError{code: 1, err: serr}
+		}
+		p.Successf("This cluster is already registered as client %q (namespace %s) — adopted it.", pc.Name, pc.Namespace)
+		p.Hintf("No new credential issued; the existing one stands. This machine is set to enroll as client %d.", pc.ID)
+		return nil
+	}
+	// Mint: print the credential FIRST — it's the only copy (the backend stores
+	// only the hash), so a later config-save failure must never cost it.
 	p.Successf("Provisioned client %q (namespace %s).", pc.Name, pc.Namespace)
 	p.Section("Machine credential — needed by the installer to connect this client")
 	p.Field("client id", strconv.Itoa(pc.ID))
 	p.Field("username", pc.Username)
 	p.Field("password", password)
+	if serr := cfg.Save(); serr != nil {
+		p.Hintf("Couldn't save the active-client pointer (%v) — run `tracebloc client use %d` to set it.", serr, pc.ID)
+	}
 	return nil
 }
 
@@ -255,11 +311,14 @@ func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
 
 // renderClientReview shows the assembled inputs before the confirm prompt, so
 // the user sees the derived namespace and location before anything is created.
-func renderClientReview(p *ui.Printer, name, namespace, location string) {
+func renderClientReview(p *ui.Printer, name, namespace, location, clusterID string) {
 	p.Section("Review")
 	p.Field("name", name)
 	p.Field("namespace", namespace)
 	p.Field("location", location)
+	if clusterID != "" {
+		p.Field("cluster", clusterID+"  (anchors this client — re-runs adopt it)")
+	}
 }
 
 // errMissingFlag reports a required flag absent in a non-interactive run (no TTY

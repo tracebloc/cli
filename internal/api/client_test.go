@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -136,5 +137,60 @@ func TestWhoAmIUnauthorized(t *testing.T) {
 	var ae *APIError
 	if _, err := c.WhoAmI(context.Background()); !errors.As(err, &ae) || ae.StatusCode != http.StatusUnauthorized {
 		t.Errorf("want APIError 401, got %v", err)
+	}
+}
+
+func TestCreateClientMintAndAdopt(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		code        int
+		wantAdopted bool
+	}{
+		{"mint", http.StatusCreated, false},
+		{"adopt", http.StatusOK, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sent CreateClientRequest
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/edge-device/" || r.Method != http.MethodPost {
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+				_ = json.NewDecoder(r.Body).Decode(&sent)
+				w.WriteHeader(tc.code)
+				_, _ = w.Write([]byte(`{"id":5,"first_name":"c","namespace":"c","cluster_id":"uid-1"}`))
+			}))
+			defer srv.Close()
+			c := New("prod")
+			c.BaseURL = srv.URL
+			pc, adopted, err := c.CreateClient(context.Background(),
+				CreateClientRequest{Name: "c", Namespace: "c", Password: "pw", ClusterID: "uid-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if adopted != tc.wantAdopted {
+				t.Errorf("adopted = %v, want %v", adopted, tc.wantAdopted)
+			}
+			if sent.ClusterID != "uid-1" {
+				t.Errorf("cluster_id sent = %q, want uid-1", sent.ClusterID)
+			}
+			if pc.ClusterID != "uid-1" {
+				t.Errorf("cluster_id parsed = %q, want uid-1", pc.ClusterID)
+			}
+		})
+	}
+}
+
+func TestCreateClientConflict(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"cluster_conflict","cluster_id":"uid-1"}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	var ae *APIError
+	_, _, err := c.CreateClient(context.Background(), CreateClientRequest{ClusterID: "uid-1"})
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusConflict {
+		t.Errorf("want APIError 409, got %v", err)
 	}
 }

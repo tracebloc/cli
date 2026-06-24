@@ -262,6 +262,9 @@ type ProvisionedClient struct {
 	Namespace string `json:"namespace"`
 	Location  string `json:"location"`
 	Status    int    `json:"status"`
+	// ClusterID is the kube-system namespace UID this client is anchored to
+	// (RFC-0001 §6.3 / backend#883). Empty on legacy / not-yet-backfilled clients.
+	ClusterID string `json:"cluster_id"`
 }
 
 // CreateClientRequest is the POST /edge-device/ body. The account is stamped
@@ -272,6 +275,10 @@ type CreateClientRequest struct {
 	Namespace string `json:"namespace"`
 	Location  string `json:"location"`
 	Password  string `json:"password"`
+	// ClusterID anchors the client to this cluster (the kube-system namespace UID)
+	// so create is get-or-create keyed on it (RFC-0001 §7.2 / backend#883). Omitted
+	// when the cluster identity can't be read (dual-mode / legacy → plain mint).
+	ClusterID string `json:"cluster_id,omitempty"`
 }
 
 // AdminContact is one "ask an admin" entry from GET /edge-device/admins/.
@@ -280,23 +287,27 @@ type AdminContact struct {
 	Email string `json:"email"`
 }
 
-// CreateClient provisions a client. A 403 *APIError means the caller lacks
-// CLIENT_WRITE — callers fall back to ListClientAdmins for the ask-an-admin
-// path (backend#836 Q4).
-func (c *Client) CreateClient(ctx context.Context, req CreateClientRequest) (*ProvisionedClient, error) {
+// CreateClient provisions a client — get-or-create keyed on cluster_id when one
+// is supplied (RFC-0001 §7.2 / backend#883). The returned `adopted` is true when
+// the backend matched an existing client for this cluster (HTTP 200, an idempotent
+// re-run) and false when it minted a new one (HTTP 201). A 403 *APIError means the
+// caller lacks CLIENT_WRITE (→ ask-an-admin, backend#836 Q4); a 409 *APIError means
+// the cluster is bound to another account (cluster_conflict, R6).
+func (c *Client) CreateClient(ctx context.Context, req CreateClientRequest) (pc *ProvisionedClient, adopted bool, err error) {
 	url := c.BaseURL + "/edge-device/"
 	status, raw, err := c.post(ctx, "/edge-device/", req)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if status < 200 || status >= 300 {
-		return nil, &APIError{StatusCode: status, Body: string(raw), URL: url}
+		return nil, false, &APIError{StatusCode: status, Body: string(raw), URL: url}
 	}
 	var out ProvisionedClient
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decoding create-client response: %w", err)
+		return nil, false, fmt.Errorf("decoding create-client response: %w", err)
 	}
-	return &out, nil
+	// 200 = adopted an existing client for this cluster_id; 201 = freshly minted.
+	return &out, status == http.StatusOK, nil
 }
 
 // maxListPages bounds how many pages ListClients will follow — a backstop
