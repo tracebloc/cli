@@ -93,6 +93,37 @@ func TestDatasetPush_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	}
 }
 
+// TestDatasetPush_KnownUnsupportedCategory_PendingNote pins the Bugbot fix
+// (v0.4.0 RC): a registry-known but CLI-unsupported NON-image category
+// (causal_language_modeling) must get the registry's pending-support note, not
+// the misleading "isn't a recognized task category" message. execDatasetPush
+// discards the error and SilenceErrors swallows it, so run the command here and
+// inspect the returned error directly.
+func TestDatasetPush_KnownUnsupportedCategory_PendingNote(t *testing.T) {
+	root := imgcLayout(t)
+	rootCmd := NewRootCmd(BuildInfo{Version: "test"})
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	rootCmd.SetArgs([]string{"dataset", "push",
+		"--kubeconfig=/tmp/tracebloc-cli-test-nonexistent-" + t.Name(),
+		root, "--table=t1", "--category=causal_language_modeling",
+		"--intent=train", "--label-column=label"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected an error for a known-but-unsupported category")
+	}
+	if got := ExitCodeFromError(err); got != 2 {
+		t.Fatalf("exit code = %d, want 2", got)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "isn't a recognized task category") {
+		t.Errorf("known category misrouted to the unrecognized-category branch:\n%s", msg)
+	}
+	if !strings.Contains(msg, "isn't supported by the CLI yet") {
+		t.Errorf("want the registry pending-support note, got:\n%s", msg)
+	}
+}
+
 // TestDatasetPush_TraversalTableName_ExitsTwo is the security
 // regression pin at the CLI layer. --table=../../etc must be
 // rejected with exit 2 BEFORE any spec synthesis or cluster work —
