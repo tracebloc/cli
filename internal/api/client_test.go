@@ -194,3 +194,43 @@ func TestCreateClientConflict(t *testing.T) {
 		t.Errorf("want APIError 409, got %v", err)
 	}
 }
+
+// TestListClients_FollowsPagination guards that DRF pagination is still
+// followed end-to-end after the nextPath refactor (page 1 → page 2 → done).
+func TestListClients_FollowsPagination(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`{"next":"","results":[{"id":2,"first_name":"b","namespace":"b"}]}`))
+			return
+		}
+		// DRF emits an absolute `next`; nextPath keeps only path+query.
+		_, _ = w.Write([]byte(`{"next":"http://x/edge-device/?page=2","results":[{"id":1,"first_name":"a","namespace":"a"}]}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	got, err := c.ListClients(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
+		t.Fatalf("want 2 clients [1,2], got %+v", got)
+	}
+}
+
+// TestListClients_UnparseableNextLink_IsError pins the Bugbot fix (v0.4.0 RC):
+// a non-empty `next` the server sends that url.Parse rejects must be a hard
+// error, never a silent truncation to the pages seen so far — otherwise list /
+// `use` / namespace-collision checks would miss clients without any error.
+func TestListClients_UnparseableNextLink_IsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// `next` carries a control byte (\u007f) → url.Parse fails.
+		_, _ = w.Write([]byte(`{"next":"http://x/\u007f","results":[{"id":1,"first_name":"a","namespace":"a"}]}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	if _, err := c.ListClients(context.Background()); err == nil {
+		t.Fatal("expected an error on an unparseable next link, got nil (silent truncation)")
+	}
+}

@@ -346,26 +346,32 @@ func (c *Client) ListClients(ctx context.Context) ([]ProvisionedClient, error) {
 			return nil, fmt.Errorf("decoding client list: %w", err)
 		}
 		all = append(all, body.Results...)
-		path = nextPath(body.Next)
+		next, perr := nextPath(body.Next)
+		if perr != nil {
+			return nil, perr
+		}
+		path = next
 	}
 	return all, nil
 }
 
 // nextPath reduces a DRF `next` link (an absolute URL) to the path+query this
-// client appends to BaseURL. Returns "" for an empty/unparseable link, which
-// ends the pagination loop.
-func nextPath(next string) string {
+// client appends to BaseURL. An empty link returns ("", nil) — the normal
+// end of pages. A non-empty link that won't parse is an error, NOT a silent
+// "", so the loop never quietly stops mid-list and returns only the pages
+// seen so far (list / `use` / collision checks must see every client).
+func nextPath(next string) (string, error) {
 	if next == "" {
-		return ""
+		return "", nil
 	}
 	u, err := url.Parse(next)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("client list: unparseable pagination link %q: %w", next, err)
 	}
 	if u.RawQuery != "" {
-		return u.Path + "?" + u.RawQuery
+		return u.Path + "?" + u.RawQuery, nil
 	}
-	return u.Path
+	return u.Path, nil
 }
 
 // ListClientAdmins returns who in the account can provision (the ask-an-admin
