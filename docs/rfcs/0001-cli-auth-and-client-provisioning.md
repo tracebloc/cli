@@ -1,7 +1,7 @@
 # RFC 0001 — Browser-based auth & one-command client provisioning
 
 > **Status: DRAFT** — circulated for discussion; not yet approved. Everything here
-> is open to change. Owner: @saadqbal. Last updated: 2026-06-23.
+> is open to change. Owner: @saadqbal. Last updated: 2026-06-25.
 >
 > **Rev 2 (2026-06-23)** folds in the code-grounded review on the tracking epic
 > ([backend#830](https://github.com/tracebloc/backend/issues/830)) and a
@@ -31,6 +31,12 @@
 > `kube-system` UID) — **not** the heartbeat, whose sender can't (§4.5/§10/C.4/R7);
 > and §7.2's account-scoped check now gates **adoption itself**, so the live-release
 > path can't bypass the cross-account `409` (R6).
+>
+> **Rev 7 (2026-06-25)** FR correction (connect-flow FR on dev, #877): `logout`
+> server-side revoke reframed as **pending** — today logout is **local-only**; the
+> server-side revoke needs the `POST /auth/revoke` endpoint (backend#887, not built)
+> + a CLI `logout`→call (backend#845 shipped only the `revoke()` primitive) —
+> §6.3/§7.5/§9/§13/C.6. The earlier "revokes server-side via #845" claim overstated it.
 
 ## 0. Decisions settled in this revision
 
@@ -331,7 +337,9 @@ it can diagnose a failed *provision*, not just cluster health.
     re-mint. (The backend accepts a CLI-supplied `cluster_id`; see C.3.)
   - (Anchor field + get-or-create + 409 + adopt-backfill: [backend#883],
     split out of #836 — which ships namespace validation + RBAC only (see PR
-    [backend#862]). Server-side token revoke for `logout` lands as backend#845.)
+    [backend#862]). Server-side token revoke for `logout` lands as the `POST /auth/revoke`
+    endpoint ([backend#887] + a CLI call); backend#845 shipped only the `revoke()`
+    primitive, so logout is local-only until #887.)
 
 ### 6.4 Installer reorder (in `tracebloc/client`)
 
@@ -560,9 +568,12 @@ wrong-but-valid target).
 
 - `logout` clears the active-client pointer (and `login` to a different account
   drops it if the client isn't in the new account).
-- **`logout` also revokes the token server-side** (backend#845), not just locally —
-  a DRF token is static, so a copied/leaked token survives a local-only clear for
-  its full life (R2).
+- **`logout` must also revoke the token server-side**, not just locally — a DRF
+  token is static, so a copied/leaked token survives a local-only clear for its full
+  life (R2). **Not wired yet (FR-confirmed 2026-06-25):** today `logout` clears only
+  the local token; server-side revoke needs the `POST /auth/revoke` endpoint
+  ([backend#887], not built) plus a CLI `logout`→revoke call. backend#845 shipped
+  only the underlying `revoke()` primitive.
 - **Scope the active client to the *environment* too, not just the account (R10).**
   `~/.tracebloc` holds one `Env`+`Token`+`ActiveClientID`; `login --env` overwrites
   env+token but today leaves the *old* env's `ActiveClientID` stranded → prod
@@ -730,8 +741,10 @@ it doesn't":
   Helm release Secret (etcd)** — acceptable for single-tenant on-prem, but state it
   as a conscious call (encrypt etcd at rest where the customer requires it).
 - Tokens: store the user token `0600` in `~/.tracebloc`; `logout` clears it **and**
-  the active-client pointer **and revokes it server-side** (backend#845) — a local
-  clear alone leaves a static DRF token valid for its full life (R2).
+  the active-client pointer, and **must revoke it server-side** — but today it is
+  **local-only** (FR-confirmed): server-side revoke is pending the `POST /auth/revoke`
+  endpoint ([backend#887] + a CLI call; #845 is only the primitive). A local clear
+  alone leaves a static DRF token valid for its full life (R2).
 - Least privilege: list/use need only the read scope; create/delete need the write
   scope (§6.3, Q4).
 - **Bootstrap supply-chain (R8) — the dominant gap for a regulated buyer.** "The CLI
@@ -835,7 +848,8 @@ demoted to **cosmetic cross-cluster dedup**, not an idempotency guarantee.
   (`unique=True`) with an **account-scoped** get-or-create that gates **adoption**
   (cross-account = `409`, even on the live-release path — R6/§7.2) and accepts a
   CLI-supplied `cluster_id` (set at create, PATCHed on adopt-backfill — R7) (#836);
-  server-side token revoke for `logout` (#845); `namespace`
+  server-side token revoke for `logout` (the `POST /auth/revoke` endpoint #887; #845
+  shipped only the `revoke()` primitive); `namespace`
   `UniqueConstraint(account, namespace)` + collision migration after the R4 check
   (#863). Plus an append-only **audit trail** (R9), a **machine-credential revoke**
   endpoint, and a **min-supported CLI version** advertised for skew handling (R11).
@@ -846,7 +860,8 @@ demoted to **cosmetic cross-cluster dedup**, not an idempotency guarantee.
   name/location (cli#84/#92); location auto-detect (cli#93); `client delete`; slug +
   picker for `use`/`delete`; selected-vs-connected `list`; bind active client →
   cluster context for the `data` commands; scope the active pointer to the account,
-  clear **and server-side revoke** on logout (#845); `auth status` token expiry.
+  clear **and server-side revoke** on logout (CLI half of [backend#887]; #845 is only
+  the primitive); `auth status` token expiry.
   Also: a `User-Agent: tracebloc-cli/<ver>` version header (R11); env-scoped config /
   profiles (R10); `--verbose` + `~/.tracebloc/install-*.log` and `cluster doctor`
   auth/config checks (§8.5); `client delete --uninstall` (R12).
@@ -884,8 +899,9 @@ of logout. One compromised box = fleet-wide client control until expiry. D2 hid 
 *small* secret and left the *big* one on disk. *Mitigation (§9):* scope the device
 token to provisioning, short TTL + refresh, **discard it after install on
 unattended boxes** (unneeded once the machine credential is in the cluster), and
-**revoke server-side on logout now** — backend#845 already supports it (§7.5/§9),
-not a Phase-2 deferral.
+**revoke server-side on logout** via the `POST /auth/revoke` endpoint ([backend#887];
+#845 shipped only the `revoke()` primitive) — a Phase-1 must, **not wired yet**:
+logout is local-only today (FR-confirmed 2026-06-25).
 
 ### R3 — The cluster anchor has a precondition
 
@@ -1183,10 +1199,10 @@ action ∈ { device.approve, client.create, client.adopt, client.delete,
            auth.login, auth.logout, token.revoke }
 ```
 
-### C.6 Revoke — backend#845 `[NEW]`
+### C.6 Revoke — endpoint [backend#887] `[NOT YET BUILT]` (primitive: backend#845)
 
 ```http
-POST /auth/revoke        # Bearer → 204   # `logout` calls this; invalidates the token
+POST /auth/revoke        # Bearer → 204   # `logout` MUST call this (not built — #887); invalidates the token
                          #   server-side (a local clear leaves it valid — R2)
 ```
 
