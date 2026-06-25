@@ -167,8 +167,11 @@ ensure_cosign() {
     csums="$TMP/cosign_checksums.txt"
 
     echo "  cosign not found — bootstrapping pinned ${COSIGN_VERSION} to verify the signature..."
-    if ! curl -fsSL "$cbase/$casset" -o "$cbin" 2>/dev/null; then return 1; fi
-    if ! curl -fsSL "$cbase/cosign_checksums.txt" -o "$csums" 2>/dev/null; then return 1; fi
+    # --tlsv1.2 floor for the cosign bootstrap fetch, matching the client
+    # installer's curls — never negotiate below TLS 1.2 to pull the verifier we
+    # then trust to authenticate the release.
+    if ! curl -fsSL --tlsv1.2 "$cbase/$casset" -o "$cbin" 2>/dev/null; then return 1; fi
+    if ! curl -fsSL --tlsv1.2 "$cbase/cosign_checksums.txt" -o "$csums" 2>/dev/null; then return 1; fi
 
     cwant="$(grep " ${casset}\$" "$csums" | awk '{print $1}' | head -1)"
     [ -n "$cwant" ] || return 1
@@ -206,7 +209,36 @@ resolve_tag() {
     basename "$redirect_url"
 }
 
+# --------------------------------------------------------------------
+# Validate the resolved tag before it flows into a download URL.
+#
+# --version / RELEASE_VERSION is returned by resolve_tag verbatim and then
+# interpolated into BASE_URL=.../releases/download/${TAG}. An unvalidated value
+# such as 'v1.2.3-../../heads/main' would let curl collapse the '..' and fetch
+# from a path other than the intended release — a path-traversal lever in the
+# most security-sensitive download in the installer. Constrain it to a release
+# tag shape and refuse any '/' or '..' (RFC-0001 R8, backend#889). Matches the
+# client bootstrap's gate (^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$).
+validate_tag() {
+    # Path-traversal belt: no separators, no parent-dir tokens.
+    case "$1" in
+        */*|*..*)
+            echo "Error: release tag '$1' contains a path separator or '..' —" >&2
+            echo "       refusing to build a download URL from it (RFC-0001 R8)." >&2
+            exit 1
+            ;;
+    esac
+    # Shape: vMAJOR.MINOR.PATCH with an optional [.-]alnum/dot suffix. grep -E is
+    # POSIX and already relied on elsewhere in this script; -q keeps it quiet.
+    if ! printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'; then
+        echo "Error: '$1' is not a valid release tag (expected vX.Y.Z, e.g. v0.1.0)." >&2
+        echo "       Pass --version with a published release tag." >&2
+        exit 1
+    fi
+}
+
 TAG="$(resolve_tag)"
+validate_tag "$TAG"
 echo "Installing tracebloc CLI $TAG ($OS/$ARCH)..."
 
 # --------------------------------------------------------------------

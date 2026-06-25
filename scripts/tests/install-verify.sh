@@ -133,6 +133,56 @@ else
 fi
 drop_sandbox
 
+# ── 6. path-traversal --version → rejected before any download (RFC-0001 R8) ─
+# 'v1.2.3-../../heads/main' once flowed verbatim into BASE_URL=.../download/$TAG;
+# curl would collapse the '..' and fetch from a path other than the release. The
+# new validate_tag must reject it: non-zero, nothing installed, no binary fetch.
+make_sandbox yes
+rc="$(COSIGN_RESULT=0 run_installer --version 'v1.2.3-../../heads/main')"
+if [ "$rc" != 0 ] \
+   && grep -Eq "path separator or '\.\.'|not a valid release tag" "$SBX/out" \
+   && [ ! -e "$DEST/tracebloc" ] \
+   && ! grep -q "Downloading binary" "$SBX/out"; then
+  ok "traversal --version rejected before download"
+else
+  bad "traversal --version rejected before download (rc=$rc)"; sed 's/^/      /' "$SBX/out"
+fi
+drop_sandbox
+
+# ── 7. bare path separator in --version → rejected ──────────────────────────
+make_sandbox yes
+rc="$(COSIGN_RESULT=0 run_installer --version 'v1.2.3/heads/main')"
+if [ "$rc" != 0 ] \
+   && grep -Eq "path separator or '\.\.'|not a valid release tag" "$SBX/out" \
+   && [ ! -e "$DEST/tracebloc" ]; then
+  ok "slash in --version rejected"
+else
+  bad "slash in --version rejected (rc=$rc)"; sed 's/^/      /' "$SBX/out"
+fi
+drop_sandbox
+
+# ── 8. malformed (non-vX.Y.Z) --version → rejected ──────────────────────────
+make_sandbox yes
+rc="$(COSIGN_RESULT=0 run_installer --version 'not-a-tag')"
+if [ "$rc" != 0 ] && grep -q "not a valid release tag" "$SBX/out" && [ ! -e "$DEST/tracebloc" ]; then
+  ok "malformed --version rejected"
+else
+  bad "malformed --version rejected (rc=$rc)"; sed 's/^/      /' "$SBX/out"
+fi
+drop_sandbox
+
+# ── 9. a well-formed --version still installs (validator isn't over-tight) ──
+# Guards against a regression where validate_tag rejects legitimate tags. The
+# sandbox serves v9.9.9, so request exactly that explicitly via --version.
+make_sandbox yes
+rc="$(COSIGN_RESULT=0 run_installer --version 'v9.9.9')"
+if [ "$rc" = 0 ] && grep -q "cosign signature valid" "$SBX/out" && [ -x "$DEST/tracebloc" ]; then
+  ok "well-formed --version passes validation and installs"
+else
+  bad "well-formed --version passes validation and installs (rc=$rc)"; sed 's/^/      /' "$SBX/out"
+fi
+drop_sandbox
+
 echo
 echo "install-verify: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
