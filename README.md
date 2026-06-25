@@ -61,6 +61,15 @@ tracebloc dataset push ./my-data \
 
 > **`tracebloc: command not found` after installing?** The binary installs to `~/.local/bin` when `/usr/local/bin` isn't writable, and an already-running shell won't see the new PATH entry until you open a new terminal (or `. ~/.bashrc`). See **[Troubleshooting installation](docs/troubleshooting.md)**.
 
+> **Signature verification is mandatory.** The installer verifies the binary's
+> SHA256 **and** its cosign signature before installing. If `cosign` isn't on
+> PATH it bootstraps a pinned, checksum-verified copy; if it can't, the install
+> **fails closed** rather than trusting the same-channel checksum alone (it no
+> longer silently skips the signature). The one escape, for a genuinely
+> constrained environment, is to re-run with `TRACEBLOC_ALLOW_UNVERIFIED=1` —
+> which prints a loud warning. For the highest trust, pre-install `cosign`
+> (`brew install cosign`, your package manager, or the [released binary](https://github.com/sigstore/cosign/releases)) before running the installer. (RFC-0001 R8.)
+
 What that runs under the curtain:
 
 1. Reads kubeconfig, discovers the parent `tracebloc/client` release in the cluster

@@ -10,7 +10,10 @@
 #   2. Resolves the latest release tag (or honors --version)
 #   3. Downloads tracebloc-<tag>-<os>-<arch> from the GitHub Release
 #   4. Verifies SHA256 against the release's SHA256SUMS file
-#   5. (Optional) Verifies cosign signature if cosign is on PATH
+#   5. Verifies the cosign signature — MANDATORY (RFC-0001 R8). If cosign isn't
+#      installed it bootstraps a pinned, checksum-verified one; if it can't, it
+#      FAILS CLOSED (never silently skips, never trusts the same-channel SHA256
+#      alone). Override only with TRACEBLOC_ALLOW_UNVERIFIED=1.
 #   6. Installs to /usr/local/bin/tracebloc (falls back to $HOME/.local/bin
 #      with PATH advice if /usr/local/bin isn't writable)
 #
@@ -28,6 +31,19 @@ INSTALL_PREFIX="${INSTALL_PREFIX:-/usr/local/bin}"
 RELEASE_VERSION="${RELEASE_VERSION:-latest}"
 GITHUB_REPO="tracebloc/cli"
 BINARY_NAME="tracebloc"
+
+# Cosign signature verification is MANDATORY on the default path (RFC-0001 R8,
+# backend#889). The previous build silently SKIPPED it when cosign was absent —
+# the default on a fresh box — degrading to a SHA256 fetched over the same
+# channel as the binary, which an on-path attacker also controls. We now require
+# a signature: if cosign isn't present we bootstrap a pinned, checksum-verified
+# one; if we can't, we FAIL CLOSED. This explicit opt-out is the only way past,
+# for the genuinely-constrained operator, and it shouts.
+ALLOW_UNVERIFIED="${TRACEBLOC_ALLOW_UNVERIFIED:-0}"
+# Pin kept in lockstep with the release workflow's cosign-installer and the
+# client installer's COSIGN_VERSION.
+COSIGN_VERSION="${COSIGN_VERSION:-v2.4.1}"
+COSIGN_BIN=""
 
 usage() {
     cat <<EOF
@@ -110,6 +126,63 @@ OS="$(detect_os)"
 ARCH="$(detect_arch)"
 
 # --------------------------------------------------------------------
+# sha256 helper (coreutils sha256sum on Linux, shasum -a 256 on macOS).
+# Echoes the digest, or returns non-zero if neither tool is present.
+# --------------------------------------------------------------------
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+# --------------------------------------------------------------------
+# Resolve a usable cosign into $COSIGN_BIN. Prefer one already on PATH;
+# otherwise download the pinned release binary for this OS/arch and verify it
+# against cosign's own published checksums before trusting it (a cosign we
+# can't vouch for is no better than none). Returns non-zero if cosign can be
+# neither found nor safely bootstrapped — the caller then fails closed.
+# --------------------------------------------------------------------
+ensure_cosign() {
+    if command -v cosign >/dev/null 2>&1; then
+        COSIGN_BIN="cosign"
+        return 0
+    fi
+
+    # cosign publishes assets named cosign-<os>-<arch> (arch in amd64/arm64);
+    # 386/arm have no official cosign build, so bootstrapping isn't possible there.
+    cosign_arch=""
+    case "$ARCH" in
+        amd64) cosign_arch="amd64" ;;
+        arm64) cosign_arch="arm64" ;;
+        *) return 1 ;;
+    esac
+
+    cbase="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}"
+    casset="cosign-${OS}-${cosign_arch}"
+    cbin="$TMP/cosign"
+    csums="$TMP/cosign_checksums.txt"
+
+    echo "  cosign not found — bootstrapping pinned ${COSIGN_VERSION} to verify the signature..."
+    if ! curl -fsSL "$cbase/$casset" -o "$cbin" 2>/dev/null; then return 1; fi
+    if ! curl -fsSL "$cbase/cosign_checksums.txt" -o "$csums" 2>/dev/null; then return 1; fi
+
+    cwant="$(grep " ${casset}\$" "$csums" | awk '{print $1}' | head -1)"
+    [ -n "$cwant" ] || return 1
+    cgot="$(sha256_of "$cbin")" || return 1
+    if [ "$cwant" != "$cgot" ]; then
+        echo "Error: bootstrapped cosign failed its own checksum — not using it." >&2
+        return 1
+    fi
+    chmod +x "$cbin"
+    COSIGN_BIN="$cbin"
+    return 0
+}
+
+# --------------------------------------------------------------------
 # Resolve the release tag if "latest".
 # --------------------------------------------------------------------
 resolve_tag() {
@@ -167,7 +240,7 @@ if [ -z "$expected" ]; then
     echo "       — release artifacts may be incomplete." >&2
     exit 1
 fi
-# sha256sum (GNU coreutils) vs shasum -a 256 (macOS): detect which is on PATH.
+# sha256sum (GNU coreutils) vs shasum -a 256 (macOS): sha256_of picks one.
 # If neither is available, refuse to install — running an unverified
 # binary from the internet is exactly what this script exists to
 # prevent. Bugbot PR #11 caught the previous "warn + continue + still
@@ -177,11 +250,7 @@ fi
 # base Perl install. A host with neither is unusual enough that
 # erroring out is the right call — the customer can install coreutils
 # / xcode-select / similar and re-run.
-if command -v sha256sum >/dev/null 2>&1; then
-    actual="$(sha256sum "$TMP/$BINARY_FILE" | awk '{print $1}')"
-elif command -v shasum >/dev/null 2>&1; then
-    actual="$(shasum -a 256 "$TMP/$BINARY_FILE" | awk '{print $1}')"
-else
+if ! actual="$(sha256_of "$TMP/$BINARY_FILE")"; then
     echo "Error: neither sha256sum nor shasum is on PATH — can't verify the" >&2
     echo "       downloaded binary's integrity. Install one of:" >&2
     echo "         apt install coreutils       # Debian/Ubuntu" >&2
@@ -201,31 +270,63 @@ fi
 echo "  ✓ checksum matches"
 
 # --------------------------------------------------------------------
-# Verify cosign signature if cosign is on PATH (optional).
+# Verify the cosign signature — MANDATORY on the default path (RFC-0001 R8).
+#
+# The SHA256 check above proves the binary matches SHA256SUMS, but SHA256SUMS is
+# fetched over the SAME channel as the binary — an on-path attacker who can swap
+# the binary can swap the sums too. The cosign signature is the independent,
+# Sigstore-rooted proof that tracebloc's release workflow produced these bytes.
+# So we no longer "skip when cosign is absent": we require a verifier, bootstrap
+# a pinned+checksummed cosign if one isn't installed, and FAIL CLOSED otherwise.
+# The only escape is an explicit, loud TRACEBLOC_ALLOW_UNVERIFIED=1.
 # --------------------------------------------------------------------
-if command -v cosign >/dev/null 2>&1; then
+verify_cosign_signature() {
+    if ! ensure_cosign; then
+        if [ "$ALLOW_UNVERIFIED" = "1" ]; then
+            echo "  WARNING: cosign unavailable and couldn't be bootstrapped —" >&2
+            echo "  signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1). The SHA256" >&2
+            echo "  above is same-channel only; do not use this path in production." >&2
+            return 0
+        fi
+        echo "Error: cosign is required to verify the binary's signature and could" >&2
+        echo "       not be found or bootstrapped — refusing to install on an" >&2
+        echo "       unauthenticated, same-channel checksum alone (RFC-0001 R8)." >&2
+        echo "       Fix: install cosign and re-run —" >&2
+        echo "         https://docs.sigstore.dev/cosign/system_config/installation/" >&2
+        echo "       (brew install cosign / apt / the released binary), or for a" >&2
+        echo "       constrained environment re-run with TRACEBLOC_ALLOW_UNVERIFIED=1." >&2
+        exit 1
+    fi
+
     echo "Verifying cosign signature..."
-    if ! curl -fsSL "$BASE_URL/$BINARY_FILE.sig" -o "$TMP/$BINARY_FILE.sig"; then
-        echo "  ⚠ couldn't download .sig — release may pre-date signing." >&2
-    elif ! curl -fsSL "$BASE_URL/$BINARY_FILE.cert" -o "$TMP/$BINARY_FILE.cert"; then
-        echo "  ⚠ couldn't download .cert — release may pre-date signing." >&2
-    elif ! cosign verify-blob \
+    if ! curl -fsSL "$BASE_URL/$BINARY_FILE.sig" -o "$TMP/$BINARY_FILE.sig" 2>/dev/null \
+       || ! curl -fsSL "$BASE_URL/$BINARY_FILE.cert" -o "$TMP/$BINARY_FILE.cert" 2>/dev/null; then
+        if [ "$ALLOW_UNVERIFIED" = "1" ]; then
+            echo "  WARNING: .sig/.cert not published for $TAG — signature NOT verified" >&2
+            echo "  (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
+            return 0
+        fi
+        echo "Error: couldn't download $BINARY_FILE.sig / .cert for $TAG — the" >&2
+        echo "       release is unsigned or incomplete. Every supported release is" >&2
+        echo "       cosign-signed; refusing to install unverified (RFC-0001 R8)." >&2
+        echo "       Pin a signed --version, or re-run with TRACEBLOC_ALLOW_UNVERIFIED=1." >&2
+        exit 1
+    fi
+
+    if "$COSIGN_BIN" verify-blob \
             --certificate-identity-regexp \
               "https://github.com/${GITHUB_REPO}/.github/workflows/release.yml@.*" \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             --certificate "$TMP/$BINARY_FILE.cert" \
             --signature "$TMP/$BINARY_FILE.sig" \
-            "$TMP/$BINARY_FILE" 2>/dev/null; then
+            "$TMP/$BINARY_FILE" >/dev/null 2>&1; then
+        echo "  ✓ cosign signature valid"
+    else
         echo "Error: cosign signature verification FAILED — refusing to install." >&2
         exit 1
-    else
-        echo "  ✓ cosign signature valid"
     fi
-else
-    # Not having cosign isn't fatal — the SHA256 check above is the
-    # baseline. Recommend cosign for higher-trust installs.
-    echo "  (cosign not installed; SHA256 verified, signature skipped)"
-fi
+}
+verify_cosign_signature
 
 # --------------------------------------------------------------------
 # Install to a writable prefix.
