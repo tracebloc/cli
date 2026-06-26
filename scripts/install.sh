@@ -161,6 +161,12 @@ ensure_cosign() {
         *) return 1 ;;
     esac
 
+    # COSIGN_VERSION is env-overridable and gets interpolated into the Sigstore
+    # download URL, so it needs the same semver + path-traversal gate as the
+    # release tag — a crafted value must not redirect which release path we fetch.
+    validate_version_tag "$COSIGN_VERSION" "cosign version" \
+        "Set COSIGN_VERSION to a published cosign release tag (e.g. v2.4.1)."
+
     cbase="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}"
     casset="cosign-${OS}-${cosign_arch}"
     cbin="$TMP/cosign"
@@ -196,7 +202,7 @@ resolve_tag() {
     # Use the redirect-trail of /releases/latest to learn the tag —
     # avoids hitting the rate-limited /api/repos endpoint for the
     # zero-auth one-liner case.
-    redirect_url="$(curl -fsSI \
+    redirect_url="$(curl -fsSI --tlsv1.2 \
         "https://github.com/${GITHUB_REPO}/releases/latest" \
         | awk '/^[Ll]ocation:/ { print $2 }' \
         | tr -d '\r')"
@@ -219,22 +225,30 @@ resolve_tag() {
 # most security-sensitive download in the installer. Constrain it to a release
 # tag shape and refuse any '/' or '..' (RFC-0001 R8, backend#889). Matches the
 # client bootstrap's gate (^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$).
-validate_tag() {
+# validate_version_tag <value> <label> <hint>: refuse any value not shaped like
+# a release tag before it is interpolated into a download URL. <label> names the
+# thing in error messages and <hint> is the corrective suggestion.
+validate_version_tag() {
+    _vt_val="$1"; _vt_label="$2"; _vt_hint="$3"
     # Path-traversal belt: no separators, no parent-dir tokens.
-    case "$1" in
+    case "$_vt_val" in
         */*|*..*)
-            echo "Error: release tag '$1' contains a path separator or '..' —" >&2
+            echo "Error: $_vt_label '$_vt_val' contains a path separator or '..' —" >&2
             echo "       refusing to build a download URL from it (RFC-0001 R8)." >&2
             exit 1
             ;;
     esac
     # Shape: vMAJOR.MINOR.PATCH with an optional [.-]alnum/dot suffix. grep -E is
     # POSIX and already relied on elsewhere in this script; -q keeps it quiet.
-    if ! printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'; then
-        echo "Error: '$1' is not a valid release tag (expected vX.Y.Z, e.g. v0.1.0)." >&2
-        echo "       Pass --version with a published release tag." >&2
+    if ! printf '%s\n' "$_vt_val" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'; then
+        echo "Error: '$_vt_val' is not a valid $_vt_label (expected vX.Y.Z, e.g. v0.1.0)." >&2
+        echo "       $_vt_hint" >&2
         exit 1
     fi
+}
+
+validate_tag() {
+    validate_version_tag "$1" "release tag" "Pass --version with a published release tag."
 }
 
 TAG="$(resolve_tag)"
@@ -251,13 +265,13 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 echo "Downloading binary..."
-if ! curl -fsSL "$BASE_URL/$BINARY_FILE" -o "$TMP/$BINARY_FILE"; then
+if ! curl -fsSL --tlsv1.2 "$BASE_URL/$BINARY_FILE" -o "$TMP/$BINARY_FILE"; then
     echo "Error: failed to download $BASE_URL/$BINARY_FILE" >&2
     exit 1
 fi
 
 echo "Downloading SHA256SUMS..."
-if ! curl -fsSL "$BASE_URL/SHA256SUMS" -o "$TMP/SHA256SUMS"; then
+if ! curl -fsSL --tlsv1.2 "$BASE_URL/SHA256SUMS" -o "$TMP/SHA256SUMS"; then
     echo "Error: failed to download SHA256SUMS — release may be malformed" >&2
     exit 1
 fi
@@ -331,8 +345,8 @@ verify_cosign_signature() {
     fi
 
     echo "Verifying cosign signature..."
-    if ! curl -fsSL "$BASE_URL/$BINARY_FILE.sig" -o "$TMP/$BINARY_FILE.sig" 2>/dev/null \
-       || ! curl -fsSL "$BASE_URL/$BINARY_FILE.cert" -o "$TMP/$BINARY_FILE.cert" 2>/dev/null; then
+    if ! curl -fsSL --tlsv1.2 "$BASE_URL/$BINARY_FILE.sig" -o "$TMP/$BINARY_FILE.sig" 2>/dev/null \
+       || ! curl -fsSL --tlsv1.2 "$BASE_URL/$BINARY_FILE.cert" -o "$TMP/$BINARY_FILE.cert" 2>/dev/null; then
         if [ "$ALLOW_UNVERIFIED" = "1" ]; then
             echo "  WARNING: .sig/.cert not published for $TAG — signature NOT verified" >&2
             echo "  (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
