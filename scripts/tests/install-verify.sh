@@ -183,6 +183,22 @@ else
 fi
 drop_sandbox
 
+# ── 10. malformed COSIGN_VERSION → rejected before the cosign bootstrap fetch ─
+# COSIGN_VERSION is env-overridable and is interpolated into the Sigstore release
+# download URL, so it gets the same semver + path-traversal gate as the release
+# tag. cosign is ABSENT here so ensure_cosign reaches the bootstrap path that
+# validates it; a crafted value must abort, not redirect which release we fetch.
+make_sandbox no
+rc="$(COSIGN_VERSION='v2.4.1/../../heads/main' run_installer)"
+if [ "$rc" != 0 ] \
+   && grep -Eq "cosign version .*contains a path separator or '\.\.'|not a valid cosign version" "$SBX/out" \
+   && [ ! -e "$DEST/tracebloc" ]; then
+  ok "malformed COSIGN_VERSION rejected"
+else
+  bad "malformed COSIGN_VERSION rejected (rc=$rc)"; sed 's/^/      /' "$SBX/out"
+fi
+drop_sandbox
+
 echo
 echo "install-verify: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
