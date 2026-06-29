@@ -76,11 +76,11 @@ func TestLogin_FullFlow(t *testing.T) {
 		t.Errorf("expected 2 polls (pending then token), got %d", polls)
 	}
 	cfg, _ := config.Load()
-	if cfg.Token != "cat_abc" {
-		t.Errorf("stored token = %q, want cat_abc", cfg.Token)
+	if cfg.Current().Token != "cat_abc" {
+		t.Errorf("stored token = %q, want cat_abc", cfg.Current().Token)
 	}
-	if cfg.Email != "ds@tracebloc.io" {
-		t.Errorf("stored email = %q, want ds@tracebloc.io", cfg.Email)
+	if cfg.Current().Email != "ds@tracebloc.io" {
+		t.Errorf("stored email = %q, want ds@tracebloc.io", cfg.Current().Email)
 	}
 	if !strings.Contains(out, "ds@tracebloc.io") {
 		t.Errorf("expected output to show the account, got:\n%s", out)
@@ -180,7 +180,9 @@ func TestLogout(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent) // 204, like the real endpoint
 	})
-	if err := (&config.Config{Token: "x", Email: "e@co", ActiveClientID: "7"}).Save(); err != nil {
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "e@co", ActiveClientID: "7"},
+	}}).Save(); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runCmd(t, "logout")
@@ -196,8 +198,8 @@ func TestLogout(t *testing.T) {
 	}
 	// The active-client pointer is account-scoped — it must not survive logout,
 	// or it bleeds into the next account's session.
-	if cfg.ActiveClientID != "" {
-		t.Errorf("active_client_id = %q after logout, want cleared", cfg.ActiveClientID)
+	if cfg.Current().ActiveClientID != "" {
+		t.Errorf("active_client_id = %q after logout, want cleared", cfg.Current().ActiveClientID)
 	}
 	if !strings.Contains(out, "Signed out") {
 		t.Errorf("got:\n%s", out)
@@ -211,7 +213,9 @@ func TestLogout_RevokeFailureStillClearsLocal(t *testing.T) {
 	withTestBackend(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError) // revoke fails
 	})
-	if err := (&config.Config{Token: "x", Email: "e@co", ActiveClientID: "7"}).Save(); err != nil {
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "e@co", ActiveClientID: "7"},
+	}}).Save(); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runCmd(t, "logout")
@@ -219,7 +223,7 @@ func TestLogout_RevokeFailureStillClearsLocal(t *testing.T) {
 		t.Fatalf("logout must succeed even when revoke fails: %v", err)
 	}
 	cfg, _ := config.Load()
-	if cfg.SignedIn() || cfg.ActiveClientID != "" {
+	if cfg.SignedIn() || cfg.Current().ActiveClientID != "" {
 		t.Errorf("local state must be cleared even when revoke fails: %+v", cfg)
 	}
 	if !strings.Contains(out, "Signed out") {
@@ -227,14 +231,14 @@ func TestLogout_RevokeFailureStillClearsLocal(t *testing.T) {
 	}
 }
 
-// TestLogout_RevokesAgainstSessionEnv pins the cli#112 / Bugbot fix: with an
-// empty cfg.Env (legacy config) the revoke must resolve the host like
-// authedClient does (— $CLIENT_ENV, else prod —), not hardcode prod, or it
-// hits the wrong backend and the real session token stays valid after logout.
+// TestLogout_RevokesAgainstSessionEnv pins that logout revokes against the
+// session's own env (the current profile's env), not a hardcoded prod — so the
+// token is killed on the host it was issued for (cli#112 / Bugbot, carried to v2).
 func TestLogout_RevokesAgainstSessionEnv(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	t.Setenv("CLIENT_ENV", "stg")
-	if err := (&config.Config{Token: "x"}).Save(); err != nil { // note: no Env set
+	if err := (&config.Config{CurrentEnv: "stg", Profiles: map[string]*config.Profile{
+		"stg": {Token: "x"},
+	}}).Save(); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -254,13 +258,15 @@ func TestLogout_RevokesAgainstSessionEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if gotEnv != "stg" {
-		t.Errorf("empty cfg.Env: revoked against %q, want $CLIENT_ENV %q (not hardcoded prod)", gotEnv, "stg")
+		t.Errorf("logout revoked against env %q, want the session env %q (not prod)", gotEnv, "stg")
 	}
 }
 
 func TestAuthStatus_SignedIn(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	if err := (&config.Config{Env: "dev", Token: "x", Email: "ds@co"}).Save(); err != nil {
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "ds@co"},
+	}}).Save(); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runCmd(t, "auth", "status")
