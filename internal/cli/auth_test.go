@@ -227,6 +227,37 @@ func TestLogout_RevokeFailureStillClearsLocal(t *testing.T) {
 	}
 }
 
+// TestLogout_RevokesAgainstSessionEnv pins the cli#112 / Bugbot fix: with an
+// empty cfg.Env (legacy config) the revoke must resolve the host like
+// authedClient does (— $CLIENT_ENV, else prod —), not hardcode prod, or it
+// hits the wrong backend and the real session token stays valid after logout.
+func TestLogout_RevokesAgainstSessionEnv(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	t.Setenv("CLIENT_ENV", "stg")
+	if err := (&config.Config{Token: "x"}).Save(); err != nil { // note: no Env set
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	var gotEnv string
+	orig := newAPIClient
+	newAPIClient = func(env string) *api.Client {
+		gotEnv = env
+		return &api.Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	}
+	t.Cleanup(func() { newAPIClient = orig })
+
+	if _, err := runCmd(t, "logout"); err != nil {
+		t.Fatal(err)
+	}
+	if gotEnv != "stg" {
+		t.Errorf("empty cfg.Env: revoked against %q, want $CLIENT_ENV %q (not hardcoded prod)", gotEnv, "stg")
+	}
+}
+
 func TestAuthStatus_SignedIn(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	if err := (&config.Config{Env: "dev", Token: "x", Email: "ds@co"}).Save(); err != nil {

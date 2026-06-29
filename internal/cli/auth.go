@@ -154,21 +154,17 @@ func newLogoutCmd() *cobra.Command {
 				return nil
 			}
 
-			// Revoke the token server-side so a copied/leaked credential stops
-			// authenticating after sign-out (RFC-0001 §7.5 / R2, backend#887).
-			// Best-effort by contract: if the backend is unreachable or the token
-			// is already revoked, still clear local state — the user must always
-			// be able to log out locally (cli#112).
-			env := cfg.Env
-			if env == "" {
-				env = api.EnvProd
-			}
-			client := newAPIClient(env)
-			client.Token = cfg.Token
-			if rerr := client.RevokeToken(cmd.Context()); rerr != nil {
-				p.Hintf("Couldn't revoke the token server-side (%v) — clearing local session anyway.", rerr)
-			}
+			// Capture what the server-side revoke needs BEFORE clearing local
+			// state. Resolve the env the same way authedClient does (saved env,
+			// else $CLIENT_ENV, else prod) so revoke hits the host the token was
+			// issued for, not a hardcoded prod.
+			token := cfg.Token
+			env := sessionEnv(cfg)
 
+			// Clear and persist local state FIRST — it's logout's primary job and
+			// the always-safe step. Saving before the network call means a failed
+			// Save can't leave a token that's already been revoked server-side
+			// sitting on disk as a broken "signed in" state.
 			cfg.Token = ""
 			cfg.Email = ""
 			// Also drop the active-client pointer: it's account-scoped, so leaving
@@ -178,6 +174,17 @@ func newLogoutCmd() *cobra.Command {
 			cfg.ActiveClientID = ""
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: 1, err: err}
+			}
+
+			// Then revoke the token server-side so a copied/leaked credential stops
+			// authenticating after sign-out (RFC-0001 §7.5 / R2, backend#887).
+			// Best-effort by contract: on failure (offline / already-revoked) the
+			// local session is already cleared — the user is logged out (cli#112).
+			client := newAPIClient(env)
+			client.Token = token
+			if rerr := client.RevokeToken(cmd.Context()); rerr != nil {
+				p.Hintf("Signed out locally, but couldn't revoke the token server-side (%v). Revoke from the dashboard if this was a shared machine.", rerr)
+				return nil
 			}
 			p.Successf("Signed out.")
 			return nil
