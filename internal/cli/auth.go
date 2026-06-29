@@ -136,21 +136,39 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	}
 }
 
-// newLogoutCmd implements `tracebloc logout` — clears the stored token.
+// newLogoutCmd implements `tracebloc logout` — revokes the token server-side
+// (so a copied/leaked credential stops working) and clears it locally.
 func newLogoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Sign out (clear the stored token)",
+		Short: "Sign out (revoke the token server-side and clear it locally)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			p := printerFor(cmd)
 			cfg, err := config.Load()
 			if err != nil {
 				return &exitError{code: 1, err: err}
 			}
 			if !cfg.SignedIn() {
-				printerFor(cmd).Hintf("Already signed out.")
+				p.Hintf("Already signed out.")
 				return nil
 			}
+
+			// Revoke the token server-side so a copied/leaked credential stops
+			// authenticating after sign-out (RFC-0001 §7.5 / R2, backend#887).
+			// Best-effort by contract: if the backend is unreachable or the token
+			// is already revoked, still clear local state — the user must always
+			// be able to log out locally (cli#112).
+			env := cfg.Env
+			if env == "" {
+				env = api.EnvProd
+			}
+			client := newAPIClient(env)
+			client.Token = cfg.Token
+			if rerr := client.RevokeToken(cmd.Context()); rerr != nil {
+				p.Hintf("Couldn't revoke the token server-side (%v) — clearing local session anyway.", rerr)
+			}
+
 			cfg.Token = ""
 			cfg.Email = ""
 			// Also drop the active-client pointer: it's account-scoped, so leaving
@@ -161,7 +179,7 @@ func newLogoutCmd() *cobra.Command {
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: 1, err: err}
 			}
-			printerFor(cmd).Successf("Signed out.")
+			p.Successf("Signed out.")
 			return nil
 		},
 	}
