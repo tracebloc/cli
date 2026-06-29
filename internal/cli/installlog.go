@@ -36,7 +36,9 @@ func newInstallLog() (*installLog, string) {
 	path := filepath.Join(dir, "install-"+time.Now().UTC().Format("20060102-150405")+".log")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return nil, path
+		// No file was created — return an empty path so the caller never
+		// advertises a "Full log:" location that doesn't exist (Bugbot).
+		return nil, ""
 	}
 	l := &installLog{f: f}
 	l.Logf("tracebloc connect/provision log")

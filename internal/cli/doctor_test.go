@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -93,5 +94,39 @@ func TestRunAuthChecks_NoActiveClientWarns(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Active client — none") {
 		t.Errorf("missing no-active-client warning:\n%s", out.String())
+	}
+}
+
+// TestClusterDoctor_KubeconfigFailEscalatesWhenAuthFails pins the Bugbot fix: a
+// kubeconfig load failure normally exits 3, but if the auth section ALSO failed
+// (here: not signed in) it escalates to 2 so a bad token isn't masked as a
+// kubeconfig-only problem.
+func TestClusterDoctor_KubeconfigFailEscalatesWhenAuthFails(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // not signed in → auth Fail
+	var out bytes.Buffer
+	err := runClusterDoctor(context.Background(), ui.New(&out), "/nonexistent-kubeconfig-xyz", "", "")
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("kubeconfig-fail + auth-fail → want exit 2, got %v", err)
+	}
+}
+
+// TestClusterDoctor_KubeconfigFailStays3WhenAuthOK: with auth healthy, a
+// kubeconfig failure keeps the documented exit-3 contract.
+func TestClusterDoctor_KubeconfigFailStays3WhenAuthOK(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", ActiveClientID: "5"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // WhoAmI ok → auth OK
+	})
+	var out bytes.Buffer
+	err := runClusterDoctor(context.Background(), ui.New(&out), "/nonexistent-kubeconfig-xyz", "", "")
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 3 {
+		t.Fatalf("kubeconfig-fail + auth-OK → want exit 3 (contract), got %v", err)
 	}
 }

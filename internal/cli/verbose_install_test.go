@@ -203,3 +203,26 @@ func TestClientCreate_ResumeCommandIncludesPromptedValues(t *testing.T) {
 		t.Errorf("resume command should carry the PROMPTED name + location, got:\n%s", out.String())
 	}
 }
+
+// TestNewInstallLog_NoPathWhenFileOpenFails pins the Bugbot fix: when the log
+// file can't be opened, newInstallLog returns an empty path (not a path to a
+// file that was never written), so the failure hint won't advertise it.
+func TestNewInstallLog_NoPathWhenFileOpenFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root — directory perms don't restrict file creation")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil { // read-only dir → OpenFile fails
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) // restore so TempDir cleanup can remove it
+	t.Setenv("TRACEBLOC_CONFIG_DIR", dir)
+
+	l, path := newInstallLog()
+	if l != nil {
+		l.Close()
+	}
+	if path != "" {
+		t.Errorf("OpenFile failed → path must be empty (no file created), got %q", path)
+	}
+}

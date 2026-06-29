@@ -90,18 +90,19 @@ func runClusterDoctor(
 	})
 	if err != nil {
 		// 3 = kubeconfig file/parse problem (same class as cluster info). The
-		// auth section above already ran, so a kubeconfig issue doesn't hide it.
+		// auth section above already ran; if IT also failed, escalate to 2 so
+		// automation doesn't read a real auth failure as a kubeconfig-only one.
 		p.Section("Cluster")
 		p.Errorf("Kubeconfig — couldn't load it: %v", err)
 		p.Hintf("     point --kubeconfig / --context at your cluster, or fix ~/.kube/config")
-		return &exitError{code: 3, err: nil}
+		return &exitError{code: kubeconfigExitCode(authStatus), err: nil}
 	}
 
 	cs, err := cluster.NewClientset(resolved)
 	if err != nil {
 		p.Section("Cluster")
 		p.Errorf("Kubeconfig — %v", err)
-		return &exitError{code: 3, err: nil}
+		return &exitError{code: kubeconfigExitCode(authStatus), err: nil}
 	}
 
 	p.Section("Kubeconfig")
@@ -215,4 +216,14 @@ func worseStatus(a, b doctor.Status) doctor.Status {
 		return doctor.StatusWarn
 	}
 	return doctor.StatusOK
+}
+
+// kubeconfigExitCode is 3 ("kubeconfig could not be loaded") unless the auth
+// section also failed — then it escalates to 2 ("a check failed"), so a bad
+// token isn't masked behind a kubeconfig-only exit code (Bugbot).
+func kubeconfigExitCode(authStatus doctor.Status) int {
+	if authStatus == doctor.StatusFail {
+		return 2
+	}
+	return 3
 }
