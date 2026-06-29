@@ -29,8 +29,9 @@ import (
 // a command's call tree; it is not safe for concurrent writes to the
 // same underlying writer (neither is fmt.Fprintf).
 type Printer struct {
-	w     io.Writer
-	color bool
+	w       io.Writer
+	color   bool
+	verbose bool
 }
 
 // Option customizes a Printer at construction. This is the functional-
@@ -45,6 +46,13 @@ type Option func(*Printer)
 // already honored by the default detection.
 func WithColor(on bool) Option {
 	return func(p *Printer) { p.color = on }
+}
+
+// WithVerbose enables verbose output: Detailf lines print only when on. Wire it
+// to a --verbose flag / $TRACEBLOC_LOG_LEVEL so the default happy path stays
+// quiet (~6 status lines) while a streamed step-by-step view is opt-in.
+func WithVerbose(on bool) Option {
+	return func(p *Printer) { p.verbose = on }
 }
 
 // New returns a Printer writing to w. By default it colorizes only when
@@ -142,6 +150,21 @@ func (p *Printer) Warnf(format string, a ...any) {
 func (p *Printer) Infof(format string, a ...any) {
 	p.out("  %s %s\n", p.paint("·", color.Faint), fmt.Sprintf(format, a...))
 }
+
+// Detailf prints an indented, dim step-detail line — but ONLY in verbose mode
+// (WithVerbose). Use for the streamed device-flow → provision → install trace
+// (§8.5 R-verbose) that would be noise by default; the quiet path skips it.
+func (p *Printer) Detailf(format string, a ...any) {
+	if !p.verbose {
+		return
+	}
+	p.out("    %s %s\n", p.paint("·", color.Faint), fmt.Sprintf(format, a...))
+}
+
+// Verbose reports whether this Printer is in verbose mode, so a caller can guard
+// expensive detail (e.g. formatting a large value) it would otherwise build then
+// discard.
+func (p *Printer) Verbose() bool { return p.verbose }
 
 // Errorf prints a bold-red ✖ error line. Unlike common.sh's error(),
 // it does NOT exit — surfacing the message is the UI's job; the command

@@ -57,6 +57,7 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	}
 	env := api.ResolveEnv(envFlag)
 	client := newAPIClient(env)
+	p.Detailf("backend %s — requesting a device code …", client.BaseURL)
 
 	dc, err := client.RequestDeviceCode(ctx)
 	if err != nil {
@@ -112,6 +113,7 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 			// capture the account to show + store. Best-effort: don't fail a
 			// successful sign-in just because this lookup couldn't run.
 			client.Token = tok
+			p.Detailf("authorized — confirming the token with the backend …")
 			if id, werr := client.WhoAmI(ctx); werr == nil {
 				prof.Email = id.Email
 			}
