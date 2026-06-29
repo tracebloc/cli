@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -32,6 +33,10 @@ type BuildInfo struct {
 // global state has historically been a source of test interference,
 // and constructing fresh trees per call is cheap.
 func NewRootCmd(info BuildInfo) *cobra.Command {
+	// Record the CLI version for the User-Agent sent on every backend request
+	// (RFC-0001 §14 R11 / backend#888): "tracebloc-cli/<ver> (<os>/<arch>)".
+	api.SetUserAgent(info.Version)
+
 	root := &cobra.Command{
 		Use:   "tracebloc",
 		Short: "tracebloc — interactive data ingestion for your cluster",
