@@ -61,7 +61,7 @@ func TestRunInteractive_FillsAllWhenEmpty(t *testing.T) {
 		"Intent":                         "test",
 		"Label column":                   "churned",
 	}}
-	a := &runDatasetPushArgs{Spec: push.SpecArgs{Category: "image_classification"}}
+	a := &runDataIngestArgs{Spec: push.SpecArgs{Category: "image_classification"}}
 
 	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
 		t.Fatalf("runInteractive: %v", err)
@@ -92,7 +92,7 @@ func TestRunInteractive_ShowsExampleHints(t *testing.T) {
 		"Path to your dataset directory": "./d",
 		"Destination table name":         "churn_train",
 	}}
-	a := &runDatasetPushArgs{Spec: push.SpecArgs{Category: "tabular_regression"}}
+	a := &runDataIngestArgs{Spec: push.SpecArgs{Category: "tabular_regression"}}
 
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
@@ -118,7 +118,7 @@ func TestRunInteractive_SkipsProvidedValues(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{}}
 	// text_classification has no category-specific prompts, so with all
 	// core fields set + an explicit --category, nothing is asked.
-	a := &runDatasetPushArgs{
+	a := &runDataIngestArgs{
 		LocalPath: "./data",
 		Spec: push.SpecArgs{
 			Category: "text_classification", Table: "t", Intent: "train", LabelColumn: "label",
@@ -136,7 +136,7 @@ func TestRunInteractive_SkipsProvidedValues(t *testing.T) {
 // the optional resolution left blank means auto-detect.
 func TestRunInteractive_Keypoint(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Number of keypoints per sample": "17"}}
-	a := &runDatasetPushArgs{
+	a := &runDataIngestArgs{
 		LocalPath: "./kp",
 		Spec:      push.SpecArgs{Category: "keypoint_detection", Table: "kp_train", Intent: "train", LabelColumn: "image_label"},
 	}
@@ -155,7 +155,7 @@ func TestRunInteractive_Keypoint(t *testing.T) {
 // (regression-class) and leaves the schema to inference.
 func TestRunInteractive_TabularRegression(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Label policy": "passthrough"}}
-	a := &runDatasetPushArgs{
+	a := &runDataIngestArgs{
 		LocalPath: "./tab",
 		Spec:      push.SpecArgs{Category: "tabular_regression", Table: "reg_train", Intent: "train", LabelColumn: "Target"},
 	}
@@ -180,7 +180,7 @@ func TestRunInteractive_Cancel(t *testing.T) {
 	}
 	// path is prompted (→ prompted=true → a confirm is shown); the rest
 	// is pre-set so we reach the confirm cleanly.
-	a := &runDatasetPushArgs{Spec: push.SpecArgs{
+	a := &runDataIngestArgs{Spec: push.SpecArgs{
 		Category: "image_classification", Table: "t", Intent: "train", LabelColumn: "label",
 	}}
 	if err := runInteractive(discardPrinter(), f, a, true); !errors.Is(err, errInteractiveCancelled) {
@@ -195,7 +195,7 @@ func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 		"Destination table name": "mlm_train",
 		"Intent":                 "train",
 	}}
-	a := &runDatasetPushArgs{
+	a := &runDataIngestArgs{
 		LocalPath: "./data",
 		Spec:      push.SpecArgs{Category: "masked_language_modeling"},
 	}
@@ -216,7 +216,7 @@ func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 // push.ValidateTableName, so an unsafe name surfaces as an error.
 func TestRunInteractive_RejectsBadTable(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Destination table name": "../bad"}}
-	a := &runDatasetPushArgs{
+	a := &runDataIngestArgs{
 		LocalPath: "./data",
 		Spec:      push.SpecArgs{Category: "image_classification", Intent: "train", LabelColumn: "label"},
 	}

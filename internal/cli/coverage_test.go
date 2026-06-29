@@ -128,14 +128,14 @@ func TestClassifyPushOutcome(t *testing.T) {
 // JSON contract. (Bugbot #49)
 func TestRunDatasetPush_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
 	var jsonBuf, human bytes.Buffer
-	a := runDatasetPushArgs{
+	a := runDataIngestArgs{
 		LocalPath:  "./x",
 		Spec:       push.SpecArgs{Table: "../bad", Category: "image_classification", Intent: "train"},
 		Printer:    ui.New(&human, ui.WithColor(false)),
 		OutputJSON: true,
 		JSONOut:    &jsonBuf,
 	}
-	err := runDatasetPush(context.Background(), &human, &human, a)
+	err := runDataIngest(context.Background(), &human, &human, a)
 
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.Code() != 2 {
@@ -202,7 +202,7 @@ func TestExitError_Methods(t *testing.T) {
 // and never reaches kubeconfig/cluster resolution.
 func TestRunDatasetRm_InvalidTableExitsTwo(t *testing.T) {
 	var buf bytes.Buffer
-	err := runDatasetRm(context.Background(), runDatasetRmArgs{
+	err := runDataDelete(context.Background(), runDataDeleteArgs{
 		Table:   "../bad",
 		Printer: ui.New(&buf, ui.WithColor(false)),
 	})

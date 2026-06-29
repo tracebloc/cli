@@ -12,10 +12,10 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// runDatasetRmArgs is the resolved input to runDatasetRm — same shape
-// convention as runDatasetPushArgs, so the command's RunE stays a thin
+// runDataDeleteArgs is the resolved input to runDataDelete — same shape
+// convention as runDataIngestArgs, so the command's RunE stays a thin
 // flag-to-struct adapter and the logic is unit-testable.
-type runDatasetRmArgs struct {
+type runDataDeleteArgs struct {
 	Table      string
 	Kubeconfig string
 	Context    string
@@ -26,11 +26,14 @@ type runDatasetRmArgs struct {
 	Prompter   prompter // nil off a TTY or when --yes is set
 }
 
-// newDatasetRmCmd implements `tracebloc dataset rm <table>` — the
-// in-cluster teardown of a previously-pushed dataset. See
+// newDataDeleteCmd implements `tracebloc data delete <table>` — the
+// in-cluster teardown of a previously-ingested dataset. See
 // internal/push.Teardown for the mechanism and the design note on the
 // approach (CLI-direct vs a server-side delete endpoint).
-func newDatasetRmCmd() *cobra.Command {
+//
+// Aliases: "rm" is kept for one deprecation cycle so existing
+// scripts continue to work.
+func newDataDeleteCmd() *cobra.Command {
 	var (
 		kubeconfigPath  string
 		contextOverride string
@@ -40,9 +43,10 @@ func newDatasetRmCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "rm <table>",
-		Short: "Delete a pushed dataset's in-cluster artifacts (table + PVC files)",
-		Long: `Removes the in-cluster artifacts a previous ` + "`dataset push`" + ` created
+		Use:     "delete <table>",
+		Aliases: []string{"rm"},
+		Short:   "Delete an ingested dataset's in-cluster artifacts (table + PVC files)",
+		Long: `Removes the in-cluster artifacts a previous ` + "`data ingest`" + ` created
 for a table: the MySQL table in ` + push.IngestionDatabase + ` and the dataset's
 directories on the shared PVC. Destructive and not undoable.
 
@@ -62,7 +66,7 @@ Exit codes:
 			if !yes && isInteractiveTTY() {
 				pr = surveyPrompter{}
 			}
-			return runDatasetRm(cmd.Context(), runDatasetRmArgs{
+			return runDataDelete(cmd.Context(), runDataDeleteArgs{
 				Table:      args[0],
 				Kubeconfig: kubeconfigPath,
 				Context:    contextOverride,
@@ -89,16 +93,16 @@ Exit codes:
 	return cmd
 }
 
-// runDatasetRm discovers the cluster, shows the teardown plan, confirms,
-// then removes the in-cluster artifacts. The flow mirrors runDatasetPush
+// runDataDelete discovers the cluster, shows the teardown plan, confirms,
+// then removes the in-cluster artifacts. The flow mirrors runDataIngest
 // (validate → discover → plan/pre-flight → act) so the two commands feel
 // like siblings.
-func runDatasetRm(ctx context.Context, a runDatasetRmArgs) error {
+func runDataDelete(ctx context.Context, a runDataDeleteArgs) error {
 	p := a.Printer
-	p.Banner("tracebloc", "delete a pushed dataset")
-	p.Para(`This permanently removes a dataset you pushed earlier: it drops the table from
+	p.Banner("tracebloc", "delete an ingested dataset")
+	p.Para(`This permanently removes a dataset you ingested earlier: it drops the table from
 the cluster and deletes the dataset's files on the shared storage. It can't be
-undone — re-pushing the data is the only way back.`)
+undone — re-ingesting the data is the only way back.`)
 
 	// 1. Validate the name before we build any PVC path from it
 	//    (push.PlanTeardown panics on an unsafe name by design).
@@ -200,7 +204,7 @@ undone — re-pushing the data is the only way back.`)
 		if res.DroppedTable {
 			return &exitError{code: 7, err: fmt.Errorf(
 				"teardown incomplete — the table %s.%s was dropped, but removing its files failed: %w; "+
-					"re-run `tracebloc dataset rm %s`, or delete the leftover staging dirs on the node",
+					"re-run `tracebloc data delete %s`, or delete the leftover staging dirs on the node",
 				plan.Database, plan.Table, err, a.Table)}
 		}
 		return &exitError{code: 7, err: fmt.Errorf("teardown failed: %w", err)}
