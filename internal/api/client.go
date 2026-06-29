@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -28,6 +29,56 @@ const (
 )
 
 const defaultTimeout = 30 * time.Second
+
+// ── User-Agent: minimum-CLI-version handshake (RFC-0001 §13 / §14 R11 / C.1) ──
+//
+// Every backend request announces the CLI build as
+//
+//	User-Agent: tracebloc-cli/<version> (<os>/<arch>)
+//
+// so the backend's MIN_SUPPORTED_CLI_VERSION gate (backend#888) can answer a
+// too-old client with 426 Upgrade Required. The version is the ldflags-injected
+// build version, recorded once at startup; until then (e.g. a bare `go run`) it
+// reports "dev", which the backend can't parse and therefore lets through — the
+// right fail-open for local development.
+
+// userAgent is the formatted header value, set once via SetUserAgent at startup.
+// A package var (not a constructor arg) so every Client built anywhere — login,
+// client provisioning — carries it without threading the version through each
+// command; it mirrors the build metadata that already lives as a global in main.
+var userAgent string
+
+// SetUserAgent records the CLI version used in the User-Agent on every backend
+// request. Call once from cli.NewRootCmd with the ldflags-injected version.
+func SetUserAgent(version string) {
+	if version == "" {
+		version = "dev"
+	}
+	userAgent = fmt.Sprintf("tracebloc-cli/%s (%s/%s)", version, runtime.GOOS, runtime.GOARCH)
+}
+
+// currentUserAgent is the header value to send, with a "dev" fallback for builds
+// that never called SetUserAgent (tests, `go run`).
+func currentUserAgent() string {
+	if userAgent != "" {
+		return userAgent
+	}
+	return fmt.Sprintf("tracebloc-cli/dev (%s/%s)", runtime.GOOS, runtime.GOARCH)
+}
+
+// userAgentTransport injects the CLI User-Agent on every request that doesn't
+// already set one. It wraps the real transport (which keeps proxy + system-CA
+// behavior). Per the http.RoundTripper contract it clones the request before
+// mutating headers rather than modifying the caller's request in place.
+type userAgentTransport struct{ base http.RoundTripper }
+
+func (t userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("User-Agent") == "" {
+		req = req.Clone(req.Context())
+		req.Header.Set("User-Agent", currentUserAgent())
+	}
+	return t.base.RoundTrip(req)
+}
 
 // BaseURL maps a CLIENT_ENV value to the backend base URL — kept in lock-step
 // with the installer's `_backend_url` and client-runtime's CLIENT_ENV→backend
@@ -73,8 +124,10 @@ func New(env string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(BaseURL(env), "/"),
 		HTTP: &http.Client{
-			Timeout:   defaultTimeout,
-			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+			Timeout: defaultTimeout,
+			// Wrap the proxy/CA-aware transport so every request carries the
+			// tracebloc-cli User-Agent (RFC-0001 §14 R11 / backend#888).
+			Transport: userAgentTransport{base: &http.Transport{Proxy: http.ProxyFromEnvironment}},
 		},
 	}
 }
@@ -88,6 +141,38 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("%s returned HTTP %d: %s", e.URL, e.StatusCode, strings.TrimSpace(e.Body))
+}
+
+// UpgradeRequiredError is returned for an HTTP 426 from any endpoint: the CLI is
+// below the backend's MIN_SUPPORTED_CLI_VERSION floor (RFC-0001 §14 R11 /
+// backend#888). It's detected centrally (in post/get) so every call degrades to
+// the same actionable "upgrade your CLI" message instead of a raw HTTP error.
+type UpgradeRequiredError struct {
+	MinVersion string // the server's minimum supported version, when it tells us
+}
+
+func (e *UpgradeRequiredError) Error() string {
+	floor := "a newer version"
+	if e.MinVersion != "" {
+		floor = ">= " + e.MinVersion
+	}
+	return fmt.Sprintf(
+		"this tracebloc CLI is too old for the server (requires %s). Upgrade to the "+
+			"latest release — re-run the tracebloc install script, or download it from "+
+			"https://github.com/tracebloc/cli/releases/latest — then retry.",
+		floor,
+	)
+}
+
+// parseUpgradeRequired builds an *UpgradeRequiredError from a 426 body
+// ({"error":"upgrade_required","min_version":"X"}). min_version is best-effort:
+// the 426 status is the contract, so a body we can't parse still upgrades.
+func parseUpgradeRequired(raw []byte) *UpgradeRequiredError {
+	var body struct {
+		MinVersion string `json:"min_version"`
+	}
+	_ = json.Unmarshal(raw, &body)
+	return &UpgradeRequiredError{MinVersion: body.MinVersion}
 }
 
 // post sends an optional JSON body and returns the status code + raw response.
@@ -115,6 +200,9 @@ func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return resp.StatusCode, nil, fmt.Errorf("reading response from %s: %w", url, err)
+	}
+	if resp.StatusCode == http.StatusUpgradeRequired {
+		return resp.StatusCode, raw, parseUpgradeRequired(raw)
 	}
 	return resp.StatusCode, raw, nil
 }
@@ -145,6 +233,9 @@ func (c *Client) get(ctx context.Context, path string) (int, []byte, error) {
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return resp.StatusCode, nil, fmt.Errorf("reading response from %s: %w", url, err)
+	}
+	if resp.StatusCode == http.StatusUpgradeRequired {
+		return resp.StatusCode, raw, parseUpgradeRequired(raw)
 	}
 	return resp.StatusCode, raw, nil
 }
