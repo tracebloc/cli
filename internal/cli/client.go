@@ -130,11 +130,36 @@ func authedClient() (*api.Client, *config.Config, error) {
 	return client, cfg, nil
 }
 
-func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clientCreateOpts) error {
+func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clientCreateOpts) (err error) {
+	// Always leave a full provision trace on disk, even on a quiet/headless run
+	// (RFC-0001 §8.5). On any failure, point at the (idempotent) resume command
+	// + `cluster doctor`, so a zero-prompt connect that breaks isn't a dead end.
+	ilog, logPath := newInstallLog()
+	defer ilog.Close()
+	ilog.Logf("client create: name=%q location=%q", opts.name, opts.location)
+	defer func() {
+		if err != nil {
+			ilog.Logf("FAILED: %v", err)
+			p.Newline()
+			p.Hintf("Provisioning didn't complete. Re-running is safe — on the same cluster it adopts the existing client instead of minting a duplicate (idempotent):")
+			p.Hintf("    %s", resumeCommand(opts))
+			p.Hintf("Diagnose auth / cluster problems with: tracebloc cluster doctor")
+			if logPath != "" {
+				p.Hintf("Full log: %s", logPath)
+			}
+			return
+		}
+		ilog.Logf("done")
+		if logPath != "" {
+			p.Detailf("full log: %s", logPath)
+		}
+	}()
+
 	client, cfg, err := authedClient()
 	if err != nil {
 		return &exitError{code: 1, err: err}
 	}
+	ilog.Logf("authenticated; provisioning against the signed-in account")
 
 	name, location := opts.name, opts.location
 
@@ -168,6 +193,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	if cidErr != nil {
 		p.Hintf("Couldn't read the target cluster's identity — provisioning without a cluster anchor, so re-running won't be idempotent. Point --kubeconfig/--context at the reachable cluster to enable that.")
 	}
+	ilog.Logf("cluster anchor: %q (read err: %v)", clusterID, cidErr)
 
 	// Derive the namespace slug from the name, avoiding collisions with existing
 	// clients (best-effort: if the list call fails we still derive a base slug).
@@ -241,6 +267,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		// where the backend instead matches a live in-cluster TB_CLIENT_ID whose
 		// cluster_id is still null and the CLI backfills it via PATCH, is the
 		// installer's orchestration — #838 — not done here.)
+		ilog.Logf("adopted existing client id=%d namespace=%s", pc.ID, pc.Namespace)
 		p.Successf("This cluster is already registered as client %q (namespace %s) — adopted it.", pc.Name, pc.Namespace)
 		p.Hintf("No new credential issued; the existing one stands. This machine is set to enroll as client %d.", pc.ID)
 		if opts.credentialFile != "" {
@@ -287,10 +314,46 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		p.Field("username", pc.Username)
 		p.Field("password", password)
 	}
+	ilog.Logf("minted client id=%d namespace=%s", pc.ID, pc.Namespace)
 	if serr := cfg.Save(); serr != nil {
 		p.Hintf("Couldn't save the active-client pointer (%v) — run `tracebloc client use %d` to set it.", serr, pc.ID)
 	}
 	return nil
+}
+
+// resumeCommand reconstructs the `tracebloc client create` invocation to retry a
+// failed provision. Re-running is idempotent (RFC-0001 §7.2): on the same cluster
+// it adopts the existing client rather than minting a duplicate.
+func resumeCommand(opts clientCreateOpts) string {
+	parts := []string{"tracebloc client create"}
+	if opts.name != "" {
+		parts = append(parts, "--name "+shellArg(opts.name))
+	}
+	if opts.location != "" {
+		parts = append(parts, "--location "+shellArg(opts.location))
+	}
+	if opts.kubeconfigPath != "" {
+		parts = append(parts, "--kubeconfig "+shellArg(opts.kubeconfigPath))
+	}
+	if opts.contextOverride != "" {
+		parts = append(parts, "--context "+shellArg(opts.contextOverride))
+	}
+	if opts.credentialFile != "" {
+		parts = append(parts, "--credential-file "+shellArg(opts.credentialFile))
+	}
+	if opts.yes {
+		parts = append(parts, "--yes")
+	}
+	return strings.Join(parts, " ")
+}
+
+// shellArg single-quotes an argument containing whitespace so the resume command
+// stays copy-pasteable for values like "Lab One".
+func shellArg(s string) string {
+	if strings.ContainsAny(s, " \t") {
+		return "'" + s + "'"
+	}
+	return s
 }
 
 // writeClientCredential writes the machine credential to path (mode 0600) as a

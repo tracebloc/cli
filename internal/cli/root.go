@@ -8,6 +8,8 @@ package cli
 
 import (
 	"io"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -80,6 +82,11 @@ what's planned next.`,
 	// CI / log capture where stdout might still look like a terminal.
 	root.PersistentFlags().Bool("plain", false,
 		"disable color and decorative output (also honors $NO_COLOR)")
+	// --verbose streams the per-step detail (device-flow → provision → install)
+	// that's hidden by default; also enabled by $TRACEBLOC_LOG_LEVEL=debug. The
+	// default output stays quiet — a handful of ✔ lines (RFC-0001 §8.5).
+	root.PersistentFlags().Bool("verbose", false,
+		"stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)")
 
 	// Subcommands. New phases append here.
 	root.AddCommand(newVersionCmd(info))
@@ -127,8 +134,26 @@ func printerFor(cmd *cobra.Command) *ui.Printer {
 // dataset push's --output-json mode, which routes human output to
 // stderr so stdout carries only the JSON result.
 func printerForWriter(cmd *cobra.Command, w io.Writer) *ui.Printer {
+	var opts []ui.Option
 	if plain, _ := cmd.Flags().GetBool("plain"); plain {
-		return ui.New(w, ui.WithColor(false))
+		opts = append(opts, ui.WithColor(false))
 	}
-	return ui.New(w)
+	if verboseRequested(cmd) {
+		opts = append(opts, ui.WithVerbose(true))
+	}
+	return ui.New(w, opts...)
+}
+
+// verboseRequested reports whether the user asked for verbose output, via the
+// --verbose flag or $TRACEBLOC_LOG_LEVEL (debug/trace/verbose). The flag wins;
+// the env var lets a headless / scripted run opt in without editing the command.
+func verboseRequested(cmd *cobra.Command) bool {
+	if v, err := cmd.Flags().GetBool("verbose"); err == nil && v {
+		return true
+	}
+	switch strings.ToLower(os.Getenv("TRACEBLOC_LOG_LEVEL")) {
+	case "debug", "trace", "verbose":
+		return true
+	}
+	return false
 }
