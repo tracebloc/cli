@@ -17,7 +17,7 @@ func TestRegistryKnownCategories(t *testing.T) {
 		"image_classification", "object_detection", "keypoint_detection",
 		"semantic_segmentation", "instance_segmentation",
 		"text_classification", "token_classification",
-		"masked_language_modeling", "causal_language_modeling",
+		"masked_language_modeling", "causal_language_modeling", "seq2seq",
 		"tabular_classification", "tabular_regression",
 		"time_series_forecasting", "time_to_event_prediction",
 	}
@@ -44,9 +44,9 @@ func TestSupportedCategories(t *testing.T) {
 			t.Errorf("SupportedCategoryIDs returned %q but IsCLISupported is false", id)
 		}
 	}
-	// segmentation + causal_language_modeling are known but not yet pushable,
-	// and must explain why.
-	for _, id := range []string{"semantic_segmentation", "instance_segmentation", "causal_language_modeling", "token_classification"} {
+	// segmentation + the self-supervised text categories (CLM, seq2seq) +
+	// token_classification are known but not yet pushable, and must explain why.
+	for _, id := range []string{"semantic_segmentation", "instance_segmentation", "causal_language_modeling", "seq2seq", "token_classification"} {
 		if !IsKnown(id) {
 			t.Errorf("%s should be known", id)
 		}
