@@ -160,3 +160,46 @@ func TestClientCreate_CancelLogsCancelledNotDone(t *testing.T) {
 		t.Errorf("a cancelled run must NOT be logged as 'done':\n%s", raw)
 	}
 }
+
+// TestClientCreate_ResumeCommandIncludesPromptedValues pins the Bugbot fix: when
+// name/location come from interactive prompts (not flags), a failed provision's
+// resume command must still include them — opts alone would omit them.
+func TestClientCreate_ResumeCommandIncludesPromptedValues(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "tok"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	// list ok; the provision POST 500s after the user confirms.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	origClient := newAPIClient
+	newAPIClient = func(string) *api.Client { return &api.Client{BaseURL: srv.URL, HTTP: srv.Client()} }
+	t.Cleanup(func() { newAPIClient = origClient })
+	origCID := readClusterID
+	readClusterID = func(context.Context, cluster.KubeconfigOptions) (string, error) {
+		return "", errors.New("no cluster (test)")
+	}
+	t.Cleanup(func() { readClusterID = origCID })
+
+	confirmYes := true
+	pr := &fakePrompter{answers: map[string]string{
+		"Client name":             "Prompted Lab",
+		"Location zone (e.g. DE)": "FR",
+	}, confirm: &confirmYes}
+	var out bytes.Buffer
+	// No name/location flags — both come from the prompts.
+	if err := runClientCreate(context.Background(), ui.New(&out), pr, clientCreateOpts{}); err == nil {
+		t.Fatal("expected the provision to fail (POST 500)")
+	}
+	if !strings.Contains(out.String(), "--name 'Prompted Lab' --location FR") {
+		t.Errorf("resume command should carry the PROMPTED name + location, got:\n%s", out.String())
+	}
+}

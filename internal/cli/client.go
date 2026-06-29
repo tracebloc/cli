@@ -185,6 +185,10 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 			return mapClientErr(err)
 		}
 	}
+	// Reflect the resolved (possibly prompted) name + location back into opts, so
+	// the failure-path resume command includes them — opts otherwise carries only
+	// the flags, omitting anything the user typed at a prompt (Bugbot).
+	opts.name, opts.location = name, location
 
 	// Read the cluster anchor (kube-system UID) so create is get-or-create keyed on
 	// it — re-running on the same cluster adopts the existing client instead of
