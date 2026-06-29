@@ -70,6 +70,8 @@ var categoryRegistry = []CategorySpec{
 		UnsupportedNote: "not implemented"},
 	{ID: "causal_language_modeling", Family: FamilyText, Label: "Causal language modeling", CLISupported: false,
 		UnsupportedNote: "schema-recognized (data-ingestors#805); `tracebloc ingest` discover/build for its raw-.txt / prompt\\tcompletion `texts` layout is pending"},
+	{ID: "seq2seq", Family: FamilyText, Label: "Sequence-to-sequence", CLISupported: false,
+		UnsupportedNote: "schema-recognized; `tracebloc ingest` discover/build for its raw-.txt / source\\ttarget `texts` layout is pending"},
 	{ID: "token_classification", Family: FamilyText, Label: "Token classification", CLISupported: false,
 		UnsupportedNote: "schema-recognized; the CLI doesn't stage its per-token-label `texts` layout yet"},
 }
