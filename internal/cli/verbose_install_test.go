@@ -109,3 +109,54 @@ func TestClientCreate_FailurePrintsResumeAndWritesInstallLog(t *testing.T) {
 		t.Errorf("install log should record the failure:\n%s", raw)
 	}
 }
+
+// TestClientCreate_CancelLogsCancelledNotDone pins the Bugbot fix: declining the
+// confirm prompt is a user abort, not a successful provision — the install log
+// must record "cancelled", never "done".
+func TestClientCreate_CancelLogsCancelledNotDone(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TRACEBLOC_CONFIG_DIR", dir)
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "tok"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	posted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posted = true
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(srv.Close)
+	origClient := newAPIClient
+	newAPIClient = func(string) *api.Client { return &api.Client{BaseURL: srv.URL, HTTP: srv.Client()} }
+	t.Cleanup(func() { newAPIClient = origClient })
+	origCID := readClusterID
+	readClusterID = func(context.Context, cluster.KubeconfigOptions) (string, error) {
+		return "", errors.New("no cluster (test)")
+	}
+	t.Cleanup(func() { readClusterID = origCID })
+
+	confirmNo := false
+	pr := &fakePrompter{answers: map[string]string{}, confirm: &confirmNo}
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), pr,
+		clientCreateOpts{name: "Lab", location: "DE"}); err != nil {
+		t.Fatalf("declining the confirm should be a clean exit, got: %v", err)
+	}
+	if posted {
+		t.Error("no client should be POSTed when the user declines")
+	}
+	logs, _ := filepath.Glob(filepath.Join(dir, "install-*.log"))
+	if len(logs) == 0 {
+		t.Fatal("no install-*.log written")
+	}
+	raw, _ := os.ReadFile(logs[0])
+	if !strings.Contains(string(raw), "cancelled") {
+		t.Errorf("install log should record the cancel, got:\n%s", raw)
+	}
+	if strings.Contains(string(raw), "done") {
+		t.Errorf("a cancelled run must NOT be logged as 'done':\n%s", raw)
+	}
+}

@@ -149,7 +149,9 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 			}
 			return
 		}
-		ilog.Logf("done")
+		// Success/cancel: the terminal outcome was already logged at its own
+		// branch (minted / adopted / cancelled), so don't blanket-log "done"
+		// here — a declined confirm must not read as a successful provision.
 		if logPath != "" {
 			p.Detailf("full log: %s", logPath)
 		}
@@ -224,6 +226,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 			return mapClientErr(cerr)
 		}
 		if !ok {
+			ilog.Logf("cancelled by user at the confirm prompt")
 			p.Hintf("Cancelled.")
 			return nil
 		}
