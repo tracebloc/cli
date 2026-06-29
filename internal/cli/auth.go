@@ -136,21 +136,35 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	}
 }
 
-// newLogoutCmd implements `tracebloc logout` — clears the stored token.
+// newLogoutCmd implements `tracebloc logout` — revokes the token server-side
+// (so a copied/leaked credential stops working) and clears it locally.
 func newLogoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Sign out (clear the stored token)",
+		Short: "Sign out (revoke the token server-side and clear it locally)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			p := printerFor(cmd)
 			cfg, err := config.Load()
 			if err != nil {
 				return &exitError{code: 1, err: err}
 			}
 			if !cfg.SignedIn() {
-				printerFor(cmd).Hintf("Already signed out.")
+				p.Hintf("Already signed out.")
 				return nil
 			}
+
+			// Capture what the server-side revoke needs BEFORE clearing local
+			// state. Resolve the env the same way authedClient does (saved env,
+			// else $CLIENT_ENV, else prod) so revoke hits the host the token was
+			// issued for, not a hardcoded prod.
+			token := cfg.Token
+			env := sessionEnv(cfg)
+
+			// Clear and persist local state FIRST — it's logout's primary job and
+			// the always-safe step. Saving before the network call means a failed
+			// Save can't leave a token that's already been revoked server-side
+			// sitting on disk as a broken "signed in" state.
 			cfg.Token = ""
 			cfg.Email = ""
 			// Also drop the active-client pointer: it's account-scoped, so leaving
@@ -161,7 +175,18 @@ func newLogoutCmd() *cobra.Command {
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: 1, err: err}
 			}
-			printerFor(cmd).Successf("Signed out.")
+
+			// Then revoke the token server-side so a copied/leaked credential stops
+			// authenticating after sign-out (RFC-0001 §7.5 / R2, backend#887).
+			// Best-effort by contract: on failure (offline / already-revoked) the
+			// local session is already cleared — the user is logged out (cli#112).
+			client := newAPIClient(env)
+			client.Token = token
+			if rerr := client.RevokeToken(cmd.Context()); rerr != nil {
+				p.Hintf("Signed out locally, but couldn't revoke the token server-side (%v). Revoke from the dashboard if this was a shared machine.", rerr)
+				return nil
+			}
+			p.Successf("Signed out.")
 			return nil
 		},
 	}

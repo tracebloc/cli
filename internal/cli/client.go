@@ -104,6 +104,17 @@ func clientPrompter() prompter {
 	return nil
 }
 
+// sessionEnv resolves the backend env for the signed-in session: the env saved
+// at login, falling back (legacy / empty config) to $CLIENT_ENV then prod. Shared
+// by authedClient and logout so every authenticated call — including the revoke
+// on sign-out — talks to the host the token was actually issued for.
+func sessionEnv(cfg *config.Config) string {
+	if cfg.Env != "" {
+		return cfg.Env
+	}
+	return api.ResolveEnv("")
+}
+
 // authedClient loads the signed-in config and returns a token-bearing API
 // client, or an error telling the user to log in.
 func authedClient() (*api.Client, *config.Config, error) {
@@ -114,11 +125,7 @@ func authedClient() (*api.Client, *config.Config, error) {
 	if !cfg.SignedIn() {
 		return nil, nil, errors.New("not signed in — run `tracebloc login` first")
 	}
-	env := cfg.Env
-	if env == "" {
-		env = api.ResolveEnv("")
-	}
-	client := newAPIClient(env)
+	client := newAPIClient(sessionEnv(cfg))
 	client.Token = cfg.Token
 	return client, cfg, nil
 }

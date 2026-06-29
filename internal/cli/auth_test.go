@@ -167,13 +167,28 @@ func TestLogin_Denied(t *testing.T) {
 }
 
 func TestLogout(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	// logout now revokes server-side (cli#112) — route it at a stub, not prod.
+	var revoked bool
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/auth/revoke" || r.Method != http.MethodPost {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			return
+		}
+		revoked = true
+		if got := r.Header.Get("Authorization"); got != "Bearer x" {
+			t.Errorf("revoke auth header = %q, want %q", got, "Bearer x")
+		}
+		w.WriteHeader(http.StatusNoContent) // 204, like the real endpoint
+	})
 	if err := (&config.Config{Token: "x", Email: "e@co", ActiveClientID: "7"}).Save(); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runCmd(t, "logout")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !revoked {
+		t.Error("logout did not call POST /auth/revoke")
 	}
 	cfg, _ := config.Load()
 	if cfg.SignedIn() {
@@ -186,6 +201,60 @@ func TestLogout(t *testing.T) {
 	}
 	if !strings.Contains(out, "Signed out") {
 		t.Errorf("got:\n%s", out)
+	}
+}
+
+// TestLogout_RevokeFailureStillClearsLocal pins the cli#112 contract: when the
+// server-side revoke fails (offline / already-revoked / 5xx), logout must still
+// succeed and clear local state — never leave the user unable to log out locally.
+func TestLogout_RevokeFailureStillClearsLocal(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError) // revoke fails
+	})
+	if err := (&config.Config{Token: "x", Email: "e@co", ActiveClientID: "7"}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runCmd(t, "logout")
+	if err != nil {
+		t.Fatalf("logout must succeed even when revoke fails: %v", err)
+	}
+	cfg, _ := config.Load()
+	if cfg.SignedIn() || cfg.ActiveClientID != "" {
+		t.Errorf("local state must be cleared even when revoke fails: %+v", cfg)
+	}
+	if !strings.Contains(out, "Signed out") {
+		t.Errorf("got:\n%s", out)
+	}
+}
+
+// TestLogout_RevokesAgainstSessionEnv pins the cli#112 / Bugbot fix: with an
+// empty cfg.Env (legacy config) the revoke must resolve the host like
+// authedClient does (— $CLIENT_ENV, else prod —), not hardcode prod, or it
+// hits the wrong backend and the real session token stays valid after logout.
+func TestLogout_RevokesAgainstSessionEnv(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	t.Setenv("CLIENT_ENV", "stg")
+	if err := (&config.Config{Token: "x"}).Save(); err != nil { // note: no Env set
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	var gotEnv string
+	orig := newAPIClient
+	newAPIClient = func(env string) *api.Client {
+		gotEnv = env
+		return &api.Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	}
+	t.Cleanup(func() { newAPIClient = orig })
+
+	if _, err := runCmd(t, "logout"); err != nil {
+		t.Fatal(err)
+	}
+	if gotEnv != "stg" {
+		t.Errorf("empty cfg.Env: revoked against %q, want $CLIENT_ENV %q (not hardcoded prod)", gotEnv, "stg")
 	}
 }
 

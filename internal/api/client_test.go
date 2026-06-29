@@ -353,3 +353,44 @@ func TestUpgradeRequired426_UnparseableBody(t *testing.T) {
 		t.Errorf("MinVersion = %q, want empty", ue.MinVersion)
 	}
 }
+
+// ── cli#112: logout server-side revoke (POST /auth/revoke, backend#887) ──
+
+// TestRevokeToken: a 204 from the endpoint → nil, with Bearer + POST on the wire.
+func TestRevokeToken(t *testing.T) {
+	var sawAuth, sawMethod, sawPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth, sawMethod, sawPath = r.Header.Get("Authorization"), r.Method, r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	c.Token = "usertoken123"
+	if err := c.RevokeToken(context.Background()); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if sawMethod != http.MethodPost || sawPath != "/auth/revoke" {
+		t.Errorf("revoke hit %s %s, want POST /auth/revoke", sawMethod, sawPath)
+	}
+	if sawAuth != "Bearer usertoken123" {
+		t.Errorf("revoke auth header = %q, want %q", sawAuth, "Bearer usertoken123")
+	}
+}
+
+// TestRevokeTokenServerError: a non-2xx surfaces as *APIError so logout can log
+// it (then clear local state regardless — see the cli-package logout tests).
+func TestRevokeTokenServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"detail":"boom"}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	c.Token = "t"
+	var ae *APIError
+	if err := c.RevokeToken(context.Background()); !errors.As(err, &ae) || ae.StatusCode != http.StatusInternalServerError {
+		t.Errorf("want APIError 500, got %v", err)
+	}
+}

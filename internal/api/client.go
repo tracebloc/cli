@@ -342,6 +342,23 @@ func (c *Client) WhoAmI(ctx context.Context) (*Identity, error) {
 	return &id, nil
 }
 
+// RevokeToken revokes the presenting credential server-side via POST /auth/revoke
+// (backend#887, shipped in backend#903): Bearer in, 204 out, idempotent. `logout`
+// calls this so a copied/leaked token stops authenticating after sign-out — local
+// clearing alone left it valid (RFC-0001 §7.5 / R2). Requires Token. A non-2xx is
+// returned as an *APIError; callers treat the call as best-effort.
+func (c *Client) RevokeToken(ctx context.Context) error {
+	url := c.BaseURL + "/auth/revoke"
+	status, raw, err := c.post(ctx, "/auth/revoke", nil)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return &APIError{StatusCode: status, Body: string(raw), URL: url}
+	}
+	return nil
+}
+
 // ── Client provisioning (Bearer-authed) — backend#836, /edge-device/ ──
 
 // ProvisionedClient is a tracebloc client (machine), as returned by the
