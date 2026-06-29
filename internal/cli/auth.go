@@ -101,21 +101,26 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 		tok, err := client.PollToken(ctx, dc.DeviceCode)
 		switch {
 		case err == nil:
-			cfg.Env = env
-			cfg.Token = tok
+			// Switch the active env and write into THAT env's profile, leaving the
+			// other envs' tokens + active-client pointers intact (R10). Profile()
+			// returns env's existing profile, so a re-login preserves its
+			// active_client_id rather than clobbering it.
+			cfg.CurrentEnv = env
+			prof := cfg.Profile(env)
+			prof.Token = tok
 			// Confirm the freshly-issued token actually authenticates, and
 			// capture the account to show + store. Best-effort: don't fail a
 			// successful sign-in just because this lookup couldn't run.
 			client.Token = tok
 			if id, werr := client.WhoAmI(ctx); werr == nil {
-				cfg.Email = id.Email
+				prof.Email = id.Email
 			}
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: 1, err: err}
 			}
 			p.Newline()
-			if cfg.Email != "" {
-				p.Successf("Signed in as %s. Token saved to ~/.tracebloc (0600).", cfg.Email)
+			if prof.Email != "" {
+				p.Successf("Signed in as %s. Token saved to ~/.tracebloc (0600).", prof.Email)
 			} else {
 				p.Successf("Signed in. Token saved to ~/.tracebloc (0600).")
 			}
@@ -155,23 +160,21 @@ func newLogoutCmd() *cobra.Command {
 			}
 
 			// Capture what the server-side revoke needs BEFORE clearing local
-			// state. Resolve the env the same way authedClient does (saved env,
+			// state. Resolve the env the same way authedClient does (current env,
 			// else $CLIENT_ENV, else prod) so revoke hits the host the token was
 			// issued for, not a hardcoded prod.
-			token := cfg.Token
+			prof := cfg.Current()
+			token := prof.Token
 			env := sessionEnv(cfg)
 
 			// Clear and persist local state FIRST — it's logout's primary job and
 			// the always-safe step. Saving before the network call means a failed
 			// Save can't leave a token that's already been revoked server-side
-			// sitting on disk as a broken "signed in" state.
-			cfg.Token = ""
-			cfg.Email = ""
-			// Also drop the active-client pointer: it's account-scoped, so leaving
-			// it would bleed into the next account's session (a later `login` as a
-			// different user would inherit a stale active client in `auth status` /
-			// `client list`).
-			cfg.ActiveClientID = ""
+			// sitting on disk as a broken "signed in" state. Only THIS env's
+			// profile is cleared; other envs' sessions are untouched (R10). The
+			// active-client pointer goes too — it's account-scoped, so leaving it
+			// would bleed into the next sign-in on this env.
+			*prof = config.Profile{}
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: 1, err: err}
 			}
@@ -218,18 +221,18 @@ func newAuthStatusCmd() *cobra.Command {
 				p.Hintf("Not signed in. Run `tracebloc login`.")
 				return nil
 			}
-			env := cfg.Env
-			if env == "" {
-				env = api.EnvProd
-			}
+			prof := cfg.Current()
 			p.Section("tracebloc auth")
 			p.Field("status", "signed in")
-			p.Field("backend", env)
-			if cfg.Email != "" {
-				p.Field("account", cfg.Email)
+			p.Field("backend", cfg.CurrentEnv)
+			if prof.Email != "" {
+				p.Field("account", prof.Email)
 			}
-			if cfg.ActiveClientID != "" {
-				p.Field("active client", cfg.ActiveClientID)
+			if prof.ActiveClientID != "" {
+				p.Field("active client", prof.ActiveClientID)
+			}
+			if prof.ExpiresAt != "" {
+				p.Field("expires", prof.ExpiresAt)
 			}
 			return nil
 		},

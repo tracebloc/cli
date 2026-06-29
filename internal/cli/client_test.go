@@ -28,7 +28,9 @@ func withClientBackend(t *testing.T, h http.HandlerFunc) {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	if err := (&config.Config{Env: "dev", Token: "tok"}).Save(); err != nil {
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "tok"},
+	}}).Save(); err != nil {
 		t.Fatal(err)
 	}
 	orig := newAPIClient
@@ -79,8 +81,8 @@ func TestClientCreate_Success(t *testing.T) {
 		t.Errorf("create body = %+v", body)
 	}
 	cfg, _ := config.Load()
-	if cfg.ActiveClientID != "5" {
-		t.Errorf("active client = %q, want 5", cfg.ActiveClientID)
+	if cfg.Current().ActiveClientID != "5" {
+		t.Errorf("active client = %q, want 5", cfg.Current().ActiveClientID)
 	}
 	if !strings.Contains(out.String(), "u-123") {
 		t.Errorf("output missing username:\n%s", out.String())
@@ -140,8 +142,8 @@ func TestClientUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, _ := config.Load()
-	if cfg.ActiveClientID != "7" {
-		t.Errorf("active = %q, want 7", cfg.ActiveClientID)
+	if cfg.Current().ActiveClientID != "7" {
+		t.Errorf("active = %q, want 7", cfg.Current().ActiveClientID)
 	}
 	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "99"); err == nil {
 		t.Error("expected an error for an unknown client id")
@@ -322,8 +324,8 @@ func TestClientCreate_AdoptIdempotent(t *testing.T) {
 		t.Error("password should still be sent in the adopt POST body")
 	}
 	cfg, _ := config.Load()
-	if cfg.ActiveClientID != "8" {
-		t.Errorf("active client = %q, want 8 (adopted id)", cfg.ActiveClientID)
+	if cfg.Current().ActiveClientID != "8" {
+		t.Errorf("active client = %q, want 8 (adopted id)", cfg.Current().ActiveClientID)
 	}
 }
 

@@ -109,8 +109,8 @@ func clientPrompter() prompter {
 // by authedClient and logout so every authenticated call — including the revoke
 // on sign-out — talks to the host the token was actually issued for.
 func sessionEnv(cfg *config.Config) string {
-	if cfg.Env != "" {
-		return cfg.Env
+	if cfg.CurrentEnv != "" {
+		return cfg.CurrentEnv
 	}
 	return api.ResolveEnv("")
 }
@@ -126,7 +126,7 @@ func authedClient() (*api.Client, *config.Config, error) {
 		return nil, nil, errors.New("not signed in — run `tracebloc login` first")
 	}
 	client := newAPIClient(sessionEnv(cfg))
-	client.Token = cfg.Token
+	client.Token = cfg.Current().Token
 	return client, cfg, nil
 }
 
@@ -232,7 +232,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		return &exitError{code: 1, err: err}
 	}
 
-	cfg.ActiveClientID = strconv.Itoa(pc.ID)
+	cfg.Current().ActiveClientID = strconv.Itoa(pc.ID)
 
 	p.Newline()
 	if adopted {
@@ -372,7 +372,7 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 	p.Section("Clients in your account")
 	for _, c := range clients {
 		marker := ""
-		if strconv.Itoa(c.ID) == cfg.ActiveClientID {
+		if strconv.Itoa(c.ID) == cfg.Current().ActiveClientID {
 			marker = "  (active)"
 		}
 		p.Field(strconv.Itoa(c.ID)+marker,
@@ -392,7 +392,7 @@ func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
 	}
 	for _, c := range clients {
 		if strconv.Itoa(c.ID) == id {
-			cfg.ActiveClientID = id
+			cfg.Current().ActiveClientID = id
 			if serr := cfg.Save(); serr != nil {
 				return &exitError{code: 1, err: serr}
 			}
