@@ -20,34 +20,38 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// newDatasetCmd wires the `tracebloc dataset` subtree. The dominant
-// verb is `push`, completed in Phase 3 (tracebloc/client#151) across
+// newDataCmd wires the `tracebloc data` subtree. The dominant
+// verb is `ingest`, completed in Phase 3 (tracebloc/client#151) across
 // PR-a (pre-flight: spec synth, validation, layout walk, cluster
 // discovery) and PR-b (this one: ephemeral stage Pod + tar-over-
-// exec stream + progress bar + SIGINT-safe cleanup). `dataset rm`
-// (#30) removes a pushed dataset's in-cluster artifacts; `dataset
+// exec stream + progress bar + SIGINT-safe cleanup). `data delete`
+// (#30) removes an ingested dataset's in-cluster artifacts; `data
 // list` lists the ingested datasets.
-func newDatasetCmd() *cobra.Command {
+//
+// Aliases: "dataset" is kept for one deprecation cycle so existing
+// scripts continue to work.
+func newDataCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "dataset",
-		Short: "Manage datasets in the parent client release",
+		Use:     "data",
+		Aliases: []string{"dataset"},
+		Short:   "Manage datasets in the parent client release",
 		Long: `Commands for staging and managing datasets on the cluster's
 shared PVC.
 
-` + "`dataset push`" + ` stages a local dataset to the cluster's shared
+` + "`data ingest`" + ` stages a local dataset to the cluster's shared
 PVC, submits the ingestion run to jobs-manager, and watches the
 ingestor Job to completion (streaming logs + the final summary).
 
 ` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run
-before the first push.`,
+before the first ingest.`,
 	}
-	cmd.AddCommand(newDatasetPushCmd())
-	cmd.AddCommand(newDatasetListCmd())
-	cmd.AddCommand(newDatasetRmCmd())
+	cmd.AddCommand(newDataIngestCmd())
+	cmd.AddCommand(newDataListCmd())
+	cmd.AddCommand(newDataDeleteCmd())
 	return cmd
 }
 
-// newDatasetPushCmd implements `tracebloc dataset push <local-path>`.
+// newDataIngestCmd implements `tracebloc data ingest <local-path>`.
 //
 // Phase 3 scope (now complete across PR-a + PR-b):
 //
@@ -64,7 +68,10 @@ before the first push.`,
 // Phase 4 (`tracebloc/client#152`) hooks the submit-to-jobs-manager
 // step into the bottom of this command, replacing the "manually
 // kick off helm ingestor" workaround in the success message.
-func newDatasetPushCmd() *cobra.Command {
+//
+// Aliases: "push" is kept for one deprecation cycle so existing
+// scripts continue to work.
+func newDataIngestCmd() *cobra.Command {
 	var (
 		// Kubeconfig flags — same conventions as `cluster info`.
 		// Promoting these to persistent on the root is a v0.2
@@ -117,8 +124,9 @@ func newDatasetPushCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "push <local-path>",
-		Short: "Stage a local dataset to the cluster's shared PVC",
+		Use:     "ingest <local-path>",
+		Aliases: []string{"push"},
+		Short:   "Stage a local dataset to the cluster's shared PVC",
 		Long: `Stages a local dataset to the parent client release's shared PVC,
 submits an ingestion run to jobs-manager, and watches the ingestor Job
 to completion. Supports 9 task categories (image classification,
@@ -161,7 +169,7 @@ Exit codes:
 			}
 			// Guided mode: on a terminal (and unless --no-input), prompt
 			// for whatever's still missing. Off a TTY / with --no-input,
-			// prompter stays nil and runDatasetPush keeps flag-only
+			// prompter stays nil and runDataIngest keeps flag-only
 			// behavior.
 			interactive := !noInput && !outputJSON && isInteractiveTTY()
 			var pr prompter
@@ -178,8 +186,8 @@ Exit codes:
 				printer = printerForWriter(cmd, cmd.ErrOrStderr())
 				jsonOut = cmd.OutOrStdout()
 			}
-			return runDatasetPush(cmd.Context(), humanOut, cmd.ErrOrStderr(),
-				runDatasetPushArgs{
+			return runDataIngest(cmd.Context(), humanOut, cmd.ErrOrStderr(),
+				runDataIngestArgs{
 					LocalPath:  localPath,
 					Kubeconfig: kubeconfigPath,
 					Context:    contextOverride,
@@ -268,11 +276,11 @@ Exit codes:
 	return cmd
 }
 
-// runDatasetPushArgs collects every parameter runDatasetPush needs,
+// runDataIngestArgs collects every parameter runDataIngest needs,
 // so the body stays testable without going through cobra. The cobra
 // RunE wrapper above is the ONLY caller in production; tests
 // construct one of these directly.
-type runDatasetPushArgs struct {
+type runDataIngestArgs struct {
 	LocalPath      string
 	Kubeconfig     string
 	Context        string
@@ -289,7 +297,7 @@ type runDatasetPushArgs struct {
 	Printer *ui.Printer
 
 	// Interactive guided mode (#28). When Interactive is true,
-	// runDatasetPush prompts (via Prompter) for any missing core inputs
+	// runDataIngest prompts (via Prompter) for any missing core inputs
 	// before validation. CategorySet records whether --category was
 	// passed explicitly (its non-empty default would otherwise look
 	// like a deliberate choice). Prompter is nil off a TTY / --no-input.
@@ -313,7 +321,7 @@ type runDatasetPushArgs struct {
 // expandHome expands a leading ~ or ~/… to $HOME, leaving every other
 // path (relative, absolute, empty) untouched. It mirrors
 // cluster.expandPath — kept as a small local copy rather than coupling
-// the dataset path-handling to the cluster package's internals; if a
+// the data path-handling to the cluster package's internals; if a
 // third caller appears, promote both to a shared pathutil.
 func expandHome(path string) string {
 	if path == "" || path[0] != '~' {
@@ -331,7 +339,7 @@ func expandHome(path string) string {
 	return filepath.Join(home, path[1:])
 }
 
-// runDatasetPush is the full Phase 3 implementation: pre-flight
+// runDataIngest is the full Phase 3 implementation: pre-flight
 // checks, then either --dry-run stop or stage Pod + tar stream +
 // cleanup. Phase 4 (#152) will hook submit-to-jobs-manager after
 // the staging step.
@@ -340,7 +348,7 @@ func expandHome(path string) string {
 // need the cluster runs before any that does, so a customer with
 // a bad label-column or oversized dataset gets the diagnostic in
 // milliseconds without a kubeconfig round-trip.
-func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPushArgs) (err error) {
+func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestArgs) (err error) {
 	// In --output-json mode, guarantee stdout always carries a JSON
 	// object. The dry-run + post-submit paths emit a result and set
 	// jsonEmitted; this defer covers every early-failure return (bad
@@ -358,11 +366,11 @@ func runDatasetPush(ctx context.Context, out, errOut io.Writer, a runDatasetPush
 		}
 	}()
 
-	// Intro header: brand + a plain-English explainer of what a push
+	// Intro header: brand + a plain-English explainer of what an ingest
 	// does, so a first-time user understands it before any prompts.
 	// Routed through a.Printer, so --output-json keeps it on stderr and
 	// --plain/non-TTY degrade cleanly. (#31)
-	a.Printer.Banner("tracebloc", "dataset push")
+	a.Printer.Banner("tracebloc", "data ingest")
 	a.Printer.Para(strings.TrimSpace(`
 This uploads a dataset from your machine into your tracebloc workspace so models
 can be trained on it. Your files are sent to the Kubernetes cluster your
@@ -377,7 +385,7 @@ contributors train against it without ever seeing the raw files.`))
 	if a.Interactive && a.Prompter != nil {
 		if err := runInteractive(a.Printer, a.Prompter, &a, a.CategorySet); err != nil {
 			if errors.Is(err, errInteractiveCancelled) {
-				a.Printer.Infof("Cancelled — nothing was pushed.")
+				a.Printer.Infof("Cancelled — nothing was ingested.")
 				return nil
 			}
 			return &exitError{code: 3, err: fmt.Errorf("interactive setup: %w", err)}
@@ -424,7 +432,7 @@ contributors train against it without ever seeing the raw files.`))
 	case push.IsCLISupported(a.Spec.Category):
 		// supported
 	case push.IsKnown(a.Spec.Category):
-		// A recognized category dataset push doesn't implement yet — image
+		// A recognized category data ingest doesn't implement yet — image
 		// (semantic_segmentation / instance_segmentation) or text
 		// (causal_language_modeling). Routed here (not the default branch) so the
 		// user gets the registry's per-category pending-support reason, not a
