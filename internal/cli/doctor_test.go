@@ -130,3 +130,26 @@ func TestClusterDoctor_KubeconfigFailStays3WhenAuthOK(t *testing.T) {
 		t.Fatalf("kubeconfig-fail + auth-OK → want exit 3 (contract), got %v", err)
 	}
 }
+
+// TestRunAuthChecks_426IsHardFailure pins the Bugbot fix: a 426 (server enforces
+// a newer CLI) from the live token check is a hard "upgrade" failure, not a
+// transient "couldn't verify — check your network" warning.
+func TestRunAuthChecks_426IsHardFailure(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", ActiveClientID: "5"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUpgradeRequired) // 426
+		_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"0.9.0"}`))
+	})
+	var out bytes.Buffer
+	if st := runAuthChecks(context.Background(), ui.New(&out)); st != doctor.StatusFail {
+		t.Errorf("426 from the token check → want Fail (not a transient Warn), got %v", st)
+	}
+	if !strings.Contains(out.String(), "too old") || !strings.Contains(out.String(), "426") {
+		t.Errorf("426 should report a clear 'too old / upgrade' failure, got:\n%s", out.String())
+	}
+}

@@ -194,14 +194,23 @@ func runAuthChecks(ctx context.Context, p *ui.Printer) doctor.Status {
 	client.Token = prof.Token
 	if _, werr := client.WhoAmI(ctx); werr != nil {
 		var ae *api.APIError
-		if errors.As(werr, &ae) && ae.StatusCode == http.StatusUnauthorized {
+		var ue *api.UpgradeRequiredError
+		switch {
+		case errors.As(werr, &ae) && ae.StatusCode == http.StatusUnauthorized:
 			p.Errorf("Backend auth — %s rejected the token (401)", api.BaseURL(env))
 			p.Hintf("     your session expired or was revoked — run `tracebloc login`")
 			return doctor.StatusFail
+		case errors.As(werr, &ue):
+			// 426: the server enforces a newer CLI. That's a hard, actionable
+			// failure ("upgrade"), not a transient "couldn't verify" warning.
+			p.Errorf("Backend auth — this CLI is too old for %s (HTTP 426)", api.BaseURL(env))
+			p.Hintf("     %s", ue.Error())
+			return doctor.StatusFail
+		default:
+			p.Warnf("Backend auth — couldn't verify the token: %v", werr)
+			p.Hintf("     the backend may be unreachable from here — check your network / HTTP(S)_PROXY")
+			return worseStatus(worst, doctor.StatusWarn)
 		}
-		p.Warnf("Backend auth — couldn't verify the token: %v", werr)
-		p.Hintf("     the backend may be unreachable from here — check your network / HTTP(S)_PROXY")
-		return worseStatus(worst, doctor.StatusWarn)
 	}
 	p.Successf("Backend auth — token valid at %s", api.BaseURL(env))
 	return worst
