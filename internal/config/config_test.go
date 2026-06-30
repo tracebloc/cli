@@ -176,3 +176,26 @@ func TestSignedInRequiresCurrentEnvToken(t *testing.T) {
 		t.Error("signed-in should be true once the current env has a token")
 	}
 }
+
+// TestLoadV2ShapedWithoutVersion_NotMigrated pins the Bugbot fix: a config that
+// already has v2 `profiles` but a missing/old version must be parsed as v2, not
+// misread as v1 and migrated (which reads only flat fields → would drop profiles).
+func TestLoadV2ShapedWithoutVersion_NotMigrated(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TRACEBLOC_CONFIG_DIR", dir)
+	// No "version" key, but a v2-shaped profiles object.
+	raw := `{"current_env":"dev","profiles":{"dev":{"token":"keep-me","active_client_id":"7"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.SignedIn() {
+		t.Fatalf("v2-shaped config without a version was misread as v1 (profiles dropped): %+v", c)
+	}
+	if p := c.Profile("dev"); p.Token != "keep-me" || p.ActiveClientID != "7" {
+		t.Errorf("dev profile not preserved: %+v", p)
+	}
+}

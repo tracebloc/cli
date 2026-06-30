@@ -122,14 +122,18 @@ func Load() (*Config, error) {
 	}
 
 	// Detect the on-disk schema. v1 (cli#83) had no "version" key and a flat
-	// {env,email,token,active_client_id}; it decodes here as version 0 → migrate.
+	// {env,email,token,active_client_id}; it decodes here as version 0. Migrate
+	// only a GENUINE v1 record: an old version AND no v2 `profiles` object — so a
+	// v2-shaped file with a missing/wrong version is still parsed as v2 and never
+	// has its profiles silently dropped by migrateV1.
 	var probe struct {
-		Version int `json:"version"`
+		Version  int             `json:"version"`
+		Profiles json.RawMessage `json:"profiles"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
-	if probe.Version < schemaVersion {
+	if probe.Version < schemaVersion && len(probe.Profiles) == 0 {
 		return migrateV1(data, path)
 	}
 	var c Config
