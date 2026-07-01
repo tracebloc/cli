@@ -76,11 +76,11 @@ func TestLogin_FullFlow(t *testing.T) {
 		t.Errorf("expected 2 polls (pending then token), got %d", polls)
 	}
 	cfg, _ := config.Load()
-	if cfg.Token != "cat_abc" {
-		t.Errorf("stored token = %q, want cat_abc", cfg.Token)
+	if cfg.Current().Token != "cat_abc" {
+		t.Errorf("stored token = %q, want cat_abc", cfg.Current().Token)
 	}
-	if cfg.Email != "ds@tracebloc.io" {
-		t.Errorf("stored email = %q, want ds@tracebloc.io", cfg.Email)
+	if cfg.Current().Email != "ds@tracebloc.io" {
+		t.Errorf("stored email = %q, want ds@tracebloc.io", cfg.Current().Email)
 	}
 	if !strings.Contains(out, "ds@tracebloc.io") {
 		t.Errorf("expected output to show the account, got:\n%s", out)
@@ -167,13 +167,30 @@ func TestLogin_Denied(t *testing.T) {
 }
 
 func TestLogout(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	if err := (&config.Config{Token: "x", Email: "e@co", ActiveClientID: "7"}).Save(); err != nil {
+	// logout now revokes server-side (cli#112) — route it at a stub, not prod.
+	var revoked bool
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/auth/revoke" || r.Method != http.MethodPost {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			return
+		}
+		revoked = true
+		if got := r.Header.Get("Authorization"); got != "Bearer x" {
+			t.Errorf("revoke auth header = %q, want %q", got, "Bearer x")
+		}
+		w.WriteHeader(http.StatusNoContent) // 204, like the real endpoint
+	})
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "e@co", ActiveClientID: "7"},
+	}}).Save(); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runCmd(t, "logout")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !revoked {
+		t.Error("logout did not call POST /auth/revoke")
 	}
 	cfg, _ := config.Load()
 	if cfg.SignedIn() {
@@ -181,17 +198,75 @@ func TestLogout(t *testing.T) {
 	}
 	// The active-client pointer is account-scoped — it must not survive logout,
 	// or it bleeds into the next account's session.
-	if cfg.ActiveClientID != "" {
-		t.Errorf("active_client_id = %q after logout, want cleared", cfg.ActiveClientID)
+	if cfg.Current().ActiveClientID != "" {
+		t.Errorf("active_client_id = %q after logout, want cleared", cfg.Current().ActiveClientID)
 	}
 	if !strings.Contains(out, "Signed out") {
 		t.Errorf("got:\n%s", out)
 	}
 }
 
+// TestLogout_RevokeFailureStillClearsLocal pins the cli#112 contract: when the
+// server-side revoke fails (offline / already-revoked / 5xx), logout must still
+// succeed and clear local state — never leave the user unable to log out locally.
+func TestLogout_RevokeFailureStillClearsLocal(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError) // revoke fails
+	})
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "e@co", ActiveClientID: "7"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runCmd(t, "logout")
+	if err != nil {
+		t.Fatalf("logout must succeed even when revoke fails: %v", err)
+	}
+	cfg, _ := config.Load()
+	if cfg.SignedIn() || cfg.Current().ActiveClientID != "" {
+		t.Errorf("local state must be cleared even when revoke fails: %+v", cfg)
+	}
+	if !strings.Contains(out, "Signed out") {
+		t.Errorf("got:\n%s", out)
+	}
+}
+
+// TestLogout_RevokesAgainstSessionEnv pins that logout revokes against the
+// session's own env (the current profile's env), not a hardcoded prod — so the
+// token is killed on the host it was issued for (cli#112 / Bugbot, carried to v2).
+func TestLogout_RevokesAgainstSessionEnv(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	if err := (&config.Config{CurrentEnv: "stg", Profiles: map[string]*config.Profile{
+		"stg": {Token: "x"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	var gotEnv string
+	orig := newAPIClient
+	newAPIClient = func(env string) *api.Client {
+		gotEnv = env
+		return &api.Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	}
+	t.Cleanup(func() { newAPIClient = orig })
+
+	if _, err := runCmd(t, "logout"); err != nil {
+		t.Fatal(err)
+	}
+	if gotEnv != "stg" {
+		t.Errorf("logout revoked against env %q, want the session env %q (not prod)", gotEnv, "stg")
+	}
+}
+
 func TestAuthStatus_SignedIn(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	if err := (&config.Config{Env: "dev", Token: "x", Email: "ds@co"}).Save(); err != nil {
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "ds@co"},
+	}}).Save(); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runCmd(t, "auth", "status")

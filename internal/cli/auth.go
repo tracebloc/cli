@@ -57,6 +57,7 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	}
 	env := api.ResolveEnv(envFlag)
 	client := newAPIClient(env)
+	p.Detailf("backend %s — requesting a device code …", client.BaseURL)
 
 	dc, err := client.RequestDeviceCode(ctx)
 	if err != nil {
@@ -101,21 +102,27 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 		tok, err := client.PollToken(ctx, dc.DeviceCode)
 		switch {
 		case err == nil:
-			cfg.Env = env
-			cfg.Token = tok
+			// Switch the active env and write into THAT env's profile, leaving the
+			// other envs' tokens + active-client pointers intact (R10). Profile()
+			// returns env's existing profile, so a re-login preserves its
+			// active_client_id rather than clobbering it.
+			cfg.CurrentEnv = env
+			prof := cfg.Profile(env)
+			prof.Token = tok
 			// Confirm the freshly-issued token actually authenticates, and
 			// capture the account to show + store. Best-effort: don't fail a
 			// successful sign-in just because this lookup couldn't run.
 			client.Token = tok
+			p.Detailf("authorized — confirming the token with the backend …")
 			if id, werr := client.WhoAmI(ctx); werr == nil {
-				cfg.Email = id.Email
+				prof.Email = id.Email
 			}
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: 1, err: err}
 			}
 			p.Newline()
-			if cfg.Email != "" {
-				p.Successf("Signed in as %s. Token saved to ~/.tracebloc (0600).", cfg.Email)
+			if prof.Email != "" {
+				p.Successf("Signed in as %s. Token saved to ~/.tracebloc (0600).", prof.Email)
 			} else {
 				p.Successf("Signed in. Token saved to ~/.tracebloc (0600).")
 			}
@@ -136,32 +143,55 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	}
 }
 
-// newLogoutCmd implements `tracebloc logout` — clears the stored token.
+// newLogoutCmd implements `tracebloc logout` — revokes the token server-side
+// (so a copied/leaked credential stops working) and clears it locally.
 func newLogoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Sign out (clear the stored token)",
+		Short: "Sign out (revoke the token server-side and clear it locally)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			p := printerFor(cmd)
 			cfg, err := config.Load()
 			if err != nil {
 				return &exitError{code: 1, err: err}
 			}
 			if !cfg.SignedIn() {
-				printerFor(cmd).Hintf("Already signed out.")
+				p.Hintf("Already signed out.")
 				return nil
 			}
-			cfg.Token = ""
-			cfg.Email = ""
-			// Also drop the active-client pointer: it's account-scoped, so leaving
-			// it would bleed into the next account's session (a later `login` as a
-			// different user would inherit a stale active client in `auth status` /
-			// `client list`).
-			cfg.ActiveClientID = ""
+
+			// Capture what the server-side revoke needs BEFORE clearing local
+			// state. Resolve the env the same way authedClient does (current env,
+			// else $CLIENT_ENV, else prod) so revoke hits the host the token was
+			// issued for, not a hardcoded prod.
+			prof := cfg.Current()
+			token := prof.Token
+			env := sessionEnv(cfg)
+
+			// Clear and persist local state FIRST — it's logout's primary job and
+			// the always-safe step. Saving before the network call means a failed
+			// Save can't leave a token that's already been revoked server-side
+			// sitting on disk as a broken "signed in" state. Only THIS env's
+			// profile is cleared; other envs' sessions are untouched (R10). The
+			// active-client pointer goes too — it's account-scoped, so leaving it
+			// would bleed into the next sign-in on this env.
+			*prof = config.Profile{}
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: 1, err: err}
 			}
-			printerFor(cmd).Successf("Signed out.")
+
+			// Then revoke the token server-side so a copied/leaked credential stops
+			// authenticating after sign-out (RFC-0001 §7.5 / R2, backend#887).
+			// Best-effort by contract: on failure (offline / already-revoked) the
+			// local session is already cleared — the user is logged out (cli#112).
+			client := newAPIClient(env)
+			client.Token = token
+			if rerr := client.RevokeToken(cmd.Context()); rerr != nil {
+				p.Hintf("Signed out locally, but couldn't revoke the token server-side (%v). Revoke from the dashboard if this was a shared machine.", rerr)
+				return nil
+			}
+			p.Successf("Signed out.")
 			return nil
 		},
 	}
@@ -193,18 +223,18 @@ func newAuthStatusCmd() *cobra.Command {
 				p.Hintf("Not signed in. Run `tracebloc login`.")
 				return nil
 			}
-			env := cfg.Env
-			if env == "" {
-				env = api.EnvProd
-			}
+			prof := cfg.Current()
 			p.Section("tracebloc auth")
 			p.Field("status", "signed in")
-			p.Field("backend", env)
-			if cfg.Email != "" {
-				p.Field("account", cfg.Email)
+			p.Field("backend", cfg.CurrentEnv)
+			if prof.Email != "" {
+				p.Field("account", prof.Email)
 			}
-			if cfg.ActiveClientID != "" {
-				p.Field("active client", cfg.ActiveClientID)
+			if prof.ActiveClientID != "" {
+				p.Field("active client", prof.ActiveClientID)
+			}
+			if prof.ExpiresAt != "" {
+				p.Field("expires", prof.ExpiresAt)
 			}
 			return nil
 		},

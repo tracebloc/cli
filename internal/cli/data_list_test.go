@@ -13,17 +13,17 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// TestRunDatasetList_OutputJSONEarlyFailureEmitsJSON: with --output-json,
+// TestRunDataList_OutputJSONEarlyFailureEmitsJSON: with --output-json,
 // a failure before the listing (here a broken kubeconfig, exit 3) still
 // writes a JSON error object to stdout — the stdout-always-JSON contract
-// that #49 established for dataset push. (Bugbot #53)
-func TestRunDatasetList_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
+// that #49 established for data ingest. (Bugbot #53)
+func TestRunDataList_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
 	bad := filepath.Join(t.TempDir(), "broken.yaml")
 	if err := os.WriteFile(bad, []byte("}{ not valid kubeconfig"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var jsonBuf, human bytes.Buffer
-	err := runDatasetList(context.Background(), runDatasetListArgs{
+	err := runDataList(context.Background(), runDataListArgs{
 		Kubeconfig: bad,
 		OutputJSON: true,
 		Printer:    ui.New(&human, ui.WithColor(false)),
@@ -43,25 +43,25 @@ func TestRunDatasetList_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
 	}
 }
 
-// TestRenderDatasetList_Empty: the empty listing shows the count and
-// points the user at `dataset push`.
-func TestRenderDatasetList_Empty(t *testing.T) {
+// TestRenderDataList_Empty: the empty listing shows the count and
+// points the user at `data ingest`.
+func TestRenderDataList_Empty(t *testing.T) {
 	var buf bytes.Buffer
-	renderDatasetList(ui.New(&buf, ui.WithColor(false)), "ap-workspace", nil)
+	renderDataList(ui.New(&buf, ui.WithColor(false)), "ap-workspace", nil)
 	out := buf.String()
 	if !strings.Contains(out, "Datasets in ap-workspace (0)") {
 		t.Errorf("missing header/count:\n%s", out)
 	}
-	if !strings.Contains(out, "dataset push") {
-		t.Errorf("empty state should point at `dataset push`:\n%s", out)
+	if !strings.Contains(out, "data ingest") {
+		t.Errorf("empty state should point at `data ingest`:\n%s", out)
 	}
 }
 
-// TestRenderDatasetList_Items: a populated listing shows the count and
+// TestRenderDataList_Items: a populated listing shows the count and
 // every table name.
-func TestRenderDatasetList_Items(t *testing.T) {
+func TestRenderDataList_Items(t *testing.T) {
 	var buf bytes.Buffer
-	renderDatasetList(ui.New(&buf, ui.WithColor(false)), "tracebloc-templates", []string{"reg_train", "churn_test"})
+	renderDataList(ui.New(&buf, ui.WithColor(false)), "tracebloc-templates", []string{"reg_train", "churn_test"})
 	out := buf.String()
 	for _, want := range []string{"Datasets in tracebloc-templates (2)", "reg_train", "churn_test"} {
 		if !strings.Contains(out, want) {
@@ -70,13 +70,13 @@ func TestRenderDatasetList_Items(t *testing.T) {
 	}
 }
 
-// TestWriteDatasetListJSON: valid JSON with the expected fields, and a
+// TestWriteDataListJSON: valid JSON with the expected fields, and a
 // nil dataset slice marshals as [] (not null) so scripts get an array.
-func TestWriteDatasetListJSON(t *testing.T) {
+func TestWriteDataListJSON(t *testing.T) {
 	var buf bytes.Buffer
-	writeDatasetListJSON(&buf, "ns1", "tracebloc", []string{"a", "b"})
+	writeDataListJSON(&buf, "ns1", "tracebloc", []string{"a", "b"})
 
-	var got datasetListJSON
+	var got dataListJSON
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, buf.String())
 	}
@@ -88,7 +88,7 @@ func TestWriteDatasetListJSON(t *testing.T) {
 	}
 
 	buf.Reset()
-	writeDatasetListJSON(&buf, "ns1", "tracebloc", nil)
+	writeDataListJSON(&buf, "ns1", "tracebloc", nil)
 	if !strings.Contains(buf.String(), `"datasets": []`) {
 		t.Errorf("nil datasets should marshal as []:\n%s", buf.String())
 	}

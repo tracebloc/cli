@@ -17,8 +17,8 @@ import (
 
 // promptCategories is the ordered list offered by the interactive
 // category picker. It derives from the push registry's CLI-supported
-// set — the exact categories runDatasetPush's gate accepts — so the
-// picker can't drift from what `dataset push` actually supports.
+// set — the exact categories runDataIngest's gate accepts — so the
+// picker can't drift from what `data ingest` actually supports.
 // semantic_/instance_segmentation are excluded (CLISupported=false)
 // until they're implemented.
 var promptCategories = push.SupportedCategoryIDs()
@@ -30,7 +30,7 @@ var promptCategories = push.SupportedCategoryIDs()
 // uses to let cluster code run against a fake clientset.
 // errInteractiveCancelled is returned when the user declines the
 // confirm prompt or hits Ctrl-C. It's control flow, not a failure:
-// runDatasetPush maps it to a clean exit (0) with a "Cancelled" note.
+// runDataIngest maps it to a clean exit (0) with a "Cancelled" note.
 var errInteractiveCancelled = errors.New("cancelled by user")
 
 type prompter interface {
@@ -102,7 +102,7 @@ func isInteractiveTTY() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
-// runInteractive fills the gaps in a's core push fields by prompting,
+// runInteractive fills the gaps in a's core ingest fields by prompting,
 // then returns. It only prompts for what's still missing, so flags the
 // user already passed win. categorySet says whether --category was set
 // explicitly (vs left at its non-empty default), which would otherwise
@@ -110,8 +110,8 @@ func isInteractiveTTY() bool {
 //
 // Mutates a through the pointer. PR-b adds category-specific prompts
 // (target-size, schema, number-of-keypoints) + a confirm screen.
-func runInteractive(p *ui.Printer, pr prompter, a *runDatasetPushArgs, categorySet bool) error {
-	p.PromptHeader("Let's set up your dataset push")
+func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, categorySet bool) error {
+	p.PromptHeader("Let's set up your data ingest")
 	p.Hintf("Press Enter to accept a default; Ctrl-C to cancel.")
 	prompted := false
 
@@ -177,11 +177,11 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDatasetPushArgs, categoryS
 	}
 	prompted = prompted || cp
 
-	// Confirm only when we actually prompted something — a push that's
+	// Confirm only when we actually prompted something — an ingest that's
 	// fully specified by flags (on a TTY) isn't nagged with a confirm.
 	if prompted {
 		renderReview(p, a)
-		ok, err := pr.Confirm("Proceed with the push?", true)
+		ok, err := pr.Confirm("Proceed with the ingest?", true)
 		if err != nil {
 			return err
 		}
@@ -195,7 +195,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDatasetPushArgs, categoryS
 // promptCategorySpecific prompts for the inputs a particular category
 // needs beyond the core fields, filling only the gaps. Returns whether
 // it prompted anything (so the caller knows to show the confirm).
-func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDatasetPushArgs) (bool, error) {
+func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (bool, error) {
 	cat := a.Spec.Category
 	prompted := false
 	switch {
@@ -257,9 +257,9 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDatasetPushArgs) (
 	return prompted, nil
 }
 
-// renderReview prints the assembled push inputs before the confirm
+// renderReview prints the assembled ingest inputs before the confirm
 // prompt, so the user sees exactly what's about to happen.
-func renderReview(p *ui.Printer, a *runDatasetPushArgs) {
+func renderReview(p *ui.Printer, a *runDataIngestArgs) {
 	p.Section("Review")
 	p.Field("path", a.LocalPath)
 	p.Field("category", a.Spec.Category)

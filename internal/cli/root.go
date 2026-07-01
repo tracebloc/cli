@@ -8,9 +8,12 @@ package cli
 
 import (
 	"io"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -32,6 +35,10 @@ type BuildInfo struct {
 // global state has historically been a source of test interference,
 // and constructing fresh trees per call is cheap.
 func NewRootCmd(info BuildInfo) *cobra.Command {
+	// Record the CLI version for the User-Agent sent on every backend request
+	// (RFC-0001 §14 R11 / backend#888): "tracebloc-cli/<ver> (<os>/<arch>)".
+	api.SetUserAgent(info.Version)
+
 	root := &cobra.Command{
 		Use:   "tracebloc",
 		Short: "tracebloc — interactive data ingestion for your cluster",
@@ -43,7 +50,7 @@ developer's workstation.
 
 The dominant workflow:
 
-  tracebloc dataset push ./my-data \
+  tracebloc data ingest ./my-data \
     --table cats_dogs_train \
     --category image_classification \
     --intent train \
@@ -54,7 +61,7 @@ on the cluster's shared PVC, submitting the ingestion request,
 watching the resulting Job, and reporting the outcome. Customers never
 touch Helm, never edit YAML, never run kubectl cp manually.
 
-This binary implements the full v0.1 ingestion path: ` + "`dataset push`" + `
+This binary implements the full v0.1 ingestion path: ` + "`data ingest`" + `
 (the dominant workflow above), ` + "`ingest validate`" + ` for a local
 schema check, ` + "`cluster info`" + ` for discovery diagnostics, plus
 ` + "`version`" + ` and ` + "`completion`" + `. See
@@ -75,12 +82,17 @@ what's planned next.`,
 	// CI / log capture where stdout might still look like a terminal.
 	root.PersistentFlags().Bool("plain", false,
 		"disable color and decorative output (also honors $NO_COLOR)")
+	// --verbose streams the per-step detail (device-flow → provision → install)
+	// that's hidden by default; also enabled by $TRACEBLOC_LOG_LEVEL=debug. The
+	// default output stays quiet — a handful of ✔ lines (RFC-0001 §8.5).
+	root.PersistentFlags().Bool("verbose", false,
+		"stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)")
 
 	// Subcommands. New phases append here.
 	root.AddCommand(newVersionCmd(info))
 	root.AddCommand(newIngestCmd())
 	root.AddCommand(newClusterCmd())
-	root.AddCommand(newDatasetCmd())
+	root.AddCommand(newDataCmd())
 	// RFC-0001 (backend#830): browser sign-in + client provisioning.
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newLogoutCmd())
@@ -97,9 +109,9 @@ what's planned next.`,
 		p := printerFor(cmd)
 		p.Banner("tracebloc", "interactive data ingestion for your cluster")
 		p.Section("Get started")
-		p.Infof("tracebloc dataset push            — stage + ingest a dataset interactively (or use --help to see flags)")
-		p.Infof("tracebloc dataset list            — list datasets ingested in the cluster")
-		p.Infof("tracebloc dataset rm <table>      — delete a pushed dataset (its table + files)")
+		p.Infof("tracebloc data ingest              — stage + ingest a dataset interactively (or use --help to see flags)")
+		p.Infof("tracebloc data list               — list datasets ingested in the cluster")
+		p.Infof("tracebloc data delete <table>     — delete an ingested dataset (its table + files)")
 		p.Infof("tracebloc cluster info            — check the CLI can reach your cluster")
 		p.Infof("tracebloc ingest validate f.yaml  — validate an ingest.yaml locally")
 		p.Newline()
@@ -122,8 +134,26 @@ func printerFor(cmd *cobra.Command) *ui.Printer {
 // dataset push's --output-json mode, which routes human output to
 // stderr so stdout carries only the JSON result.
 func printerForWriter(cmd *cobra.Command, w io.Writer) *ui.Printer {
+	var opts []ui.Option
 	if plain, _ := cmd.Flags().GetBool("plain"); plain {
-		return ui.New(w, ui.WithColor(false))
+		opts = append(opts, ui.WithColor(false))
 	}
-	return ui.New(w)
+	if verboseRequested(cmd) {
+		opts = append(opts, ui.WithVerbose(true))
+	}
+	return ui.New(w, opts...)
+}
+
+// verboseRequested reports whether the user asked for verbose output, via the
+// --verbose flag or $TRACEBLOC_LOG_LEVEL (debug/trace/verbose). The flag wins;
+// the env var lets a headless / scripted run opt in without editing the command.
+func verboseRequested(cmd *cobra.Command) bool {
+	if v, err := cmd.Flags().GetBool("verbose"); err == nil && v {
+		return true
+	}
+	switch strings.ToLower(os.Getenv("TRACEBLOC_LOG_LEVEL")) {
+	case "debug", "trace", "verbose":
+		return true
+	}
+	return false
 }

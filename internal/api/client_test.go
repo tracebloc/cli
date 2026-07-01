@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -251,5 +253,144 @@ func TestListClients_BareArrayUnpaginated(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
 		t.Fatalf("want 2 clients [1,2] from a bare array, got %+v", got)
+	}
+}
+
+// ── cli#98: User-Agent version header + 426 Upgrade Required (RFC-0001 §14 R11) ──
+
+// TestUserAgentHeaderSent proves the transport wrapper puts the configured
+// version on the wire for a real request (here a GET via WhoAmI).
+func TestUserAgentHeaderSent(t *testing.T) {
+	old := userAgent
+	defer func() { userAgent = old }()
+	SetUserAgent("7.7.7")
+
+	want := "tracebloc-cli/7.7.7 (" + runtime.GOOS + "/" + runtime.GOARCH + ")"
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte(`{"email":"x","type":"y","account":"z"}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	c.Token = "t"
+	if _, err := c.WhoAmI(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("User-Agent = %q, want %q", got, want)
+	}
+}
+
+// TestUserAgentDevFallback: a build that never called SetUserAgent (or with an
+// empty version) reports "dev" — which the backend can't parse, so it fails open.
+func TestUserAgentDevFallback(t *testing.T) {
+	old := userAgent
+	defer func() { userAgent = old }()
+
+	want := "tracebloc-cli/dev (" + runtime.GOOS + "/" + runtime.GOARCH + ")"
+	userAgent = ""
+	if got := currentUserAgent(); got != want {
+		t.Errorf("unset → currentUserAgent() = %q, want %q", got, want)
+	}
+	SetUserAgent("")
+	if got := currentUserAgent(); got != want {
+		t.Errorf(`SetUserAgent("") → %q, want %q`, got, want)
+	}
+}
+
+// TestUpgradeRequired426 pins the central 426 handling: a 426 from any endpoint
+// (GET or POST) surfaces as a typed *UpgradeRequiredError carrying min_version,
+// not a raw *APIError — so every command degrades to the same upgrade message.
+func TestUpgradeRequired426(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUpgradeRequired) // 426
+		_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"0.4.0"}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	c.Token = "t"
+
+	var ue *UpgradeRequiredError
+	if _, err := c.WhoAmI(context.Background()); !errors.As(err, &ue) || ue.MinVersion != "0.4.0" {
+		t.Errorf("GET on 426: want *UpgradeRequiredError{0.4.0}, got %v", err)
+	}
+	ue = nil
+	if _, err := c.RequestDeviceCode(context.Background()); !errors.As(err, &ue) || ue.MinVersion != "0.4.0" {
+		t.Errorf("POST on 426: want *UpgradeRequiredError{0.4.0}, got %v", err)
+	}
+}
+
+// TestUpgradeRequiredErrorMessage: the message is actionable (names the floor)
+// and stays sensible when the server didn't send a min_version.
+func TestUpgradeRequiredErrorMessage(t *testing.T) {
+	msg := (&UpgradeRequiredError{MinVersion: "0.4.0"}).Error()
+	if !strings.Contains(msg, "0.4.0") || !strings.Contains(msg, "too old") {
+		t.Errorf("message not actionable: %q", msg)
+	}
+	if got := (&UpgradeRequiredError{}).Error(); strings.Contains(got, ">=") {
+		t.Errorf("empty min_version should not print a bare '>=': %q", got)
+	}
+}
+
+// TestUpgradeRequired426_UnparseableBody: a 426 whose body doesn't parse still
+// yields an *UpgradeRequiredError (the status is the contract), with no min_version.
+func TestUpgradeRequired426_UnparseableBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUpgradeRequired)
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	var ue *UpgradeRequiredError
+	if _, err := c.RequestDeviceCode(context.Background()); !errors.As(err, &ue) {
+		t.Fatalf("want *UpgradeRequiredError even on unparseable body, got %v", err)
+	}
+	if ue.MinVersion != "" {
+		t.Errorf("MinVersion = %q, want empty", ue.MinVersion)
+	}
+}
+
+// ── cli#112: logout server-side revoke (POST /auth/revoke, backend#887) ──
+
+// TestRevokeToken: a 204 from the endpoint → nil, with Bearer + POST on the wire.
+func TestRevokeToken(t *testing.T) {
+	var sawAuth, sawMethod, sawPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth, sawMethod, sawPath = r.Header.Get("Authorization"), r.Method, r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	c.Token = "usertoken123"
+	if err := c.RevokeToken(context.Background()); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if sawMethod != http.MethodPost || sawPath != "/auth/revoke" {
+		t.Errorf("revoke hit %s %s, want POST /auth/revoke", sawMethod, sawPath)
+	}
+	if sawAuth != "Bearer usertoken123" {
+		t.Errorf("revoke auth header = %q, want %q", sawAuth, "Bearer usertoken123")
+	}
+}
+
+// TestRevokeTokenServerError: a non-2xx surfaces as *APIError so logout can log
+// it (then clear local state regardless — see the cli-package logout tests).
+func TestRevokeTokenServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"detail":"boom"}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	c.Token = "t"
+	var ae *APIError
+	if err := c.RevokeToken(context.Background()); !errors.As(err, &ae) || ae.StatusCode != http.StatusInternalServerError {
+		t.Errorf("want APIError 500, got %v", err)
 	}
 }

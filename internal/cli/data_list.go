@@ -14,10 +14,10 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// runDatasetListArgs is the resolved input to runDatasetList — same
-// shape convention as the other dataset verbs, keeping the RunE a thin
+// runDataListArgs is the resolved input to runDataList — same
+// shape convention as the other data verbs, keeping the RunE a thin
 // flag-to-struct adapter.
-type runDatasetListArgs struct {
+type runDataListArgs struct {
 	Kubeconfig string
 	Context    string
 	Namespace  string
@@ -26,12 +26,12 @@ type runDatasetListArgs struct {
 	JSONOut    io.Writer
 }
 
-// newDatasetListCmd implements `tracebloc dataset list` — a read-only
+// newDataListCmd implements `tracebloc data list` — a read-only
 // listing of the datasets ingested into the cluster. The kubeconfig
-// flags are all zero-value-safe, so the minimal `tracebloc dataset list`
+// flags are all zero-value-safe, so the minimal `tracebloc data list`
 // runs against the current context + its namespace; the flags only
 // override that (same convention as `cluster info`).
-func newDatasetListCmd() *cobra.Command {
+func newDataListCmd() *cobra.Command {
 	var (
 		kubeconfigPath  string
 		contextOverride string
@@ -42,11 +42,11 @@ func newDatasetListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List datasets ingested in the cluster",
-		Long: `Lists the datasets pushed + ingested into the parent client release —
+		Long: `Lists the datasets ingested into the parent client release —
 the tables in ` + push.IngestionDatabase + ` on the cluster.
 
 With no flags it uses your current kubeconfig context and its namespace;
-the flags below override that, same as ` + "`cluster info`" + ` and ` + "`dataset push`" + `.
+the flags below override that, same as ` + "`cluster info`" + ` and ` + "`data ingest`" + `.
 For the full catalog (with metadata), see the dashboard at
 https://ai.tracebloc.io/metadata.
 
@@ -58,14 +58,14 @@ Exit codes:
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// In --output-json mode, human output (the banner) goes to
-			// stderr so stdout carries only the JSON — same split as push.
+			// stderr so stdout carries only the JSON — same split as ingest.
 			printer := printerFor(cmd)
 			var jsonOut io.Writer
 			if outputJSON {
 				printer = printerForWriter(cmd, cmd.ErrOrStderr())
 				jsonOut = cmd.OutOrStdout()
 			}
-			return runDatasetList(cmd.Context(), runDatasetListArgs{
+			return runDataList(cmd.Context(), runDataListArgs{
 				Kubeconfig: kubeconfigPath,
 				Context:    contextOverride,
 				Namespace:  nsOverride,
@@ -88,14 +88,14 @@ Exit codes:
 	return cmd
 }
 
-// runDatasetList discovers the cluster, enumerates the ingested tables,
-// and renders them. Mirrors the other dataset verbs' discovery so the
+// runDataList discovers the cluster, enumerates the ingested tables,
+// and renders them. Mirrors the other data verbs' discovery so the
 // exit-code contract is consistent.
-func runDatasetList(ctx context.Context, a runDatasetListArgs) (err error) {
+func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	// In --output-json mode, guarantee stdout always carries JSON: the
 	// success path emits the listing and sets jsonEmitted; this defer
 	// covers the early-failure returns (kubeconfig, no release, query)
-	// with a JSON error object, mirroring dataset push. (Bugbot #53)
+	// with a JSON error object, mirroring data ingest. (Bugbot #53)
 	jsonEmitted := false
 	defer func() {
 		if a.OutputJSON && err != nil && !jsonEmitted {
@@ -104,7 +104,7 @@ func runDatasetList(ctx context.Context, a runDatasetListArgs) (err error) {
 			if errors.As(err, &ee) {
 				code = ee.Code()
 			}
-			writeDatasetListErrorJSON(a.JSONOut, err, code)
+			writeDataListErrorJSON(a.JSONOut, err, code)
 		}
 	}()
 
@@ -134,20 +134,20 @@ func runDatasetList(ctx context.Context, a runDatasetListArgs) (err error) {
 	}
 
 	if a.OutputJSON {
-		writeDatasetListJSON(a.JSONOut, resolved.Namespace, release.ReleaseName, tables)
+		writeDataListJSON(a.JSONOut, resolved.Namespace, release.ReleaseName, tables)
 		jsonEmitted = true
 		return nil
 	}
-	renderDatasetList(p, resolved.Namespace, tables)
+	renderDataList(p, resolved.Namespace, tables)
 	return nil
 }
 
-// renderDatasetList prints the human-facing listing. Split out so it's
+// renderDataList prints the human-facing listing. Split out so it's
 // unit-testable with a buffer-backed Printer.
-func renderDatasetList(p *ui.Printer, namespace string, tables []string) {
+func renderDataList(p *ui.Printer, namespace string, tables []string) {
 	p.Section(fmt.Sprintf("Datasets in %s (%d)", namespace, len(tables)))
 	if len(tables) == 0 {
-		p.Infof("No datasets yet — push one with `tracebloc dataset push`.")
+		p.Infof("No datasets yet — ingest one with `tracebloc data ingest`.")
 		return
 	}
 	for _, t := range tables {
@@ -155,19 +155,19 @@ func renderDatasetList(p *ui.Printer, namespace string, tables []string) {
 	}
 }
 
-// datasetListJSON is the --output-json shape (owned by the CLI layer).
-type datasetListJSON struct {
+// dataListJSON is the --output-json shape (owned by the CLI layer).
+type dataListJSON struct {
 	Namespace string   `json:"namespace"`
 	Release   string   `json:"release"`
 	Count     int      `json:"count"`
 	Datasets  []string `json:"datasets"`
 }
 
-func writeDatasetListJSON(w io.Writer, namespace, release string, tables []string) {
+func writeDataListJSON(w io.Writer, namespace, release string, tables []string) {
 	if tables == nil {
 		tables = []string{} // emit [] not null
 	}
-	res := datasetListJSON{
+	res := dataListJSON{
 		Namespace: namespace,
 		Release:   release,
 		Count:     len(tables),
@@ -180,10 +180,10 @@ func writeDatasetListJSON(w io.Writer, namespace, release string, tables []strin
 	_, _ = fmt.Fprintln(w, string(b))
 }
 
-// writeDatasetListErrorJSON emits a minimal JSON error object for
+// writeDataListErrorJSON emits a minimal JSON error object for
 // --output-json runs that fail before the listing is produced, so
-// stdout is never empty on failure (parallels dataset push). (Bugbot #53)
-func writeDatasetListErrorJSON(w io.Writer, e error, code int) {
+// stdout is never empty on failure (parallels data ingest). (Bugbot #53)
+func writeDataListErrorJSON(w io.Writer, e error, code int) {
 	res := struct {
 		Status   string `json:"status"`
 		Error    string `json:"error"`
