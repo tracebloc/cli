@@ -283,7 +283,12 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 			// installer reconciles the existing release rather than expecting a fresh
 			// credential (#838).
 			if werr := writeClientCredential(opts.credentialFile, []string{
-				"TRACEBLOC_CLIENT_ID=" + strconv.Itoa(pc.ID),
+				// TRACEBLOC_CLIENT_ID is the *auth username* the client pod sends to
+				// api-token-auth (cred → helm clientId → secret CLIENT_ID →
+				// controller getenv("CLIENT_ID") as username). The backend
+				// authenticates an EdgeDevice by its UUID username, NOT the numeric
+				// dashboard id — so write pc.Username, not pc.ID (id is display-only).
+				"TRACEBLOC_CLIENT_ID=" + pc.Username,
 				"TB_NAMESPACE=" + pc.Namespace,
 				"TRACEBLOC_CLIENT_ADOPTED=1",
 			}); werr != nil {
@@ -304,7 +309,9 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	p.Successf("Provisioned client %q (namespace %s).", pc.Name, pc.Namespace)
 	if opts.credentialFile != "" {
 		if werr := writeClientCredential(opts.credentialFile, []string{
-			"TRACEBLOC_CLIENT_ID=" + strconv.Itoa(pc.ID),
+			// The auth username (UUID), NOT the numeric dashboard id — see the
+			// adopt path above. api-token-auth authenticates by username.
+			"TRACEBLOC_CLIENT_ID=" + pc.Username,
 			"TRACEBLOC_CLIENT_PASSWORD=" + password,
 			"TB_NAMESPACE=" + pc.Namespace,
 		}); werr != nil {
@@ -317,8 +324,10 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		// Print the credential FIRST — it's the only copy (the backend stores only
 		// the hash), so a later config-save failure must never cost it.
 		p.Section("Machine credential — needed by the installer to connect this client")
-		p.Field("client id", strconv.Itoa(pc.ID))
-		p.Field("username", pc.Username)
+		// The installer's "Client ID" prompt takes the auth username (UUID);
+		// that IS TRACEBLOC_CLIENT_ID; the numeric id is a dashboard reference only.
+		p.Field("client id", pc.Username)
+		p.Field("dashboard id", strconv.Itoa(pc.ID)) // human reference at ai.tracebloc.io/clients — NOT an installer input
 		p.Field("password", password)
 	}
 	ilog.Logf("minted client id=%d namespace=%s", pc.ID, pc.Namespace)

@@ -279,6 +279,12 @@ func TestClientCreate_AnchorMint(t *testing.T) {
 	if !strings.Contains(out.String(), "Machine credential") {
 		t.Errorf("mint should print the credential, got:\n%s", out.String())
 	}
+	// The printed "client id" is what the installer's Client ID prompt consumes —
+	// it must be the UUID username (u-5), the same value written to the credential
+	// file, not the numeric dashboard id. Assert the username is shown as the id.
+	if !strings.Contains(out.String(), "client id") || !strings.Contains(out.String(), "u-5") {
+		t.Errorf("mint should print the username (u-5) as the client id, got:\n%s", out.String())
+	}
 }
 
 func TestClientCreate_AdoptIdempotent(t *testing.T) {
@@ -359,8 +365,12 @@ func TestClientCreate_CredentialFileMint(t *testing.T) {
 		t.Errorf("credential file mode = %o, want 600", perm)
 	}
 	kv := parseEnvFile(t, credPath)
-	if kv["TRACEBLOC_CLIENT_ID"] != "5" || kv["TB_NAMESPACE"] != "my-ns" || kv["TRACEBLOC_CLIENT_PASSWORD"] == "" {
-		t.Errorf("credential file = %v (want id=5, ns=my-ns, non-empty password)", kv)
+	// TRACEBLOC_CLIENT_ID must be the UUID *username* (here "u-5"), NOT the numeric
+	// dashboard id (5): it becomes the pod's CLIENT_ID, which controller.py sends to
+	// api-token-auth as the login username. The backend authenticates an EdgeDevice
+	// by its username, so writing the id crash-loops the client on "Unable to log in".
+	if kv["TRACEBLOC_CLIENT_ID"] != "u-5" || kv["TB_NAMESPACE"] != "my-ns" || kv["TRACEBLOC_CLIENT_PASSWORD"] == "" {
+		t.Errorf("credential file = %v (want id=u-5 [the username, not id 5], ns=my-ns, non-empty password)", kv)
 	}
 	// never-show, the real invariant: the minted password VALUE must not appear
 	// in stdout under any label (the string checks above are just a proxy).
@@ -448,10 +458,12 @@ func TestClientCreate_CredentialFileAdopt(t *testing.T) {
 		t.Fatalf("adopt: %v", err)
 	}
 	kv := parseEnvFile(t, credPath)
-	// adopt emits id + namespace + the ADOPTED marker, but NO password (the
-	// existing one stands; it's write-only on the backend).
-	if kv["TRACEBLOC_CLIENT_ID"] != "8" || kv["TB_NAMESPACE"] != "ex-ns" || kv["TRACEBLOC_CLIENT_ADOPTED"] != "1" {
-		t.Errorf("adopt credential file = %v (want id=8, ns=ex-ns, ADOPTED=1)", kv)
+	// adopt emits the username + namespace + the ADOPTED marker, but NO password
+	// (the existing one stands; it's write-only on the backend). Same invariant as
+	// the mint path: TRACEBLOC_CLIENT_ID is the UUID username ("u-8"), not id 8 —
+	// it's the login username the adopted client reconnects with.
+	if kv["TRACEBLOC_CLIENT_ID"] != "u-8" || kv["TB_NAMESPACE"] != "ex-ns" || kv["TRACEBLOC_CLIENT_ADOPTED"] != "1" {
+		t.Errorf("adopt credential file = %v (want id=u-8 [the username, not id 8], ns=ex-ns, ADOPTED=1)", kv)
 	}
 	if _, hasPw := kv["TRACEBLOC_CLIENT_PASSWORD"]; hasPw {
 		t.Errorf("adopt must not write a password (none issued), got:\n%v", kv)
