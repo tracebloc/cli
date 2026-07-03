@@ -1,7 +1,15 @@
 # RFC 0001 — Browser-based auth & one-command client provisioning
 
-> **Status: DRAFT** — circulated for discussion; not yet approved. Everything here
-> is open to change. Owner: @saadqbal. Last updated: 2026-06-25.
+> **Status: ACCEPTED — implemented.** The design in this RFC shipped in
+> **CLI v0.4.0** ([cli#107](https://github.com/tracebloc/cli/pull/107)); the
+> tracking epic ([cli#54](https://github.com/tracebloc/cli/issues/54)) is closed.
+> This document is retained as the design-of-record. The Phase 2 items in §11
+> (server-side token revoke [backend#887], short-lived auto-refreshing tokens,
+> `client rotate`, atomic fleet enrollment) remain tracked but out of the v0.4.0
+> scope. Owner: @saadqbal. Last updated: 2026-07-03.
+>
+> The revision history below is kept as the record of how the design converged;
+> Rev 6–7 are accuracy fixes reconciling the doc with what actually shipped.
 >
 > **Rev 2 (2026-06-23)** folds in the code-grounded review on the tracking epic
 > ([backend#830](https://github.com/tracebloc/backend/issues/830)) and a
