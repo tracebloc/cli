@@ -108,14 +108,20 @@ what's planned next.`,
 		}
 		p := printerFor(cmd)
 		p.Banner("tracebloc", "interactive data ingestion for your cluster")
-		p.Section("Get started")
+		p.Section("Sign in & pick a client")
+		p.Infof("tracebloc login                   — sign in via your browser")
+		p.Infof("tracebloc client create           — provision this machine as a client")
+		p.Infof("tracebloc client list             — list your clients + their online state")
+		p.Infof("tracebloc client use <client>     — select the active client (by slug or id)")
+		p.Infof("tracebloc auth status             — show who/where you're signed in")
+		p.Section("Work with data")
 		p.Infof("tracebloc data ingest              — stage + ingest a dataset interactively (or use --help to see flags)")
 		p.Infof("tracebloc data list               — list datasets ingested in the cluster")
 		p.Infof("tracebloc data delete <table>     — delete an ingested dataset (its table + files)")
-		p.Infof("tracebloc cluster info            — check the CLI can reach your cluster")
+		p.Infof("tracebloc cluster info            — check the CLI can reach your active client's cluster")
 		p.Infof("tracebloc ingest validate f.yaml  — validate an ingest.yaml locally")
 		p.Newline()
-		p.Hintf("Add --help to any command for the full flag list.")
+		p.Hintf("Run `tracebloc --help` for the full command list, or add --help to any command for its flags.")
 		return nil
 	}
 
