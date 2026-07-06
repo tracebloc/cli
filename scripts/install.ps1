@@ -214,8 +214,8 @@ try {
 
     Write-Host ""
     Write-Host "First steps:"
-    Write-Host "  tracebloc cluster info        # confirm CLI can reach your cluster"
-    Write-Host "  tracebloc dataset push --help # see the dominant flow"
+    Write-Host "  tracebloc cluster info        # confirm the CLI can reach your cluster"
+    Write-Host "  tracebloc data ingest --help  # stage a dataset onto the cluster"
 }
 finally {
     # Always clean up the temp dir, even on early exit / Ctrl-C.
