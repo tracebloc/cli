@@ -591,32 +591,19 @@ contributors train against it without ever seeing the raw files.`))
 	//    consistent across pre-flight commands.
 	a.Printer.Step(2, 4, "Connect to your workspace's cluster")
 	a.Printer.Hintf("Using your kubeconfig to find the tracebloc release in your workspace and the shared storage your dataset will live on.")
-	resolved, err := cluster.Load(cluster.KubeconfigOptions{
+	// 6. PVC discovery (needPVC) confirms the chart's shared-data PVC is
+	//    Bound before we waste time provisioning a Pod that can't mount it.
+	target, err := resolveClusterTarget(ctx, cluster.KubeconfigOptions{
 		Path:      a.Kubeconfig,
 		Context:   a.Context,
 		Namespace: a.Namespace,
-	})
+	}, true)
 	if err != nil {
-		return &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
+		return err
 	}
-	cs, err := cluster.NewClientset(resolved)
-	if err != nil {
-		return &exitError{code: 3, err: err}
-	}
-	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
-	if err != nil {
-		return &exitError{code: 4, err: err}
-	}
+	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
 	if a.IngestorSAName != "" {
 		release.IngestorSAName = a.IngestorSAName
-	}
-
-	// 6. PVC discovery — confirms the chart's shared-data PVC is
-	//    Bound before we waste time provisioning a Pod that can't
-	//    mount it.
-	pvc, err := cluster.DiscoverSharedPVC(ctx, cs, resolved.Namespace)
-	if err != nil {
-		return &exitError{code: 4, err: err}
 	}
 
 	// 7. Show what we found on the cluster — the customer's last look
