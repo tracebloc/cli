@@ -492,5 +492,5 @@ if [ "$persist" = "yes" ]; then
 fi
 
 echo "First steps:"
-echo "  $BINARY_NAME cluster info        # confirm CLI can reach your cluster"
-echo "  $BINARY_NAME dataset push --help # see the dominant flow"
+echo "  $BINARY_NAME cluster info        # confirm the CLI can reach your cluster"
+echo "  $BINARY_NAME data ingest --help  # stage a dataset onto the cluster"
