@@ -35,6 +35,24 @@ func ClusterID(ctx context.Context, opts KubeconfigOptions) (string, error) {
 	return clusterIDFrom(ctx, cs)
 }
 
+// DiscoverInClusterClient loads the target cluster from opts and discovers a live
+// tracebloc client already installed on it (see DiscoverInClusterClientID —
+// RFC-0001 §7.2 step 1, the anchor for R7 adopt-backfill). Mirrors ClusterID's
+// best-effort, time-bounded read so `client create` never blocks on it: a load /
+// connect failure returns the error and callers fall back to a plain create.
+func DiscoverInClusterClient(ctx context.Context, opts KubeconfigOptions) (*InClusterClient, error) {
+	rc, err := Load(opts)
+	if err != nil {
+		return nil, err
+	}
+	rc.RestConfig.Timeout = clusterIDReadTimeout
+	cs, err := NewClientset(rc)
+	if err != nil {
+		return nil, err
+	}
+	return DiscoverInClusterClientID(ctx, cs)
+}
+
 // clusterIDFrom reads the kube-system UID from a clientset. Split out so it can be
 // exercised with a fake clientset without a real cluster.
 func clusterIDFrom(ctx context.Context, cs kubernetes.Interface) (string, error) {
