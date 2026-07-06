@@ -114,13 +114,11 @@ undone — re-ingesting the data is the only way back.`)
 	//    confirm the parent release + shared PVC exist (exit 4 if not) —
 	//    both "is this the right cluster?" context and a guard against
 	//    running teardown against a cluster with no tracebloc install.
-	target, err := resolveClusterTarget(ctx, cluster.KubeconfigOptions{
-		Path:      a.Kubeconfig,
-		Context:   a.Context,
-		Namespace: a.Namespace,
-	}, true)
+	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
+	binding := bindActiveClientNamespace(&opts)
+	target, err := resolveClusterTarget(ctx, opts, true)
 	if err != nil {
-		return err
+		return binding.explain(err)
 	}
 	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
 

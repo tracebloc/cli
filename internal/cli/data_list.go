@@ -111,13 +111,11 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	p := a.Printer
 	p.Banner("tracebloc", "datasets in the cluster")
 
-	target, err := resolveClusterTarget(ctx, cluster.KubeconfigOptions{
-		Path:      a.Kubeconfig,
-		Context:   a.Context,
-		Namespace: a.Namespace,
-	}, false)
+	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
+	binding := bindActiveClientNamespace(&opts)
+	target, err := resolveClusterTarget(ctx, opts, false)
 	if err != nil {
-		return err
+		return binding.explain(err)
 	}
 	resolved, cs, release := target.Resolved, target.Clientset, target.Release
 

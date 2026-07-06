@@ -265,7 +265,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		return &exitError{code: 1, err: err}
 	}
 
-	cfg.Current().ActiveClientID = strconv.Itoa(pc.ID)
+	setActiveClient(cfg.Current(), pc)
 
 	p.Newline()
 	if adopted {
@@ -471,7 +471,7 @@ func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
 	}
 	for _, c := range clients {
 		if strconv.Itoa(c.ID) == id {
-			cfg.Current().ActiveClientID = id
+			setActiveClient(cfg.Current(), &c)
 			if serr := cfg.Save(); serr != nil {
 				return &exitError{code: 1, err: serr}
 			}
@@ -481,6 +481,15 @@ func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
 	}
 	return &exitError{code: 1, err: fmt.Errorf(
 		"no client %s in your account — run `tracebloc client list` to see the ids", id)}
+}
+
+// setActiveClient points this env's profile at c, caching its namespace and
+// display name alongside the id so the data commands can bind to the active
+// client's cluster (§7.3) without a backend round-trip. Callers Save() after.
+func setActiveClient(p *config.Profile, c *api.ProvisionedClient) {
+	p.ActiveClientID = strconv.Itoa(c.ID)
+	p.ActiveClientNamespace = c.Namespace
+	p.ActiveClientName = c.Name
 }
 
 // renderClientReview shows the assembled inputs before the confirm prompt, so

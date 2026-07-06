@@ -593,13 +593,11 @@ contributors train against it without ever seeing the raw files.`))
 	a.Printer.Hintf("Using your kubeconfig to find the tracebloc release in your workspace and the shared storage your dataset will live on.")
 	// 6. PVC discovery (needPVC) confirms the chart's shared-data PVC is
 	//    Bound before we waste time provisioning a Pod that can't mount it.
-	target, err := resolveClusterTarget(ctx, cluster.KubeconfigOptions{
-		Path:      a.Kubeconfig,
-		Context:   a.Context,
-		Namespace: a.Namespace,
-	}, true)
+	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
+	binding := bindActiveClientNamespace(&opts)
+	target, err := resolveClusterTarget(ctx, opts, true)
 	if err != nil {
-		return err
+		return binding.explain(err)
 	}
 	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
 	if a.IngestorSAName != "" {

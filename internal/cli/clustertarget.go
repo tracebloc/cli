@@ -2,12 +2,24 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/tracebloc/cli/internal/cluster"
+	"github.com/tracebloc/cli/internal/config"
 )
+
+// noParentReleaseError marks the exit-4 case where the reached cluster hosts no
+// tracebloc release in the target namespace — as opposed to a release that is
+// present but whose shared PVC is missing. §7.3 uses this to turn an
+// active-client binding miss into a clear "runs on another machine" message
+// instead of a generic "no release" error.
+type noParentReleaseError struct{ err error }
+
+func (e *noParentReleaseError) Error() string { return e.err.Error() }
+func (e *noParentReleaseError) Unwrap() error { return e.err }
 
 // clusterTarget bundles the cluster handles the data commands resolve from a
 // kubeconfig before doing any work: the resolved config, a clientset, the
@@ -40,7 +52,7 @@ func resolveClusterTarget(ctx context.Context, opts cluster.KubeconfigOptions, n
 	}
 	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
 	if err != nil {
-		return nil, &exitError{code: 4, err: err}
+		return nil, &exitError{code: 4, err: &noParentReleaseError{err}}
 	}
 	t := &clusterTarget{Resolved: resolved, Clientset: cs, Release: release}
 	if needPVC {
@@ -51,4 +63,58 @@ func resolveClusterTarget(ctx context.Context, opts cluster.KubeconfigOptions, n
 		t.PVC = pvc
 	}
 	return t, nil
+}
+
+// activeClientBinding records that a data command defaulted its target
+// namespace to the active client's cached namespace (§7.3), so a subsequent
+// "no release here" failure can be explained as "the active client runs
+// elsewhere" rather than a bare discovery error.
+type activeClientBinding struct {
+	applied   bool
+	name      string
+	namespace string
+}
+
+// bindActiveClientNamespace defaults opts.Namespace to the active client's
+// cached namespace when the user overrode neither --namespace nor --context.
+// It never fails: no config, no active client, or no cached namespace all
+// leave opts untouched (unchanged current-context behavior), so this is
+// backward compatible for anyone who hasn't run `client use`/`create`.
+func bindActiveClientNamespace(opts *cluster.KubeconfigOptions) activeClientBinding {
+	if opts.Namespace != "" || opts.Context != "" {
+		return activeClientBinding{} // user was explicit — don't second-guess
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return activeClientBinding{}
+	}
+	p := cfg.Current()
+	if p.ActiveClientNamespace == "" {
+		return activeClientBinding{}
+	}
+	opts.Namespace = p.ActiveClientNamespace
+	return activeClientBinding{applied: true, name: p.ActiveClientName, namespace: p.ActiveClientNamespace}
+}
+
+// explain rewrites a "no tracebloc release in namespace" failure (exit 4) into
+// §7.3's "client runs on another machine" guidance when the target namespace
+// came from the active-client binding: the cluster the kubeconfig reaches
+// doesn't host that client. Non-binding errors (and PVC-missing, where the
+// release *was* found) pass through unchanged.
+func (b activeClientBinding) explain(err error) error {
+	if !b.applied {
+		return err
+	}
+	var npr *noParentReleaseError
+	if !errors.As(err, &npr) {
+		return err
+	}
+	handle := b.name
+	if handle == "" {
+		handle = b.namespace
+	}
+	return &exitError{code: 4, err: fmt.Errorf(
+		"active client %q runs on another machine — namespace %q isn't on the cluster your kubeconfig points at; "+
+			"run this command there, `tracebloc client use` a client on this cluster, or override with --namespace/--context",
+		handle, b.namespace)}
 }
