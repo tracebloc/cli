@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -120,7 +121,9 @@ func TestBindActiveClientNamespace_NoActiveClient(t *testing.T) {
 }
 
 func TestActiveClientBinding_Explain(t *testing.T) {
-	noRelease := &exitError{code: 4, err: &noParentReleaseError{errors.New("no release")}}
+	// A discovery failure carrying the sentinel (as DiscoverParentRelease
+	// returns for a genuine not-found) — the case explain rewrites.
+	noRelease := &exitError{code: 4, err: fmt.Errorf("%w in namespace", cluster.ErrNoParentRelease)}
 	pvcMissing := &exitError{code: 4, err: errors.New("shared PVC not bound")}
 
 	// Applied + "no release here" → rewritten to the §7.3 guidance.

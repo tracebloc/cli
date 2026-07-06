@@ -633,18 +633,35 @@ func runClientUse(ctx context.Context, p *ui.Printer, handle string) error {
 	if err != nil {
 		return &exitError{code: 1, err: err}
 	}
-	for _, c := range clients {
-		if c.Namespace == handle || strconv.Itoa(c.ID) == handle {
-			setActiveClient(cfg.Current(), &c)
-			if serr := cfg.Save(); serr != nil {
-				return &exitError{code: 1, err: serr}
-			}
-			p.Successf("This machine is now set to enroll as client %q (namespace %s).", c.Name, c.Namespace)
-			return nil
+	// Slug takes precedence over id. Namespaces are unique per account, so a
+	// slug match is unambiguous; matching id in the same pass would let a
+	// client whose slug is all-numeric collide with another client's id and
+	// pick whichever the API listed first. Fall back to id only if no slug
+	// matched (backward compatibility).
+	var byID *api.ProvisionedClient
+	for i := range clients {
+		if clients[i].Namespace == handle {
+			return selectClient(p, cfg, &clients[i])
 		}
+		if byID == nil && strconv.Itoa(clients[i].ID) == handle {
+			byID = &clients[i]
+		}
+	}
+	if byID != nil {
+		return selectClient(p, cfg, byID)
 	}
 	return &exitError{code: 1, err: fmt.Errorf(
 		"no client %q in your account — run `tracebloc client list` to see the slugs and ids", handle)}
+}
+
+// selectClient points this machine at c and persists the choice.
+func selectClient(p *ui.Printer, cfg *config.Config, c *api.ProvisionedClient) error {
+	setActiveClient(cfg.Current(), c)
+	if err := cfg.Save(); err != nil {
+		return &exitError{code: 1, err: err}
+	}
+	p.Successf("This machine is now set to enroll as client %q (namespace %s).", c.Name, c.Namespace)
+	return nil
 }
 
 // setActiveClient points this env's profile at c, caching its namespace and

@@ -278,6 +278,23 @@ func TestClientUse(t *testing.T) {
 	}
 }
 
+// A numeric handle that is one client's slug AND another client's id must
+// resolve deterministically to the slug owner (slug > id), regardless of list
+// order — not "whichever the API returned first".
+func TestClientUse_SlugBeatsNumericIDCollision(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		// id=1039 listed FIRST; the client whose slug is "1039" listed second.
+		_, _ = w.Write([]byte(`[{"id":1039,"first_name":"by-id","namespace":"other-ns"},{"id":42,"first_name":"by-slug","namespace":"1039"}]`))
+	})
+	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "1039"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := config.Load()
+	if cfg.Current().ActiveClientID != "42" || cfg.Current().ActiveClientNamespace != "1039" {
+		t.Errorf("handle 1039 should select the slug owner (id 42), got %+v", cfg.Current())
+	}
+}
+
 func TestClientCreate_Interactive(t *testing.T) {
 	var body api.CreateClientRequest
 	posted := false

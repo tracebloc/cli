@@ -126,7 +126,7 @@ func runClusterInfo(
 	// gave neither --namespace nor --context, so `cluster info` diagnoses the
 	// selected client's cluster rather than the kubeconfig's current-context ns.
 	opts := cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride, Namespace: nsOverride}
-	bindActiveClientNamespace(&opts)
+	binding := bindActiveClientNamespace(&opts)
 	resolved, err := cluster.Load(opts)
 	if err != nil {
 		// Kubeconfig errors are exit-code-3 territory (file/parse
@@ -151,8 +151,10 @@ func runClusterInfo(
 		// 4 = "cluster reachable, but no tracebloc release here."
 		// Distinct from the kubeconfig error (3) so callers can
 		// branch: 3 means "fix your kubeconfig", 4 means "install
-		// the parent chart first".
-		return &exitError{code: 4, err: err}
+		// the parent chart first". When the namespace came from the
+		// active-client binding, explain() rewrites this to the §7.3
+		// "active client runs on another machine" guidance.
+		return binding.explain(&exitError{code: 4, err: err})
 	}
 
 	// Apply the SA-name override here. Discovery doesn't read the

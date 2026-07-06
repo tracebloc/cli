@@ -11,17 +11,6 @@ import (
 	"github.com/tracebloc/cli/internal/config"
 )
 
-// noParentReleaseError marks the exit-4 case where the reached cluster
-// genuinely hosts no tracebloc release in the target namespace
-// (cluster.ErrNoParentRelease) — as opposed to a present-but-PVC-missing
-// release, an API/RBAC list failure, or an ambiguous multiple-release match.
-// §7.3 uses it to turn an active-client binding miss into a clear "runs on
-// another machine" message; the other failures keep their own diagnostics.
-type noParentReleaseError struct{ err error }
-
-func (e *noParentReleaseError) Error() string { return e.err.Error() }
-func (e *noParentReleaseError) Unwrap() error { return e.err }
-
 // clusterTarget bundles the cluster handles the data commands resolve from a
 // kubeconfig before doing any work: the resolved config, a clientset, the
 // parent tracebloc release, and — when asked — the shared data PVC.
@@ -53,12 +42,10 @@ func resolveClusterTarget(ctx context.Context, opts cluster.KubeconfigOptions, n
 	}
 	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
 	if err != nil {
-		// Only a genuine "namespace has no release" maps to the §7.3
-		// "runs elsewhere" rewrite; an API/RBAC list failure or an
-		// ambiguous multiple-release match keeps its own message.
-		if errors.Is(err, cluster.ErrNoParentRelease) {
-			return nil, &exitError{code: 4, err: &noParentReleaseError{err}}
-		}
+		// The error carries cluster.ErrNoParentRelease for a genuine
+		// "namespace has no release" (which explain() rewrites as §7.3
+		// "runs elsewhere"); an API/RBAC list failure or ambiguous
+		// multiple-release match wraps a different error and passes through.
 		return nil, &exitError{code: 4, err: err}
 	}
 	t := &clusterTarget{Resolved: resolved, Clientset: cs, Release: release}
@@ -106,14 +93,12 @@ func bindActiveClientNamespace(opts *cluster.KubeconfigOptions) activeClientBind
 // explain rewrites a "no tracebloc release in namespace" failure (exit 4) into
 // §7.3's "client runs on another machine" guidance when the target namespace
 // came from the active-client binding: the cluster the kubeconfig reaches
-// doesn't host that client. Non-binding errors (and PVC-missing, where the
-// release *was* found) pass through unchanged.
+// doesn't host that client. Gated on cluster.ErrNoParentRelease so a
+// PVC-missing failure (release was found), an API/RBAC error, or an ambiguous
+// multiple-release match all pass through unchanged. Callable by any command
+// that binds — data ingest/list/delete and cluster info.
 func (b activeClientBinding) explain(err error) error {
-	if !b.applied {
-		return err
-	}
-	var npr *noParentReleaseError
-	if !errors.As(err, &npr) {
+	if !b.applied || !errors.Is(err, cluster.ErrNoParentRelease) {
 		return err
 	}
 	handle := b.name
