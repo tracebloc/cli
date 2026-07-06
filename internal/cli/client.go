@@ -38,7 +38,7 @@ var readInClusterClient = cluster.DiscoverInClusterClient
 func newClientCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "client",
-		Short: "Provision and manage tracebloc clients (machines)",
+		Short: "Provision and manage the clients in your account",
 		Long: `Provision a tracebloc client for this machine and list/select clients
 in your account.  Requires sign-in first (` + "`tracebloc login`" + `).`,
 	}

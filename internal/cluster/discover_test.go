@@ -152,7 +152,7 @@ func TestDiscoverParentRelease_NoReleaseFound(t *testing.T) {
 	// The error message has to be customer-actionable. Pin the
 	// key remediation phrase so a future refactor that loses it
 	// (or worse, replaces it with a stack trace) fails this test.
-	for _, want := range []string{"no tracebloc parent client release found", "helm install"} {
+	for _, want := range []string{"no tracebloc client found", "--namespace", "https://tracebloc.io/i.sh", "cluster doctor"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("expected error to mention %q, got: %s", want, err)
 		}
@@ -282,5 +282,51 @@ func TestChartVersionFromLabel(t *testing.T) {
 				t.Errorf("chartVersionFromLabel(%q) = %q, want %q", in, got, want)
 			}
 		})
+	}
+}
+
+// FindClientNamespaces backs the cluster-wide fallback scan (§7.3): a miss in
+// the kubeconfig's default namespace must find the client in its slug
+// namespace instead of dead-ending. These pin the scan's filtering + ordering.
+func TestFindClientNamespaces(t *testing.T) {
+	cs := fake.NewSimpleClientset(
+		jobsManagerDeployment("tracebloc", "lukas-01", "client-1.6.0", "1.6.0", ""),
+		jobsManagerDeployment("tracebloc", "zeta-ns", "client-1.6.0", "1.6.0", ""),
+		// a chart-labeled sibling that is NOT a jobs-manager must not count
+		siblingDeployment("mysql-client", "other-ns"),
+	)
+	got, err := FindClientNamespaces(context.Background(), cs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"lukas-01", "zeta-ns"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("expected sorted namespaces %v, got %v", want, got)
+	}
+}
+
+func TestFindClientNamespaces_NoneFound(t *testing.T) {
+	cs := fake.NewSimpleClientset(siblingDeployment("mysql-client", "somewhere"))
+	got, err := FindClientNamespaces(context.Background(), cs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected no namespaces, got %v", got)
+	}
+}
+
+// siblingDeployment builds a chart-labeled Deployment that is not a
+// jobs-manager — the scan must ignore it.
+func siblingDeployment(name, namespace string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "client",
+				"app.kubernetes.io/managed-by": "Helm",
+			},
+		},
 	}
 }

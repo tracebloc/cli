@@ -147,7 +147,7 @@ func FormatOrphansWarning(orphans []Orphan) string {
 	}
 	var s string
 	s += fmt.Sprintf("WARNING: %d orphan stage Pod%s detected in this namespace — likely "+
-		"leftover from a previously crashed `dataset push`:\n",
+		"leftover from a previously crashed `data ingest`:\n",
 		len(orphans), pluralS(len(orphans)))
 	names := make([]string, 0, len(orphans))
 	for _, o := range orphans {
