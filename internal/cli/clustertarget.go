@@ -11,11 +11,12 @@ import (
 	"github.com/tracebloc/cli/internal/config"
 )
 
-// noParentReleaseError marks the exit-4 case where the reached cluster hosts no
-// tracebloc release in the target namespace — as opposed to a release that is
-// present but whose shared PVC is missing. §7.3 uses this to turn an
-// active-client binding miss into a clear "runs on another machine" message
-// instead of a generic "no release" error.
+// noParentReleaseError marks the exit-4 case where the reached cluster
+// genuinely hosts no tracebloc release in the target namespace
+// (cluster.ErrNoParentRelease) — as opposed to a present-but-PVC-missing
+// release, an API/RBAC list failure, or an ambiguous multiple-release match.
+// §7.3 uses it to turn an active-client binding miss into a clear "runs on
+// another machine" message; the other failures keep their own diagnostics.
 type noParentReleaseError struct{ err error }
 
 func (e *noParentReleaseError) Error() string { return e.err.Error() }
@@ -52,7 +53,13 @@ func resolveClusterTarget(ctx context.Context, opts cluster.KubeconfigOptions, n
 	}
 	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
 	if err != nil {
-		return nil, &exitError{code: 4, err: &noParentReleaseError{err}}
+		// Only a genuine "namespace has no release" maps to the §7.3
+		// "runs elsewhere" rewrite; an API/RBAC list failure or an
+		// ambiguous multiple-release match keeps its own message.
+		if errors.Is(err, cluster.ErrNoParentRelease) {
+			return nil, &exitError{code: 4, err: &noParentReleaseError{err}}
+		}
+		return nil, &exitError{code: 4, err: err}
 	}
 	t := &clusterTarget{Resolved: resolved, Clientset: cs, Release: release}
 	if needPVC {
