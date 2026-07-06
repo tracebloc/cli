@@ -44,6 +44,15 @@ func withClientBackend(t *testing.T, h http.HandlerFunc) {
 		return "", errors.New("no cluster reachable (test default)")
 	}
 	t.Cleanup(func() { readClusterID = origCID })
+
+	// Default: no client live on the cluster, so the R7 adopt-backfill path is a
+	// no-op and create tests never touch a real kubeconfig. Tests that exercise R7
+	// override it via stubInClusterClient.
+	origLive := readInClusterClient
+	readInClusterClient = func(context.Context, cluster.KubeconfigOptions) (*cluster.InClusterClient, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() { readInClusterClient = origLive })
 }
 
 // stubClusterID overrides the cluster-anchor read for a single test.
@@ -54,6 +63,16 @@ func stubClusterID(t *testing.T, uid string, err error) {
 		return uid, err
 	}
 	t.Cleanup(func() { readClusterID = orig })
+}
+
+// stubInClusterClient overrides the live in-cluster client discovery (R7).
+func stubInClusterClient(t *testing.T, lc *cluster.InClusterClient, err error) {
+	t.Helper()
+	orig := readInClusterClient
+	readInClusterClient = func(context.Context, cluster.KubeconfigOptions) (*cluster.InClusterClient, error) {
+		return lc, err
+	}
+	t.Cleanup(func() { readInClusterClient = orig })
 }
 
 func TestClientCreate_Success(t *testing.T) {
@@ -108,6 +127,102 @@ func TestClientCreate_AskAnAdmin(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "ada@co.io") {
 		t.Errorf("expected admins shown, got:\n%s", out.String())
+	}
+}
+
+// TestClientCreate_R7_AdoptBackfill: a client is live on this cluster with a null
+// backend cluster_id (existing fleet). Create must backfill the anchor onto it
+// (PATCH) and ADOPT it — never mint a duplicate (cli#131 / RFC-0001 §7.2).
+func TestClientCreate_R7_AdoptBackfill(t *testing.T) {
+	var patchedCluster string
+	postCalled := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			// The live client is in this account, anchor still null.
+			_, _ = w.Write([]byte(`[{"id":7,"first_name":"box","username":"uuid-live","namespace":"ns-live","cluster_id":""}]`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/edge-device/7/":
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			patchedCluster = body["cluster_id"]
+			_, _ = w.Write([]byte(`{"id":7,"first_name":"box","username":"uuid-live","namespace":"ns-live","cluster_id":"uid-9"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			postCalled = true
+			t.Error("mint POST must NOT be called on the R7 adopt-backfill path")
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	stubClusterID(t, "uid-9", nil)
+	stubInClusterClient(t, &cluster.InClusterClient{ClientID: "uuid-live", Namespace: "ns-live"}, nil)
+
+	credFile := filepath.Join(t.TempDir(), "cred.env")
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), nil,
+		clientCreateOpts{name: "box", location: "DE", yes: true, credentialFile: credFile}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if postCalled {
+		t.Fatal("minted instead of adopting")
+	}
+	if patchedCluster != "uid-9" {
+		t.Errorf("backfilled cluster_id = %q, want uid-9", patchedCluster)
+	}
+	cfg, _ := config.Load()
+	if cfg.Current().ActiveClientID != "7" {
+		t.Errorf("active client = %q, want 7 (the adopted live client)", cfg.Current().ActiveClientID)
+	}
+	cred, _ := os.ReadFile(credFile)
+	if !strings.Contains(string(cred), "TRACEBLOC_CLIENT_ADOPTED=1") ||
+		!strings.Contains(string(cred), "TRACEBLOC_CLIENT_ID=uuid-live") ||
+		strings.Contains(string(cred), "TRACEBLOC_CLIENT_PASSWORD") {
+		t.Errorf("adopt credential file wrong (want id+ADOPTED, no password):\n%s", cred)
+	}
+}
+
+// TestClientCreate_R7_AlreadyAnchored: the live client already carries this
+// cluster's anchor → adopt directly, no PATCH, no mint.
+func TestClientCreate_R7_AlreadyAnchored(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":7,"first_name":"box","username":"uuid-live","namespace":"ns-live","cluster_id":"uid-9"}]`))
+		default:
+			t.Errorf("unexpected %s %s (no PATCH/POST expected)", r.Method, r.URL.Path)
+		}
+	})
+	stubClusterID(t, "uid-9", nil)
+	stubInClusterClient(t, &cluster.InClusterClient{ClientID: "uuid-live", Namespace: "ns-live"}, nil)
+
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), nil,
+		clientCreateOpts{name: "box", location: "DE", yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	cfg, _ := config.Load()
+	if cfg.Current().ActiveClientID != "7" {
+		t.Errorf("active client = %q, want 7", cfg.Current().ActiveClientID)
+	}
+}
+
+// TestClientCreate_R7_CrossAccountRefuse: a client is live here but it isn't in
+// the signed-in account — refuse rather than mint over it or silently adopt.
+func TestClientCreate_R7_CrossAccountRefuse(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`)) // signed-in account owns no such client
+		default:
+			t.Errorf("unexpected %s %s (must refuse before PATCH/POST)", r.Method, r.URL.Path)
+		}
+	})
+	stubClusterID(t, "uid-9", nil)
+	stubInClusterClient(t, &cluster.InClusterClient{ClientID: "uuid-foreign", Namespace: "ns"}, nil)
+
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{name: "box", location: "DE", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "different tracebloc account") {
+		t.Errorf("want cross-account refusal, got %v", err)
 	}
 }
 

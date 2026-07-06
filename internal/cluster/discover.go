@@ -181,6 +181,60 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 	return release, nil
 }
 
+// InClusterClient identifies a tracebloc client already installed on the cluster:
+// its CLIENT_ID (the UUID auth username the pod authenticates with) and the
+// namespace its release occupies.
+type InClusterClient struct {
+	ClientID  string
+	Namespace string
+}
+
+// clientChartSelector matches the chart-managed resources of a tracebloc client
+// release (the same selector DiscoverParentRelease uses on Deployments).
+const clientChartSelector = "app.kubernetes.io/name=client,app.kubernetes.io/managed-by=Helm"
+
+// DiscoverInClusterClientID finds a tracebloc client already installed on the
+// cluster, if any, and returns its live CLIENT_ID + namespace (RFC-0001 §7.2
+// step 1). It locates the namespace hosting the client release (its jobs-manager
+// Deployment), then reads CLIENT_ID from the chart's `<release>-secrets` Secret
+// there — scoping to that namespace avoids the node-agents mirror secret, which
+// carries the same CLIENT_ID under the same labels.
+//
+// This anchors R7 adopt-backfill: a live client whose backend cluster_id is null
+// must be adopted (and its anchor backfilled), never re-minted. Best-effort — it
+// returns (nil, nil) when nothing is installed or the cluster can't be read
+// (unreachable / restricted RBAC), so callers fall back to a plain create.
+func DiscoverInClusterClientID(ctx context.Context, cs kubernetes.Interface) (*InClusterClient, error) {
+	deps, err := cs.AppsV1().Deployments(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+		LabelSelector: clientChartSelector,
+	})
+	if err != nil {
+		return nil, nil // best-effort: treat an unreadable cluster as "nothing installed"
+	}
+	ns := ""
+	for _, d := range deps.Items {
+		if d.Name == "jobs-manager" || strings.HasSuffix(d.Name, "-jobs-manager") {
+			ns = d.Namespace
+			break
+		}
+	}
+	if ns == "" {
+		return nil, nil // no client release on this cluster
+	}
+	secrets, err := cs.CoreV1().Secrets(ns).List(ctx, metav1.ListOptions{
+		LabelSelector: clientChartSelector,
+	})
+	if err != nil {
+		return nil, nil
+	}
+	for _, s := range secrets.Items {
+		if v, ok := s.Data["CLIENT_ID"]; ok && len(v) > 0 {
+			return &InClusterClient{ClientID: string(v), Namespace: ns}, nil
+		}
+	}
+	return nil, nil
+}
+
 // pickJobsManagerService probes for the chart's jobs-manager
 // Service. The chart's helper templates have used both names over
 // chart history:

@@ -90,6 +90,57 @@ func TestDiscoverParentRelease_HappyPath(t *testing.T) {
 	}
 }
 
+// clientSecret builds the chart's `<release>-secrets` Secret carrying CLIENT_ID
+// (the live client's UUID username). extraLabels lets a test mimic the
+// node-agents mirror, which shares the labels + CLIENT_ID in another namespace.
+func clientSecret(release, namespace, clientID string, extraLabels map[string]string) *corev1.Secret {
+	labels := map[string]string{
+		"app.kubernetes.io/name":       "client",
+		"app.kubernetes.io/instance":   release,
+		"app.kubernetes.io/managed-by": "Helm",
+	}
+	for k, v := range extraLabels {
+		labels[k] = v
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: release + "-secrets", Namespace: namespace, Labels: labels},
+		Data:       map[string][]byte{"CLIENT_ID": []byte(clientID)},
+	}
+}
+
+func TestDiscoverInClusterClientID_HappyPath(t *testing.T) {
+	const ns = "tracebloc"
+	cs := fake.NewClientset(
+		jobsManagerDeployment("tracebloc", ns, "client-1.3.5", "1.3.5", "sha256:x"),
+		clientSecret("tracebloc", ns, "uuid-live", nil),
+		// node-agents mirror: same labels + CLIENT_ID, DIFFERENT namespace. The read
+		// is scoped to the jobs-manager namespace, so this must be ignored.
+		clientSecret("tracebloc", "node-agents", "uuid-live", map[string]string{"app": "resource-monitor"}),
+	)
+	got, err := DiscoverInClusterClientID(context.Background(), cs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.ClientID != "uuid-live" || got.Namespace != ns {
+		t.Errorf("got %+v, want {ClientID:uuid-live Namespace:%s}", got, ns)
+	}
+}
+
+func TestDiscoverInClusterClientID_NoRelease(t *testing.T) {
+	got, err := DiscoverInClusterClientID(context.Background(), fake.NewClientset())
+	if err != nil || got != nil {
+		t.Errorf("empty cluster: want (nil,nil), got (%+v,%v)", got, err)
+	}
+}
+
+func TestDiscoverInClusterClientID_ReleaseButNoSecret(t *testing.T) {
+	cs := fake.NewClientset(jobsManagerDeployment("tracebloc", "tracebloc", "client-1.3.5", "1.3.5", "d"))
+	got, err := DiscoverInClusterClientID(context.Background(), cs)
+	if err != nil || got != nil {
+		t.Errorf("release but no secret: want (nil,nil), got (%+v,%v)", got, err)
+	}
+}
+
 func TestDiscoverParentRelease_NoReleaseFound(t *testing.T) {
 	cs := fake.NewClientset() // empty cluster
 
