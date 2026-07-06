@@ -18,6 +18,20 @@ func TestSetActiveClient_CachesNamespaceAndName(t *testing.T) {
 	}
 }
 
+func TestClientStateLabel(t *testing.T) {
+	cases := map[int]string{
+		clientStatusOnline:  "online",
+		clientStatusOffline: "offline",
+		clientStatusPending: "pending",
+		99:                  "unknown",
+	}
+	for status, want := range cases {
+		if got := clientStateLabel(status); got != want {
+			t.Errorf("clientStateLabel(%d) = %q, want %q", status, got, want)
+		}
+	}
+}
+
 // writeActiveClientConfig writes a signed-in dev profile whose active client
 // carries the given namespace + name, into a temp config dir.
 func writeActiveClientConfig(t *testing.T, namespace, name string) {

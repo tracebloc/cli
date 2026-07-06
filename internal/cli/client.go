@@ -449,15 +449,43 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 		return nil
 	}
 	p.Section("Clients in your account")
+	active := cfg.Current().ActiveClientID
 	for _, c := range clients {
 		marker := ""
-		if strconv.Itoa(c.ID) == cfg.Current().ActiveClientID {
-			marker = "  (active)"
+		if strconv.Itoa(c.ID) == active {
+			marker = "  (active — this machine)"
 		}
 		p.Field(strconv.Itoa(c.ID)+marker,
-			fmt.Sprintf("%s   namespace=%s   location=%s", c.Name, c.Namespace, c.Location))
+			fmt.Sprintf("%s   state=%s   namespace=%s   location=%s",
+				c.Name, clientStateLabel(c.Status), c.Namespace, c.Location))
 	}
+	// §7.3: separate "selected" (this machine's local pointer) from "connected"
+	// (the backend's last-heartbeat state) so a stale pointer is visible.
+	p.Hintf("\"active\" is this machine's selected client; state is its last reported status to tracebloc.")
 	return nil
+}
+
+// EdgeDevice.status codes mirrored from the backend (metaApi User.py).
+const (
+	clientStatusOffline = 0
+	clientStatusOnline  = 1
+	clientStatusPending = 2
+)
+
+// clientStateLabel maps the backend status code to a TTY/CI-safe word. Plain
+// text (not an emoji glyph) on purpose — flag/emoji glyphs mojibake in CI logs
+// and Windows consoles (RFC-0001 §12 watch-item).
+func clientStateLabel(status int) string {
+	switch status {
+	case clientStatusOnline:
+		return "online"
+	case clientStatusOffline:
+		return "offline"
+	case clientStatusPending:
+		return "pending"
+	default:
+		return "unknown"
+	}
 }
 
 func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
