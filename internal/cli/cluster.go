@@ -29,7 +29,7 @@ func newClusterCmd() *cobra.Command {
 configured to talk to.
 
 Use ` + "`cluster info`" + ` to verify which cluster, namespace, and parent
-tracebloc release the next ` + "`dataset push`" + ` will target. Useful as a
+tracebloc release the next ` + "`data ingest`" + ` will target. Useful as a
 pre-flight before doing anything destructive (e.g. ingesting into
 the wrong cluster).`,
 	}
@@ -71,7 +71,7 @@ cluster + namespace and prints:
   • Which kubeconfig context the CLI used
   • The namespace it resolved to
   • The parent release name + chart version + appVersion
-  • The jobs-manager Service the next dataset push would POST to
+  • The jobs-manager Service the next data ingest would POST to
   • The ingestor ServiceAccount the post-install hook would auth as
   • The cluster's configured INGESTOR_IMAGE_DIGEST default
   • Whether the user's kubeconfig can mint short-lived SA tokens
@@ -197,6 +197,6 @@ func runClusterInfo(
 	}
 
 	p.Newline()
-	p.Successf("Ready for `tracebloc dataset push`.")
+	p.Successf("Ready for `tracebloc data ingest`.")
 	return nil
 }
