@@ -58,7 +58,7 @@ EOF
   chmod +x "$BIN/curl"
 
   # coreutils the installer needs, so PATH=$BIN alone works (host cosign hidden).
-  for t in bash sh env mkdir mktemp cp cat awk grep sed head tr uname chmod mv rm sleep printf install dirname basename sha256sum shasum; do
+  for t in bash sh env mkdir mktemp cp cat awk grep sed head tr uname chmod mv rm sleep printf install dirname basename sha256sum shasum ln readlink; do
     p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$BIN/$t"
   done
 
@@ -84,6 +84,13 @@ if [ "$rc" = 0 ] && grep -q "cosign signature valid" "$SBX/out" && [ -x "$DEST/t
   ok "cosign present + valid sig installs"
 else
   bad "cosign present + valid sig installs (rc=$rc)"; sed 's/^/      /' "$SBX/out"
+fi
+# the tb short alias rides along on the happy path (best-effort, but with ln
+# available — as here — it must exist and point at the binary)
+if [ "$(readlink "$DEST/tb" 2>/dev/null)" = "$DEST/tracebloc" ]; then
+  ok "tb short alias created next to the binary"
+else
+  bad "tb short alias missing or wrong target ($(readlink "$DEST/tb" 2>/dev/null || echo none))"
 fi
 drop_sandbox
 

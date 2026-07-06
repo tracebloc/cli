@@ -402,12 +402,16 @@ mv "$TMP/$BINARY_FILE" "$PREFIX/$BINARY_NAME"
 # Short alias: `tb` — the kubectl→k pattern for the most-typed word in the
 # product. A symlink next to the binary, created only when the name is free
 # (or already ours): never clobber an unrelated tool the user has as `tb`.
-if [ ! -e "$PREFIX/tb" ] || [ "$(readlink "$PREFIX/tb" 2>/dev/null)" = "$PREFIX/$BINARY_NAME" ]; then
-    ln -sf "$PREFIX/$BINARY_NAME" "$PREFIX/tb"
-    TB_ALIAS_NOTE=" (short alias: tb)"
-else
-    echo "Note: $PREFIX/tb already exists and isn't ours — skipping the tb alias."
-    TB_ALIAS_NOTE=""
+TB_ALIAS_NOTE=""
+if command -v ln >/dev/null 2>&1; then
+    if [ ! -e "$PREFIX/tb" ] || [ "$(readlink "$PREFIX/tb" 2>/dev/null)" = "$PREFIX/$BINARY_NAME" ]; then
+        # Best-effort: an alias must never be able to fail the install.
+        if ln -sf "$PREFIX/$BINARY_NAME" "$PREFIX/tb" 2>/dev/null; then
+            TB_ALIAS_NOTE=" (short alias: tb)"
+        fi
+    else
+        echo "Note: $PREFIX/tb already exists and isn't ours — skipping the tb alias."
+    fi
 fi
 
 echo ""
