@@ -136,17 +136,30 @@ func TestClientList(t *testing.T) {
 
 func TestClientUse(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`[{"id":7,"first_name":"gamma","namespace":"gamma"}]`))
+		_, _ = w.Write([]byte(`[{"id":7,"first_name":"gamma","namespace":"gamma-ns"}]`))
 	})
+
+	// By numeric id (backward compatible).
 	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "7"); err != nil {
 		t.Fatal(err)
 	}
 	cfg, _ := config.Load()
-	if cfg.Current().ActiveClientID != "7" {
-		t.Errorf("active = %q, want 7", cfg.Current().ActiveClientID)
+	if cfg.Current().ActiveClientID != "7" || cfg.Current().ActiveClientNamespace != "gamma-ns" {
+		t.Errorf("after use by id: %+v, want id=7 ns=gamma-ns", cfg.Current())
 	}
-	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "99"); err == nil {
-		t.Error("expected an error for an unknown client id")
+
+	// By namespace slug — the RFC-0001 §7.1/D3 handle.
+	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "gamma-ns"); err != nil {
+		t.Fatalf("use by slug: %v", err)
+	}
+	cfg, _ = config.Load()
+	if cfg.Current().ActiveClientID != "7" {
+		t.Errorf("after use by slug: active = %q, want 7", cfg.Current().ActiveClientID)
+	}
+
+	// Unknown handle → error.
+	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "nope"); err == nil {
+		t.Error("expected an error for an unknown client handle")
 	}
 }
 

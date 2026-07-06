@@ -122,11 +122,12 @@ func runClusterInfo(
 ) error {
 	p.Banner("tracebloc", "cluster diagnostics")
 
-	resolved, err := cluster.Load(cluster.KubeconfigOptions{
-		Path:      kubeconfigPath,
-		Context:   contextOverride,
-		Namespace: nsOverride,
-	})
+	// Default the namespace to the active client's (RFC-0001 §7.3) when the user
+	// gave neither --namespace nor --context, so `cluster info` diagnoses the
+	// selected client's cluster rather than the kubeconfig's current-context ns.
+	opts := cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride, Namespace: nsOverride}
+	bindActiveClientNamespace(&opts)
+	resolved, err := cluster.Load(opts)
 	if err != nil {
 		// Kubeconfig errors are exit-code-3 territory (file/parse
 		// problem, same conceptual class as `ingest validate`'s

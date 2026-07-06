@@ -86,9 +86,12 @@ func newClientListCmd() *cobra.Command {
 
 func newClientUseCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "use <client-id>",
-		Short: "Enroll this machine as an existing client",
-		Args:  cobra.ExactArgs(1),
+		Use:   "use <client>",
+		Short: "Select the active client for this machine (by slug or id)",
+		Long: `Select which client this machine's data / cluster commands act on.
+Accepts the client's namespace slug (e.g. tracebloc-amazon) — the handle shown
+by ` + "`tracebloc client list`" + ` — or its numeric id.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runClientUse(cmd.Context(), printerFor(cmd), args[0])
 		},
@@ -488,7 +491,9 @@ func clientStateLabel(status int) string {
 	}
 }
 
-func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
+// runClientUse selects the active client by its handle — the namespace slug
+// (the RFC-0001 §7.1/D3 handle) or, for backward compatibility, its numeric id.
+func runClientUse(ctx context.Context, p *ui.Printer, handle string) error {
 	client, cfg, err := authedClient()
 	if err != nil {
 		return &exitError{code: 1, err: err}
@@ -498,17 +503,17 @@ func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
 		return &exitError{code: 1, err: err}
 	}
 	for _, c := range clients {
-		if strconv.Itoa(c.ID) == id {
+		if c.Namespace == handle || strconv.Itoa(c.ID) == handle {
 			setActiveClient(cfg.Current(), &c)
 			if serr := cfg.Save(); serr != nil {
 				return &exitError{code: 1, err: serr}
 			}
-			p.Successf("This machine is now set to enroll as client %s (%s).", id, c.Name)
+			p.Successf("This machine is now set to enroll as client %q (namespace %s).", c.Name, c.Namespace)
 			return nil
 		}
 	}
 	return &exitError{code: 1, err: fmt.Errorf(
-		"no client %s in your account — run `tracebloc client list` to see the ids", id)}
+		"no client %q in your account — run `tracebloc client list` to see the slugs and ids", handle)}
 }
 
 // setActiveClient points this env's profile at c, caching its namespace and
