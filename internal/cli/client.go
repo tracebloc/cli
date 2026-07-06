@@ -298,7 +298,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		}
 	}
 
-	cfg.Current().ActiveClientID = strconv.Itoa(pc.ID)
+	setActiveClient(cfg.Current(), pc)
 
 	p.Newline()
 	if adopted {
@@ -574,15 +574,43 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 		return nil
 	}
 	p.Section("Clients in your account")
+	active := cfg.Current().ActiveClientID
 	for _, c := range clients {
 		marker := ""
-		if strconv.Itoa(c.ID) == cfg.Current().ActiveClientID {
-			marker = "  (active)"
+		if strconv.Itoa(c.ID) == active {
+			marker = "  (active — this machine)"
 		}
 		p.Field(strconv.Itoa(c.ID)+marker,
-			fmt.Sprintf("%s   namespace=%s   location=%s", c.Name, c.Namespace, c.Location))
+			fmt.Sprintf("%s   state=%s   namespace=%s   location=%s",
+				c.Name, clientStateLabel(c.Status), c.Namespace, c.Location))
 	}
+	// §7.3: separate "selected" (this machine's local pointer) from "connected"
+	// (the backend's last-heartbeat state) so a stale pointer is visible.
+	p.Hintf("\"active\" is this machine's selected client; state is its last reported status to tracebloc.")
 	return nil
+}
+
+// EdgeDevice.status codes mirrored from the backend (metaApi User.py).
+const (
+	clientStatusOffline = 0
+	clientStatusOnline  = 1
+	clientStatusPending = 2
+)
+
+// clientStateLabel maps the backend status code to a TTY/CI-safe word. Plain
+// text (not an emoji glyph) on purpose — flag/emoji glyphs mojibake in CI logs
+// and Windows consoles (RFC-0001 §12 watch-item).
+func clientStateLabel(status int) string {
+	switch status {
+	case clientStatusOnline:
+		return "online"
+	case clientStatusOffline:
+		return "offline"
+	case clientStatusPending:
+		return "pending"
+	default:
+		return "unknown"
+	}
 }
 
 func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
@@ -596,7 +624,7 @@ func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
 	}
 	for _, c := range clients {
 		if strconv.Itoa(c.ID) == id {
-			cfg.Current().ActiveClientID = id
+			setActiveClient(cfg.Current(), &c)
 			if serr := cfg.Save(); serr != nil {
 				return &exitError{code: 1, err: serr}
 			}
@@ -606,6 +634,15 @@ func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
 	}
 	return &exitError{code: 1, err: fmt.Errorf(
 		"no client %s in your account — run `tracebloc client list` to see the ids", id)}
+}
+
+// setActiveClient points this env's profile at c, caching its namespace and
+// display name alongside the id so the data commands can bind to the active
+// client's cluster (§7.3) without a backend round-trip. Callers Save() after.
+func setActiveClient(p *config.Profile, c *api.ProvisionedClient) {
+	p.ActiveClientID = strconv.Itoa(c.ID)
+	p.ActiveClientNamespace = c.Namespace
+	p.ActiveClientName = c.Name
 }
 
 // renderClientReview shows the assembled inputs before the confirm prompt, so

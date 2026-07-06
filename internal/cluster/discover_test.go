@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -156,6 +157,11 @@ func TestDiscoverParentRelease_NoReleaseFound(t *testing.T) {
 			t.Errorf("expected error to mention %q, got: %s", want, err)
 		}
 	}
+	// The sentinel gates the §7.3 "runs elsewhere" rewrite (cli#128) — a
+	// genuine not-found must be errors.Is-identifiable.
+	if !errors.Is(err, ErrNoParentRelease) {
+		t.Errorf("not-found error should match ErrNoParentRelease, got: %v", err)
+	}
 }
 
 func TestDiscoverParentRelease_MultipleReleases(t *testing.T) {
@@ -175,6 +181,11 @@ func TestDiscoverParentRelease_MultipleReleases(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("expected error to mention %q, got: %s", want, err)
 		}
+	}
+	// An ambiguous match is NOT "no release" — it must not trip the §7.3
+	// rewrite (the cluster does host tracebloc, just more than one).
+	if errors.Is(err, ErrNoParentRelease) {
+		t.Error("multiple-release error must not match ErrNoParentRelease")
 	}
 }
 

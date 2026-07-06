@@ -111,22 +111,13 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	p := a.Printer
 	p.Banner("tracebloc", "datasets in the cluster")
 
-	resolved, err := cluster.Load(cluster.KubeconfigOptions{
-		Path:      a.Kubeconfig,
-		Context:   a.Context,
-		Namespace: a.Namespace,
-	})
+	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
+	binding := bindActiveClientNamespace(&opts)
+	target, err := resolveClusterTarget(ctx, opts, false)
 	if err != nil {
-		return &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
+		return binding.explain(err)
 	}
-	cs, err := cluster.NewClientset(resolved)
-	if err != nil {
-		return &exitError{code: 3, err: err}
-	}
-	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
-	if err != nil {
-		return &exitError{code: 4, err: err}
-	}
+	resolved, cs, release := target.Resolved, target.Clientset, target.Release
 
 	tables, err := push.ListDatasets(ctx, cs, resolved.RestConfig, resolved.Namespace)
 	if err != nil {

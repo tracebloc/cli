@@ -110,31 +110,17 @@ undone — re-ingesting the data is the only way back.`)
 		return &exitError{code: 2, err: fmt.Errorf("invalid table name %q: %w", a.Table, err)}
 	}
 
-	// 2. Resolve cluster + clientset (kubeconfig errors = exit 3).
-	resolved, err := cluster.Load(cluster.KubeconfigOptions{
-		Path:      a.Kubeconfig,
-		Context:   a.Context,
-		Namespace: a.Namespace,
-	})
-	if err != nil {
-		return &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
-	}
-	cs, err := cluster.NewClientset(resolved)
-	if err != nil {
-		return &exitError{code: 3, err: err}
-	}
-
-	// 3. Confirm the parent release + shared PVC exist (exit 4 if not) —
+	// 2. Resolve cluster + clientset (kubeconfig errors = exit 3), then
+	//    confirm the parent release + shared PVC exist (exit 4 if not) —
 	//    both "is this the right cluster?" context and a guard against
 	//    running teardown against a cluster with no tracebloc install.
-	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
+	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
+	binding := bindActiveClientNamespace(&opts)
+	target, err := resolveClusterTarget(ctx, opts, true)
 	if err != nil {
-		return &exitError{code: 4, err: err}
+		return binding.explain(err)
 	}
-	pvc, err := cluster.DiscoverSharedPVC(ctx, cs, resolved.Namespace)
-	if err != nil {
-		return &exitError{code: 4, err: err}
-	}
+	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
 
 	// 4. Show exactly what will be deleted — the customer's last look
 	//    before destructive, unrecoverable work.

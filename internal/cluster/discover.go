@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,6 +10,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
+
+// ErrNoParentRelease is the sentinel for DiscoverParentRelease's "the namespace
+// has no tracebloc release" case — distinct from an API/RBAC list failure or an
+// ambiguous multiple-release match. Callers use errors.Is to tell "this cluster
+// doesn't host the release" apart from "couldn't determine the release."
+var ErrNoParentRelease = errors.New("no tracebloc parent client release found")
 
 // ParentRelease describes the tracebloc parent client chart release
 // discovered in the customer's cluster. The information comes from
@@ -114,11 +121,11 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 	switch len(jmDeps) {
 	case 0:
 		return nil, fmt.Errorf(
-			"no tracebloc parent client release found in namespace %q "+
+			"%w in namespace %q "+
 				"(no chart-managed Deployment named *-jobs-manager). "+
 				"Install with `helm install <release> tracebloc/client --namespace %s` first, "+
 				"or pass --namespace to point at the namespace where it's running.",
-			namespace, namespace,
+			ErrNoParentRelease, namespace, namespace,
 		)
 	case 1:
 		// happy path
