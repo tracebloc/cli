@@ -278,6 +278,41 @@ func TestClientUse(t *testing.T) {
 	}
 }
 
+// client use reports the selected client's connectivity (§7.3): online-here vs
+// online-elsewhere (via the local probe), pending, and offline.
+func TestClientUse_ReportsConnectionState(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		reachable  bool
+		wantSubstr string
+	}{
+		{"online_here", clientStatusOnline, true, "Connected on this machine"},
+		{"online_elsewhere", clientStatusOnline, false, "runs on another machine"},
+		{"pending", clientStatusPending, false, "isn't connected to a cluster yet"},
+		{"offline", clientStatusOffline, false, "currently offline"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`[{"id":7,"first_name":"box","namespace":"ns7","status":%d}]`, tc.status)
+			withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(body))
+			})
+			orig := probeClientReachableHere
+			probeClientReachableHere = func(context.Context, string) bool { return tc.reachable }
+			t.Cleanup(func() { probeClientReachableHere = orig })
+
+			var out bytes.Buffer
+			if err := runClientUse(context.Background(), ui.New(&out), "ns7"); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.String(), tc.wantSubstr) {
+				t.Errorf("want %q in output:\n%s", tc.wantSubstr, out.String())
+			}
+		})
+	}
+}
+
 // A numeric handle that is one client's slug AND another client's id must
 // resolve deterministically to the slug owner (slug > id), regardless of list
 // order — not "whichever the API returned first".

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -641,27 +642,73 @@ func runClientUse(ctx context.Context, p *ui.Printer, handle string) error {
 	var byID *api.ProvisionedClient
 	for i := range clients {
 		if clients[i].Namespace == handle {
-			return selectClient(p, cfg, &clients[i])
+			return selectClient(ctx, p, cfg, &clients[i])
 		}
 		if byID == nil && strconv.Itoa(clients[i].ID) == handle {
 			byID = &clients[i]
 		}
 	}
 	if byID != nil {
-		return selectClient(p, cfg, byID)
+		return selectClient(ctx, p, cfg, byID)
 	}
 	return &exitError{code: 1, err: fmt.Errorf(
 		"no client %q in your account — run `tracebloc client list` to see the slugs and ids", handle)}
 }
 
-// selectClient points this machine at c and persists the choice.
-func selectClient(p *ui.Printer, cfg *config.Config, c *api.ProvisionedClient) error {
+// selectClient points this machine at c, persists the choice, then reports —
+// non-fatally — whether c is actually usable from here, so `client use` never
+// leaves the user to discover an unreachable/unconnected client via a later
+// data-command failure (§7.3).
+func selectClient(ctx context.Context, p *ui.Printer, cfg *config.Config, c *api.ProvisionedClient) error {
 	setActiveClient(cfg.Current(), c)
 	if err := cfg.Save(); err != nil {
 		return &exitError{code: 1, err: err}
 	}
-	p.Successf("This machine is now set to enroll as client %q (namespace %s).", c.Name, c.Namespace)
+	p.Successf("Now using client %q (namespace %s).", c.Name, c.Namespace)
+	reportSelectedClientState(ctx, p, c)
 	return nil
+}
+
+// reportSelectedClientState prints an honest, non-fatal note about the selected
+// client's connectivity. Backend status (from `client list`) tells us online /
+// offline / pending for free; for an online client we additionally probe the
+// local cluster to distinguish "connected here" from "runs on another machine".
+func reportSelectedClientState(ctx context.Context, p *ui.Printer, c *api.ProvisionedClient) {
+	switch c.Status {
+	case clientStatusOnline:
+		if probeClientReachableHere(ctx, c.Namespace) {
+			p.Infof("Connected on this machine — data commands will target namespace %s.", c.Namespace)
+			return
+		}
+		p.Warnf("This client is online but runs on another machine — data commands here can't reach its cluster.")
+		p.Hintf("Run data commands where it's installed, or `tracebloc client use` a client on this machine.")
+	case clientStatusPending:
+		p.Warnf("This client isn't connected to a cluster yet.")
+		p.Hintf("Install it on the target machine first — data commands won't work until it's online.")
+	case clientStatusOffline:
+		p.Warnf("This client is currently offline (no recent heartbeat).")
+		p.Hintf("Data commands will fail until it's back online — run `tracebloc cluster doctor` to diagnose.")
+	}
+}
+
+// probeClientReachableHere reports, best-effort, whether the client's namespace
+// hosts its tracebloc release on the cluster the default kubeconfig points at
+// ("connected here"). Bounded so `client use` never hangs on an unreachable
+// cluster; any failure (no kubeconfig, unreachable, no release) → false. A
+// package var so tests can stub it without a real cluster.
+var probeClientReachableHere = func(ctx context.Context, namespace string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	resolved, err := cluster.Load(cluster.KubeconfigOptions{Namespace: namespace})
+	if err != nil {
+		return false
+	}
+	cs, err := cluster.NewClientset(resolved)
+	if err != nil {
+		return false
+	}
+	_, err = cluster.DiscoverParentRelease(ctx, cs, namespace)
+	return err == nil
 }
 
 // setActiveClient points this env's profile at c, caching its namespace and
