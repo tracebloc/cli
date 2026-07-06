@@ -18,6 +18,41 @@ func TestSetActiveClient_CachesNamespaceAndName(t *testing.T) {
 	}
 }
 
+func TestBackfillActiveClientCache(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	clients := []api.ProvisionedClient{
+		{ID: 1039, Name: "aws-ubuntu", Namespace: "tracebloc-amazon"},
+		{ID: 1053, Name: "asad-macbook", Namespace: "asad-macbook-2"},
+	}
+
+	// Pre-cache config (old binary): id set, namespace empty → backfilled.
+	cfg := &config.Config{CurrentEnv: "prod", Profiles: map[string]*config.Profile{
+		"prod": {Token: "t", ActiveClientID: "1039"},
+	}}
+	backfillActiveClientCache(cfg, clients)
+	if cfg.Current().ActiveClientNamespace != "tracebloc-amazon" || cfg.Current().ActiveClientName != "aws-ubuntu" {
+		t.Errorf("backfill = %+v, want ns=tracebloc-amazon name=aws-ubuntu", cfg.Current())
+	}
+
+	// Already cached → left untouched (no clobber).
+	cached := &config.Config{CurrentEnv: "prod", Profiles: map[string]*config.Profile{
+		"prod": {Token: "t", ActiveClientID: "1039", ActiveClientNamespace: "custom-ns", ActiveClientName: "custom"},
+	}}
+	backfillActiveClientCache(cached, clients)
+	if cached.Current().ActiveClientNamespace != "custom-ns" {
+		t.Errorf("backfill clobbered an existing cache: %+v", cached.Current())
+	}
+
+	// Active id not in the list → no-op (no crash).
+	orphan := &config.Config{CurrentEnv: "prod", Profiles: map[string]*config.Profile{
+		"prod": {Token: "t", ActiveClientID: "9999"},
+	}}
+	backfillActiveClientCache(orphan, clients)
+	if orphan.Current().ActiveClientNamespace != "" {
+		t.Errorf("orphan id should not backfill, got %+v", orphan.Current())
+	}
+}
+
 func TestClientStateLabel(t *testing.T) {
 	cases := map[int]string{
 		clientStatusOnline:  "online",

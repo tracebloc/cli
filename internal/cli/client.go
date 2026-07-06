@@ -576,6 +576,12 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 		p.Hintf("No clients yet. Run `tracebloc client create`.")
 		return nil
 	}
+	// Backfill the active client's namespace cache if it's empty — e.g. a
+	// config written before the cache existed. `list` already has every
+	// client in hand, so this needs no extra request and lets `cluster info`
+	// / `data` commands bind (§7.3) without an explicit re-`use`.
+	backfillActiveClientCache(cfg, clients)
+
 	p.Section("Clients in your account")
 	active := cfg.Current().ActiveClientID
 	for _, c := range clients {
@@ -648,6 +654,26 @@ func setActiveClient(p *config.Profile, c *api.ProvisionedClient) {
 	p.ActiveClientID = strconv.Itoa(c.ID)
 	p.ActiveClientNamespace = c.Namespace
 	p.ActiveClientName = c.Name
+}
+
+// backfillActiveClientCache fills the active client's namespace/name cache from
+// an already-fetched client list when it's missing (a config written before the
+// cache existed, or the id set some other way). Best-effort: if the active
+// client isn't in the list, or the cache is already populated, it's a no-op; a
+// Save failure is ignored (the next `client use` will persist it anyway).
+func backfillActiveClientCache(cfg *config.Config, clients []api.ProvisionedClient) {
+	p := cfg.Current()
+	if p.ActiveClientID == "" || p.ActiveClientNamespace != "" {
+		return
+	}
+	for i := range clients {
+		if strconv.Itoa(clients[i].ID) == p.ActiveClientID {
+			p.ActiveClientNamespace = clients[i].Namespace
+			p.ActiveClientName = clients[i].Name
+			_ = cfg.Save()
+			return
+		}
+	}
 }
 
 // renderClientReview shows the assembled inputs before the confirm prompt, so
