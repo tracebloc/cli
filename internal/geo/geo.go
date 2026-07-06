@@ -74,13 +74,19 @@ func probeCloud(ctx context.Context) (region, provider string) {
 	ctx, cancel := context.WithTimeout(ctx, cloudProbeTimeout)
 	defer cancel()
 	type res struct{ region, provider string }
+	// Snapshot the endpoint bases synchronously, before spawning the goroutines,
+	// so each probe reads a captured local — never the package var. We return on
+	// the first winner and leave the losers running to their deadline; if they
+	// read the globals directly, a test's t.Cleanup (which restores those vars)
+	// races the still-running goroutines (go test -race).
+	awsBase, gcpBase, azBase := awsIMDSBase, gcpMetaBase, azureIMDSBase
 	probes := []struct {
 		name string
 		fn   func(context.Context) string
 	}{
-		{"aws", detectAWS},
-		{"gcp", detectGCP},
-		{"azure", detectAzure},
+		{"aws", func(c context.Context) string { return detectAWS(c, awsBase) }},
+		{"gcp", func(c context.Context) string { return detectGCP(c, gcpBase) }},
+		{"azure", func(c context.Context) string { return detectAzure(c, azBase) }},
 	}
 	ch := make(chan res, len(probes))
 	for _, p := range probes {
@@ -97,15 +103,15 @@ func probeCloud(ctx context.Context) (region, provider string) {
 
 // detectAWS reads the region from EC2 IMDS, preferring IMDSv2 (token) and
 // falling back to IMDSv1 (no token) if the token PUT is refused.
-func detectAWS(ctx context.Context) string {
+func detectAWS(ctx context.Context, base string) string {
 	var token string
-	if req, err := http.NewRequestWithContext(ctx, http.MethodPut, awsIMDSBase+"/latest/api/token", nil); err == nil {
+	if req, err := http.NewRequestWithContext(ctx, http.MethodPut, base+"/latest/api/token", nil); err == nil {
 		req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "60")
 		if t, ok := doText(metadataClient, req); ok {
 			token = t
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, awsIMDSBase+"/latest/meta-data/placement/region", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/latest/meta-data/placement/region", nil)
 	if err != nil {
 		return ""
 	}
@@ -118,8 +124,8 @@ func detectAWS(ctx context.Context) string {
 
 // detectGCP reads the instance zone and trims the trailing zone letter to a
 // region ("projects/N/zones/europe-west3-c" → "europe-west3").
-func detectGCP(ctx context.Context) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gcpMetaBase+"/computeMetadata/v1/instance/zone", nil)
+func detectGCP(ctx context.Context, base string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/computeMetadata/v1/instance/zone", nil)
 	if err != nil {
 		return ""
 	}
@@ -139,9 +145,9 @@ func detectGCP(ctx context.Context) string {
 
 // detectAzure reads the compute location from Azure IMDS (already a region-like
 // string, e.g. "germanywestcentral").
-func detectAzure(ctx context.Context) string {
+func detectAzure(ctx context.Context, base string) string {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		azureIMDSBase+"/metadata/instance/compute/location?api-version=2021-02-01&format=text", nil)
+		base+"/metadata/instance/compute/location?api-version=2021-02-01&format=text", nil)
 	if err != nil {
 		return ""
 	}
