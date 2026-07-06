@@ -49,7 +49,7 @@ ingest.v1.json schema (synced from tracebloc/data-ingestors). Prints
 violations in the same JSON-pointer-prefixed format the cluster's
 jobs-manager uses, and exits non-zero if any are found.
 
-Useful as a pre-flight before ` + "`tracebloc dataset push`" + ` lands in a
+Useful as a pre-flight before ` + "`tracebloc data ingest`" + ` lands in a
 future phase; for now, customers running the Helm chart can validate
 their ` + "`ingest.yaml`" + ` before invoking ` + "`helm install`" + `, getting
 millisecond local feedback instead of a multi-second cluster round
