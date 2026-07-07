@@ -281,6 +281,32 @@
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
       "note": "pins the text-family dispatch"
+    },
+    {
+      "name": "tabular-varchar-numeric-labels",
+      "category": "tabular_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "age": "INT",
+        "label": "VARCHAR(255)"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "labels '1' vs '1.0' under a VARCHAR label: the ingestor pins dtype=str (no numeric collapse) so they are 2 classes \u2014 pins #152's schema-type-aware collapse (the earlier blanket collapse falsely rejected this)"
+    },
+    {
+      "name": "tabular-float-numeric-labels",
+      "category": "tabular_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "age": "INT",
+        "label": "FLOAT"
+      },
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "same values under a FLOAT label: numeric read collapses 1/1.0 into one class \u2014 both sides reject (the counterpart pin)"
     }
   ]
 }
