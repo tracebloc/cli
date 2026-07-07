@@ -737,6 +737,11 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 			sp.Stop()
 			p.Successf("tracebloc can see this client.")
 			return nil
+		default:
+			// A successful poll — client present, just not online yet (offline/pending).
+			// Clear any earlier transient error so a timeout reports the real last
+			// state, not a stale "last check failed".
+			lastErr = nil
 		}
 		if time.Now().After(deadline) {
 			sp.Stop()

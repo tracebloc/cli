@@ -1261,3 +1261,37 @@ func TestClientStatus_TimeoutWithoutWaitRejected(t *testing.T) {
 		t.Errorf("want a '--timeout needs --wait' error, got: %v", err)
 	}
 }
+
+// TestClientStatus_WaitTimeoutClearsStaleError (Bugbot): an early transient list
+// error must not mask the real last state at timeout — once a later poll succeeds
+// (client present but offline), the timeout reports "offline", not the old error.
+func TestClientStatus_WaitTimeoutClearsStaleError(t *testing.T) {
+	calls := 0
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			calls++
+			if calls == 1 {
+				w.WriteHeader(http.StatusBadGateway) // one transient blip
+				return
+			}
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":0}]`)) // then offline
+		}
+	})
+	setActiveClientID(t, "5")
+	// Instant polling so many iterations fit inside the timeout — the first is the
+	// 502, all the rest are the successful offline poll that clears lastErr.
+	origAfter := pollAfter
+	pollAfter = func(time.Duration) <-chan time.Time { ch := make(chan time.Time, 1); ch <- time.Time{}; return ch }
+	t.Cleanup(func() { pollAfter = origAfter })
+
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, 100*time.Millisecond)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "last state: offline") {
+		t.Errorf("timeout should report the real last state (offline), got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "last status check failed") {
+		t.Errorf("a stale transient error must be cleared after a later successful poll: %v", err)
+	}
+}
