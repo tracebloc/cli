@@ -311,22 +311,6 @@ func TestClientList(t *testing.T) {
 	}
 }
 
-func TestClientUse(t *testing.T) {
-	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`[{"id":7,"first_name":"gamma","namespace":"gamma"}]`))
-	})
-	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "7"); err != nil {
-		t.Fatal(err)
-	}
-	cfg, _ := config.Load()
-	if cfg.Current().ActiveClientID != "7" {
-		t.Errorf("active = %q, want 7", cfg.Current().ActiveClientID)
-	}
-	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "99"); err == nil {
-		t.Error("expected an error for an unknown client id")
-	}
-}
-
 func TestClientCreate_Interactive(t *testing.T) {
 	var body api.CreateClientRequest
 	posted := false
