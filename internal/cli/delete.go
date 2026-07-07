@@ -120,7 +120,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		name = prof.ActiveClientID
 	}
 	// The release namespace: --namespace wins, else the active client's cached
-	// namespace (set at create/use time).
+	// namespace (set at create time).
 	ns := o.namespace
 	if ns == "" {
 		ns = prof.ActiveClientNamespace
@@ -138,7 +138,12 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	if !o.force {
 		if st, found, lerr := lookupClientStatus(ctx, client, prof.ActiveClientID); lerr != nil {
 			p.Hintf("Couldn't check whether this client is still online (%v) — continuing; pass --force to skip this check.", lerr)
-		} else if found && st == clientStatusOnline {
+		} else if !found {
+			// The stored id isn't among this account's clients — likely a stale
+			// pointer or the wrong account/env. Don't silently pass the guard: warn,
+			// then continue (the revoke below will 403/404 if it isn't really ours).
+			p.Hintf("This client isn't in the signed-in account's client list — continuing; if that's unexpected, check you're logged into the right account/env.")
+		} else if st == clientStatusOnline {
 			return &exitError{code: 1, err: fmt.Errorf(
 				"client %q is still online (tracebloc reports it running) — stop its training jobs first, "+
 					"or pass --force to offboard anyway", name)}
@@ -179,11 +184,19 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	}
 	p.Successf("Revoked this machine's credential (client %q kept on tracebloc as a record).", name)
 
+	// The teardown steps below are best-effort (the credential is already revoked),
+	// but a step that leaves real state behind — a live release, the local cluster,
+	// or on-host data — must NOT be papered over by the final success line. Track it
+	// so the closing message tells the truth (image reclaim is pure disk cleanup, so
+	// it's intentionally excluded — its own warning already surfaces it).
+	degraded := false
+
 	// 2. Uninstall the Helm release (best-effort — the credential is already
 	//    revoked; a leftover release is harmless and re-runnable).
 	if ns != "" {
 		if uerr := uninstallChart(ctx, ns, o.kubeconfigPath, o.contextOverride); uerr != nil {
 			p.Warnf("Chart uninstall reported: %v", uerr)
+			degraded = true
 		} else {
 			p.Successf("Uninstalled the Helm release %s.", ns)
 		}
@@ -193,11 +206,13 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		// promised the release would go, so a leftover must be called out.
 		p.Warnf("Couldn't determine this client's namespace — skipped the Helm uninstall. " +
 			"If a release is still installed, re-run with --namespace <ns>.")
+		degraded = true
 	}
 
 	// 3. Tear down the local cluster (also prunes its kubeconfig entry).
 	if terr := teardownCluster(ctx, nodeboot.ClusterName); terr != nil {
 		p.Warnf("Cluster teardown reported: %v", terr)
+		degraded = true
 	} else {
 		p.Successf("Deleted the local cluster %q.", nodeboot.ClusterName)
 	}
@@ -210,14 +225,13 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		p.Successf("Reclaimed the tracebloc container images.")
 	}
 
-	// 5. Remove ~/.tracebloc (config + on-host datasets on a single-host install)
-	//    unless --keep-data. This is the one irreversible step on that path.
+	// 5. The credential is revoked, so the enrollment is dead — clear the local
+	//    active-client pointer FIRST, regardless of --keep-data, so the host never
+	//    looks enrolled as a revoked client (§7.5). Then either spare or wipe
+	//    ~/.tracebloc. The token and (under --keep-data) on-host data stay;
+	//    re-running `client create` re-adopts by cluster_id.
+	prof.ActiveClientID, prof.ActiveClientName, prof.ActiveClientNamespace = "", "", ""
 	if o.keepData {
-		// Spare ~/.tracebloc, but still clear the now-dangling active-client pointer:
-		// the credential is revoked, so leaving this host "enrolled" as the client
-		// would mislead a later sign-in / reinstall (§7.5). The token and on-host
-		// data stay; re-running `client create` re-adopts by cluster_id.
-		prof.ActiveClientID, prof.ActiveClientName, prof.ActiveClientNamespace = "", "", ""
 		if serr := cfg.Save(); serr != nil {
 			p.Warnf("Kept local data, but couldn't clear the active-client pointer (%v).", serr)
 		} else {
@@ -225,7 +239,15 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		}
 	} else {
 		if derr := removeHostDataDir(); derr != nil {
-			p.Warnf("Couldn't remove local data (%v) — remove it by hand: rm -rf %s", derr, hostDataDirDisplay())
+			// The wipe failed, so the pointer isn't gone with the directory —
+			// persist the cleared pointer so the host doesn't still look enrolled
+			// under a dead credential.
+			degraded = true
+			if serr := cfg.Save(); serr != nil {
+				p.Warnf("Couldn't remove local data (%v) or clear the active-client pointer (%v) — remove it by hand: rm -rf %s", derr, serr, hostDataDirDisplay())
+			} else {
+				p.Warnf("Couldn't remove local data (%v) — cleared the active-client pointer; remove the data by hand: rm -rf %s", derr, hostDataDirDisplay())
+			}
 		} else {
 			p.Successf("Removed local tracebloc data and config.")
 		}
@@ -238,7 +260,15 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	removeSelf(p)
 
 	p.Newline()
-	p.Successf("Offboarded %q. This machine is no longer connected to tracebloc.", name)
+	// The credential is revoked either way, so the machine can no longer connect —
+	// but only claim a clean offboard when the teardown actually completed. If a
+	// step left real state behind, say so instead of printing an unqualified success.
+	if degraded {
+		p.Warnf("Offboarded %q: the machine credential is revoked, so it can no longer connect to tracebloc — "+
+			"but some cleanup above didn't complete. Finish the flagged steps by hand.", name)
+	} else {
+		p.Successf("Offboarded %q. This machine is no longer connected to tracebloc.", name)
+	}
 	return nil
 }
 

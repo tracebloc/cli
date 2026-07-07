@@ -236,6 +236,69 @@ func TestDelete_KeepData_SparesDataDir(t *testing.T) {
 	}
 }
 
+// When the ~/.tracebloc wipe fails, the active-client pointer must still be
+// cleared (persisted) — otherwise the host looks enrolled under a dead credential.
+func TestDelete_WipeFails_StillClearsPointer(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	dataDir := os.Getenv("TRACEBLOC_CONFIG_DIR")
+	exe := filepath.Join(t.TempDir(), "tracebloc")
+	// Make the data-dir wipe fail, but let cfg.Save() (which writes into dataDir)
+	// succeed — the fake osRemoveAll only errors for the data dir path.
+	fn := &fakeNodeboot{executable: exe, removeErr: map[string]error{dataDir: errors.New("permission denied")}}
+	fn.install(t)
+
+	var out bytes.Buffer
+	if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true}); err != nil {
+		t.Fatalf("offboard: %v", err)
+	}
+	cfg, _ := config.Load()
+	if got := cfg.Current().ActiveClientID; got != "" {
+		t.Errorf("a failed wipe must still clear the active-client pointer, got %q", got)
+	}
+	if !strings.Contains(out.String(), "Couldn't remove local data") {
+		t.Errorf("expected a wipe-failure warning, got:\n%s", out.String())
+	}
+}
+
+// When a teardown step leaves real state behind, the closing line must NOT claim a
+// clean offboard — it should flag that some cleanup didn't complete.
+func TestDelete_TeardownFailure_HonestClosing(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	fn := &fakeNodeboot{
+		executable:   filepath.Join(t.TempDir(), "tracebloc"),
+		uninstallErr: errors.New("helm: connection refused"),
+	}
+	fn.install(t)
+
+	var out bytes.Buffer
+	if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true}); err != nil {
+		t.Fatalf("offboard should still return nil (revoke succeeded): %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "some cleanup above didn't complete") {
+		t.Errorf("a failed teardown step should produce an honest degraded closing, got:\n%s", s)
+	}
+	if strings.Contains(s, "no longer connected to tracebloc") {
+		t.Errorf("must not print the clean-success closing when a step failed:\n%s", s)
+	}
+}
+
 // --kubeconfig/--context must reach the helm uninstall — otherwise the release is
 // uninstalled against the ambient current-context, which may be the wrong cluster.
 func TestDelete_KubeconfigContext_ReachHelm(t *testing.T) {
