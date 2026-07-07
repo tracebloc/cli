@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/nodeboot"
 	"github.com/tracebloc/cli/internal/ui"
@@ -323,6 +324,82 @@ func TestDelete_KubeconfigContext_ReachHelm(t *testing.T) {
 	if fn.uninstallKubeconfig != "/tmp/kc.yaml" || fn.uninstallContext != "k3d-tracebloc" {
 		t.Errorf("uninstall got kubeconfig=%q context=%q, want /tmp/kc.yaml + k3d-tracebloc",
 			fn.uninstallKubeconfig, fn.uninstallContext)
+	}
+}
+
+// A 426 (CLI too old) from the pre-offboard online guard must be a HARD failure
+// with the upgrade signal — NOT a softened "couldn't check, continuing" that then
+// proceeds into a destructive offboard. (Bugbot: "Delete guard softens HTTP 426".)
+func TestDelete_Guard426_HardFails(t *testing.T) {
+	revoked := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
+			revoked = true
+		}
+		// The guard's status lookup (GET /edge-device/) returns 426 Upgrade Required.
+		w.WriteHeader(http.StatusUpgradeRequired)
+		_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"0.9.0"}`))
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
+	fn.install(t)
+
+	var out bytes.Buffer
+	err := runDelete(context.Background(), ui.New(&out), typedNamePrompter{reply: "gpu-box-01"}, deleteOpts{})
+	if err == nil {
+		t.Fatal("a 426 from the online guard must fail the offboard, got nil")
+	}
+	var ue *api.UpgradeRequiredError
+	if !errors.As(err, &ue) {
+		t.Errorf("want *api.UpgradeRequiredError, got %v", err)
+	}
+	if revoked {
+		t.Error("must NOT revoke after a 426 guard failure")
+	}
+	if len(fn.calls) != 0 {
+		t.Errorf("no teardown after a 426 guard failure, got: %v", fn.calls)
+	}
+}
+
+// Under --keep-data, if persisting the cleared active-client pointer fails, the
+// offboard must NOT print a clean-success closing — the on-disk config still names
+// the revoked client, so the closing line must flag the incomplete cleanup.
+// (Bugbot: "Keep-data save leaves stale pointer".)
+func TestDelete_KeepData_SaveFails_HonestClosing(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	// Make cfg.Save() fail while cfg.Load() still succeeds: chmod the config dir
+	// read-only. Load reads dir/config.json fine (dir is traversable); Save's
+	// os.CreateTemp(dir, …) can't create the temp file in a non-writable dir.
+	// Restore perms so t.TempDir cleanup can remove it.
+	dataDir := os.Getenv("TRACEBLOC_CONFIG_DIR")
+	if err := os.Chmod(dataDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o700) })
+	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
+	fn.install(t)
+
+	var out bytes.Buffer
+	if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true, keepData: true}); err != nil {
+		t.Fatalf("offboard should still return nil (revoke succeeded): %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "couldn't clear the active-client pointer") {
+		t.Errorf("expected a pointer-clear-failed warning, got:\n%s", s)
+	}
+	if !strings.Contains(s, "some cleanup above didn't complete") {
+		t.Errorf("a failed pointer save under --keep-data must give the degraded closing, got:\n%s", s)
+	}
+	if strings.Contains(s, "no longer connected to tracebloc") {
+		t.Errorf("must not print the clean-success closing when the pointer save failed:\n%s", s)
 	}
 }
 

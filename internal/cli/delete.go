@@ -137,6 +137,16 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	// unreachable precisely because it's being retired); warn and continue.
 	if !o.force {
 		if st, found, lerr := lookupClientStatus(ctx, client, prof.ActiveClientID); lerr != nil {
+			// A 426 (CLI too old) is NOT a soft "couldn't check" — the CLI can't
+			// speak to tracebloc at all, and waiting/continuing won't help. Fail
+			// immediately with the upgrade signal rather than proceeding into a
+			// destructive offboard on a softened guard (mirrors `client status
+			// --wait`). --force skips this whole block by design; there the revoke
+			// call below surfaces the same 426 as a hard error.
+			var ue *api.UpgradeRequiredError
+			if errors.As(lerr, &ue) {
+				return &exitError{code: 1, err: lerr}
+			}
 			p.Hintf("Couldn't check whether this client is still online (%v) — continuing; pass --force to skip this check.", lerr)
 		} else if !found {
 			// The stored id isn't among this account's clients — likely a stale
@@ -233,7 +243,13 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	prof.ActiveClientID, prof.ActiveClientName, prof.ActiveClientNamespace = "", "", ""
 	if o.keepData {
 		if serr := cfg.Save(); serr != nil {
-			p.Warnf("Kept local data, but couldn't clear the active-client pointer (%v).", serr)
+			// The in-memory clear didn't persist: on-disk config still names the
+			// now-revoked client, so the host still looks enrolled. Mark degraded so
+			// the closing line doesn't claim a clean offboard (parity with the wipe
+			// path below, which already flags a failed Save).
+			degraded = true
+			p.Warnf("Kept local data, but couldn't clear the active-client pointer (%v) — "+
+				"the on-disk config still names the revoked client; re-run offboard or clear it by hand.", serr)
 		} else {
 			p.Infof("Kept local data and config (~/.tracebloc); cleared the active-client pointer — --keep-data.")
 		}
