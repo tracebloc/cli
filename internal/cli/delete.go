@@ -137,6 +137,14 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	// unreachable precisely because it's being retired); warn and continue.
 	if !o.force {
 		if st, found, lerr := lookupClientStatus(ctx, client, prof.ActiveClientID); lerr != nil {
+			// A 426 (CLI too old) won't recover by continuing — the whole offboard
+			// talks to the same backend, so fail fast with the upgrade message rather
+			// than imply the guard was merely skipped. Other errors (5xx/429/network)
+			// are transient: warn and continue, since the teardown is the real gate.
+			var ue *api.UpgradeRequiredError
+			if errors.As(lerr, &ue) {
+				return &exitError{code: 1, err: lerr}
+			}
 			p.Hintf("Couldn't check whether this client is still online (%v) — continuing; pass --force to skip this check.", lerr)
 		} else if !found {
 			// The stored id isn't among this account's clients — likely a stale
@@ -233,7 +241,12 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	prof.ActiveClientID, prof.ActiveClientName, prof.ActiveClientNamespace = "", "", ""
 	if o.keepData {
 		if serr := cfg.Save(); serr != nil {
-			p.Warnf("Kept local data, but couldn't clear the active-client pointer (%v).", serr)
+			// The in-memory pointer was cleared but not persisted — the on-disk config
+			// still names the revoked client. Mark degraded so the closing doesn't read
+			// as a clean offboard, and tell the user it needs a hand.
+			degraded = true
+			p.Warnf("Kept local data, but couldn't clear the stored active-client pointer (%v) — "+
+				"the on-disk config still names the revoked client; run `tracebloc logout` or remove it by hand.", serr)
 		} else {
 			p.Infof("Kept local data and config (~/.tracebloc); cleared the active-client pointer — --keep-data.")
 		}
