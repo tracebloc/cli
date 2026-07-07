@@ -290,3 +290,41 @@ func TestAuthStatus_NotSignedIn(t *testing.T) {
 		t.Errorf("got:\n%s", out)
 	}
 }
+
+// TestLogin_ClearsStaleIdentityOnWhoAmIFailure (review #3): a re-login as a
+// different user must not inherit the previous user's identity if the WhoAmI
+// confirmation fails — otherwise cli#137 would auto-name the new client after the
+// wrong person.
+func TestLogin_ClearsStaleIdentityOnWhoAmIFailure(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/device/code":
+			_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"WDJB-MJHT","verification_uri":"https://x/activate","expires_in":600,"interval":5}`))
+		case "/device/token":
+			_, _ = w.Write([]byte(`{"token":"bob_tok"}`))
+		case "/userinfo/":
+			w.WriteHeader(http.StatusInternalServerError) // confirmation fails
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+		}
+	})
+	// Pre-existing session for a DIFFERENT user (Alice) on this env.
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "alice_tok", Email: "alice@co", FirstName: "Alice"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runCmd(t, "login"); err != nil {
+		t.Fatalf("login should still succeed when WhoAmI fails: %v", err)
+	}
+
+	cfg, _ := config.Load()
+	prof := cfg.Current()
+	if prof.Token != "bob_tok" {
+		t.Errorf("token = %q, want the new bob_tok", prof.Token)
+	}
+	if prof.FirstName != "" || prof.Email != "" {
+		t.Errorf("stale identity leaked: FirstName=%q Email=%q (want both cleared)", prof.FirstName, prof.Email)
+	}
+}

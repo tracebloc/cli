@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +17,6 @@ import (
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
-	"github.com/tracebloc/cli/internal/geo"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -76,13 +76,25 @@ func stubInClusterClient(t *testing.T, lc *cluster.InClusterClient, err error) {
 	t.Cleanup(func() { readInClusterClient = orig })
 }
 
-// stubDetect replaces the location auto-detector so command tests stay hermetic
-// (no real cloud-metadata / GeoIP probes).
-func stubDetect(t *testing.T, z *geo.Zone) {
+// signInAs sets the active profile's identity (first name + email) so the cli#137
+// auto-name (<firstname>-NN) is deterministic in a test. Call after
+// withClientBackend, which creates the profile.
+func signInAs(t *testing.T, firstName, email string) {
 	t.Helper()
-	orig := detectZone
-	detectZone = func(context.Context) *geo.Zone { return z }
-	t.Cleanup(func() { detectZone = orig })
+	// Guard against writing to the developer's real ~/.tracebloc: this helper only
+	// makes sense once withClientBackend has redirected config to a temp dir.
+	if os.Getenv("TRACEBLOC_CONFIG_DIR") == "" {
+		t.Fatal("signInAs: TRACEBLOC_CONFIG_DIR is unset — call withClientBackend first")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Current()
+	p.FirstName, p.Email = firstName, email
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestClientCreate_Success(t *testing.T) {
@@ -286,18 +298,14 @@ func TestClientCreate_Interactive(t *testing.T) {
 			posted = true
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"id":9,"first_name":"Lab One","username":"u-9","namespace":"lab-one","location":"DE"}`))
+			_, _ = w.Write([]byte(`{"id":9,"first_name":"lab-01","username":"u-9","namespace":"lab-01"}`))
 		}
 	})
-	stubDetect(t, nil) // hermetic: no real cloud/GeoIP probes
+	signInAs(t, "Lab", "lab@example.com") // auto-name base "lab"
+	// No name/location prompts anymore (cli#137): the name is auto-derived and
+	// location is optional, so an interactive run only reaches the confirm.
 	confirmYes := true
-	pr := &fakePrompter{
-		answers: map[string]string{
-			"Client name":             "Lab One",
-			"Location zone (e.g. DE)": "DE",
-		},
-		confirm: &confirmYes,
-	}
+	pr := &fakePrompter{confirm: &confirmYes}
 	var out bytes.Buffer
 	if err := runClientCreate(context.Background(), ui.New(&out), pr, clientCreateOpts{}); err != nil {
 		t.Fatalf("interactive create: %v", err)
@@ -305,8 +313,11 @@ func TestClientCreate_Interactive(t *testing.T) {
 	if !posted {
 		t.Fatal("expected a POST after the user confirmed")
 	}
-	if body.Name != "Lab One" || body.Namespace != "lab-one" || body.Location != "DE" {
-		t.Errorf("create body = %+v", body)
+	if body.Name != "lab-01" || body.Namespace != "lab-01" {
+		t.Errorf("auto-named create body = %+v, want name/namespace lab-01", body)
+	}
+	if body.Location != "" {
+		t.Errorf("location = %q, want empty (no --location given, none sent)", body.Location)
 	}
 	if !strings.Contains(out.String(), "Review") {
 		t.Errorf("expected a review section before the confirm, got:\n%s", out.String())
@@ -321,15 +332,9 @@ func TestClientCreate_InteractiveCancel(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`[]`))
 	})
-	stubDetect(t, nil)
+	signInAs(t, "Lab", "lab@example.com")
 	confirmNo := false
-	pr := &fakePrompter{
-		answers: map[string]string{
-			"Client name":             "Lab Two",
-			"Location zone (e.g. DE)": "US",
-		},
-		confirm: &confirmNo,
-	}
+	pr := &fakePrompter{confirm: &confirmNo}
 	var out bytes.Buffer
 	if err := runClientCreate(context.Background(), ui.New(&out), pr, clientCreateOpts{}); err != nil {
 		t.Fatalf("declining the confirm should be a clean exit, got: %v", err)
@@ -680,7 +685,7 @@ func TestClientCreate_ReRunReviewShowsAdoptedNamespace(t *testing.T) {
 	})
 	stubClusterID(t, "uid-1", nil)
 	confirmYes := true
-	pr := &fakePrompter{answers: map[string]string{}, confirm: &confirmYes}
+	pr := &fakePrompter{confirm: &confirmYes}
 	var out bytes.Buffer
 	if err := runClientCreate(context.Background(), ui.New(&out), pr,
 		clientCreateOpts{name: "Lab One", location: "DE"}); err != nil {
@@ -691,7 +696,71 @@ func TestClientCreate_ReRunReviewShowsAdoptedNamespace(t *testing.T) {
 	}
 }
 
-func TestClientCreate_AcceptsDetectedZone(t *testing.T) {
+// TestClientCreate_AutoNameNoLocation is the cli#137 headline acceptance case:
+// a non-interactive create with NO name and NO location flags still succeeds —
+// the name is auto-generated from the signed-in identity and no location is sent.
+func TestClientCreate_AutoNameNoLocation(t *testing.T) {
+	var body api.CreateClientRequest
+	rawBody := ""
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`)) // no existing clients on the account
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			b, _ := io.ReadAll(r.Body)
+			rawBody = string(b)
+			_ = json.Unmarshal(b, &body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"lukas-01","username":"u-5","namespace":"lukas-01"}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+
+	// pr == nil → non-interactive (the installer path). No flags at all.
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{yes: true}); err != nil {
+		t.Fatalf("zero-flag non-interactive create should succeed, got: %v", err)
+	}
+	if body.Name != "lukas-01" || body.Namespace != "lukas-01" {
+		t.Errorf("auto-name = %+v, want name/namespace lukas-01", body)
+	}
+	// "no location sent" must mean the key is absent from the JSON (omitempty),
+	// not just an empty string — the backend distinguishes unset from blank.
+	if strings.Contains(rawBody, "location") {
+		t.Errorf("request body carried a location key, want it omitted: %s", rawBody)
+	}
+}
+
+// TestClientCreate_AutoNameNumbering: a second machine on the same account with
+// the same first name numbers up (lukas-02), rather than stacking a slug -2 bump.
+func TestClientCreate_AutoNameNumbering(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			// lukas-01 already exists on the account.
+			_, _ = w.Write([]byte(`[{"id":1,"first_name":"lukas-01","username":"u-1","namespace":"lukas-01"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":2,"first_name":"lukas-02","username":"u-2","namespace":"lukas-02"}`))
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.Name != "lukas-02" || body.Namespace != "lukas-02" {
+		t.Errorf("second machine = %+v, want lukas-02 (numbered, not a slug -2 bump)", body)
+	}
+}
+
+// TestClientCreate_AutoNameEmailFallback: with no first name on the profile, the
+// auto-name base falls back to the email local-part.
+func TestClientCreate_AutoNameEmailFallback(t *testing.T) {
 	var body api.CreateClientRequest
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -700,21 +769,307 @@ func TestClientCreate_AcceptsDetectedZone(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"id":3,"first_name":"Edge","username":"u-3","namespace":"edge","location":"FR"}`))
+			_, _ = w.Write([]byte(`{"id":7,"first_name":"jane-doe-01","username":"u-7","namespace":"jane-doe-01"}`))
 		}
 	})
-	// Detector suggests FR; the user accepts it — no scripted answer for the
-	// location prompt, so the fake returns the pre-filled default.
-	stubDetect(t, &geo.Zone{Code: "FR", Source: "aws", Confidence: geo.High})
-	confirmYes := true
-	pr := &fakePrompter{
-		answers: map[string]string{"Client name": "Edge"},
-		confirm: &confirmYes,
-	}
-	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), pr, clientCreateOpts{}); err != nil {
+	signInAs(t, "", "jane.doe@tracebloc.io") // no first name → local-part "jane.doe" → slug "jane-doe"
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{yes: true}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if body.Location != "FR" {
-		t.Errorf("location = %q, want FR (detected zone accepted as the default)", body.Location)
+	if body.Name != "jane-doe-01" {
+		t.Errorf("auto-name = %q, want jane-doe-01 (email local-part fallback)", body.Name)
+	}
+}
+
+// TestClientCreate_FlagsStillHonored: explicit --name/--location are passed
+// through verbatim and suppress the auto-name.
+func TestClientCreate_FlagsStillHonored(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":4,"first_name":"lab-one","username":"u-4","namespace":"lab-one","location":"US"}`))
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io") // would auto-name lukas-01 if not overridden
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{name: "Lab One", location: "US", yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.Name != "Lab One" || body.Location != "US" {
+		t.Errorf("create body = %+v, want name 'Lab One' location US (flags verbatim)", body)
+	}
+}
+
+// TestClientCreate_NonInteractiveNeedsConsent (review #1): a bare non-interactive
+// run (no TTY, no --yes, no --credential-file) must NOT silently mint and print
+// the credential to stdout — it fails closed with guidance before any POST.
+func TestClientCreate_NonInteractiveNeedsConsent(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	// pr == nil (non-interactive), yes == false, no credential file.
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{})
+	if code := ExitCodeFromError(err); code != 1 {
+		t.Fatalf("want exit 1, got %d (err=%v)", code, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "refusing to provision non-interactively") {
+		t.Errorf("want a consent-required error, got: %v", err)
+	}
+	if posted {
+		t.Error("no client should be minted without --yes/--credential-file")
+	}
+}
+
+// TestClientCreate_NonInteractiveWithYes: --yes alone is sufficient consent for a
+// non-interactive mint (the confirm can't run, but the user opted in).
+func TestClientCreate_NonInteractiveWithYes(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"lukas-01","username":"u-5","namespace":"lukas-01"}`))
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true}); err != nil {
+		t.Fatalf("--yes should authorize a non-interactive mint, got: %v", err)
+	}
+	if !posted {
+		t.Error("expected a mint with --yes")
+	}
+}
+
+// TestClientCreate_AutoNameFailsClosedOnListError (review #2): if the account's
+// client list can't be read, auto-naming would number against an empty set and
+// mint a deterministic duplicate. It must fail closed instead — never POST.
+func TestClientCreate_AutoNameFailsClosedOnListError(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			w.WriteHeader(http.StatusBadGateway) // transient list failure
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true})
+	if code := ExitCodeFromError(err); code != 1 {
+		t.Fatalf("want exit 1 on list failure, got %d (err=%v)", code, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "unique client name") {
+		t.Errorf("want a 'couldn't pick a unique name' error, got: %v", err)
+	}
+	if posted {
+		t.Error("must not mint (a duplicate) when the client list is unreadable")
+	}
+}
+
+// TestClientCreate_AutoNameFailsClosedOnListError still lets an explicit --name
+// through a list blip (the list is only best-effort for slug-collision avoidance).
+func TestClientCreate_ExplicitNameToleratesListError(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			w.WriteHeader(http.StatusBadGateway)
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"lab","username":"u-5","namespace":"lab"}`))
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{name: "lab", yes: true}); err != nil {
+		t.Fatalf("explicit --name should tolerate a list blip, got: %v", err)
+	}
+	if !posted {
+		t.Error("expected a mint with an explicit --name despite the list error")
+	}
+}
+
+// TestClientCreate_AutoNameCapsAt63 (review #4): a very long first name must still
+// produce name == namespace within the 63-char DNS label cap — no slug -NN bump.
+func TestClientCreate_AutoNameCapsAt63(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"x","username":"u-5","namespace":"x"}`))
+		}
+	})
+	signInAs(t, strings.Repeat("a", 70), "long@tracebloc.io") // slugifies to 63 a's
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.Name != body.Namespace {
+		t.Errorf("name != namespace for a long first name: %q vs %q", body.Name, body.Namespace)
+	}
+	if len(body.Name) > 63 {
+		t.Errorf("name exceeds the 63-char DNS label cap: %d chars (%q)", len(body.Name), body.Name)
+	}
+	if !strings.HasSuffix(body.Name, "-01") {
+		t.Errorf("expected a -01 suffix, got %q", body.Name)
+	}
+}
+
+// TestClientCreate_AutoNameSurfacesUpgradeRequired (Bugbot #144-A): a 426 while
+// listing clients for the auto-name must surface as an upgrade signal, not a
+// "retry" reachability error — retrying an outdated CLI never succeeds.
+func TestClientCreate_AutoNameSurfacesUpgradeRequired(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusUpgradeRequired) // 426
+			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true})
+	if code := ExitCodeFromError(err); code != 1 {
+		t.Fatalf("want exit 1, got %d (err=%v)", code, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Errorf("want an upgrade-required message, got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "couldn't reach the backend") {
+		t.Errorf("a 426 must not be framed as a transient reachability error: %v", err)
+	}
+}
+
+// TestClientCreate_AutoNameReservesSluggedNames (Bugbot #144-B): a legacy client
+// whose display name slugifies to the same handle (e.g. "Lukas 01" → lukas-01),
+// even with a blank namespace, must reserve that handle so auto-naming skips it.
+func TestClientCreate_AutoNameReservesSluggedNames(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			// Legacy client: raw display name, no namespace stored.
+			_, _ = w.Write([]byte(`[{"id":1,"first_name":"Lukas 01","username":"u-1","namespace":""}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":2,"first_name":"lukas-02","username":"u-2","namespace":"lukas-02"}`))
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.Name != "lukas-02" {
+		t.Errorf("auto-name = %q, want lukas-02 (lukas-01 reserved by legacy \"Lukas 01\")", body.Name)
+	}
+}
+
+// TestClientCreate_NonInteractiveAdoptNeedsNoConsent (Bugbot follow-up): the
+// non-interactive consent guard must NOT block an idempotent re-run on an
+// already-anchored cluster — that path adopts (HTTP 200) and prints no
+// credential, so it stays zero-friction without --yes/--credential-file.
+func TestClientCreate_NonInteractiveAdoptNeedsNoConsent(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			// This cluster is already anchored to an existing client.
+			_, _ = w.Write([]byte(`[{"id":8,"first_name":"box","username":"u-8","namespace":"existing","cluster_id":"uid-1"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+			w.WriteHeader(http.StatusOK) // 200 = adopted
+			_, _ = w.Write([]byte(`{"id":8,"first_name":"box","username":"u-8","namespace":"existing","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	// pr == nil, no --yes, no --credential-file: a fresh mint would be blocked, but
+	// this is an adopt, so it must proceed.
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), nil, clientCreateOpts{}); err != nil {
+		t.Fatalf("non-interactive re-run on an anchored cluster should adopt, got: %v", err)
+	}
+	if !posted {
+		t.Error("expected the adopt POST")
+	}
+	if !strings.Contains(out.String(), "already registered") {
+		t.Errorf("expected an adopt message, got:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "Machine credential") {
+		t.Errorf("adopt must not print a credential:\n%s", out.String())
+	}
+}
+
+// TestClientCreate_AutoNameReusesAnchoredClientName (Bugbot follow-up): a re-run
+// without --name on an already-anchored cluster reuses the anchored client's
+// name, not a freshly-numbered handle the backend would ignore on adopt.
+func TestClientCreate_AutoNameReusesAnchoredClientName(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			// lukas-01 is already anchored to this cluster.
+			_, _ = w.Write([]byte(`[{"id":8,"first_name":"lukas-01","username":"u-8","namespace":"lukas-01","cluster_id":"uid-1"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusOK) // adopt
+			_, _ = w.Write([]byte(`{"id":8,"first_name":"lukas-01","username":"u-8","namespace":"lukas-01","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	signInAs(t, "Lukas", "lukas@tracebloc.io") // would auto-name lukas-02 (lukas-01 taken) if not reused
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.Name != "lukas-01" {
+		t.Errorf("re-run should reuse the anchored name lukas-01, got %q (a fresh handle the backend would discard)", body.Name)
+	}
+}
+
+// TestClientCreate_NonInteractiveListFailureExplainsCause (Bugbot follow-up): when
+// the consent guard fires because the client list couldn't be read (willAdopt
+// unknown), the error must name the real cause and note that a retry adopts —
+// not just tell the user to pass --yes.
+func TestClientCreate_NonInteractiveListFailureExplainsCause(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			w.WriteHeader(http.StatusBadGateway) // list fails → willAdopt unknown
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+		}
+	})
+	stubClusterID(t, "uid-1", nil) // a cluster that could well be adopt-only
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	// --name given so the auto-name fast-fail is skipped and we reach the guard.
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "lab"})
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "couldn't read the account's client list") {
+		t.Errorf("want a list-failure explanation, got: %v", err)
+	}
+	if posted {
+		t.Error("must not mint when the client list is unreadable")
 	}
 }

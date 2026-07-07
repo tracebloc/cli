@@ -39,6 +39,7 @@ const defaultEnv = "prod"
 // partially-configured profile stays small and forward-compatible.
 type Profile struct {
 	Email          string `json:"email,omitempty"`            // who is signed in (display only)
+	FirstName      string `json:"first_name,omitempty"`       // signed-in user's first name; auto-names clients (cli#137)
 	Token          string `json:"token,omitempty"`            // user token from device login
 	ExpiresAt      string `json:"expires_at,omitempty"`       // token expiry (RFC 3339), when known
 	ActiveClientID string `json:"active_client_id,omitempty"` // client this machine enrolls as, for THIS env
