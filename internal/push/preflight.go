@@ -37,7 +37,7 @@ func HasBOM(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	head := make([]byte, 3)
 	n, err := io.ReadFull(f, head)
 	if err != nil && n < 3 {
@@ -60,7 +60,7 @@ func ReadCSVHeader(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	br := bufio.NewReader(f)
 	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
 		_, _ = br.Discard(3)
@@ -162,7 +162,7 @@ func CheckHasDataRows(path string) error {
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", filepath.Base(path), err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	br := bufio.NewReader(f)
 	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
 		_, _ = br.Discard(3)
@@ -254,7 +254,7 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	br := bufio.NewReader(f)
 	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
 		_, _ = br.Discard(3)
@@ -387,7 +387,7 @@ func CheckLabelDiversity(csvPath, labelColumn string, dropNASentinels, collapseN
 	if err != nil {
 		return nil // unreadable file is another check's diagnostic
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	br := bufio.NewReader(f)
 	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
 		_, _ = br.Discard(3)
@@ -478,7 +478,7 @@ func CheckCSVEncoding(path string) error {
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", filepath.Base(path), err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, MaxSingleFileBytes+1))
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", filepath.Base(path), err)
