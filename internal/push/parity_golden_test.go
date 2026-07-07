@@ -23,15 +23,16 @@ import (
 // silent.
 
 type parityCase struct {
-	Name            string `json:"name"`
-	Category        string `json:"category"`
-	CSV             string `json:"csv"`
-	LabelColumn     string `json:"label_column"`
-	Extension       string `json:"extension"`
-	TargetSize      []int  `json:"target_size"`
-	CLIVerdict      string `json:"cli_verdict"`
-	IngestorVerdict string `json:"ingestor_verdict"`
-	Note            string `json:"note"`
+	Name            string            `json:"name"`
+	Category        string            `json:"category"`
+	CSV             string            `json:"csv"`
+	LabelColumn     string            `json:"label_column"`
+	Extension       string            `json:"extension"`
+	TargetSize      []int             `json:"target_size"`
+	Schema          map[string]string `json:"schema"`
+	CLIVerdict      string            `json:"cli_verdict"`
+	IngestorVerdict string            `json:"ingestor_verdict"`
+	Note            string            `json:"note"`
 }
 
 func TestValidatorParity(t *testing.T) {
@@ -85,9 +86,12 @@ func runGoPreflight(t *testing.T, c parityCase) string {
 		TargetSize:  c.TargetSize,
 	}
 	if IsTabular(c.Category) {
-		// Mirror runDataIngest: the schema is inferred from the CSV before
-		// the preflight runs (the schema-columns preview needs it).
-		if sch, _, _, err := InferSchema(layout.LabelsCSV); err == nil {
+		// Mirror runDataIngest: an explicit schema (the --schema flow) wins,
+		// else it is inferred from the CSV — the golden generator derives the
+		// schema the same way, so dtype-sensitive verdicts stay comparable.
+		if len(c.Schema) > 0 {
+			spec.Schema = c.Schema
+		} else if sch, _, _, err := InferSchema(layout.LabelsCSV); err == nil {
 			spec.Schema = sch
 		}
 	}

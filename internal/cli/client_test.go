@@ -203,6 +203,45 @@ func TestClientCreate_R7_AdoptBackfill(t *testing.T) {
 	}
 }
 
+// TestClientCreate_R7_UIDReadFailsAdoptsLive: the kube-system UID read fails
+// (e.g. RBAC on namespaces, a transient API error) while the cluster is still
+// reachable enough to discover a live owned client — #158. The create must NOT
+// mint over it; it adopts the live client as-is, with no backfill PATCH (there's
+// no anchor to stamp).
+func TestClientCreate_R7_UIDReadFailsAdoptsLive(t *testing.T) {
+	postCalled, patchCalled := false, false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":7,"first_name":"box","username":"uuid-live","namespace":"ns-live","cluster_id":""}]`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/edge-device/7/":
+			patchCalled = true
+			t.Error("no anchor to backfill when the UID read failed — PATCH must NOT be called")
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			postCalled = true
+			t.Error("must NOT mint over a live client when the UID read failed (#158)")
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	// UID read fails, but the live client is still discoverable.
+	stubClusterID(t, "", errors.New(`namespaces "kube-system" is forbidden`))
+	stubInClusterClient(t, &cluster.InClusterClient{ClientID: "uuid-live", Namespace: "ns-live"}, nil)
+
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), nil,
+		clientCreateOpts{name: "box", location: "DE", yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if postCalled || patchCalled {
+		t.Fatal("expected a pure adopt (no mint, no backfill)")
+	}
+	cfg, _ := config.Load()
+	if cfg.Current().ActiveClientID != "7" {
+		t.Errorf("active client = %q, want 7 (adopted live client)", cfg.Current().ActiveClientID)
+	}
+}
+
 // TestClientCreate_R7_AlreadyAnchored: the live client already carries this
 // cluster's anchor → adopt directly, no PATCH, no mint.
 func TestClientCreate_R7_AlreadyAnchored(t *testing.T) {
