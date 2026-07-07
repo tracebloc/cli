@@ -72,17 +72,25 @@ func TestDiscover_TotalBytesSum(t *testing.T) {
 	}
 }
 
-func TestDiscover_AcceptsAllImageExtensions(t *testing.T) {
-	// Mirror the chart's FileTypeValidator(images) defaults — if a
-	// customer's image-set has .png + .webp, both should stage.
+func TestDiscover_AcceptsIngestorExtensions(t *testing.T) {
+	// The accept-set mirrors what the in-cluster ingestor can actually
+	// validate: .jpg/.jpeg/.png (case-insensitive). .webp was accepted
+	// here historically on a chart-comment claim the ingestor never
+	// honored — staging it guaranteed an in-cluster failure after the
+	// full upload (cli#68), so it is now deliberately skipped.
 	root := imgcDir(t, "a.jpg", "b.jpeg", "c.png", "d.webp", "e.JPG")
 	got, err := Discover(root)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	if len(got.Images) != 5 {
-		t.Errorf("len(Images) = %d, want 5 (case-insensitive); names=%v",
+	if len(got.Images) != 4 {
+		t.Errorf("len(Images) = %d, want 4 (webp skipped, case-insensitive); names=%v",
 			len(got.Images), got.Images)
+	}
+	for _, img := range got.Images {
+		if strings.HasSuffix(img, ".webp") {
+			t.Errorf("webp staged despite the ingestor rejecting it: %s", img)
+		}
 	}
 }
 
@@ -161,8 +169,12 @@ func TestDiscover_NoAcceptedImageExtensions(t *testing.T) {
 	if err == nil {
 		t.Fatal("Discover returned nil error; expected no-images error")
 	}
-	if !strings.Contains(err.Error(), "no image files") {
-		t.Errorf("error = %q, want it to mention no image files", err)
+	// The error must name what WAS found and what's accepted — the
+	// customer's fix is one conversion away.
+	for _, want := range []string{"no usable image files", ".gif", ".bmp", ".jpg, .jpeg, or .png"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
 	}
 }
 
@@ -361,6 +373,26 @@ func TestHumanBytes(t *testing.T) {
 	for _, c := range cases {
 		if got := HumanBytes(c.in); got != c.want {
 			t.Errorf("HumanBytes(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// DetectExtension backs the cli#68 fix: the spec must tell the cluster the
+// ONE extension the dataset actually uses, and mixed sets must fail locally
+// (before upload), not in-cluster (after).
+func TestDetectExtension(t *testing.T) {
+	ext, err := DetectExtension([]string{"a/x.jpg", "a/y.JPG", "a/z.jpg"})
+	if err != nil || ext != ".jpg" {
+		t.Errorf("uniform: ext=%q err=%v, want .jpg/nil", ext, err)
+	}
+
+	_, err = DetectExtension([]string{"a/x.jpg", "a/y.png", "a/z.jpg"})
+	if err == nil {
+		t.Fatal("mixed extensions must error before any upload")
+	}
+	for _, want := range []string{".jpg ×2", ".png ×1", "one type"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("mixed error = %q, want it to mention %q", err, want)
 		}
 	}
 }

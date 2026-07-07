@@ -175,6 +175,13 @@ type SpecArgs struct {
 	// it from there, so this needs no top-level schema field. 0 ⇒
 	// unset (ignored for non-keypoint categories).
 	NumberOfKeypoints int
+
+	// Extension is the single image file extension every file in the
+	// dataset shares (detected by DetectExtension), emitted as
+	// spec.file_options.extension so the ingestor's FileTypeValidator
+	// checks against what was actually staged instead of its .jpeg
+	// convention default (cli#68).
+	Extension string
 }
 
 // Build produces the ingest.v1.json-conforming spec map. The
@@ -256,6 +263,15 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 		spec["annotations"] = path.Join(prefix, "annotations") + "/"
 	}
 
+	// file_options carries the per-file conventions the ingestor's
+	// validators read: the detected extension (all categories in the
+	// image family — FileTypeValidator checks images against it) and,
+	// for the non-keypoint categories, the resolution override.
+	fileOptions := map[string]any{}
+	if a.Extension != "" {
+		fileOptions["extension"] = a.Extension
+	}
+
 	if a.Category == "keypoint_detection" {
 		if len(a.TargetSize) == 2 {
 			// Schema documents target_size as [height, width]; TargetSize
@@ -265,16 +281,13 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 		if a.NumberOfKeypoints > 0 {
 			spec["number_of_keypoints"] = a.NumberOfKeypoints
 		}
-		return
+	} else if len(a.TargetSize) == 2 {
+		// [height, width] per the schema; TargetSize is [W, H].
+		fileOptions["target_size"] = []int{a.TargetSize[1], a.TargetSize[0]}
 	}
 
-	if len(a.TargetSize) == 2 {
-		spec["spec"] = map[string]any{
-			"file_options": map[string]any{
-				// [height, width] per the schema; TargetSize is [W, H].
-				"target_size": []int{a.TargetSize[1], a.TargetSize[0]},
-			},
-		}
+	if len(fileOptions) > 0 {
+		spec["spec"] = map[string]any{"file_options": fileOptions}
 	}
 }
 

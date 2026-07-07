@@ -446,3 +446,68 @@ func TestStagedPrefix_PanicsOnUnsafeName(t *testing.T) {
 		})
 	}
 }
+
+// The cli#68 fix: Build must carry the detected extension into
+// spec.file_options so the ingestor's FileTypeValidator checks the type
+// that was actually staged — and the result must still schema-validate
+// (the enum only allows what the ingestor's FileExtension enum allows).
+func TestBuild_EmitsDetectedExtension_PassesSchema(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args SpecArgs
+	}{
+		{"image_classification with target size", SpecArgs{
+			Table: "t1", Category: "image_classification", Intent: "train",
+			LabelColumn: "label", TargetSize: []int{512, 512}, Extension: ".png",
+		}},
+		{"image_classification extension only", SpecArgs{
+			Table: "t2", Category: "image_classification", Intent: "train",
+			LabelColumn: "label", Extension: ".jpg",
+		}},
+		{"keypoint_detection keeps top-level fields", SpecArgs{
+			Table: "t3", Category: "keypoint_detection", Intent: "train",
+			LabelColumn: "label", TargetSize: []int{256, 256},
+			NumberOfKeypoints: 17, Extension: ".jpeg",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := tc.args.Build()
+			inner, _ := spec["spec"].(map[string]any)
+			if inner == nil {
+				t.Fatal("spec.file_options missing entirely")
+			}
+			fo, _ := inner["file_options"].(map[string]any)
+			if fo == nil || fo["extension"] != tc.args.Extension {
+				t.Fatalf("file_options.extension = %v, want %q (file_options=%v)",
+					fo["extension"], tc.args.Extension, fo)
+			}
+			if tc.args.Category == "keypoint_detection" {
+				if spec["number_of_keypoints"] != 17 {
+					t.Errorf("keypoint top-level fields must survive: %v", spec)
+				}
+				if _, hasTS := spec["target_size"]; !hasTS {
+					t.Error("keypoint target_size must stay present top-level")
+				}
+				if _, hasTS := fo["target_size"]; hasTS {
+					t.Errorf("keypoint target_size must stay top-level, not in file_options")
+				}
+			}
+
+			specBytes, err := yaml.Marshal(spec)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			v, err := schema.NewV1Validator()
+			if err != nil {
+				t.Fatalf("NewV1Validator: %v", err)
+			}
+			_, errs, parseErr := v.ValidateYAML(specBytes)
+			if parseErr != nil {
+				t.Fatalf("parse error on our own output: %v\n%s", parseErr, specBytes)
+			}
+			if len(errs) != 0 {
+				t.Fatalf("schema rejects the emitted extension spec: %v\n%s", errs, specBytes)
+			}
+		})
+	}
+}

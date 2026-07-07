@@ -1,7 +1,15 @@
 package cli
 
 import (
+	"github.com/tracebloc/cli/internal/push"
+	"github.com/tracebloc/cli/internal/ui"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	"bytes"
+	"context"
+	"errors"
+	"github.com/tracebloc/cli/internal/cluster"
 	"os"
 	"path/filepath"
 	"strings"
@@ -342,5 +350,56 @@ func TestAliasResolution(t *testing.T) {
 				t.Errorf("output missing %q:\n%s", c.want, combined)
 			}
 		})
+	}
+}
+
+// destTableExists backs the cli#70 P4-lite guard: an existing destination
+// table must be caught BEFORE staging (a re-ingest used to burn the full
+// upload and then fail in-cluster), and a broken check must fail OPEN with
+// a visible note — never block the ingest, never pretend it ran.
+func TestDestTableExists(t *testing.T) {
+	resolved := &cluster.ResolvedConfig{Namespace: "ns"}
+
+	restore := listDatasetsFn
+	defer func() { listDatasetsFn = restore }()
+
+	listDatasetsFn = func(_ context.Context, _ kubernetes.Interface, _ *rest.Config, _ string) ([]string, error) {
+		return []string{"other", "MyTable"}, nil
+	}
+	matched, note := destTableExists(context.Background(), nil, resolved, "mytable")
+	if matched != "MyTable" || note != "" {
+		t.Errorf("case-insensitive match must return the EXISTING spelling (teardown acts on it): matched=%q note=%q, want MyTable/empty", matched, note)
+	}
+
+	matched, note = destTableExists(context.Background(), nil, resolved, "fresh_table")
+	if matched != "" || note != "" {
+		t.Errorf("absent table: matched=%q note=%q, want empty/empty", matched, note)
+	}
+
+	listDatasetsFn = func(_ context.Context, _ kubernetes.Interface, _ *rest.Config, _ string) ([]string, error) {
+		return nil, errors.New("mysql pod not found")
+	}
+	matched, note = destTableExists(context.Background(), nil, resolved, "t")
+	if matched != "" {
+		t.Error("a broken check must fail open (no match), not closed")
+	}
+	if !strings.Contains(note, "couldn't check") || !strings.Contains(note, "mysql pod not found") {
+		t.Errorf("fail-open note = %q, want it to say the check didn't run and why", note)
+	}
+}
+
+// The images summary line surfaces the detected extension — the visible
+// half of the cli#68 fix (the spec half is pinned in internal/push).
+func TestPrintLocalSummary_ShowsDetectedExtension(t *testing.T) {
+	var buf bytes.Buffer
+	p := ui.New(&buf, ui.WithColor(false))
+	layout := &push.LocalLayout{Root: "/d", LabelsCSV: "/d/labels.csv", Images: []string{"/d/images/a.png"}}
+	spec := map[string]any{
+		"table": "t", "category": "image_classification", "intent": "train",
+		"spec": map[string]any{"file_options": map[string]any{"extension": ".png"}},
+	}
+	printLocalSummary(p, layout, spec)
+	if !strings.Contains(buf.String(), "1 files (.png)") {
+		t.Errorf("summary missing detected extension:\n%s", buf.String())
 	}
 }
