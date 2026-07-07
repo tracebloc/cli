@@ -17,7 +17,6 @@ import (
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
-	"github.com/tracebloc/cli/internal/geo"
 	"github.com/tracebloc/cli/internal/slug"
 	"github.com/tracebloc/cli/internal/ui"
 )
@@ -136,10 +135,6 @@ func authedClient() (*api.Client, *config.Config, error) {
 	return client, cfg, nil
 }
 
-// detectZone suggests a location zone (cloud metadata → GeoIP). A seam so tests
-// stay hermetic (no network).
-var detectZone = geo.Detect
-
 func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clientCreateOpts) (err error) {
 	// Always leave a full provision trace on disk, even on a quiet/headless run
 	// (RFC-0001 §8.5). On any failure, point at the (idempotent) resume command
@@ -174,39 +169,15 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	ilog.Logf("authenticated; provisioning against the signed-in account")
 
 	name, location := opts.name, opts.location
-
-	// Gather inputs first (flags win; prompt only what's missing, and only on a
-	// TTY), then show one review + confirm — matching the dataset-push flow.
-	if name == "" {
-		if pr == nil {
-			return errMissingFlag("--name")
-		}
-		if name, err = pr.Input("Client name", "shown on your dashboard + carbon reports", "", validateNonEmpty); err != nil {
-			return mapClientErr(err)
-		}
-	}
-	if location == "" {
-		if pr == nil {
-			return errMissingFlag("--location")
-		}
-		// Auto-detect a suggested zone (cloud metadata → IP geolocation) and
-		// pre-fill it as the prompt default; the user confirms with Enter or
-		// overrides. Never silent (it's a prompt), never empty (validateNonEmpty).
-		suggested := ""
-		help := "electricityMaps zone for the carbon footprint (e.g. DE)"
-		if z := detectZone(ctx); z != nil {
-			suggested = z.Code
-			help = fmt.Sprintf("detected %s via %s (%s confidence) — Enter to accept, or type your zone",
-				z.Code, z.Source, z.Confidence)
-		}
-		if location, err = pr.Input("Location zone (e.g. DE)", help, suggested, validateNonEmpty); err != nil {
-			return mapClientErr(err)
-		}
-	}
-	// Reflect the resolved (possibly prompted) name + location back into opts, so
-	// the failure-path resume command includes them — opts otherwise carries only
-	// the flags, omitting anything the user typed at a prompt (Bugbot).
-	opts.name, opts.location = name, location
+	// cli#137 — the installer path provisions with zero flags and zero prompts:
+	//   • name: auto-generated below (<firstname>-NN) once the account's client
+	//     list is in hand, so --name is never required; --name /
+	//     TRACEBLOC_CLIENT_NAME still override.
+	//   • location: optional — never prompted, never required. With no --location we
+	//     send nothing (CreateClientRequest.Location is omitempty) and the backend
+	//     records the client with no location rather than a silent default
+	//     (backend#993). internal/geo (detectZone) stays available for opt-in
+	//     enrichment but must not block or prompt here.
 
 	// Read the cluster anchor (kube-system UID) so create is get-or-create keyed on
 	// it — re-running on the same cluster adopts the existing client instead of
@@ -226,6 +197,19 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	if listErr != nil {
 		ilog.Logf("client list failed (non-fatal): %v", listErr)
 	}
+
+	// Auto-name when neither --name nor TRACEBLOC_CLIENT_NAME was given (cli#137):
+	// no prompt, ever. <firstname>-NN, NN = the next free two-digit number across
+	// the account's existing clients — a second machine on the account lands on
+	// lukas-02, not a slug -2 bump. The derived name is already slug-clean, so it
+	// passes through slug.Derive unchanged (display name = namespace = handle).
+	if name == "" {
+		name = autoClientName(cfg.Current(), accountClients)
+		ilog.Logf("auto-named client %q (no --name/TRACEBLOC_CLIENT_NAME)", name)
+	}
+	// Reflect the resolved name + location back into opts so the failure-path resume
+	// command reproduces them — opts otherwise carries only the raw flags (Bugbot).
+	opts.name, opts.location = name, location
 
 	var pc *api.ProvisionedClient
 	var adopted bool
@@ -320,7 +304,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		// client whose cluster_id was null, backfilled the anchor onto it, and
 		// adopted it. Either way — no new credential; the existing one stands.
 		ilog.Logf("adopted existing client id=%d namespace=%s", pc.ID, pc.Namespace)
-		p.Successf("This cluster is already registered as client %q (namespace %s) — adopted it.", pc.Name, pc.Namespace)
+		p.Successf("This machine is already registered as client %q (namespace %s) — adopted it.", pc.Name, pc.Namespace)
 		p.Hintf("No new credential issued; the existing one stands. This machine is set to enroll as client %d.", pc.ID)
 		if opts.credentialFile != "" {
 			// No password to hand over on adopt (it's write-only on the backend and
@@ -664,24 +648,53 @@ func renderClientReview(p *ui.Printer, name, namespace, location, clusterID stri
 	p.Section("Review")
 	p.Field("name", name)
 	p.Field("namespace", namespace)
-	p.Field("location", location)
+	// Location is optional (cli#137) — only show the field when one was given, so a
+	// zero-prompt create doesn't render a blank "location:" line.
+	if location != "" {
+		p.Field("location", location)
+	}
 	if clusterID != "" {
 		p.Field("cluster", clusterID+"  (anchors this client — re-runs adopt it)")
 	}
 }
 
-// errMissingFlag reports a required flag absent in a non-interactive run (no TTY
-// to prompt — CI, a pipe, or output redirected).
-func errMissingFlag(flag string) error {
-	return &exitError{code: 1, err: fmt.Errorf("%s is required (non-interactive — no TTY to prompt)", flag)}
+// autoClientName derives the client name used when neither --name nor
+// TRACEBLOC_CLIENT_NAME was given (cli#137): <base>-NN, where base is the
+// signed-in user's first name (slugified), falling back to the email local-part,
+// then a generic "client". NN is the lowest two-digit number ≥ 1 not already used
+// by an existing client's name OR namespace — so a second machine on the account
+// lands on lukas-02 rather than the slug package's -2 collision bump, and the
+// derived name is guaranteed collision-free through slug.Derive (name = namespace).
+func autoClientName(prof *config.Profile, existing []api.ProvisionedClient) string {
+	base := ""
+	if prof != nil {
+		if base = slug.Slugify(prof.FirstName); base == "" {
+			base = slug.Slugify(emailLocalPart(prof.Email))
+		}
+	}
+	if base == "" {
+		base = "client"
+	}
+	taken := make(map[string]struct{}, 2*len(existing))
+	for _, c := range existing {
+		taken[c.Name] = struct{}{}
+		taken[c.Namespace] = struct{}{}
+	}
+	for n := 1; ; n++ {
+		cand := fmt.Sprintf("%s-%02d", base, n)
+		if _, clash := taken[cand]; !clash {
+			return cand
+		}
+	}
 }
 
-// validateNonEmpty rejects blank prompt input.
-func validateNonEmpty(s string) error {
-	if strings.TrimSpace(s) == "" {
-		return errors.New("required")
+// emailLocalPart returns the part of an email before '@' (the whole string when
+// there's no '@'), the fallback source for an auto-name when first_name is empty.
+func emailLocalPart(email string) string {
+	if i := strings.IndexByte(email, '@'); i >= 0 {
+		return email[:i]
 	}
-	return nil
+	return email
 }
 
 // mapClientErr turns a cancelled interactive prompt into a clean exit.

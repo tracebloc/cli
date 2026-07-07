@@ -161,17 +161,17 @@ func TestClientCreate_CancelLogsCancelledNotDone(t *testing.T) {
 	}
 }
 
-// TestClientCreate_ResumeCommandIncludesPromptedValues pins the Bugbot fix: when
-// name/location come from interactive prompts (not flags), a failed provision's
-// resume command must still include them — opts alone would omit them.
-func TestClientCreate_ResumeCommandIncludesPromptedValues(t *testing.T) {
+// TestClientCreate_ResumeCommandPinsAutoName pins that a failed provision's resume
+// command carries the AUTO-DERIVED name (cli#137), not a bare re-invocation — so a
+// retry reproduces the same client name instead of re-deriving/renumbering it.
+func TestClientCreate_ResumeCommandPinsAutoName(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
-		"dev": {Token: "tok"},
+		"dev": {Token: "tok", FirstName: "Lukas"},
 	}}).Save(); err != nil {
 		t.Fatal(err)
 	}
-	// list ok; the provision POST 500s after the user confirms.
+	// list ok; the provision POST 500s.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			_, _ = w.Write([]byte(`[]`))
@@ -189,18 +189,13 @@ func TestClientCreate_ResumeCommandIncludesPromptedValues(t *testing.T) {
 	}
 	t.Cleanup(func() { readClusterID = origCID })
 
-	confirmYes := true
-	pr := &fakePrompter{answers: map[string]string{
-		"Client name":             "Prompted Lab",
-		"Location zone (e.g. DE)": "FR",
-	}, confirm: &confirmYes}
 	var out bytes.Buffer
-	// No name/location flags — both come from the prompts.
-	if err := runClientCreate(context.Background(), ui.New(&out), pr, clientCreateOpts{}); err == nil {
+	// No flags at all — the name is auto-derived to lukas-01.
+	if err := runClientCreate(context.Background(), ui.New(&out), nil, clientCreateOpts{yes: true}); err == nil {
 		t.Fatal("expected the provision to fail (POST 500)")
 	}
-	if !strings.Contains(out.String(), "--name 'Prompted Lab' --location FR") {
-		t.Errorf("resume command should carry the PROMPTED name + location, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "--name lukas-01") {
+		t.Errorf("resume command should pin the auto-derived name, got:\n%s", out.String())
 	}
 }
 

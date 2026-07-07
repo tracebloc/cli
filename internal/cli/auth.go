@@ -116,6 +116,7 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 			p.Detailf("authorized — confirming the token with the backend …")
 			if id, werr := client.WhoAmI(ctx); werr == nil {
 				prof.Email = id.Email
+				prof.FirstName = id.FirstName
 			}
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: 1, err: err}
