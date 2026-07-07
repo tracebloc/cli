@@ -137,6 +137,14 @@ func TestClientCreate_CancelLogsCancelledNotDone(t *testing.T) {
 		return "", errors.New("no cluster (test)")
 	}
 	t.Cleanup(func() { readClusterID = origCID })
+	// The R7 adopt-backfill now runs even when the UID read fails (#158), so it
+	// calls readInClusterClient regardless — stub it to "no live client" so this
+	// test doesn't touch the developer's real kubeconfig.
+	origLive := readInClusterClient
+	readInClusterClient = func(context.Context, cluster.KubeconfigOptions) (*cluster.InClusterClient, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() { readInClusterClient = origLive })
 
 	confirmNo := false
 	pr := &fakePrompter{confirm: &confirmNo}

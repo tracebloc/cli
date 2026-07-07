@@ -254,16 +254,22 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	// live on this cluster but its backend cluster_id is null (it predates the
 	// anchor), a create keyed on the freshly-read UID matches nothing and mints a
 	// DUPLICATE, orphaning the live client. Instead adopt the live client and
-	// backfill its anchor onto it. Needs a readable anchor (nothing to stamp
-	// otherwise); without one we fall through to a plain create (dual-mode).
-	if clusterID != "" {
-		adoptedPC, handled, aerr := adoptLiveInClusterClient(ctx, p, ilog, client, opts, accountClients, listErr, clusterID)
-		if aerr != nil {
-			return aerr
-		}
-		if handled {
-			pc, adopted = adoptedPC, true
-		}
+	// backfill its anchor onto it.
+	//
+	// Run this even when the UID read failed (clusterID == ""): detecting the live
+	// client (readInClusterClient) is independent of the anchor, and only the
+	// backfill needs it. Gating the whole block on clusterID != "" meant a
+	// reachable cluster whose kube-system UID read failed (RBAC on
+	// namespaces/kube-system, a transient API error) skipped detection entirely and
+	// minted over the live client — orphaning it (#158). adopt now adopts-without-
+	// backfill in that case; a genuinely-unreachable cluster fails detection too and
+	// falls through to a non-anchored mint, unchanged.
+	adoptedPC, handled, aerr := adoptLiveInClusterClient(ctx, p, ilog, client, opts, accountClients, listErr, clusterID)
+	if aerr != nil {
+		return aerr
+	}
+	if handled {
+		pc, adopted = adoptedPC, true
 	}
 
 	if pc == nil {
@@ -490,6 +496,16 @@ func adoptLiveInClusterClient(
 	}
 
 	switch {
+	case clusterID == "":
+		// A live owned client is here, but the cluster UID read failed
+		// (namespaces/kube-system unreadable — RBAC, a transient API error) so
+		// there's nothing to backfill and no anchor to compare against. The
+		// invariant that matters is §7.2 — never mint over a live client — so
+		// adopt it as-is (no Patch, no mismatch check) rather than fall through
+		// and mint a duplicate. Warn that idempotency wasn't (re)stamped; a
+		// cluster where kube-system is readable enables the backfill.
+		p.Hintf("A tracebloc client is already running on this cluster — adopting it. Couldn't read the cluster identity, so its idempotency anchor was left unchanged; point --kubeconfig/--context at a cluster where kube-system is readable to stamp it.")
+		ilog.Logf("adopting live client id=%d without anchor backfill (cluster UID unread)", owner.ID)
 	case owner.ClusterID == "":
 		// The R7 case: backfill the freshly-read anchor onto the live client.
 		patched, perr := apiClient.PatchClientClusterID(ctx, owner.ID, clusterID)
