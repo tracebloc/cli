@@ -23,9 +23,10 @@ const IngestionDatabase = "training_test_datasets"
 //
 // It deliberately does NOT include the central tracebloc backend
 // catalog entry: the CLI has no direct line to that backend (only the
-// in-cluster ingestor does, with its own creds). The backend removes
-// the dataset's catalog metadata automatically once these in-cluster
-// artifacts are gone, so there's no CLI-side catalog teardown to do.
+// in-cluster ingestor does, with its own creds). The backend never
+// removes the dataset's catalog metadata — it is kept as a record on
+// tracebloc, marked unavailable (soft-flagged, not deleted) — so there's
+// no CLI-side catalog teardown to do.
 type TeardownPlan struct {
 	Database string   // MySQL schema (IngestionDatabase)
 	Table    string   // table name — MUST have passed ValidateTableName
