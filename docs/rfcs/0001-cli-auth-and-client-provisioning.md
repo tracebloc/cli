@@ -60,6 +60,23 @@
 >
 > The §6.6/§6.7/§7.7 bodies below are retained as the original design-of-record; the
 > inline **Rev 8** callouts mark where the shipped behavior now differs.
+>
+> **Rev 9 (2026-07-07)** offboarding + single-machine CLI scope (R12 — decided by
+> Lukas 2026-07-07):
+> - **The CLI is scoped to THIS machine; the fleet lives in the web-UI.** One machine
+>   hosts one client (the §7.2 anchor), so the CLI never needs to *select among*
+>   clients: `client use` is **removed** and `client list` is **internal-only** (hidden,
+>   still callable for the installer's one-client pre-flight). Managing many clients
+>   across an account is a web-UI concern. (Amends the §6.2 surface; folds in the
+>   cli#136 client-surface prototype.)
+> - **Offboarding is top-level `tracebloc delete`** (not `client delete --uninstall`):
+>   on a one-client machine, "delete the client" *is* "remove tracebloc," and the verb
+>   no longer collides with `data delete`. It is a **soft offboard** — revoke the
+>   machine credential, tear down the local install, wipe local data, and **retain all
+>   backend artifacts** (the client record, dataset catalog, use cases, trained models)
+>   as history. A hard row-`destroy` is **rejected**: it would cascade-delete the shared
+>   training history. New §7.10; R12 moves from future-proof to addressed. Supersedes the
+>   cli#136 prototype's `client delete` / `DELETE` offboarding draft.
 
 ## 0. Decisions settled in this revision
 
@@ -321,6 +338,13 @@ Global: `--verbose` / `TRACEBLOC_LOG_LEVEL` for diagnosability (§8.5), and a
 `--uninstall` teardown on `client delete` / the installer for clean offboarding
 (R12). `tracebloc cluster doctor` extends to also check auth/config/token state, so
 it can diagnose a failed *provision*, not just cluster health.
+
+> **Amended — Rev 9 / cli#136:** the CLI is single-machine (one client per machine —
+> the §7.2 anchor), so `client use` is **removed** and `client list` is **internal-only**
+> (hidden; still callable for the installer's one-client pre-flight). Offboarding is the
+> top-level **`tracebloc delete`** (§7.10) — not `client delete --uninstall`; on a
+> one-client machine it *is* the delete, and it owns the full local teardown. Fleet
+> management across an account moves to the web-UI.
 
 ### 6.3 Backend additions (in `tracebloc/backend`)
 
@@ -598,6 +622,11 @@ identity vanished).
 - **Checks RBAC** (write `403` → "ask an admin", §6.3).
 - **Clears the stale active pointer** afterward (§7.5).
 
+> **Amended — Rev 9 / cli#136:** on the single-machine CLI, the per-client `client delete`
+> picker is superseded by top-level **`tracebloc delete`** (§7.10), which owns the full
+> local teardown + soft offboard. These guards (refuse-if-a-job-is-running, `--force`,
+> RBAC 403 → ask-an-admin, clear-pointer) carry over to it unchanged.
+
 ### 7.5 Stale active client — cross-account *and* cross-env (confirmed bug today)
 
 **Risk.** The active client is cached locally. **`logout` today clears only the
@@ -688,6 +717,74 @@ CLI **resumes into it** instead of minting a second.
   on heartbeat recency, not just "no values file."
 - Concurrent attaches to one cluster are serialized by the `unique` `cluster_id`
   constraint (§6.3); the loser fetches and adopts the winner.
+
+### 7.10 Offboarding — `tracebloc delete` (R12) — **[decision, Rev 9]**
+
+**Goal.** A clean inverse of install for a retired box — stop the heartbeat, kill the
+credential, reclaim local disk — *without* stranding an R3 orphan and *without*
+destroying the shared history built on this client.
+
+**`tracebloc delete` is a top-level command** (not `client delete --uninstall`): on the
+single-machine CLI (Rev 9) the machine hosts exactly one client, so "delete the client"
+is "remove tracebloc," and the verb no longer collides with `data delete`. It is a
+**soft offboard** with three explicit scopes, surfaced to the user as one screen before
+a typed confirm:
+
+1. **Removed from this machine.** Revoke the machine credential (below); `helm
+   uninstall`; `k3d cluster delete` (this also prunes the dangling kubeconfig entry);
+   reclaim the tracebloc container images (scoped to `ghcr.io/tracebloc/*` — **never** a
+   blanket `docker system prune`); `rm -rf ~/.tracebloc`. On the single-host path the
+   on-prem datasets live *there* (host bind-mount, not node-ephemeral — neither
+   `helm uninstall` nor `k3d cluster delete` erases them), so this is the one
+   irreversible step. Finally remove the CLI binary + `tb` alias.
+2. **Retained on the backend, as history.** The client record, the dataset catalog
+   entries (`UserDataSet`), the use cases (`PrivateCompetition`), and the trained-model
+   records + leaderboards **stay**. A colleague's model must not vanish because the data
+   owner reclaimed their laptop. This is not new behavior: no backend path hard-deletes
+   these, and `revoke` preserves the client row by construction (§9, C.6).
+3. **Left in place.** Shared system software the installer also laid down — Docker,
+   Homebrew, `kubectl`/`k3d`/`helm`, and (on a Linux GPU box) **NVIDIA drivers +
+   container toolkit** — is **listed, never removed**: other software depends on it, and
+   an uninstaller must never pull it out or trigger a reboot.
+
+**Credential kill = the machine-credential revoke action, not `DELETE`.** Offboard calls
+`POST /edge-device/<id>/revoke` (C.6 — the action that unsets the password, deletes the
+DRF token, and revokes the `ClientAccessToken`s in one transaction while preserving the
+row). `DELETE /edge-device/<id>/` is **not routed** (`405`) and revokes nothing — an
+offboard built on it would leave a live credential for up to the token TTL (R2). This
+satisfies R12's "leave no live credential" with **no** row deletion.
+
+**Hard `destroy` is rejected.** Deleting the `EdgeDevice`/`User` row would CASCADE the
+per-client training telemetry — epoch metrics, cycle records (incl. their
+`modelWeightsFile` references and confusion matrices), carbon history — the very shared
+history retained in scope 2, while leaving datasets/experiments alive-but-orphaned
+(`SET_NULL`) and dangling the JSON/text edge-id references (`edges_involved`,
+`dataset_summary`). There is therefore no CLI or backend path that row-deletes a client;
+offboard is soft-only. *(Full account/history erasure — GDPR-style — is a separate,
+account-level web-UI/support flow, deliberately out of the per-machine CLI's reach.)*
+
+**Tombstone, don't mislead — backend work.** Retained artifacts must not read as live
+once the data is gone:
+- **Decommissioned state.** The client needs an explicit *decommissioned* marker,
+  distinct from the transient heartbeat `OFFLINE` (offboard ≠ a sleeping laptop). Set by
+  the revoke/offboard call. *(None exists today — new state.)*
+- **Mark its datasets unavailable.** A dataset flips to `edge_dataset_status=deleted`
+  today only via the edge reporting which ingestor-ids it still holds — but an
+  offboarded edge never reports again, so the offboard call must flip its datasets
+  itself.
+- **Gate new training at launch.** `ExperimentView.post` reads the *frozen* dataset
+  summary, so a run against a tombstoned dataset is currently *queued* and fails late at
+  a gone edge. Add the availability gate the un-archive path already carries
+  (`CompetitionSerializer.validate_is_archived`) so it fails fast — "data no longer
+  available on edge."
+
+**Verification.** Because the local data wipe is irreversible, the confirm is a **typed
+client-name** confirmation (not `[y/N]`), preceded by the removed / retained / left
+three-way summary. `--yes` for automation; `--keep-data` uninstalls the software while
+sparing `~/.tracebloc`. Inherits §7.4's live-work guards (refuse if a training job is
+running unless `--force`). Teardown lives in `internal/nodeboot` (shell-out to
+k3d/helm), extended past the cli#136 prototype's k3d/Linux-only scope. This is the
+connect/install family's inverse — the **#880 uninstall/offboard** flow.
 
 ## 8. UX — drafted flows
 
@@ -1035,13 +1132,17 @@ cadences + a new contract = undefined failures on skew. *Mitigation:* CLI sends 
 version header; backend advertises a min-supported version with a clear "upgrade
 required" message; `chart_version` on the heartbeat. *(cli + backend + chart.)*
 
-### R12 — No clean uninstall / offboarding (ease-of-use, future-proof)
+### R12 — Clean uninstall / offboarding — **addressed (§7.10, Rev 9)**
 
-There's no inverse of install: nothing stops the heartbeat, de-registers the box, or
-clears local state, so every retired/rebuilt box becomes an R3 orphan. *Mitigation:*
-`client delete --uninstall` / installer `--uninstall` that tears down the release,
-de-registers the `EdgeDevice`, and clears `~/.tracebloc` — the intended cure for R3
-rebuild-orphans. *(cli + installer.)*
+There was no inverse of install: nothing stopped the heartbeat, killed the credential, or
+cleared local state, so every retired/rebuilt box became an R3 orphan. **Resolved by
+top-level `tracebloc delete` (§7.10):** a soft offboard that revokes the machine
+credential (`POST /edge-device/<id>/revoke`, C.6 — not the `405` `DELETE`), tears down
+the local release + cluster, reclaims local disk, and **retains backend history as
+tombstones** — never a hard row-delete (which would cascade shared training telemetry).
+Remaining build: the *decommissioned* client state + the dataset-unavailable flip on the
+revoke action, and the launch-time availability gate (all §7.10). *(cli `tracebloc
+delete` + `internal/nodeboot`; backend revoke-extend + launch gate.)*
 
 ### Watch-items (not blockers)
 
@@ -1254,9 +1355,22 @@ POST /auth/revoke        # Bearer → 204   # `logout` MUST call this (not built
                          #   server-side (a local clear leaves it valid — R2)
 ```
 
-Machine-credential revoke ("kill a compromised node *now*", §9) is a **separate**
-EdgeDevice action, distinct from `DELETE`: invalidate the password hash + force
-re-enroll, without tearing down the cluster install.
+Machine-credential revoke ("kill a compromised node *now*", §9; and the credential
+half of offboard, §7.10) is a **separate** EdgeDevice action, distinct from `DELETE`:
+
+```http
+POST /edge-device/<id>/revoke   # Bearer, CanManageClient → 200   [backend#886, BUILT]
+                                #   one transaction: unset password + delete DRF Token
+                                #   + revoke the ClientAccessTokens; PRESERVES the row
+                                #   + cluster_id (re-enroll / history). Idempotent;
+                                #   account-scoped (cross-account → 404).
+```
+
+It invalidates every credential + forces re-enroll **without** tearing down the cluster
+install and **without** deleting the row. `DELETE /edge-device/<id>/` is deliberately
+**not routed** (`405`) — there is no hard client destroy (§7.10: a row delete would
+cascade the client's training history). **§7.10 offboard extends this action** to also
+set the *decommissioned* state + mark the client's datasets unavailable `[NEW]`.
 
 ### C.7 Data model — backend `[NEW]`
 
