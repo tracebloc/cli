@@ -111,8 +111,8 @@ Helm, no YAML, no kubectl needed.`,
 		p.Infof("tracebloc data ingest ./data     — stage a dataset into your client")
 		p.Infof("tracebloc data list              — datasets in the cluster")
 		p.Infof("tracebloc data delete <table>    — delete an ingested dataset")
-		p.Infof("tracebloc client list            — your clients and their status")
 		p.Infof("tracebloc cluster doctor         — diagnose connection issues")
+		p.Infof("tracebloc delete                 — remove tracebloc from this machine")
 		p.Newline()
 		p.Hintf("Add --help to any command for the full flag list.")
 		return nil

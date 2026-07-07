@@ -32,17 +32,24 @@ var readClusterID = cluster.ClusterID
 // anchor. A package var so tests can stub it without a reachable cluster.
 var readInClusterClient = cluster.DiscoverInClusterClient
 
-// newClientCmd wires the `tracebloc client` subtree — provisioning + selecting
-// the client (machine) this host enrolls as. Consumes the backend provisioning
-// endpoints (backend#836) with the user token from `tracebloc login`.
+// newClientCmd wires the `tracebloc client` subtree — provisioning the client
+// (machine) this host enrolls as. Consumes the backend provisioning endpoints
+// (backend#836) with the user token from `tracebloc login`.
+//
+// The single-machine CLI (RFC-0001 §7.10) owns exactly one client, so there is
+// nothing to *select*: `client use` is withdrawn, and `client list` is hidden
+// (kept callable for the installer's one-client-per-machine pre-flight, off the
+// user-facing surface). `create` provisions this machine's client; offboarding
+// is the top-level `tracebloc delete`.
 func newClientCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "client",
-		Short: "Provision and manage the clients in your account",
-		Long: `Provision a tracebloc client for this machine and list/select clients
-in your account.  Requires sign-in first (` + "`tracebloc login`" + `).`,
+		Short: "Provision this machine's tracebloc client",
+		Long: `Provision a tracebloc client for this machine. Requires sign-in first
+(` + "`tracebloc login`" + `). To remove tracebloc from this machine, use
+` + "`tracebloc delete`" + `.`,
 	}
-	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientUseCmd(), newClientStatusCmd())
+	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientStatusCmd())
 	return cmd
 }
 
@@ -82,25 +89,18 @@ type clientCreateOpts struct {
 	yes                                                             bool
 }
 
+// newClientListCmd is HIDDEN (RFC-0001 §7.10): with `use` withdrawn a user has
+// nothing to select, but the installer's one-client-per-machine pre-flight still
+// shells out to `client list`. Keep it callable, off the user-facing surface.
 func newClientListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List the clients in your account",
+		Hidden:  true,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClientList(cmd.Context(), printerFor(cmd))
-		},
-	}
-}
-
-func newClientUseCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "use <client-id>",
-		Short: "Enroll this machine as an existing client",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runClientUse(cmd.Context(), printerFor(cmd), args[0])
 		},
 	}
 }
@@ -387,7 +387,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		// Mirror the mint path: a config-save failure shouldn't bury the result —
 		// hint how to set the pointer by hand and still exit clean.
 		if serr := cfg.Save(); serr != nil {
-			p.Hintf("Couldn't save the active-client pointer (%v) — run `tracebloc client use %d` to set it.", serr, pc.ID)
+			p.Hintf("Couldn't save the active-client pointer (%v) — re-run `tracebloc client create` (it adopts this cluster's client) to set it.", serr)
 		}
 		return nil
 	}
@@ -683,7 +683,7 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 	active := cfg.Current().ActiveClientID
 	if active == "" {
 		return &exitError{code: 1, err: errors.New(
-			"no active client on this machine — run `tracebloc client create` (or `client use <id>`) first")}
+			"no active client on this machine — run `tracebloc client create` (or re-run the installer) first")}
 	}
 
 	// One-shot: report the current state and exit 0 (informational).
@@ -821,27 +821,6 @@ func clientStateLabel(status int) string {
 	default:
 		return "unknown"
 	}
-}
-
-func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
-	client, cfg, err := authedClient()
-	if err != nil {
-		return &exitError{code: 1, err: err}
-	}
-	clients, err := client.ListClients(ctx)
-	if err != nil {
-		return &exitError{code: 1, err: err}
-	}
-	if c := findClientByID(clients, id); c != nil {
-		setActiveClient(cfg.Current(), c)
-		if serr := cfg.Save(); serr != nil {
-			return &exitError{code: 1, err: serr}
-		}
-		p.Successf("This machine is now set to enroll as client %s (%s).", id, c.Name)
-		return nil
-	}
-	return &exitError{code: 1, err: fmt.Errorf(
-		"no client %s in your account — run `tracebloc client list` to see the ids", id)}
 }
 
 // setActiveClient points this env's profile at c, caching its namespace and

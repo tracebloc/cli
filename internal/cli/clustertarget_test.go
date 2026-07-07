@@ -166,7 +166,7 @@ func TestDiscoverRelease_ScanMultipleNamespacesRefuses(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for multiple client namespaces")
 	}
-	for _, want := range []string{"alpha", "beta", "--namespace", "client use"} {
+	for _, want := range []string{"alpha", "beta", "--namespace"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should mention %q, got: %s", want, err)
 		}
