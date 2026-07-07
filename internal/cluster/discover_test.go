@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -90,6 +91,57 @@ func TestDiscoverParentRelease_HappyPath(t *testing.T) {
 	}
 }
 
+// clientSecret builds the chart's `<release>-secrets` Secret carrying CLIENT_ID
+// (the live client's UUID username). extraLabels lets a test mimic the
+// node-agents mirror, which shares the labels + CLIENT_ID in another namespace.
+func clientSecret(release, namespace, clientID string, extraLabels map[string]string) *corev1.Secret {
+	labels := map[string]string{
+		"app.kubernetes.io/name":       "client",
+		"app.kubernetes.io/instance":   release,
+		"app.kubernetes.io/managed-by": "Helm",
+	}
+	for k, v := range extraLabels {
+		labels[k] = v
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: release + "-secrets", Namespace: namespace, Labels: labels},
+		Data:       map[string][]byte{"CLIENT_ID": []byte(clientID)},
+	}
+}
+
+func TestDiscoverInClusterClientID_HappyPath(t *testing.T) {
+	const ns = "tracebloc"
+	cs := fake.NewClientset(
+		jobsManagerDeployment("tracebloc", ns, "client-1.3.5", "1.3.5", "sha256:x"),
+		clientSecret("tracebloc", ns, "uuid-live", nil),
+		// node-agents mirror: same labels + CLIENT_ID, DIFFERENT namespace. The read
+		// is scoped to the jobs-manager namespace, so this must be ignored.
+		clientSecret("tracebloc", "node-agents", "uuid-live", map[string]string{"app": "resource-monitor"}),
+	)
+	got, err := DiscoverInClusterClientID(context.Background(), cs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.ClientID != "uuid-live" || got.Namespace != ns {
+		t.Errorf("got %+v, want {ClientID:uuid-live Namespace:%s}", got, ns)
+	}
+}
+
+func TestDiscoverInClusterClientID_NoRelease(t *testing.T) {
+	got, err := DiscoverInClusterClientID(context.Background(), fake.NewClientset())
+	if err != nil || got != nil {
+		t.Errorf("empty cluster: want (nil,nil), got (%+v,%v)", got, err)
+	}
+}
+
+func TestDiscoverInClusterClientID_ReleaseButNoSecret(t *testing.T) {
+	cs := fake.NewClientset(jobsManagerDeployment("tracebloc", "tracebloc", "client-1.3.5", "1.3.5", "d"))
+	got, err := DiscoverInClusterClientID(context.Background(), cs)
+	if err != nil || got != nil {
+		t.Errorf("release but no secret: want (nil,nil), got (%+v,%v)", got, err)
+	}
+}
+
 func TestDiscoverParentRelease_NoReleaseFound(t *testing.T) {
 	cs := fake.NewClientset() // empty cluster
 
@@ -100,10 +152,15 @@ func TestDiscoverParentRelease_NoReleaseFound(t *testing.T) {
 	// The error message has to be customer-actionable. Pin the
 	// key remediation phrase so a future refactor that loses it
 	// (or worse, replaces it with a stack trace) fails this test.
-	for _, want := range []string{"no tracebloc parent client release found", "helm install"} {
+	for _, want := range []string{"no tracebloc client found", "--namespace", "https://tracebloc.io/i.sh", "cluster doctor"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("expected error to mention %q, got: %s", want, err)
 		}
+	}
+	// The sentinel gates the §7.3 "runs elsewhere" rewrite (cli#128) — a
+	// genuine not-found must be errors.Is-identifiable.
+	if !errors.Is(err, ErrNoParentRelease) {
+		t.Errorf("not-found error should match ErrNoParentRelease, got: %v", err)
 	}
 }
 
@@ -124,6 +181,11 @@ func TestDiscoverParentRelease_MultipleReleases(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("expected error to mention %q, got: %s", want, err)
 		}
+	}
+	// An ambiguous match is NOT "no release" — it must not trip the §7.3
+	// rewrite (the cluster does host tracebloc, just more than one).
+	if errors.Is(err, ErrNoParentRelease) {
+		t.Error("multiple-release error must not match ErrNoParentRelease")
 	}
 }
 
@@ -220,5 +282,51 @@ func TestChartVersionFromLabel(t *testing.T) {
 				t.Errorf("chartVersionFromLabel(%q) = %q, want %q", in, got, want)
 			}
 		})
+	}
+}
+
+// FindClientNamespaces backs the cluster-wide fallback scan (§7.3): a miss in
+// the kubeconfig's default namespace must find the client in its slug
+// namespace instead of dead-ending. These pin the scan's filtering + ordering.
+func TestFindClientNamespaces(t *testing.T) {
+	cs := fake.NewSimpleClientset(
+		jobsManagerDeployment("tracebloc", "lukas-01", "client-1.6.0", "1.6.0", ""),
+		jobsManagerDeployment("tracebloc", "zeta-ns", "client-1.6.0", "1.6.0", ""),
+		// a chart-labeled sibling that is NOT a jobs-manager must not count
+		siblingDeployment("mysql-client", "other-ns"),
+	)
+	got, err := FindClientNamespaces(context.Background(), cs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"lukas-01", "zeta-ns"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("expected sorted namespaces %v, got %v", want, got)
+	}
+}
+
+func TestFindClientNamespaces_NoneFound(t *testing.T) {
+	cs := fake.NewSimpleClientset(siblingDeployment("mysql-client", "somewhere"))
+	got, err := FindClientNamespaces(context.Background(), cs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected no namespaces, got %v", got)
+	}
+}
+
+// siblingDeployment builds a chart-labeled Deployment that is not a
+// jobs-manager — the scan must ignore it.
+func siblingDeployment(name, namespace string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "client",
+				"app.kubernetes.io/managed-by": "Helm",
+			},
+		},
 	}
 }

@@ -66,7 +66,7 @@ Exit codes:
 	cmd.Flags().StringVar(&contextOverride, "context", "",
 		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
 	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where the parent tracebloc/client release is installed (default: the context's namespace, or 'default')")
+		"namespace where your tracebloc client is installed (default: the context's namespace, or 'default')")
 
 	return cmd
 }

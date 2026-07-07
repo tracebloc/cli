@@ -177,6 +177,19 @@ func parseUpgradeRequired(raw []byte) *UpgradeRequiredError {
 
 // post sends an optional JSON body and returns the status code + raw response.
 func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, error) {
+	return c.bodyRequest(ctx, http.MethodPost, path, body)
+}
+
+// patch sends an authenticated PATCH (used for the adopt-backfill of cluster_id
+// onto an existing client — RFC-0001 §7.2 / R7, backend#883).
+func (c *Client) patch(ctx context.Context, path string, body any) (int, []byte, error) {
+	return c.bodyRequest(ctx, http.MethodPatch, path, body)
+}
+
+// bodyRequest sends an authenticated JSON-body request (POST/PATCH) and returns
+// the status code + raw response. Shared so POST and PATCH stay identical on
+// auth, content-type, and the 426 upgrade-required handling.
+func (c *Client) bodyRequest(ctx context.Context, method, path string, body any) (int, []byte, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -186,7 +199,7 @@ func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, 
 		rdr = bytes.NewReader(b)
 	}
 	url := c.BaseURL + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, rdr)
+	req, err := http.NewRequestWithContext(ctx, method, url, rdr)
 	if err != nil {
 		return 0, nil, fmt.Errorf("building request: %w", err)
 	}
@@ -194,7 +207,7 @@ func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, 
 	c.setAuth(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("POST %s: %w", url, err)
+		return 0, nil, fmt.Errorf("%s %s: %w", method, url, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
@@ -318,9 +331,10 @@ func (c *Client) PollToken(ctx context.Context, deviceCode string) (string, erro
 
 // Identity is the signed-in user, from GET /userinfo/.
 type Identity struct {
-	Email   string `json:"email"`
-	Type    string `json:"type"`
-	Account string `json:"account"`
+	Email     string `json:"email"`
+	FirstName string `json:"first_name"`
+	Type      string `json:"type"`
+	Account   string `json:"account"`
 }
 
 // WhoAmI fetches the signed-in user from the backend, authenticating with the
@@ -381,8 +395,11 @@ type ProvisionedClient struct {
 type CreateClientRequest struct {
 	Name      string `json:"first_name"`
 	Namespace string `json:"namespace"`
-	Location  string `json:"location"`
-	Password  string `json:"password"`
+	// Location is optional (cli#137): omitted when the operator gives no --location,
+	// so the backend records the client with no location rather than a silent
+	// default (backend#993). EdgeDevice.location is blank=True server-side.
+	Location string `json:"location,omitempty"`
+	Password string `json:"password"`
 	// ClusterID anchors the client to this cluster (the kube-system namespace UID)
 	// so create is get-or-create keyed on it (RFC-0001 §7.2 / backend#883). Omitted
 	// when the cluster identity can't be read (dual-mode / legacy → plain mint).
@@ -416,6 +433,31 @@ func (c *Client) CreateClient(ctx context.Context, req CreateClientRequest) (pc 
 	}
 	// 200 = adopted an existing client for this cluster_id; 201 = freshly minted.
 	return &out, status == http.StatusOK, nil
+}
+
+// PatchClientClusterID backfills the cluster anchor onto an existing client
+// (RFC-0001 §7.2 / R7, backend#883). The existing fleet predates cluster_id, so
+// a client that's already live in-cluster has a null anchor — and a plain create
+// keyed on the freshly-read kube-system UID would match nothing and mint a
+// duplicate. PATCH /edge-device/{id}/ stamps the UID onto the live client so it
+// (not a new mint) owns this cluster. The backend enforces write-once: a 409
+// *APIError means the anchor is already set to a different value or is bound to
+// another client (R6); a 403 *APIError means the caller lacks CLIENT_WRITE.
+func (c *Client) PatchClientClusterID(ctx context.Context, id int, clusterID string) (*ProvisionedClient, error) {
+	path := fmt.Sprintf("/edge-device/%d/", id)
+	url := c.BaseURL + path
+	status, raw, err := c.patch(ctx, path, map[string]string{"cluster_id": clusterID})
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, &APIError{StatusCode: status, Body: string(raw), URL: url}
+	}
+	var out ProvisionedClient
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decoding patch-client response: %w", err)
+	}
+	return &out, nil
 }
 
 // maxListPages bounds how many pages ListClients will follow — a backstop

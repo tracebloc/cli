@@ -14,7 +14,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	"golang.org/x/term"
@@ -209,4 +211,98 @@ func (p *Printer) Section(title string) {
 // width so values line up within a section.
 func (p *Printer) Field(label, value string) {
 	p.out("    %s %s\n", p.paint(fmt.Sprintf("%-14s", label+":"), color.Faint), value)
+}
+
+// Action prints an imperative instruction row — a bold verb label and its value,
+// with no trailing colon: "    Open    https://…". Used for the device-flow
+// sign-in steps (Open the URL / Enter the code), where the label is a thing to
+// DO, not a field to read (contrast Field, which is dim + colon-terminated).
+func (p *Printer) Action(label, value string) {
+	p.out("    %s  %s\n", p.paint(fmt.Sprintf("%-5s", label), color.Bold), value)
+}
+
+// spinnerFrames are braille cells; cycled, they read as a smooth rotation and
+// match the ⠴ vocabulary the tracebloc/client installer already uses.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// Spinner is a single self-redrawing status line for a blocking wait: a braille
+// frame, a message, and mm:ss elapsed. Start it with Printer.Spinner and end it
+// with Stop, which clears the animated line so the caller can print a final ✔/✖
+// in its place.
+//
+// It animates ONLY when the Printer colorizes (a real terminal, no --plain, no
+// NO_COLOR). Otherwise — piped output, --plain, CI — it prints one static line
+// and never redraws, so logs stay free of `\r`/ANSI. Concurrency: the spinner
+// owns the writer between Spinner() and Stop(); the caller must not print in
+// between, and Stop must be called from the same goroutine.
+type Spinner struct {
+	p     *Printer
+	msg   string
+	hint  string // optional trailing "(hint)", e.g. "Ctrl-C to cancel"
+	start time.Time
+	stop  chan struct{}
+	done  chan struct{}
+}
+
+// Spinner starts a live wait line reading "<frame> <msg>  M:SS   (hint)". Pass
+// hint == "" to omit the parenthetical. See the Spinner type for the
+// animate-vs-static contract; the returned handle is always safe to Stop.
+func (p *Printer) Spinner(msg, hint string) *Spinner {
+	s := &Spinner{p: p, msg: msg, hint: hint, start: time.Now()}
+	// Static line (no redraw) when we can't animate cleanly: non-color/non-TTY, or
+	// Windows — the redraw writes raw \r\033[K + SGR straight to the writer, which
+	// fatih/color's Windows VT-enable path never sees, so legacy consoles would show
+	// escape garbage every tick. Windows gets the clean one-liner instead.
+	if !p.color || runtime.GOOS == "windows" {
+		p.out("  %s %s\n", "·", msg)
+		return s
+	}
+	s.stop = make(chan struct{})
+	s.done = make(chan struct{})
+	go s.run()
+	return s
+}
+
+func (s *Spinner) run() {
+	defer close(s.done)
+	t := time.NewTicker(120 * time.Millisecond)
+	defer t.Stop()
+	frame := 0
+	s.draw(spinnerFrames[0])
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-t.C:
+			frame = (frame + 1) % len(spinnerFrames)
+			s.draw(spinnerFrames[frame])
+		}
+	}
+}
+
+func (s *Spinner) draw(frame string) {
+	elapsed := time.Since(s.start)
+	mm := int(elapsed / time.Minute)
+	ss := int(elapsed/time.Second) % 60
+	hint := ""
+	if s.hint != "" {
+		hint = "   (" + s.hint + ")"
+	}
+	// \r returns to column 0; \033[K clears to end-of-line so a line that shrank
+	// (e.g. 10:00 → 9:59 never does, but the hint/msg could) leaves no residue.
+	s.p.out("\r\033[K  %s %s  %d:%02d%s",
+		s.p.paint(frame, color.FgCyan), s.msg, mm, ss, s.p.paint(hint, color.Faint))
+}
+
+// Stop ends the animation and clears the spinner line (animated mode); on a
+// static spinner it's a no-op. Idempotent. After Stop the cursor sits at column
+// 0 of a cleared line, so the caller's next Successf/Errorf prints in its place.
+func (s *Spinner) Stop() {
+	if s.stop == nil {
+		return // static, or already stopped
+	}
+	close(s.stop)
+	<-s.done
+	s.stop = nil
+	s.p.out("\r\033[K") // clear the line; the caller prints the outcome next
 }

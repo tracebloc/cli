@@ -41,32 +41,26 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 
 	root := &cobra.Command{
 		Use:   "tracebloc",
-		Short: "tracebloc — interactive data ingestion for your cluster",
-		Long: `tracebloc is the customer-facing CLI for the tracebloc declarative
-ingestion path. It wraps the same POST /internal/submit-ingestion-run
-protocol the tracebloc/ingestor Helm chart uses, so any cluster running
-the parent tracebloc/client chart can be targeted directly from a
-developer's workstation.
+		Short: "tracebloc — connect this machine to tracebloc and manage its data",
+		Long: `The tracebloc CLI connects machines to tracebloc as clients and
+manages the datasets that models train on. Your data stays on your
+infrastructure — models from other collaborators come to it, once you
+approve them.
 
-The dominant workflow:
+Two kinds of commands:
 
-  tracebloc data ingest ./my-data \
-    --table cats_dogs_train \
-    --category image_classification \
-    --intent train \
-    --label-column label
+  Your account (sign in first):   login, logout, auth, client
+  This machine's client:          data, cluster
 
-The CLI handles cluster discovery (via kubeconfig), staging the data
-on the cluster's shared PVC, submitting the ingestion request,
-watching the resulting Job, and reporting the outcome. Customers never
-touch Helm, never edit YAML, never run kubectl cp manually.
+A typical first session:
 
-This binary implements the full v0.1 ingestion path: ` + "`data ingest`" + `
-(the dominant workflow above), ` + "`ingest validate`" + ` for a local
-schema check, ` + "`cluster info`" + ` for discovery diagnostics, plus
-` + "`version`" + ` and ` + "`completion`" + `. See
-https://github.com/tracebloc/client/issues/147 for the v0.1 roadmap and
-what's planned next.`,
+  tracebloc login                  # sign in or create your account (browser)
+  tracebloc data ingest ./my-data  # stage a dataset into your client
+  tracebloc data list              # see what's in the cluster
+
+The CLI finds your cluster through your kubeconfig, stages data onto
+the cluster's shared storage, and reports progress as it goes. No
+Helm, no YAML, no kubectl needed.`,
 
 		// Silence cobra's auto-printed errors + usage on every error;
 		// we already print structured errors in handlers, and the
@@ -107,13 +101,14 @@ what's planned next.`,
 			return cmd.Help() // an arg that wasn't a known subcommand
 		}
 		p := printerFor(cmd)
-		p.Banner("tracebloc", "interactive data ingestion for your cluster")
+		p.Banner("tracebloc", "connect this machine to tracebloc and manage its data")
 		p.Section("Get started")
-		p.Infof("tracebloc data ingest              — stage + ingest a dataset interactively (or use --help to see flags)")
-		p.Infof("tracebloc data list               — list datasets ingested in the cluster")
-		p.Infof("tracebloc data delete <table>     — delete an ingested dataset (its table + files)")
-		p.Infof("tracebloc cluster info            — check the CLI can reach your cluster")
-		p.Infof("tracebloc ingest validate f.yaml  — validate an ingest.yaml locally")
+		p.Infof("tracebloc login                  — sign in to tracebloc (browser)")
+		p.Infof("tracebloc data ingest ./data     — stage a dataset into your client")
+		p.Infof("tracebloc data list              — datasets in the cluster")
+		p.Infof("tracebloc data delete <table>    — delete an ingested dataset")
+		p.Infof("tracebloc client list            — your clients and their status")
+		p.Infof("tracebloc cluster doctor         — diagnose connection issues")
 		p.Newline()
 		p.Hintf("Add --help to any command for the full flag list.")
 		return nil

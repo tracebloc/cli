@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -28,8 +29,8 @@ func newClusterCmd() *cobra.Command {
 		Long: `Commands for inspecting the Kubernetes cluster the CLI is
 configured to talk to.
 
-Use ` + "`cluster info`" + ` to verify which cluster, namespace, and parent
-tracebloc release the next ` + "`dataset push`" + ` will target. Useful as a
+Use ` + "`cluster info`" + ` to verify which cluster, namespace, and
+client the next ` + "`data ingest`" + ` will target. Useful as a
 pre-flight before doing anything destructive (e.g. ingesting into
 the wrong cluster).`,
 	}
@@ -64,14 +65,14 @@ func newClusterInfoCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "info",
-		Short: "Show the cluster, namespace, parent release, and ingestor SA token state",
-		Long: `Discovers the tracebloc parent client release in the configured
+		Short: "Show the cluster, namespace, client install, and ingestor token state",
+		Long: `Discovers the tracebloc client installed in the configured
 cluster + namespace and prints:
 
   • Which kubeconfig context the CLI used
   • The namespace it resolved to
-  • The parent release name + chart version + appVersion
-  • The jobs-manager Service the next dataset push would POST to
+  • The client's release name + chart version + appVersion
+  • The jobs-manager Service the next data ingest would POST to
   • The ingestor ServiceAccount the post-install hook would auth as
   • The cluster's configured INGESTOR_IMAGE_DIGEST default
   • Whether the user's kubeconfig can mint short-lived SA tokens
@@ -84,7 +85,7 @@ token I expect" without leaking it to terminal scrollback.
 
 Exit codes:
   0   cluster discovered + token mintable; CLI is ready
-  4   cluster reachable but no tracebloc parent release found
+  4   cluster reachable but no tracebloc client found
   5   cluster reachable + release found but no usable SA token`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -103,10 +104,10 @@ Exit codes:
 	cmd.Flags().StringVar(&contextOverride, "context", "",
 		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
 	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where the parent tracebloc/client release is installed (default: the context's namespace, or 'default')")
+		"namespace where your tracebloc client is installed (default: the context's namespace, or 'default')")
 	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
 		"override the ingestor ServiceAccount name (default: \"ingestor\", the chart default; "+
-			"set this if you customized `ingestionAuthz.serviceAccountName` in the parent client chart)")
+			"set this if you customized `ingestionAuthz.serviceAccountName` in your client's install)")
 	cmd.Flags().Int64Var(&tokenExpiry, "token-expiry-seconds", 600,
 		"requested SA token expiration in seconds (default 600 = 10 min; ignored for static-secret fallback)")
 
@@ -122,11 +123,17 @@ func runClusterInfo(
 ) error {
 	p.Banner("tracebloc", "cluster diagnostics")
 
-	resolved, err := cluster.Load(cluster.KubeconfigOptions{
+	// Bind the active client's namespace exactly like the data commands do,
+	// so this pre-flight targets what `data ingest` will actually target —
+	// and so the multi-client "set your active client" remediation works
+	// here too, not just on the data path.
+	opts := cluster.KubeconfigOptions{
 		Path:      kubeconfigPath,
 		Context:   contextOverride,
 		Namespace: nsOverride,
-	})
+	}
+	binding := bindActiveClientNamespace(&opts)
+	resolved, err := cluster.Load(opts)
 	if err != nil {
 		// Kubeconfig errors are exit-code-3 territory (file/parse
 		// problem, same conceptual class as `ingest validate`'s
@@ -142,17 +149,27 @@ func runClusterInfo(
 	p.Section("Kubeconfig")
 	p.Field("context", resolved.Context)
 	p.Field("server", resolved.ServerURL)
-	p.Field("namespace", resolved.Namespace)
 
-	// Discover the parent release.
-	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
+	// Discover the client's release — with the cluster-wide fallback scan
+	// when the namespace is just the kubeconfig default, so diagnostics find
+	// the client in its slug namespace instead of dead-ending on "default".
+	release, nsUsed, err := discoverRelease(ctx, p, cs, resolved.Namespace, binding.allowScan())
 	if err != nil {
-		// 4 = "cluster reachable, but no tracebloc release here."
+		// 4 = "cluster reachable, but no tracebloc client here."
 		// Distinct from the kubeconfig error (3) so callers can
-		// branch: 3 means "fix your kubeconfig", 4 means "install
-		// the parent chart first".
+		// branch: 3 means "fix your kubeconfig", 4 means "no client
+		// installed on this cluster". A binding miss gets the §7.3
+		// "runs elsewhere" explanation, same as the data commands.
+		if errors.Is(err, cluster.ErrNoParentRelease) {
+			return binding.explain(&exitError{code: 4, err: &noParentReleaseError{err}})
+		}
 		return &exitError{code: 4, err: err}
 	}
+	resolved.Namespace = nsUsed
+	// Printed after discovery so it reflects the namespace the scan actually
+	// retargeted to — this pre-flight's whole job is to report what the next
+	// `data ingest` will target, so it must not show the pre-scan default.
+	p.Field("namespace", resolved.Namespace)
 
 	// Apply the SA-name override here. Discovery doesn't read the
 	// name from the cluster (see #7); customers with a non-default
@@ -161,7 +178,7 @@ func runClusterInfo(
 		release.IngestorSAName = ingestorSAOverride
 	}
 
-	p.Section("Parent release")
+	p.Section("Client install")
 	p.Field("name", release.ReleaseName)
 	p.Field("chart version", release.ChartVersion)
 	p.Field("app version", release.AppVersion)
@@ -197,6 +214,6 @@ func runClusterInfo(
 	}
 
 	p.Newline()
-	p.Successf("Ready for `tracebloc dataset push`.")
+	p.Successf("Ready for `tracebloc data ingest`.")
 	return nil
 }

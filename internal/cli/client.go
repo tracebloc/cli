@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -26,17 +27,22 @@ import (
 // reachable cluster.
 var readClusterID = cluster.ClusterID
 
+// readInClusterClient discovers a tracebloc client already live on the target
+// cluster (its CLIENT_ID + namespace) — the RFC-0001 §7.2 / R7 adopt-backfill
+// anchor. A package var so tests can stub it without a reachable cluster.
+var readInClusterClient = cluster.DiscoverInClusterClient
+
 // newClientCmd wires the `tracebloc client` subtree — provisioning + selecting
 // the client (machine) this host enrolls as. Consumes the backend provisioning
 // endpoints (backend#836) with the user token from `tracebloc login`.
 func newClientCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "client",
-		Short: "Provision and manage tracebloc clients (machines)",
+		Short: "Provision and manage the clients in your account",
 		Long: `Provision a tracebloc client for this machine and list/select clients
 in your account.  Requires sign-in first (` + "`tracebloc login`" + `).`,
 	}
-	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientUseCmd())
+	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientUseCmd(), newClientStatusCmd())
 	return cmd
 }
 
@@ -45,17 +51,21 @@ func newClientCreateCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Provision a new client for this machine (--name, --location)",
+		Short: "Provision a tracebloc client for this machine (auto-named; no flags required)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClientCreate(cmd.Context(), printerFor(cmd), clientPrompter(),
 				clientCreateOpts{name: name, location: location, kubeconfigPath: kubeconfigPath, contextOverride: contextOverride, credentialFile: credentialFile, yes: yes})
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "",
-		"human-readable client name (shown on your dashboard + carbon reports)")
-	cmd.Flags().StringVar(&location, "location", "",
-		"location zone for carbon footprint (e.g. DE); prompted if omitted")
+	// --name / --location default from their TRACEBLOC_CLIENT_* env vars so an
+	// unattended run (or the installer) can set them without the flag; an explicit
+	// flag still wins. Empty --name → auto-generated <firstname>-NN; empty
+	// --location → sent as unset (no silent default).
+	cmd.Flags().StringVar(&name, "name", os.Getenv("TRACEBLOC_CLIENT_NAME"),
+		"client name (default: $TRACEBLOC_CLIENT_NAME, else auto-generated <firstname>-NN; shown on your dashboard + carbon reports)")
+	cmd.Flags().StringVar(&location, "location", os.Getenv("TRACEBLOC_CLIENT_LOCATION"),
+		"optional location zone for carbon reporting, e.g. DE (default: $TRACEBLOC_CLIENT_LOCATION; omitted if unset)")
 	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
 		"path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config) — read to anchor the client to this cluster")
 	cmd.Flags().StringVar(&contextOverride, "context", "",
@@ -164,31 +174,15 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	ilog.Logf("authenticated; provisioning against the signed-in account")
 
 	name, location := opts.name, opts.location
-
-	// Gather inputs first (flags win; prompt only what's missing, and only on a
-	// TTY), then show one review + confirm — matching the dataset-push flow.
-	if name == "" {
-		if pr == nil {
-			return errMissingFlag("--name")
-		}
-		if name, err = pr.Input("Client name", "shown on your dashboard + carbon reports", "", validateNonEmpty); err != nil {
-			return mapClientErr(err)
-		}
-	}
-	if location == "" {
-		if pr == nil {
-			return errMissingFlag("--location")
-		}
-		// Never silent-empty: the prompt requires a non-empty zone. (Cloud /
-		// GeoIP auto-detect of a suggested default is a fast-follow.)
-		if location, err = pr.Input("Location zone (e.g. DE)", "physical zone, for the carbon footprint", "", validateNonEmpty); err != nil {
-			return mapClientErr(err)
-		}
-	}
-	// Reflect the resolved (possibly prompted) name + location back into opts, so
-	// the failure-path resume command includes them — opts otherwise carries only
-	// the flags, omitting anything the user typed at a prompt (Bugbot).
-	opts.name, opts.location = name, location
+	// cli#137 — the installer path provisions with zero flags and zero prompts:
+	//   • name: auto-generated below (<firstname>-NN) once the account's client
+	//     list is in hand, so --name is never required; --name /
+	//     TRACEBLOC_CLIENT_NAME still override.
+	//   • location: optional — never prompted, never required. With no --location we
+	//     send nothing (CreateClientRequest.Location is omitempty) and the backend
+	//     records the client with no location rather than a silent default
+	//     (backend#993). The backend is the source of truth for valid zones — a bad
+	//     --location surfaces as its real create error, not a CLI-side guess.
 
 	// Read the cluster anchor (kube-system UID) so create is get-or-create keyed on
 	// it — re-running on the same cluster adopts the existing client instead of
@@ -201,79 +195,179 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	}
 	ilog.Logf("cluster anchor: %q (read err: %v)", clusterID, cidErr)
 
-	// Derive the namespace slug from the name, avoiding collisions with existing
-	// clients (best-effort: if the list call fails we still derive a base slug).
-	var existing []string
-	if clients, lerr := client.ListClients(ctx); lerr == nil {
-		for _, c := range clients {
-			// Skip the client already anchored to this cluster: a re-run adopts it
-			// (the backend keys on cluster_id), so its namespace isn't a collision.
-			// Counting it would bump the derived slug and show a namespace in the
-			// review that doesn't match the one actually adopted.
+	// One account-scoped client list, reused for R7 adopt-backfill and for
+	// namespace-collision avoidance on the mint path. A list failure is non-fatal
+	// for both (best-effort — we still derive a base slug / fall through to create).
+	accountClients, listErr := client.ListClients(ctx)
+	if listErr != nil {
+		ilog.Logf("client list failed (non-fatal): %v", listErr)
+	}
+
+	// Auto-name when neither --name nor TRACEBLOC_CLIENT_NAME was given (cli#137):
+	// no prompt, ever. <firstname>-NN, NN = the next free two-digit number across
+	// the account's existing clients — a second machine on the account lands on
+	// lukas-02, not a slug -2 bump. The derived name is already slug-clean, so it
+	// passes through slug.Derive unchanged (display name = namespace = handle).
+	if name == "" {
+		// Numbering is only unique if we could actually read the account's clients.
+		// A list failure would otherwise number against an empty set and mint a
+		// DETERMINISTIC duplicate (`<base>-01` almost always already exists), whose
+		// name AND namespace collide with no server-side uniqueness to catch it. So
+		// fail closed here, exactly like the adopt pre-flight — retry, or name it by
+		// hand. (A supplied --name still tolerates a list blip: it's best-effort for
+		// slug-collision avoidance only.)
+		if listErr != nil {
+			// A 426 means the CLI is too old — retrying won't help, so surface the
+			// upgrade signal verbatim instead of framing it as a transient outage.
+			var ue *api.UpgradeRequiredError
+			if errors.As(listErr, &ue) {
+				return &exitError{code: 1, err: ue}
+			}
+			return &exitError{code: 1, err: fmt.Errorf(
+				"couldn't reach the backend to choose a unique client name (%v) — retry, "+
+					"or pass --name explicitly", listErr)}
+		}
+		// A re-run on a cluster already anchored to a client will ADOPT that client
+		// (get-or-create by cluster_id), so reuse its existing name — otherwise the
+		// review/confirm and POST body would describe a freshly-numbered handle
+		// (lukas-02) that the backend then ignores in favour of the anchored record.
+		if anchored := anchoredClient(accountClients, clusterID); anchored != nil {
+			name = anchored.Name
+			ilog.Logf("reusing anchored client name %q (re-run on this cluster adopts it)", name)
+		} else {
+			name = autoClientName(cfg.Current(), accountClients)
+			ilog.Logf("auto-named client %q (no --name/TRACEBLOC_CLIENT_NAME)", name)
+		}
+	}
+	// Reflect the resolved name + location back into opts so the failure-path resume
+	// command reproduces them — opts otherwise carries only the raw flags (Bugbot).
+	opts.name, opts.location = name, location
+
+	var pc *api.ProvisionedClient
+	var adopted bool
+	// password is the freshly generated machine credential; set only on the mint
+	// path below and consumed only by the mint output branch (an adopt keeps the
+	// existing credential — §7.2).
+	var password string
+
+	// R7 — existing-fleet adopt-backfill (RFC-0001 §7.2). If a client is already
+	// live on this cluster but its backend cluster_id is null (it predates the
+	// anchor), a create keyed on the freshly-read UID matches nothing and mints a
+	// DUPLICATE, orphaning the live client. Instead adopt the live client and
+	// backfill its anchor onto it.
+	//
+	// Run this even when the UID read failed (clusterID == ""): detecting the live
+	// client (readInClusterClient) is independent of the anchor, and only the
+	// backfill needs it. Gating the whole block on clusterID != "" meant a
+	// reachable cluster whose kube-system UID read failed (RBAC on
+	// namespaces/kube-system, a transient API error) skipped detection entirely and
+	// minted over the live client — orphaning it (#158). adopt now adopts-without-
+	// backfill in that case; a genuinely-unreachable cluster fails detection too and
+	// falls through to a non-anchored mint, unchanged.
+	adoptedPC, handled, aerr := adoptLiveInClusterClient(ctx, p, ilog, client, opts, accountClients, listErr, clusterID)
+	if aerr != nil {
+		return aerr
+	}
+	if handled {
+		pc, adopted = adoptedPC, true
+	}
+
+	if pc == nil {
+		// No live client to adopt → mint (or adopt via the backend's cluster_id
+		// get-or-create). Derive the namespace slug, avoiding collisions with the
+		// account's OTHER clients — skip the one already anchored here (a re-run
+		// adopts it, so its namespace isn't a collision and must not bump the slug).
+		// Track whether this cluster is already anchored to a client: then
+		// CreateClient will adopt (HTTP 200, no credential minted or printed), so the
+		// consent guard below must not block that idempotent re-run.
+		var existing []string
+		willAdopt := false
+		for _, c := range accountClients {
 			if clusterID != "" && c.ClusterID == clusterID {
+				willAdopt = true
 				continue
 			}
 			if c.Namespace != "" {
 				existing = append(existing, c.Namespace)
 			}
 		}
-	}
-	namespace, err := slug.Derive(name, existing, "client-"+randHex(4))
-	if err != nil {
-		return &exitError{code: 1, err: err}
-	}
-
-	if pr != nil && !opts.yes {
-		renderClientReview(p, name, namespace, location, clusterID)
-		ok, cerr := pr.Confirm("Provision this client?", true)
-		if cerr != nil {
-			return mapClientErr(cerr)
+		namespace, derr := slug.Derive(name, existing, "client-"+randHex(4))
+		if derr != nil {
+			return &exitError{code: 1, err: derr}
 		}
-		if !ok {
-			ilog.Logf("cancelled by user at the confirm prompt")
-			p.Hintf("Cancelled.")
-			return nil
-		}
-	}
 
-	// The machine credential: the CLI generates the password, the backend stores
-	// it (write-only). Sent on every create but used only when minting — on an
-	// idempotent adopt the backend keeps the existing client's credential (§7.2),
-	// so the generated value is never printed in that case.
-	password := randHex(24)
-	pc, adopted, err := client.CreateClient(ctx, api.CreateClientRequest{
-		Name:      name,
-		Namespace: namespace,
-		Location:  location,
-		Password:  password,
-		ClusterID: clusterID,
-	})
-	if err != nil {
-		var ae *api.APIError
-		if errors.As(err, &ae) {
-			switch ae.StatusCode {
-			case http.StatusForbidden:
-				return askAnAdmin(ctx, p, client)
-			case http.StatusConflict:
-				// Per RFC C.3 the only 409 on POST /edge-device/ is cluster_conflict
-				// (R6): this cluster_id is bound to another account.
-				return &exitError{code: 1, err: errors.New(
-					"this cluster is already registered to a different tracebloc account — " +
-						"sign in to that account, or ask your admin (cluster_conflict)")}
+		if pr != nil && !opts.yes {
+			renderClientReview(p, name, namespace, location, clusterID)
+			ok, cerr := pr.Confirm("Provision this client?", true)
+			if cerr != nil {
+				return mapClientErr(cerr)
 			}
+			if !ok {
+				ilog.Logf("cancelled by user at the confirm prompt")
+				p.Hintf("Cancelled.")
+				return nil
+			}
+		} else if pr == nil && !opts.yes && opts.credentialFile == "" && !willAdopt {
+			// Non-interactive with no way to confirm AND no --credential-file: a fresh
+			// MINT here would side-effect silently and print the machine credential to
+			// stdout (into whatever captured it). Require an explicit signal first —
+			// --yes to consent, or --credential-file to keep the secret off stdout.
+			// Skipped when this cluster is already anchored (willAdopt): that re-run
+			// adopts and prints no credential, so it stays zero-friction. The installer
+			// passes both flags anyway; this only stops an accidental bare
+			// `client create` in a pipe / CI from leaking a freshly minted credential.
+			if listErr != nil {
+				// The list failed, so willAdopt is unknown — we can't tell a fresh mint
+				// (would leak a credential) from an idempotent adopt (safe). Fail closed,
+				// but name the real cause: a retry once the backend is reachable will
+				// adopt an existing client without any flag.
+				return &exitError{code: 1, err: fmt.Errorf(
+					"couldn't read the account's client list to tell whether this cluster is new "+
+						"or already registered (%v) — retry when the backend is reachable (a re-run "+
+						"adopts an existing client), or pass --yes/--credential-file to provision now", listErr)}
+			}
+			return &exitError{code: 1, err: errors.New(
+				"refusing to provision non-interactively without confirmation — pass --yes to " +
+					"confirm, and --credential-file to write the credential to a file instead of stdout")}
 		}
-		return &exitError{code: 1, err: err}
+
+		// The machine credential: the CLI generates the password, the backend stores
+		// it (write-only). Sent on every create but used only when minting — on an
+		// idempotent adopt the backend keeps the existing client's credential (§7.2),
+		// so the generated value is never printed in that case.
+		password = randHex(24)
+		var cerr error
+		pc, adopted, cerr = client.CreateClient(ctx, api.CreateClientRequest{
+			Name:      name,
+			Namespace: namespace,
+			Location:  location,
+			Password:  password,
+			ClusterID: clusterID,
+		})
+		if cerr != nil {
+			var ae *api.APIError
+			if errors.As(cerr, &ae) {
+				switch ae.StatusCode {
+				case http.StatusForbidden:
+					return askAnAdmin(ctx, p, client)
+				case http.StatusConflict:
+					// Per RFC C.3 the only 409 on POST /edge-device/ is cluster_conflict
+					// (R6): this cluster_id is bound to another account.
+					return &exitError{code: 1, err: errors.New(crossAccountConflictMsg)}
+				}
+			}
+			return &exitError{code: 1, err: cerr}
+		}
 	}
 
-	cfg.Current().ActiveClientID = strconv.Itoa(pc.ID)
+	setActiveClient(cfg.Current(), pc)
 
 	p.Newline()
 	if adopted {
-		// Idempotent re-run: the backend matched this cluster_id to an existing
-		// client and returned it — no new credential. (The existing-fleet R7 case,
-		// where the backend instead matches a live in-cluster TB_CLIENT_ID whose
-		// cluster_id is still null and the CLI backfills it via PATCH, is the
-		// installer's orchestration — #838 — not done here.)
+		// Idempotent re-run: either the backend matched this cluster_id to an
+		// existing client (HTTP 200), or the R7 path above matched a live in-cluster
+		// client whose cluster_id was null, backfilled the anchor onto it, and
+		// adopted it. Either way — no new credential; the existing one stands.
 		ilog.Logf("adopted existing client id=%d namespace=%s", pc.ID, pc.Namespace)
 		p.Successf("This cluster is already registered as client %q (namespace %s) — adopted it.", pc.Name, pc.Namespace)
 		p.Hintf("No new credential issued; the existing one stands. This machine is set to enroll as client %d.", pc.ID)
@@ -335,6 +429,109 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		p.Hintf("Couldn't save the active-client pointer (%v) — run `tracebloc client use %d` to set it.", serr, pc.ID)
 	}
 	return nil
+}
+
+// crossAccountConflictMsg is the guidance shown when this cluster — or the client
+// already live on it — belongs to a different tracebloc account. Shared by the
+// create 409 (R6) and the R7 not-owned / anchor-taken refusals so they read alike.
+const crossAccountConflictMsg = "this cluster is already registered to a different tracebloc account — " +
+	"sign in to that account, or ask your admin (cluster_conflict)"
+
+// adoptLiveInClusterClient implements the RFC-0001 §7.2 / R7 adopt-backfill. It
+// discovers a tracebloc client already live on the target cluster and, when the
+// signed-in account owns it, backfills the cluster anchor onto it (PATCH) and
+// returns it for adoption — so a re-run on a pre-anchor box reconciles the live
+// client instead of minting a duplicate that orphans it.
+//
+// Returns (client, true, nil) when it handled provisioning (caller adopts and
+// skips the mint); (nil, false, nil) when there's nothing live to adopt (caller
+// mints as normal); and a non-nil error to abort — when the live client belongs
+// to a DIFFERENT account (never silent-adopt across accounts — R6), when the
+// anchor is already taken, or when ownership can't be verified.
+func adoptLiveInClusterClient(
+	ctx context.Context,
+	p *ui.Printer,
+	ilog *installLog,
+	apiClient *api.Client,
+	opts clientCreateOpts,
+	accountClients []api.ProvisionedClient,
+	listErr error,
+	clusterID string,
+) (*api.ProvisionedClient, bool, error) {
+	live, err := readInClusterClient(ctx, cluster.KubeconfigOptions{Path: opts.kubeconfigPath, Context: opts.contextOverride})
+	if err != nil {
+		// Best-effort: couldn't inspect the cluster for a live client. Fall through
+		// to a plain create (the backend's cluster_id get-or-create still applies).
+		ilog.Logf("in-cluster client discovery failed (non-fatal): %v", err)
+		return nil, false, nil
+	}
+	if live == nil {
+		return nil, false, nil // fresh cluster — nothing installed to adopt
+	}
+	ilog.Logf("live in-cluster client: id=%s namespace=%s", live.ClientID, live.Namespace)
+
+	// A client is live here — we must NOT mint over it. If the account couldn't be
+	// listed we can't verify ownership, so fail closed (re-run) rather than mint a
+	// duplicate (orphan) or adopt across accounts.
+	if listErr != nil {
+		return nil, false, &exitError{code: 1, err: fmt.Errorf(
+			"a tracebloc client is already running on this cluster, but listing your account to verify ownership failed (%w) — re-run once tracebloc is reachable, or resolve manually", listErr)}
+	}
+
+	// Is the live client one of THIS account's? Match on the UUID auth username
+	// (the value stored in-cluster as CLIENT_ID); the numeric dashboard id isn't
+	// readable in-cluster.
+	var owner *api.ProvisionedClient
+	for i := range accountClients {
+		if accountClients[i].Username == live.ClientID {
+			owner = &accountClients[i]
+			break
+		}
+	}
+	if owner == nil {
+		// Live here, but not in the signed-in account — adopting it would be a silent
+		// cross-account takeover. Refuse (mirrors the create 409, R6).
+		ilog.Logf("live client %s not in this account — refusing cross-account adopt", live.ClientID)
+		return nil, false, &exitError{code: 1, err: errors.New(crossAccountConflictMsg)}
+	}
+
+	switch {
+	case clusterID == "":
+		// A live owned client is here, but the cluster UID read failed
+		// (namespaces/kube-system unreadable — RBAC, a transient API error) so
+		// there's nothing to backfill and no anchor to compare against. The
+		// invariant that matters is §7.2 — never mint over a live client — so
+		// adopt it as-is (no Patch, no mismatch check) rather than fall through
+		// and mint a duplicate. Warn that idempotency wasn't (re)stamped; a
+		// cluster where kube-system is readable enables the backfill.
+		p.Hintf("A tracebloc client is already running on this cluster — adopting it. Couldn't read the cluster identity, so its idempotency anchor was left unchanged; point --kubeconfig/--context at a cluster where kube-system is readable to stamp it.")
+		ilog.Logf("adopting live client id=%d without anchor backfill (cluster UID unread)", owner.ID)
+	case owner.ClusterID == "":
+		// The R7 case: backfill the freshly-read anchor onto the live client.
+		patched, perr := apiClient.PatchClientClusterID(ctx, owner.ID, clusterID)
+		if perr != nil {
+			var ae *api.APIError
+			switch {
+			case errors.As(perr, &ae) && ae.StatusCode == http.StatusConflict:
+				// Anchor already taken (write-once / bound elsewhere — R6).
+				return nil, false, &exitError{code: 1, err: errors.New(crossAccountConflictMsg)}
+			case errors.As(perr, &ae) && ae.StatusCode == http.StatusForbidden:
+				return nil, false, askAnAdmin(ctx, p, apiClient)
+			}
+			return nil, false, &exitError{code: 1, err: fmt.Errorf("backfilling the cluster anchor onto the existing client: %w", perr)}
+		}
+		ilog.Logf("backfilled cluster_id onto client id=%d", owner.ID)
+		owner = patched
+	case owner.ClusterID != clusterID:
+		// The live client is anchored to a DIFFERENT cluster than the one we're
+		// pointed at — the kubeconfig and the in-cluster client disagree. Don't
+		// re-anchor (write-once); surface it rather than guess.
+		return nil, false, &exitError{code: 1, err: fmt.Errorf(
+			"the client running in this namespace is anchored to a different cluster (%s) than --kubeconfig/--context points at (%s) — check you're targeting the right cluster",
+			owner.ClusterID, clusterID)}
+	}
+
+	return owner, true, nil
 }
 
 // resumeCommand reconstructs the `tracebloc client create` invocation to retry a
@@ -449,15 +646,197 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 		return nil
 	}
 	p.Section("Clients in your account")
+	active := cfg.Current().ActiveClientID
 	for _, c := range clients {
 		marker := ""
-		if strconv.Itoa(c.ID) == cfg.Current().ActiveClientID {
-			marker = "  (active)"
+		if strconv.Itoa(c.ID) == active {
+			marker = "  (active — this machine)"
 		}
 		p.Field(strconv.Itoa(c.ID)+marker,
-			fmt.Sprintf("%s   namespace=%s   location=%s", c.Name, c.Namespace, c.Location))
+			fmt.Sprintf("%s   state=%s   namespace=%s   location=%s",
+				c.Name, clientStateLabel(c.Status), c.Namespace, c.Location))
+	}
+	// §7.3: separate "selected" (this machine's local pointer) from "connected"
+	// (the backend's last-heartbeat state) so a stale pointer is visible.
+	p.Hintf("\"active\" is this machine's selected client; state is its last reported status to tracebloc.")
+	return nil
+}
+
+func newClientStatusCmd() *cobra.Command {
+	var wait bool
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show whether tracebloc can see this machine's client (online)",
+		Long: `Report tracebloc's view of this machine's active client — online, offline,
+or pending. With --wait, poll until tracebloc reports it online (exit 0) or the
+timeout elapses (non-zero), to confirm the client connected after setup.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// --timeout only governs the --wait poll; accepting it alone would be a
+			// silent no-op, so reject it rather than mislead.
+			if cmd.Flags().Changed("timeout") && !wait {
+				return &exitError{code: 1, err: errors.New("--timeout has no effect without --wait")}
+			}
+			return runClientStatus(cmd.Context(), printerFor(cmd), wait, timeout)
+		},
+	}
+	cmd.Flags().BoolVar(&wait, "wait", false, "poll until tracebloc reports this client online")
+	cmd.Flags().DurationVar(&timeout, "timeout", 120*time.Second, "with --wait, give up after this long")
+	return cmd
+}
+
+// clientStatusPollInterval is how often --wait re-checks the backend. A const,
+// not a seam: tests inject through pollAfter (which ignores the duration and
+// fires instantly), so the value never needs overriding.
+const clientStatusPollInterval = 3 * time.Second
+
+func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time.Duration) error {
+	client, cfg, err := authedClient()
+	if err != nil {
+		return &exitError{code: 1, err: err}
+	}
+	active := cfg.Current().ActiveClientID
+	if active == "" {
+		return &exitError{code: 1, err: errors.New(
+			"no active client on this machine — run `tracebloc client create` (or `client use <id>`) first")}
+	}
+
+	// One-shot: report the current state and exit 0 (informational).
+	if !wait {
+		st, found, lerr := lookupClientStatus(ctx, client, active)
+		if lerr != nil {
+			return &exitError{code: 1, err: lerr}
+		}
+		if !found {
+			return &exitError{code: 1, err: fmt.Errorf(
+				"active client %s isn't in your account list — run `tracebloc client list` to see "+
+					"your clients, or re-run the installer to provision this machine", active)}
+		}
+		p.Section("Client status")
+		p.Field("state", clientStateLabel(st))
+		return nil
+	}
+
+	// --wait: poll the same source `client list` renders until online or timeout.
+	// The backend-reported status is the honest Online signal (RFC-0001 §8.5); a
+	// local rollout check can't tell whether tracebloc can actually see the client.
+	sp := p.Spinner("Waiting for tracebloc to confirm…", "")
+	defer sp.Stop() // leak-proof net for every return; the online path Stops explicitly before its ✔
+	deadline := time.Now().Add(timeout)
+	var lastErr error // most recent transient (retryable) error, for the timeout message
+	lastState := -1   // most recent successfully-read status; -1 = none read yet
+	var ue *api.UpgradeRequiredError
+	var apiErr *api.APIError
+	for {
+		st, found, lerr := lookupClientStatus(ctx, client, active)
+		switch {
+		case errors.As(lerr, &ue):
+			// 426 (CLI too old) won't recover by waiting — surface the upgrade signal.
+			return &exitError{code: 1, err: lerr}
+		case errors.As(lerr, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden):
+			// A revoked/expired/forbidden token (401/403) won't recover by waiting —
+			// the client itself may be online. Fail fast, point at sign-in. Note 429
+			// and 5xx stay transient (below): those DO recover on retry.
+			return &exitError{code: 1, err: errors.New(
+				"tracebloc rejected your credentials while waiting — run `tracebloc login`, then retry")}
+		case lerr != nil:
+			lastErr = lerr // transient (5xx / 429 / network) — keep waiting, remember why
+		case !found:
+			// The active client isn't in the account (deleted / wrong account) — no
+			// amount of waiting surfaces it. Fail fast, matching the one-shot path.
+			return &exitError{code: 1, err: fmt.Errorf(
+				"active client %s isn't in your account list — run `tracebloc client list` to see "+
+					"your clients, or re-run the installer to provision this machine", active)}
+		case st == clientStatusOnline:
+			sp.Stop()
+			p.Successf("tracebloc can see this client.")
+			return nil
+		default:
+			// A good poll (present, not online yet) supersedes any earlier transient
+			// error, so a later timeout reports the real state, not a stale failure.
+			lastErr, lastState = nil, st
+		}
+
+		// --timeout caps how long we WAIT: stop once the budget is spent, and clamp
+		// the sleep to what remains so total runtime doesn't overshoot by a poll
+		// cycle. A poll begun within budget is still honored (online → ✔ above).
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			switch {
+			case lastErr != nil:
+				return &exitError{code: 1, err: fmt.Errorf(
+					"timed out after %s waiting for tracebloc to report this client online; "+
+						"the last status check failed: %v", timeout, lastErr)}
+			case lastState >= 0:
+				return &exitError{code: 1, err: fmt.Errorf(
+					"timed out after %s waiting for tracebloc to report this client online (last state: %s). "+
+						"Run `tracebloc cluster doctor` to diagnose, or re-run the installer.", timeout, clientStateLabel(lastState))}
+			default:
+				return &exitError{code: 1, err: fmt.Errorf(
+					"timed out after %s before tracebloc could confirm this client — retry, "+
+						"or run `tracebloc cluster doctor`.", timeout)}
+			}
+		}
+		wait := clientStatusPollInterval
+		if wait > remaining {
+			wait = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return &exitError{code: 130} // Ctrl-C: exit quietly (no "Error: context canceled")
+		case <-pollAfter(wait):
+		}
+	}
+}
+
+// lookupClientStatus finds the account client whose numeric id matches active and
+// returns its backend status code. found=false means no such client (deleted, or
+// signed into the wrong account). A list error is returned verbatim so --wait can
+// treat it as transient and retry.
+func lookupClientStatus(ctx context.Context, client *api.Client, active string) (status int, found bool, err error) {
+	clients, err := client.ListClients(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	if c := findClientByID(clients, active); c != nil {
+		return c.Status, true, nil
+	}
+	return 0, false, nil
+}
+
+// findClientByID returns the account client whose numeric dashboard id equals id
+// (the string form stored as the active-client pointer), or nil if none match.
+func findClientByID(clients []api.ProvisionedClient, id string) *api.ProvisionedClient {
+	for i := range clients {
+		if strconv.Itoa(clients[i].ID) == id {
+			return &clients[i]
+		}
 	}
 	return nil
+}
+
+// EdgeDevice.status codes mirrored from the backend (metaApi User.py).
+const (
+	clientStatusOffline = 0
+	clientStatusOnline  = 1
+	clientStatusPending = 2
+)
+
+// clientStateLabel maps the backend status code to a TTY/CI-safe word. Plain
+// text (not an emoji glyph) on purpose — flag/emoji glyphs mojibake in CI logs
+// and Windows consoles (RFC-0001 §12 watch-item).
+func clientStateLabel(status int) string {
+	switch status {
+	case clientStatusOnline:
+		return "online"
+	case clientStatusOffline:
+		return "offline"
+	case clientStatusPending:
+		return "pending"
+	default:
+		return "unknown"
+	}
 }
 
 func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
@@ -469,18 +848,25 @@ func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
 	if err != nil {
 		return &exitError{code: 1, err: err}
 	}
-	for _, c := range clients {
-		if strconv.Itoa(c.ID) == id {
-			cfg.Current().ActiveClientID = id
-			if serr := cfg.Save(); serr != nil {
-				return &exitError{code: 1, err: serr}
-			}
-			p.Successf("This machine is now set to enroll as client %s (%s).", id, c.Name)
-			return nil
+	if c := findClientByID(clients, id); c != nil {
+		setActiveClient(cfg.Current(), c)
+		if serr := cfg.Save(); serr != nil {
+			return &exitError{code: 1, err: serr}
 		}
+		p.Successf("This machine is now set to enroll as client %s (%s).", id, c.Name)
+		return nil
 	}
 	return &exitError{code: 1, err: fmt.Errorf(
 		"no client %s in your account — run `tracebloc client list` to see the ids", id)}
+}
+
+// setActiveClient points this env's profile at c, caching its namespace and
+// display name alongside the id so the data commands can bind to the active
+// client's cluster (§7.3) without a backend round-trip. Callers Save() after.
+func setActiveClient(p *config.Profile, c *api.ProvisionedClient) {
+	p.ActiveClientID = strconv.Itoa(c.ID)
+	p.ActiveClientNamespace = c.Namespace
+	p.ActiveClientName = c.Name
 }
 
 // renderClientReview shows the assembled inputs before the confirm prompt, so
@@ -489,24 +875,87 @@ func renderClientReview(p *ui.Printer, name, namespace, location, clusterID stri
 	p.Section("Review")
 	p.Field("name", name)
 	p.Field("namespace", namespace)
-	p.Field("location", location)
+	// Location is optional (cli#137) — only show the field when one was given, so a
+	// zero-prompt create doesn't render a blank "location:" line.
+	if location != "" {
+		p.Field("location", location)
+	}
 	if clusterID != "" {
 		p.Field("cluster", clusterID+"  (anchors this client — re-runs adopt it)")
 	}
 }
 
-// errMissingFlag reports a required flag absent in a non-interactive run (no TTY
-// to prompt — CI, a pipe, or output redirected).
-func errMissingFlag(flag string) error {
-	return &exitError{code: 1, err: fmt.Errorf("%s is required (non-interactive — no TTY to prompt)", flag)}
-}
-
-// validateNonEmpty rejects blank prompt input.
-func validateNonEmpty(s string) error {
-	if strings.TrimSpace(s) == "" {
-		return errors.New("required")
+// anchoredClient returns the account client already bound to clusterID (the
+// kube-system UID), or nil. A non-nil result means a re-run on this cluster will
+// adopt that client, so callers should reuse its name rather than mint a new one.
+func anchoredClient(clients []api.ProvisionedClient, clusterID string) *api.ProvisionedClient {
+	if clusterID == "" {
+		return nil
+	}
+	for i := range clients {
+		if clients[i].ClusterID == clusterID {
+			return &clients[i]
+		}
 	}
 	return nil
+}
+
+// autoClientName derives the client name used when neither --name nor
+// TRACEBLOC_CLIENT_NAME was given (cli#137): <base>-NN, where base is the
+// signed-in user's first name (slugified), falling back to the email local-part,
+// then a generic "client". NN is the lowest two-digit number ≥ 1 not already used
+// by an existing client's name OR namespace — so a second machine on the account
+// lands on lukas-02 rather than the slug package's -2 collision bump, and the
+// derived name is guaranteed collision-free through slug.Derive (name = namespace).
+func autoClientName(prof *config.Profile, existing []api.ProvisionedClient) string {
+	base := ""
+	if prof != nil {
+		if base = slug.Slugify(prof.FirstName); base == "" {
+			base = slug.Slugify(emailLocalPart(prof.Email))
+		}
+	}
+	if base == "" {
+		base = "client"
+	}
+	// Reserve each existing client's handle in BOTH raw and slugified form: a legacy
+	// client stored with a display name like "Lukas 01" (and a blank/legacy
+	// namespace) must still block the derived handle "lukas-01", which is what
+	// slug.Derive would produce for it.
+	taken := make(map[string]struct{}, 4*len(existing))
+	reserve := func(s string) {
+		if s == "" {
+			return
+		}
+		taken[s] = struct{}{}
+		taken[slug.Slugify(s)] = struct{}{}
+	}
+	for _, c := range existing {
+		reserve(c.Name)
+		reserve(c.Namespace)
+	}
+	for n := 1; ; n++ {
+		suffix := fmt.Sprintf("-%02d", n)
+		// Keep the whole handle within the DNS-1123 label cap so it survives
+		// slug.Derive unchanged — otherwise a long first_name yields name != namespace
+		// and reintroduces the exact slug -2 bump this numbering exists to avoid.
+		b := base
+		if len(b)+len(suffix) > slug.MaxLabelLength {
+			b = strings.TrimRight(b[:slug.MaxLabelLength-len(suffix)], "-")
+		}
+		cand := b + suffix
+		if _, clash := taken[cand]; !clash {
+			return cand
+		}
+	}
+}
+
+// emailLocalPart returns the part of an email before '@' (the whole string when
+// there's no '@'), the fallback source for an auto-name when first_name is empty.
+func emailLocalPart(email string) string {
+	if i := strings.IndexByte(email, '@'); i >= 0 {
+		return email[:i]
+	}
+	return email
 }
 
 // mapClientErr turns a cancelled interactive prompt into a clean exit.

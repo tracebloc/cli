@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"k8s.io/client-go/kubernetes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,13 +35,14 @@ func newDataCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "data",
 		Aliases: []string{"dataset"},
-		Short:   "Manage datasets in the parent client release",
-		Long: `Commands for staging and managing datasets on the cluster's
-shared PVC.
+		Short:   "Manage the datasets in your client",
+		Long: `Commands for staging and managing the datasets your client holds —
+the data models train on. It stays on your infrastructure.
 
-` + "`data ingest`" + ` stages a local dataset to the cluster's shared
-PVC, submits the ingestion run to jobs-manager, and watches the
-ingestor Job to completion (streaming logs + the final summary).
+` + "`data ingest`" + ` stages a local dataset into your client's storage,
+submits the ingestion run, and watches it to completion (streaming
+logs + the final summary). ` + "`data validate`" + ` checks an ingest.yaml
+locally first.
 
 ` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run
 before the first ingest.`,
@@ -48,6 +50,7 @@ before the first ingest.`,
 	cmd.AddCommand(newDataIngestCmd())
 	cmd.AddCommand(newDataListCmd())
 	cmd.AddCommand(newDataDeleteCmd())
+	cmd.AddCommand(newIngestValidateCmd())
 	return cmd
 }
 
@@ -96,6 +99,7 @@ func newDataIngestCmd() *cobra.Command {
 
 		// Operations flags.
 		dryRun     bool
+		overwrite  bool
 		noInput    bool
 		outputJSON bool
 
@@ -126,8 +130,8 @@ func newDataIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ingest <local-path>",
 		Aliases: []string{"push"},
-		Short:   "Stage a local dataset to the cluster's shared PVC",
-		Long: `Stages a local dataset to the parent client release's shared PVC,
+		Short:   "Stage a local dataset into your client's storage",
+		Long: `Stages a local dataset into your client's shared storage,
 submits an ingestion run to jobs-manager, and watches the ingestor Job
 to completion. Supports 9 task categories (image classification,
 object/keypoint detection, text classification, masked language
@@ -142,7 +146,9 @@ Expected local layout (image_classification shown):
         002.jpg
         ...
 
-Accepted image extensions: .jpg, .jpeg, .png, .webp (case-insensitive).
+Accepted image extensions: .jpg, .jpeg, or .png (case-insensitive).
+All images in one dataset must share a single type — the cluster
+validates the type it was told to expect.
 
 v0.1 caps the dataset at 1 GiB total + 500 MiB per file. Larger
 datasets need the v0.2 cloud-source story (S3/GCS/HTTPS sources) —
@@ -153,11 +159,14 @@ Exit codes:
   2   schema validation failed (synthesized spec rejected) or
       v0.1-unsupported category passed
   3   local-layout or kubeconfig error
-  4   cluster reachable but parent release / shared PVC missing
+  4   cluster reachable but no tracebloc client / shared storage missing
   5   ingestor SA token couldn't be obtained, or jobs-manager
       rejected the token (401/403)
+  6   destination table already exists (re-run with --overwrite to
+      replace it, or pick a different --table)
   7   pre-flight succeeded but staging the files failed
-      (Pod creation, image pull, exec stream, or remote tar error)
+      (Pod creation, image pull, exec stream, or remote tar error) —
+      or, with --overwrite, removing the old table failed
   8   jobs-manager rejected the submit (4xx/5xx other than auth)
   9   ingestion Job exited non-zero, or completed with row-level
       failures the summary panel reports`,
@@ -200,6 +209,7 @@ Exit codes:
 					TargetSizeFlag: targetSize,
 					SchemaFlag:     schemaFlag,
 					DryRun:         dryRun,
+					Overwrite:      overwrite,
 					IngestorSAName: ingestorSAName,
 					StagePodImage:  stagePodImage,
 					Detach:         detach,
@@ -220,7 +230,7 @@ Exit codes:
 	cmd.Flags().StringVar(&contextOverride, "context", "",
 		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
 	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where the parent tracebloc/client release is installed")
+		"namespace where your tracebloc client is installed")
 
 	// Required spec flags. We DON'T mark them required-at-cobra-level
 	// because cobra's "required flag" error message is terse and
@@ -249,6 +259,8 @@ Exit codes:
 	cmd.Flags().IntVar(&numberOfKeypoints, "number-of-keypoints", 0,
 		"keypoint_detection only: number of keypoints per sample (required; e.g. 17 for COCO pose)")
 
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false,
+		"replace the destination table if it already exists: its current table + files are removed first (same as `tracebloc data delete`), then the new data is ingested. Not combinable with --idempotency-key")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"validate + discover + walk, but don't create any cluster resources")
 	cmd.Flags().BoolVar(&noInput, "no-input", false,
@@ -257,7 +269,7 @@ Exit codes:
 		"emit a machine-readable JSON result on stdout (human output → stderr; implies --no-input)")
 	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
 		"override the ingestor ServiceAccount name (default: \"ingestor\"); "+
-			"set this if you customized ingestionAuthz.serviceAccountName in the parent client chart")
+			"set this if you customized ingestionAuthz.serviceAccountName in your client's install")
 	cmd.Flags().StringVar(&stagePodImage, "stage-pod-image", "",
 		"override the ephemeral stage Pod's image (default: digest-pinned alpine 3.20 baked into the CLI). "+
 			"Pin by digest in your override too — tag-only refs drift silently.")
@@ -289,6 +301,7 @@ type runDataIngestArgs struct {
 	TargetSizeFlag string // raw --target-size; resolved after Discover (image)
 	SchemaFlag     string // raw --schema; resolved or inferred after Discover (tabular)
 	DryRun         bool
+	Overwrite      bool
 	IngestorSAName string
 	StagePodImage  string
 
@@ -370,13 +383,23 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 	// does, so a first-time user understands it before any prompts.
 	// Routed through a.Printer, so --output-json keeps it on stderr and
 	// --plain/non-TTY degrade cleanly. (#31)
+	// --overwrite + a reused --idempotency-key is a data-loss trap: the
+	// teardown removes the existing data, then jobs-manager treats the
+	// duplicate key as a REPLAY and attaches to the previous run instead of
+	// ingesting anything — old data gone, new data never loaded, exit 0 from
+	// the old Job's status. Refuse the combination outright.
+	if a.Overwrite && a.IdempotencyKey != "" {
+		return &exitError{code: 2, err: errors.New(
+			"--overwrite can't be combined with --idempotency-key: a reused key makes the cluster replay the previous run instead of ingesting the new data — after --overwrite's removal that would report success while loading nothing. Drop one of the two (a fresh per-run key is the default).")}
+	}
+
 	a.Printer.Banner("tracebloc", "data ingest")
 	a.Printer.Para(strings.TrimSpace(`
 This uploads a dataset from your machine into your tracebloc workspace so models
 can be trained on it. Your files are sent to the Kubernetes cluster your
 workspace was installed on — tracebloc checks them and loads them into a table
 your training runs read from. Your data stays on that cluster the whole time;
-contributors train against it without ever seeing the raw files.`))
+other collaborators train against it without ever seeing the raw files.`))
 	a.Printer.Hintf("Learn more: https://docs.tracebloc.io")
 
 	// 0. Guided mode: prompt for any missing core inputs before
@@ -479,6 +502,17 @@ contributors train against it without ever seeing the raw files.`))
 	//     synthesized spec carries the right fields before validation.
 	switch {
 	case push.IsTabular(a.Spec.Category):
+		// P3 (cli#71): a BOM'd tabular CSV is doomed in-cluster AND would
+		// corrupt InferSchema's own header read below — reject before
+		// either. The rest of the content preflight runs after the spec
+		// schema validation (mirroring the in-cluster order).
+		if perr := push.CheckTabularBOM(layout.LabelsCSV); perr != nil {
+			return &exitError{code: 3, err: perr}
+		}
+		if perr := push.CheckHasDataRows(layout.LabelsCSV); perr != nil {
+			return &exitError{code: 3, err: perr}
+		}
+
 		// Column schema: an explicit --schema wins; otherwise infer
 		// INT/FLOAT/VARCHAR types from the CSV so the customer doesn't
 		// hand-write one for the common case.
@@ -540,6 +574,15 @@ contributors train against it without ever seeing the raw files.`))
 						"resolution mismatch.\n", derr)
 			}
 		}
+		// Extension: every image must share one type, and the spec tells
+		// the cluster which one to validate against (file_options.extension).
+		// Without this the ingestor checked its .jpeg convention default and
+		// rejected .jpg/.png datasets AFTER the full upload (cli#68).
+		ext, exterr := push.DetectExtension(layout.Images)
+		if exterr != nil {
+			return &exitError{code: 3, err: exterr}
+		}
+		a.Spec.Extension = ext
 	default:
 		// Text family: no extra per-category resolution. The label (for
 		// text_classification) comes straight from --label-column;
@@ -583,6 +626,15 @@ contributors train against it without ever seeing the raw files.`))
 		return &exitError{code: 2, err: errors.New("synthesized spec failed schema validation; check the flag values above")}
 	}
 
+	// P3 content preflight (backend#828, cli#69/#71/#72/#73): preview the
+	// ingestor's own validators locally — AFTER the spec schema validation,
+	// mirroring the in-cluster order (jsonschema first, then validators),
+	// and BEFORE any cluster work. Each check names the rule it previews;
+	// parity is pinned by internal/push/parity_golden_test.go.
+	if perr := runLocalPreflight(a, layout, errOut); perr != nil {
+		return perr
+	}
+
 	printLocalSummary(a.Printer, layout, spec)
 
 	// 5. Cluster discovery — same kubeconfig path as `cluster info`.
@@ -591,37 +643,44 @@ contributors train against it without ever seeing the raw files.`))
 	//    consistent across pre-flight commands.
 	a.Printer.Step(2, 4, "Connect to your workspace's cluster")
 	a.Printer.Hintf("Using your kubeconfig to find the tracebloc release in your workspace and the shared storage your dataset will live on.")
-	resolved, err := cluster.Load(cluster.KubeconfigOptions{
-		Path:      a.Kubeconfig,
-		Context:   a.Context,
-		Namespace: a.Namespace,
-	})
+	// 6. PVC discovery (needPVC) confirms the chart's shared-data PVC is
+	//    Bound before we waste time provisioning a Pod that can't mount it.
+	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
+	binding := bindActiveClientNamespace(&opts)
+	target, err := resolveClusterTarget(ctx, a.Printer, opts, binding, true)
 	if err != nil {
-		return &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
+		return binding.explain(err)
 	}
-	cs, err := cluster.NewClientset(resolved)
-	if err != nil {
-		return &exitError{code: 3, err: err}
-	}
-	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
-	if err != nil {
-		return &exitError{code: 4, err: err}
-	}
+	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
 	if a.IngestorSAName != "" {
 		release.IngestorSAName = a.IngestorSAName
-	}
-
-	// 6. PVC discovery — confirms the chart's shared-data PVC is
-	//    Bound before we waste time provisioning a Pod that can't
-	//    mount it.
-	pvc, err := cluster.DiscoverSharedPVC(ctx, cs, resolved.Namespace)
-	if err != nil {
-		return &exitError{code: 4, err: err}
 	}
 
 	// 7. Show what we found on the cluster — the customer's last look
 	//    before any bytes move.
 	printClusterSummary(a.Printer, release, pvc)
+
+	// 8a. Destination guard (cli#70, P4-lite): re-ingesting an existing
+	//     table used to stage EVERYTHING and then fail the in-cluster Job
+	//     on the ingestor's duplicate check — a full upload burned to learn
+	//     the table exists. One cheap read heads that off. The check fails
+	//     open (dim note) — the ingestor still refuses duplicates, so a
+	//     broken check can't cause silent data loss.
+	existingTable, checkNote := destTableExists(ctx, cs, resolved, a.Spec.Table)
+	if checkNote != "" {
+		a.Printer.Hintf("%s", checkNote)
+	}
+	tableExists := existingTable != ""
+	if tableExists && !a.Overwrite {
+		return &exitError{code: 6, err: fmt.Errorf(
+			"table %q already exists in this client. Re-ingesting the same table doesn't merge or replace — "+
+				"the run would fail after uploading everything. Re-run with --overwrite to replace it, "+
+				"or pick a different --table. (`tracebloc data delete %s` also removes it.)",
+			existingTable, existingTable)}
+	}
+	if tableExists && a.Overwrite {
+		a.Printer.Warnf("Table %q already exists — --overwrite replaces it (table + files).", existingTable)
+	}
 
 	// 8. Dry-run stop. Acknowledged success, plus a reminder of the
 	//    live-only steps (stage + ingest) the customer just skipped.
@@ -634,6 +693,36 @@ contributors train against it without ever seeing the raw files.`))
 			jsonEmitted = true
 		}
 		return nil
+	}
+
+	// 8b. --overwrite: remove the existing table + files before staging —
+	//     the same teardown `data delete` runs, so the semantics match.
+	if tableExists && a.Overwrite {
+		// Tear down the MATCHED name, not the flag's spelling — table names
+		// are case-sensitive on Linux MySQL and PVC paths always are, so
+		// acting on a differently-cased --table would silently no-op the
+		// DROP/rm and then "succeed".
+		a.Printer.Infof("Removing the existing %q first…", existingTable)
+		plan := push.PlanTeardown(existingTable)
+		if _, terr := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
+			Namespace:          resolved.Namespace,
+			PVCClaimName:       pvc.ClaimName,
+			PVCMountPath:       pvc.MountPath,
+			Table:              existingTable,
+			ServiceAccountName: release.IngestorSAName,
+			Image:              a.StagePodImage,
+		}); terr != nil {
+			// The teardown drops the table before removing files, so a
+			// partial failure can leave files the DB-backed guard can no
+			// longer see — a plain re-run would upload everything and then
+			// hit them in-cluster. data delete first is the real recovery.
+			return &exitError{code: 7, err: fmt.Errorf(
+				"replacing table %q failed partway — its removal may be incomplete, and a plain re-run "+
+					"would hit the leftovers after uploading everything. Run `tracebloc data delete %s` "+
+					"first, then re-run this ingest. Nothing new was staged. (%w)",
+				existingTable, existingTable, terr)}
+		}
+		a.Printer.Successf("Removed the old %q — ingesting the new data.", existingTable)
 	}
 
 	// 9. Stage the files: create ephemeral Pod → wait Ready → tar
@@ -827,7 +916,15 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 		}
 	default:
 		p.Field("labels.csv", layout.LabelsCSV)
-		p.Field("images", fmt.Sprintf("%d files", len(layout.Images)))
+		imagesVal := fmt.Sprintf("%d files", len(layout.Images))
+		if ext, _ := spec["spec"].(map[string]any); ext != nil {
+			if fo, _ := ext["file_options"].(map[string]any); fo != nil {
+				if e, _ := fo["extension"].(string); e != "" {
+					imagesVal = fmt.Sprintf("%d files (%s)", len(layout.Images), e)
+				}
+			}
+		}
+		p.Field("images", imagesVal)
 		if anns := layout.Sidecars["annotations"]; len(anns) > 0 {
 			p.Field("annotations", fmt.Sprintf("%d files", len(anns)))
 		}
@@ -939,4 +1036,48 @@ func writePushErrorJSON(w io.Writer, sp push.SpecArgs, e error, code int) {
 		return
 	}
 	_, _ = fmt.Fprintln(w, string(b))
+}
+
+// listDatasetsFn is a test seam over push.ListDatasets.
+var listDatasetsFn = push.ListDatasets
+
+// destTableExists reports whether the destination table already holds an
+// ingested dataset, via the same query `data list` uses. It fails OPEN: a
+// broken check returns (false, note) so the ingest proceeds — the in-cluster
+// duplicate check still backstops it — but the note tells the user the guard
+// didn't run rather than silently skipping it.
+// The first return is the EXISTING table's exact name ("" when absent):
+// matching is case-insensitive (mysql's catalog may be), but any teardown
+// must act on the real spelling — DROP/rm against the flag's casing would
+// silently no-op on case-sensitive systems and then claim success.
+func destTableExists(ctx context.Context, cs kubernetes.Interface, resolved *cluster.ResolvedConfig, table string) (string, string) {
+	names, err := listDatasetsFn(ctx, cs, resolved.RestConfig, resolved.Namespace)
+	if err != nil {
+		return "", fmt.Sprintf("(couldn't check whether %q already exists — continuing; the cluster still refuses duplicates: %v)", table, err)
+	}
+	for _, n := range names {
+		if strings.EqualFold(n, table) {
+			return n, ""
+		}
+	}
+	return "", ""
+}
+
+// runLocalPreflight maps push.PreflightDataset — THE shared preview
+// dispatch, also exercised verbatim by the parity harness — onto the CLI's
+// conventions: notes print dim to errOut, a BadFlag problem exits 2 (fix a
+// flag), anything else exits 3 (fix the data).
+func runLocalPreflight(a runDataIngestArgs, layout *push.LocalLayout, errOut io.Writer) error {
+	notes, problem := push.PreflightDataset(a.Spec, layout)
+	for _, n := range notes {
+		_, _ = fmt.Fprintln(errOut, n)
+	}
+	if problem == nil {
+		return nil
+	}
+	code := 3
+	if problem.BadFlag {
+		code = 2
+	}
+	return &exitError{code: code, err: problem.Err}
 }

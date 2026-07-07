@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -86,12 +87,15 @@ func (l *LocalLayout) FileCount() int {
 	return n
 }
 
-// imageExtensions accepts the file types the chart's
-// image_classification ingestor processes by default. From
-// data-ingestors' FileTypeValidator(images) defaults: .jpg, .jpeg,
-// .png. The chart's defaults file (see chartversion 1.3.5+) also
-// accepts .webp; we mirror that here so customers on a recent
-// chart can stage webp files without hitting "no images found."
+// imageExtensions accepts the file types the in-cluster ingestor can
+// actually validate: data-ingestors' FileExtension enum + the
+// ingest.v1 schema's file_options.extension enum both allow exactly
+// .jpg, .jpeg, and .png for images. (.webp was listed here previously
+// on the strength of a chart-defaults comment, but the ingestor's
+// FileTypeValidator REJECTS it at construction — accepting it locally
+// meant a full upload followed by a guaranteed in-cluster failure.
+// cli#68 / backend#828 P5: this list and the emitted
+// file_options.extension keep the two sides in lock-step.)
 //
 // Comparison is case-insensitive — filesystems vary (case-sensitive
 // on Linux, case-preserving-but-insensitive on macOS default APFS).
@@ -99,14 +103,13 @@ var imageExtensions = map[string]struct{}{
 	".jpg":  {},
 	".jpeg": {},
 	".png":  {},
-	".webp": {},
 }
 
 // Discover walks rootDir and validates it matches the layout Phase 3
 // expects for image_classification:
 //
 //   - <root>/labels.csv  (required)
-//   - <root>/images/*.{jpg,jpeg,png,webp}  (at least one file)
+//   - <root>/images/*.{jpg,jpeg,png}  (at least one file, one type)
 //
 // Returns specific errors keyed to the layout mistakes a customer
 // is most likely to hit — these surface as the CLI's diagnostic
@@ -152,8 +155,7 @@ func Discover(rootDir string) (*LocalLayout, error) {
 			return nil, fmt.Errorf(
 				"missing labels.csv in %q. The CLI expects "+
 					"<dir>/labels.csv + <dir>/images/ for image_classification; "+
-					"see https://github.com/tracebloc/client/issues/147 for the "+
-					"v0.1 layout contract.",
+					"see https://docs.tracebloc.io for the dataset layout.",
 				abs)
 		}
 		return nil, fmt.Errorf("stat labels.csv: %w", err)
@@ -191,7 +193,7 @@ func Discover(rootDir string) (*LocalLayout, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf(
 				"missing images/ subdirectory in %q. The CLI expects "+
-					"<dir>/labels.csv + <dir>/images/*.{jpg,jpeg,png,webp}.",
+					"<dir>/labels.csv + <dir>/images/*.{jpg,jpeg,png}.",
 				abs)
 		}
 		return nil, fmt.Errorf("stat images/: %w", err)
@@ -211,6 +213,7 @@ func Discover(rootDir string) (*LocalLayout, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading images/: %w", err)
 	}
+	skippedExts := map[string]int{}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			// Silently skip subdirectories so a stray .DS_Store or
@@ -222,6 +225,9 @@ func Discover(rootDir string) (*LocalLayout, error) {
 		}
 		ext := strings.ToLower(filepath.Ext(entry.Name()))
 		if _, ok := imageExtensions[ext]; !ok {
+			if ext != "" {
+				skippedExts[ext]++
+			}
 			continue
 		}
 		// entry.Info() returns Lstat-like metadata for the
@@ -246,8 +252,15 @@ func Discover(rootDir string) (*LocalLayout, error) {
 	}
 
 	if len(layout.Images) == 0 {
+		if len(skippedExts) > 0 {
+			return nil, fmt.Errorf(
+				"no usable image files in %q — found %s, but the ingestor "+
+					"accepts only .jpg, .jpeg, or .png. Convert the images "+
+					"and re-run.",
+				imagesDir, extCounts(skippedExts))
+		}
 		return nil, fmt.Errorf(
-			"no image files found in %q. Expected .jpg, .jpeg, .png, or .webp; "+
+			"no image files found in %q. Expected .jpg, .jpeg, or .png; "+
 				"got %d non-image entries.",
 			imagesDir, len(entries))
 	}
@@ -347,4 +360,46 @@ func HumanBytes(n int64) string {
 	default:
 		return fmt.Sprintf("%d B", n)
 	}
+}
+
+// DetectExtension returns the single file extension (lowercased, with
+// dot) shared by every image in the set. The in-cluster ingestor's
+// FileTypeValidator enforces ONE extension per dataset, so a mixed set
+// would pass local preflight and then fail in-cluster after the full
+// upload — the exact cli#68 failure class. Detecting and emitting it
+// here (spec.file_options.extension) keeps the preflight's promise:
+// if this passes, the ingestor's file-type check passes too.
+func DetectExtension(images []string) (string, error) {
+	if len(images) == 0 {
+		return "", fmt.Errorf("no image files to detect a type from")
+	}
+	counts := map[string]int{}
+	for _, img := range images {
+		counts[strings.ToLower(filepath.Ext(img))]++
+	}
+	if len(counts) == 1 {
+		for ext := range counts {
+			return ext, nil
+		}
+	}
+	return "", fmt.Errorf(
+		"your images mix file types (%s) — the ingestor requires one type "+
+			"per dataset. Convert them to a single type, or split them into "+
+			"separate tables.",
+		extCounts(counts))
+}
+
+// extCounts renders {".png": 3, ".jpg": 120} as ".jpg ×120, .png ×3"
+// (sorted for stable output).
+func extCounts(counts map[string]int) string {
+	exts := make([]string, 0, len(counts))
+	for ext := range counts {
+		exts = append(exts, ext)
+	}
+	sort.Strings(exts)
+	parts := make([]string, 0, len(exts))
+	for _, ext := range exts {
+		parts = append(parts, fmt.Sprintf("%s ×%d", ext, counts[ext]))
+	}
+	return strings.Join(parts, ", ")
 }

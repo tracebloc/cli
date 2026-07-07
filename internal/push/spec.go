@@ -144,9 +144,14 @@ type SpecArgs struct {
 	// default apply. Populated by the CLI from --target-size or by
 	// auto-detecting the first image. (Image categories only.)
 	//
-	// NOTE: stored [W, H] here, but EMITTED as [height, width] by
-	// Build — that's the order the ingest.v1 schema documents and the
-	// ingestor reads. buildImage does the swap. (Bugbot, PR #22.)
+	// NOTE: stored [W, H] here AND emitted as [width, height] by
+	// buildImage — no swap. That's the order the ingest.v1 schema
+	// documents ("matches PIL.Image.size and what
+	// ImageResolutionValidator expects") and the order the validator
+	// compares against verbatim (PIL's img.size is (W, H)). An earlier
+	// [H,W] revision (PR #22 review note) was mistaken and made every
+	// non-square dataset fail in-cluster; #147 reverted it. Do not
+	// re-introduce a swap. (See the inline comment in buildImage.)
 	TargetSize []int
 
 	// Schema is the column→SQL-type map for tabular / time-series
@@ -175,6 +180,13 @@ type SpecArgs struct {
 	// it from there, so this needs no top-level schema field. 0 ⇒
 	// unset (ignored for non-keypoint categories).
 	NumberOfKeypoints int
+
+	// Extension is the single image file extension every file in the
+	// dataset shares (detected by DetectExtension), emitted as
+	// spec.file_options.extension so the ingestor's FileTypeValidator
+	// checks against what was actually staged instead of its .jpeg
+	// convention default (cli#68).
+	Extension string
 }
 
 // Build produces the ingest.v1.json-conforming spec map. The
@@ -256,25 +268,37 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 		spec["annotations"] = path.Join(prefix, "annotations") + "/"
 	}
 
+	// file_options carries the per-file conventions the ingestor's
+	// validators read: the detected extension (all categories in the
+	// image family — FileTypeValidator checks images against it) and,
+	// for the non-keypoint categories, the resolution override.
+	fileOptions := map[string]any{}
+	if a.Extension != "" {
+		fileOptions["extension"] = a.Extension
+	}
+
 	if a.Category == "keypoint_detection" {
 		if len(a.TargetSize) == 2 {
-			// Schema documents target_size as [height, width]; TargetSize
-			// is stored [W, H], so swap on emit. (Bugbot, PR #22.)
-			spec["target_size"] = []int{a.TargetSize[1], a.TargetSize[0]}
+			// Emitted as [width, height] — the schema's own description
+			// says so ("matches PIL.Image.size and what
+			// ImageResolutionValidator expects"), and the validator
+			// compares PIL's (W,H) against this list verbatim (verified
+			// empirically: an 8×4 image passes [8,4], fails [4,8]). An
+			// earlier revision swapped to [H,W] here on a mistaken review
+			// note, which made EVERY non-square dataset fail in-cluster
+			// after the full upload.
+			spec["target_size"] = []int{a.TargetSize[0], a.TargetSize[1]}
 		}
 		if a.NumberOfKeypoints > 0 {
 			spec["number_of_keypoints"] = a.NumberOfKeypoints
 		}
-		return
+	} else if len(a.TargetSize) == 2 {
+		// [width, height] — same contract as the keypoint branch above.
+		fileOptions["target_size"] = []int{a.TargetSize[0], a.TargetSize[1]}
 	}
 
-	if len(a.TargetSize) == 2 {
-		spec["spec"] = map[string]any{
-			"file_options": map[string]any{
-				// [height, width] per the schema; TargetSize is [W, H].
-				"target_size": []int{a.TargetSize[1], a.TargetSize[0]},
-			},
-		}
+	if len(fileOptions) > 0 {
+		spec["spec"] = map[string]any{"file_options": fileOptions}
 	}
 }
 

@@ -197,6 +197,50 @@ func TestCreateClientConflict(t *testing.T) {
 	}
 }
 
+func TestPatchClientClusterID(t *testing.T) {
+	var gotPath, gotMethod string
+	var sent map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":7,"first_name":"c","username":"uuid-7","namespace":"ns7","cluster_id":"uid-9"}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	pc, err := c.PatchClientClusterID(context.Background(), 7, "uid-9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodPatch || gotPath != "/edge-device/7/" {
+		t.Errorf("sent %s %s, want PATCH /edge-device/7/", gotMethod, gotPath)
+	}
+	if sent["cluster_id"] != "uid-9" {
+		t.Errorf("body cluster_id = %q, want uid-9", sent["cluster_id"])
+	}
+	if pc.ClusterID != "uid-9" || pc.Username != "uuid-7" {
+		t.Errorf("parsed = %+v, want cluster_id=uid-9 username=uuid-7", pc)
+	}
+}
+
+func TestPatchClientClusterID_ConflictIsAPIError(t *testing.T) {
+	// Write-once / anchor-taken → 409, surfaced as a typed APIError the caller maps
+	// to the cross-account guidance (R6).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"cluster_conflict"}`))
+	}))
+	defer srv.Close()
+	c := New("prod")
+	c.BaseURL = srv.URL
+	var ae *APIError
+	_, err := c.PatchClientClusterID(context.Background(), 7, "uid-9")
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusConflict {
+		t.Errorf("want APIError 409, got %v", err)
+	}
+}
+
 // TestListClients_FollowsPagination guards that DRF pagination is still
 // followed end-to-end after the nextPath refactor (page 1 → page 2 → done).
 func TestListClients_FollowsPagination(t *testing.T) {

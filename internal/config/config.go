@@ -39,9 +39,18 @@ const defaultEnv = "prod"
 // partially-configured profile stays small and forward-compatible.
 type Profile struct {
 	Email          string `json:"email,omitempty"`            // who is signed in (display only)
+	FirstName      string `json:"first_name,omitempty"`       // signed-in user's first name; auto-names clients (cli#137)
 	Token          string `json:"token,omitempty"`            // user token from device login
 	ExpiresAt      string `json:"expires_at,omitempty"`       // token expiry (RFC 3339), when known
 	ActiveClientID string `json:"active_client_id,omitempty"` // client this machine enrolls as, for THIS env
+
+	// ActiveClientNamespace + ActiveClientName cache the active client's k8s
+	// namespace and display name at `client use`/`create` time, so the data
+	// commands can bind to the active client's cluster (RFC-0001 §7.3) without
+	// a backend round-trip — they run cluster-local and may be offline. Empty
+	// when no client is active or for pre-v2 configs that predate the cache.
+	ActiveClientNamespace string `json:"active_client_namespace,omitempty"`
+	ActiveClientName      string `json:"active_client_name,omitempty"`
 }
 
 // Config is the on-disk CLI state: env-scoped profiles plus the current env.

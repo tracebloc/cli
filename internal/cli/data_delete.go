@@ -57,7 +57,7 @@ Exit codes:
   0  artifacts removed (or --dry-run, or the user declined)
   2  invalid table name
   3  kubeconfig error, or refused (no confirmation off a terminal)
-  4  cluster reachable but parent release / shared PVC missing
+  4  cluster reachable but no tracebloc client / shared storage missing
   7  teardown failed mid-flight (table drop or PVC rm errored)`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -84,7 +84,7 @@ Exit codes:
 	cmd.Flags().StringVar(&contextOverride, "context", "",
 		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
 	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where the parent tracebloc/client release is installed")
+		"namespace where your tracebloc client is installed")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"show what would be deleted without deleting anything")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false,
@@ -110,31 +110,17 @@ undone — re-ingesting the data is the only way back.`)
 		return &exitError{code: 2, err: fmt.Errorf("invalid table name %q: %w", a.Table, err)}
 	}
 
-	// 2. Resolve cluster + clientset (kubeconfig errors = exit 3).
-	resolved, err := cluster.Load(cluster.KubeconfigOptions{
-		Path:      a.Kubeconfig,
-		Context:   a.Context,
-		Namespace: a.Namespace,
-	})
-	if err != nil {
-		return &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
-	}
-	cs, err := cluster.NewClientset(resolved)
-	if err != nil {
-		return &exitError{code: 3, err: err}
-	}
-
-	// 3. Confirm the parent release + shared PVC exist (exit 4 if not) —
+	// 2. Resolve cluster + clientset (kubeconfig errors = exit 3), then
+	//    confirm the parent release + shared PVC exist (exit 4 if not) —
 	//    both "is this the right cluster?" context and a guard against
 	//    running teardown against a cluster with no tracebloc install.
-	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
+	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
+	binding := bindActiveClientNamespace(&opts)
+	target, err := resolveClusterTarget(ctx, a.Printer, opts, binding, true)
 	if err != nil {
-		return &exitError{code: 4, err: err}
+		return binding.explain(err)
 	}
-	pvc, err := cluster.DiscoverSharedPVC(ctx, cs, resolved.Namespace)
-	if err != nil {
-		return &exitError{code: 4, err: err}
-	}
+	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
 
 	// 4. Show exactly what will be deleted — the customer's last look
 	//    before destructive, unrecoverable work.

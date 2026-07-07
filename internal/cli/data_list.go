@@ -42,7 +42,7 @@ func newDataListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List datasets ingested in the cluster",
-		Long: `Lists the datasets ingested into the parent client release —
+		Long: `Lists the datasets ingested into your client —
 the tables in ` + push.IngestionDatabase + ` on the cluster.
 
 With no flags it uses your current kubeconfig context and its namespace;
@@ -53,7 +53,7 @@ https://ai.tracebloc.io/metadata.
 Exit codes:
   0  listed successfully (including an empty list)
   3  kubeconfig error
-  4  cluster reachable but no parent release in the namespace
+  4  cluster reachable but no tracebloc client in the namespace
   7  couldn't query the cluster for datasets`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -81,7 +81,7 @@ Exit codes:
 	cmd.Flags().StringVar(&contextOverride, "context", "",
 		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
 	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where the parent tracebloc/client release is installed")
+		"namespace where your tracebloc client is installed")
 	cmd.Flags().BoolVar(&outputJSON, "output-json", false,
 		"emit the dataset list as JSON on stdout (human output → stderr)")
 
@@ -111,22 +111,13 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	p := a.Printer
 	p.Banner("tracebloc", "datasets in the cluster")
 
-	resolved, err := cluster.Load(cluster.KubeconfigOptions{
-		Path:      a.Kubeconfig,
-		Context:   a.Context,
-		Namespace: a.Namespace,
-	})
+	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
+	binding := bindActiveClientNamespace(&opts)
+	target, err := resolveClusterTarget(ctx, p, opts, binding, false)
 	if err != nil {
-		return &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
+		return binding.explain(err)
 	}
-	cs, err := cluster.NewClientset(resolved)
-	if err != nil {
-		return &exitError{code: 3, err: err}
-	}
-	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
-	if err != nil {
-		return &exitError{code: 4, err: err}
-	}
+	resolved, cs, release := target.Resolved, target.Clientset, target.Release
 
 	tables, err := push.ListDatasets(ctx, cs, resolved.RestConfig, resolved.Namespace)
 	if err != nil {

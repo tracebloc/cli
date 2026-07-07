@@ -290,3 +290,185 @@ func TestAuthStatus_NotSignedIn(t *testing.T) {
 		t.Errorf("got:\n%s", out)
 	}
 }
+
+// saveSignedIn writes a signed-in profile for the "dev" env into the isolated
+// config dir set up by a prior withTestBackend/t.Setenv.
+func saveSignedIn(t *testing.T, token string) {
+	t.Helper()
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: token, Email: "ds@co"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAuthCheck_SignedInValid_Exit0: `auth status --check` exits 0 and is silent
+// when a token is present and the backend accepts it.
+func TestAuthCheck_SignedInValid_Exit0(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			_, _ = w.Write([]byte(`{"email":"ds@co","account":"Acme"}`))
+			return
+		}
+		t.Errorf("unexpected request path %s", r.URL.Path)
+	})
+	saveSignedIn(t, "tok") // CurrentEnv=dev
+	out, err := runCmd(t, "auth", "status", "--check", "--env", "dev")
+	if err != nil {
+		t.Fatalf("--check should exit 0 when signed in + token valid, got: %v", err)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("--check should be silent by default, got:\n%s", out)
+	}
+}
+
+// TestAuthCheck_NotSignedIn_Exit1: silent exit 1 when there's no token.
+func TestAuthCheck_NotSignedIn_Exit1(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	out, err := runCmd(t, "auth", "status", "--check")
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1 (err=%v)", got, err)
+	}
+	if !IsSilentError(err) {
+		t.Errorf("--check exit 1 should be silent (nil-inner exitError), err=%v", err)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("--check should print nothing, got:\n%s", out)
+	}
+}
+
+// TestAuthCheck_TokenRejected_Exit1: a stored token the backend rejects (401)
+// exits 1 — not a false "signed in".
+func TestAuthCheck_TokenRejected_Exit1(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	})
+	saveSignedIn(t, "stale") // CurrentEnv=dev
+	_, err := runCmd(t, "auth", "status", "--check", "--env", "dev")
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1 on a rejected token", got)
+	}
+}
+
+// TestAuthCheck_VerboseNarrates: --check --verbose prints the verdict.
+func TestAuthCheck_VerboseNarrates(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			_, _ = w.Write([]byte(`{"email":"ds@co","account":"Acme"}`))
+		}
+	})
+	saveSignedIn(t, "tok") // CurrentEnv=dev
+	out, err := runCmd(t, "auth", "status", "--check", "--verbose", "--env", "dev")
+	if err != nil {
+		t.Fatalf("--check --verbose signed-in should exit 0, got: %v", err)
+	}
+	if !strings.Contains(out, "ds@co") {
+		t.Errorf("--verbose should narrate the account, got:\n%s", out)
+	}
+}
+
+// TestAuthCheck_UpgradeRequiredSurfaces (Bugbot #146-C): a 426 from WhoAmI must
+// surface the upgrade instruction (even without --verbose), not be reported like
+// a rejected token telling the user to re-login.
+func TestAuthCheck_UpgradeRequiredSurfaces(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			w.WriteHeader(http.StatusUpgradeRequired) // 426
+			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
+		}
+	})
+	saveSignedIn(t, "tok")                                           // CurrentEnv=dev
+	_, err := runCmd(t, "auth", "status", "--check", "--env", "dev") // no --verbose
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if IsSilentError(err) || err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Errorf("a 426 must surface the upgrade message (non-silent), got: %v", err)
+	}
+}
+
+// TestAuthCheck_EnvMismatch_Exit1 (Lukas #1): a valid session for one env must NOT
+// pass --check for a DIFFERENT target env — otherwise the installer skips the
+// login that switches env and provisions into the wrong account. Exit 1 without
+// even probing the backend (no /userinfo/ call).
+func TestAuthCheck_EnvMismatch_Exit1(t *testing.T) {
+	probed := false
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			probed = true
+			_, _ = w.Write([]byte(`{"email":"ds@co","account":"Acme"}`))
+		}
+	})
+	saveSignedIn(t, "tok") // CurrentEnv=dev, valid dev session
+	// The installer targets prod this run; the dev session must not satisfy it.
+	_, err := runCmd(t, "auth", "status", "--check", "--env", "prod")
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1 on an env mismatch", got)
+	}
+	if probed {
+		t.Error("must not probe the backend when the signed-in env differs from the target")
+	}
+}
+
+// TestAuthCheck_VerboseUnreachableNotRejected (review #2): a non-401/403 WhoAmI
+// failure (e.g. backend 500 / outage) must read as "couldn't verify", not a
+// rejected token telling the user to re-login (which wouldn't help).
+func TestAuthCheck_VerboseUnreachableNotRejected(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			w.WriteHeader(http.StatusInternalServerError) // reachable but erroring — not a rejection
+		}
+	})
+	saveSignedIn(t, "tok") // CurrentEnv=dev
+	out, err := runCmd(t, "auth", "status", "--check", "--verbose", "--env", "dev")
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if !strings.Contains(out, "Couldn't verify your session") {
+		t.Errorf("a 500 should read as 'couldn't verify', got:\n%s", out)
+	}
+	if strings.Contains(out, "was rejected") {
+		t.Errorf("a 500 must not be labelled a rejected token: %s", out)
+	}
+}
+
+// TestLogin_ClearsStaleIdentityOnWhoAmIFailure (review #3): a re-login as a
+// different user must not inherit the previous user's identity if the WhoAmI
+// confirmation fails — otherwise cli#137 would auto-name the new client after the
+// wrong person.
+func TestLogin_ClearsStaleIdentityOnWhoAmIFailure(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/device/code":
+			_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"WDJB-MJHT","verification_uri":"https://x/activate","expires_in":600,"interval":5}`))
+		case "/device/token":
+			_, _ = w.Write([]byte(`{"token":"bob_tok"}`))
+		case "/userinfo/":
+			w.WriteHeader(http.StatusInternalServerError) // confirmation fails
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+		}
+	})
+	// Pre-existing session for a DIFFERENT user (Alice) on this env.
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "alice_tok", Email: "alice@co", FirstName: "Alice"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runCmd(t, "login"); err != nil {
+		t.Fatalf("login should still succeed when WhoAmI fails: %v", err)
+	}
+
+	cfg, _ := config.Load()
+	prof := cfg.Current()
+	if prof.Token != "bob_tok" {
+		t.Errorf("token = %q, want the new bob_tok", prof.Token)
+	}
+	if prof.FirstName != "" || prof.Email != "" {
+		t.Errorf("stale identity leaked: FirstName=%q Email=%q (want both cleared)", prof.FirstName, prof.Email)
+	}
+}
