@@ -1,0 +1,286 @@
+{
+  "_comment": "Drives BOTH sides of the validator-parity harness (backend#828 P3). cli_verdict = what the Go preflight must decide; ingestor_verdict = what the REAL Python validators decide (pinned by goldens.json, regenerated via scripts/gen-validator-goldens.py). The two may deliberately diverge only where the note explains why (e.g. failures the ingestor only surfaces at transfer time, which the CLI previews anyway).",
+  "cases": [
+    {
+      "name": "tabular-ok",
+      "category": "tabular_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept"
+    },
+    {
+      "name": "tabular-dup-header",
+      "category": "tabular_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "DataValidator preflight probe + read-time twin (cli#73a)"
+    },
+    {
+      "name": "tabular-bom",
+      "category": "tabular_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "the stdlib header probe does not strip the BOM \u2014 false in-cluster rejection the CLI must preview (cli#71)"
+    },
+    {
+      "name": "tabular-header-only",
+      "category": "tabular_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "IngestableRecordsValidator (cli#73b) (residual masking: a header-only CSV also has 0 label classes, so diversity rejects too \u2014 unavoidable for this shape)"
+    },
+    {
+      "name": "tabular-label-missing",
+      "category": "tabular_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "accept",
+      "note": "DELIBERATE divergence: the ingestor's preflight validators pass \u2014 the failure only fires at READ time (full-schema check, after table creation, orphaning it). The CLI previews the read-time rule (cli#69)."
+    },
+    {
+      "name": "imgc-ok",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept"
+    },
+    {
+      "name": "imgc-bom-labels",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "pandas strips the BOM in-cluster \u2014 the CLI must NOT reject what the cluster accepts (cli#71 parity)"
+    },
+    {
+      "name": "imgc-label-missing",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "LabelColumnValidator (cli#69)"
+    },
+    {
+      "name": "imgc-label-case",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "the ingestor's _match_column is case-insensitive + trimmed \u2014 the CLI must be exactly as loose"
+    },
+    {
+      "name": "imgc-zero-byte",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "ImageResolutionValidator: empty file (cli#72b)"
+    },
+    {
+      "name": "imgc-corrupt",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "ImageResolutionValidator: not a valid image (cli#72b)"
+    },
+    {
+      "name": "imgc-res-mismatch",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "ImageResolutionValidator: exact equality, no resize (cli#72c)"
+    },
+    {
+      "name": "imgc-header-only",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "IngestableRecordsValidator (cli#73b) (residual masking: a header-only CSV also has 0 label classes, so diversity rejects too \u2014 unavoidable for this shape)"
+    },
+    {
+      "name": "imgc-missing-file",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "reject",
+      "ingestor_verdict": "accept",
+      "note": "DELIBERATE divergence: the ingestor's preflight passes \u2014 the row becomes a failed record at TRANSFER time ('completed with failures', exit 9, post-upload). The CLI previews the transfer fate (cli#72a)."
+    },
+    {
+      "name": "imgc-label-uniform",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "LabelDiversityValidator: classification needs >=2 distinct labels \u2014 discovered BY this harness's first run (was not in any ticket)"
+    },
+    {
+      "name": "imgc-nonsquare",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        4
+      ],
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "non-square [W,H]=[8,4]: pins the target_size ORIENTATION end-to-end \u2014 an [H,W] swap on emit (the pre-P3 bug) flips this to reject in-cluster"
+    },
+    {
+      "name": "imgc-nonsquare-swapped",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        4,
+        8
+      ],
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "the same 8\u00d74 images with target [4,8]: both sides must reject \u2014 proves the comparison is orientation-sensitive, not shape-normalized"
+    },
+    {
+      "name": "imgc-dup-header",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "reject",
+      "ingestor_verdict": "accept",
+      "note": "DELIBERATE divergence: image categories have no DataValidator, so the ingestor's preflight accepts dup headers \u2014 the rejection fires at READ time (after table creation, orphaning it). The CLI previews the read-time rule."
+    },
+    {
+      "name": "imgc-empty-label",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "empty-string label IS a class for image categories (keep_default_na=False): the CLI must not be stricter"
+    },
+    {
+      "name": "imgc-dotted-stem",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        8,
+        8
+      ],
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "row 'photo.2024' resolves to photo.2024.jpg via _has_extension (dotted stems are not extensions) \u2014 the CLI's cross-check must mirror, not reject"
+    },
+    {
+      "name": "tabular-na-labels",
+      "category": "tabular_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "'NA' drops to NaN for schema-typed labels (coercion NA_SENTINELS) \u2192 1 distinct class in-cluster; the CLI mirrors the sentinel drop"
+    },
+    {
+      "name": "tabular-nonutf8",
+      "category": "tabular_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "check_csv_encoding runs before ANY validator in-cluster; Latin-1 exports must fail locally, not post-upload"
+    },
+    {
+      "name": "text-clf-ok",
+      "category": "text_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".txt",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "pins the text-family dispatch"
+    }
+  ]
+}
