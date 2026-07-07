@@ -46,6 +46,10 @@ locally first.
 
 ` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run
 before the first ingest.`,
+		// A bare `tracebloc data` prints help; a mistyped subcommand errors with a
+		// suggestion instead of silently exiting 0 (#75).
+		RunE:                       runGroup,
+		SuggestionsMinimumDistance: 2,
 	}
 	cmd.AddCommand(newDataIngestCmd())
 	cmd.AddCommand(newDataListCmd())
