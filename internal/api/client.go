@@ -346,9 +346,10 @@ func (c *Client) PollToken(ctx context.Context, deviceCode string) (string, erro
 
 // Identity is the signed-in user, from GET /userinfo/.
 type Identity struct {
-	Email   string `json:"email"`
-	Type    string `json:"type"`
-	Account string `json:"account"`
+	Email     string `json:"email"`
+	FirstName string `json:"first_name"`
+	Type      string `json:"type"`
+	Account   string `json:"account"`
 }
 
 // WhoAmI fetches the signed-in user from the backend, authenticating with the
@@ -409,8 +410,11 @@ type ProvisionedClient struct {
 type CreateClientRequest struct {
 	Name      string `json:"first_name"`
 	Namespace string `json:"namespace"`
-	Location  string `json:"location"`
-	Password  string `json:"password"`
+	// Location is optional (cli#137): omitted when the operator gives no --location,
+	// so the backend records the client with no location rather than a silent
+	// default (backend#993). EdgeDevice.location is blank=True server-side.
+	Location string `json:"location,omitempty"`
+	Password string `json:"password"`
 	// ClusterID anchors the client to this cluster (the kube-system namespace UID)
 	// so create is get-or-create keyed on it (RFC-0001 §7.2 / backend#883). Omitted
 	// when the cluster identity can't be read (dual-mode / legacy → plain mint).

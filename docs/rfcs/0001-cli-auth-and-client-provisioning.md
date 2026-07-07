@@ -46,7 +46,22 @@
 > + a CLI `logout`→call (backend#845 shipped only the `revoke()` primitive) —
 > §6.3/§7.5/§9/§13/C.6. The earlier "revokes server-side via #845" claim overstated it.
 >
-> **Rev 8 (2026-07-06) — PROPOSED amendment, not yet accepted ([cli#136], draft).**
+> **Rev 8 (2026-07-07)** product deviation on the two zero-prompt inputs (cli#137,
+> installer UX v2 — decided by Lukas 2026-07-06):
+> - **Name is `<firstname>-NN`, not the hostname.** The auto-generated name is now
+>   `<slug(first_name)>-NN` from the signed-in identity (fallback: email local-part),
+>   numbered per account — the hostname is neither stable nor account-scoped (§6.6/§7.7).
+> - **Location is optional, not auto-detected.** With no `--location` the CLI omits
+>   it and the backend records the client with **no location** (an explicit "not set"
+>   state — backend#993), rather than auto-detecting a zone at provision time. The
+>   cloud-metadata auto-detect (`internal/geo`, cli#93) is **removed** — the silent
+>   path no longer detects, and the backend is the source of truth for valid zones
+>   (a bad `--location` surfaces as its real create error). §6.7/§7.7.
+>
+> The §6.6/§6.7/§7.7 bodies below are retained as the original design-of-record; the
+> inline **Rev 8** callouts mark where the shipped behavior now differs.
+>
+> **Rev 9 (2026-07-06) — PROPOSED amendment, not yet accepted ([cli#136], draft).**
 > Simplifies the client command surface to a strict **one machine = one client =
 > one cluster** model and reaffirms the installer as the create front door. See
 > **§15** for the full amendment. Net: `client use` is **removed** and the D3
@@ -65,7 +80,7 @@ the review. They are now decided; the rest of the doc assumes them.
 
 | # | Decision | Choice |
 |---|---|---|
-| D1 | **Setup is silent / auto, not interactive.** | Common path asks **zero questions**: name = sanitized hostname, location = auto-detect, both *surfaced* in progress and correctable with flags — never prompted. (§6.7, §7.7, §8) |
+| D1 | **Setup is silent / auto, not interactive.** | Common path asks **zero questions**: name = sanitized hostname, location = auto-detect, both *surfaced* in progress and correctable with flags — never prompted. (§6.7, §7.7, §8) *(Amended Rev 8 / cli#137: name = `<firstname>-NN`; location optional & omitted when unset — see §6.6/§6.7 callouts.)* |
 | D2 | **The machine credential is never shown.** | `client create` prints only name + status. The credential is written straight into the cluster secret (mode `0600`) + stored hashed in the backend, and never touches stdout, scrollback, the clipboard, or `~/.tracebloc`. Rotation = delete + recreate. (§7.1, §7.8, §9) |
 | D3 | **Clients are referred to by a human handle, never a secret or backend id.** | The handle is the per-account-unique namespace **slug** (e.g. `munich-hospital-radiology`); bare `use` / `delete` open an arrow-key picker. The UUID / username / password are never displayed. (§7.1) |
 
@@ -391,6 +406,15 @@ Today there are effectively two names: `first_name` (display) and `namespace`
 (k8s). Asking for both is redundant; in the silent flow we ask for **neither**
 (§6.7) — we derive both from the hostname.
 
+> **Amended — Rev 8 / cli#137:** the silent flow no longer derives the name from the
+> hostname. It auto-generates `<slug(first_name)>-NN` from the signed-in identity
+> (the account — and thus the user's first name — is known at create time; the
+> hostname is neither stable nor account-scoped). `NN` is the next free two-digit
+> number across the account's existing client names/namespaces, so a second machine
+> is `lukas-02` rather than a slug `-2` bump. The derived name is already slug-clean,
+> so the derive-once / set-both / freeze namespace rule below is unchanged (name =
+> namespace by construction). `--name` / `TRACEBLOC_CLIENT_NAME` still override.
+
 > **All of this is net-new.** Today the backend does *no* namespace processing — it
 > stores the client-reported `namespace` verbatim (§4.2), with no slug derivation,
 > no format validation, and no uniqueness. The slug rule below, setting `namespace`
@@ -436,6 +460,16 @@ Derivation rules (reference algorithm + validation in Appendix A):
 client can be created with no location and `carbon_intensity` defaults to `0` —
 i.e. it silently reads as "carbon-free", quietly corrupting the exact metric
 tracebloc sells.
+
+> **Amended — Rev 8 / cli#137:** location is no longer auto-detected on the silent
+> path. With no `--location` the CLI omits it (`CreateClientRequest.location` is
+> `omitempty`) and the backend records the client with **no location** — the explicit
+> "not set" state (backend#993), not a silent zero and not a provision-time GeoIP
+> guess. The cloud-metadata auto-detect (`internal/geo`, cli#93) is **removed**, not
+> parked: the silent path never detects, and the backend is the source of truth for
+> valid zones (a bad `--location` surfaces as its real create error). The
+> "never block / never fake a zero" principle below stands; "auto-detect silently"
+> is the part that's gone.
 
 **Proposal: auto-detect the zone and use it silently; never prompt, never block,
 never fake a zero.**
@@ -625,6 +659,12 @@ Location = the cli#93 auto-detect; if undetectable, fall back to the account
 default / `unset` rather than block (§6.7). Surface the chosen name + zone in
 friendly progress (*"Setting up gpu-box-01 in DE"*) — visible but not
 interactive; correct later with `--name` / `--location` or in the dashboard.
+
+> **Amended — Rev 8 / cli#137:** name = `<firstname>-NN` from the signed-in identity
+> (not the hostname), and location is **optional** — omitted when no `--location` is
+> given, leaving the client in the explicit "not set" state (backend#993) rather than
+> auto-detected at provision time. See the §6.6 and §6.7 Rev 8 callouts. Both inputs
+> stay zero-prompt on the common path; `--name` / `--location` still override.
 
 ### 7.8 If nothing is shown, how does the user manage it later? — **[D2]**
 
@@ -1270,7 +1310,7 @@ class Meta:
 // `login --env X` switches current_env without clearing the other profiles.
 ```
 
-## 15. Amendment (Rev 8) — CLI client-surface simplification
+## 15. Amendment (Rev 9) — CLI client-surface simplification
 
 > **Status: PROPOSED, not yet accepted** — prototyped on [cli#136] (draft).
 > This section narrows the command surface in §6.2 / §7.1 / §7.3 and the D3
