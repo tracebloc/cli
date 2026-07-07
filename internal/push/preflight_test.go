@@ -202,17 +202,53 @@ func TestCheckLabelDiversity(t *testing.T) {
 	// (stripped) label values. Discovered by the parity harness's first
 	// run; previously an in-cluster-only, post-upload failure.
 	two := writeTmp(t, "two.csv", []byte("id,label\na,cat\nb, cat \nc,dog\n"))
-	if err := CheckLabelDiversity(two, "label", false); err != nil {
+	if err := CheckLabelDiversity(two, "label", false, false); err != nil {
 		t.Errorf("2 distinct labels rejected: %v", err)
 	}
 	one := writeTmp(t, "one.csv", []byte("id,label\na,cat\nb,cat\n"))
-	if err := CheckLabelDiversity(one, "label", false); err == nil {
+	if err := CheckLabelDiversity(one, "label", false, false); err == nil {
 		t.Fatal("single-class dataset must be rejected")
 	} else if !strings.Contains(err.Error(), "at least 2 classes") {
 		t.Errorf("unexpected message: %v", err)
 	}
 	// benign-skip when the column is absent (that's CheckLabelColumn's job)
-	if err := CheckLabelDiversity(one, "nope", false); err != nil {
+	if err := CheckLabelDiversity(one, "nope", false, false); err != nil {
 		t.Errorf("missing column must benign-skip like the ingestor: %v", err)
+	}
+
+	// Schema-type sensitivity (data-ingestors #252): "1" and "1.0" are two
+	// distinct classes for a string-typed (VARCHAR) label — the ingestor
+	// pins dtype=str and does NOT collapse them — but one class for a
+	// numeric label, where pandas numeric inference merges them.
+	numeric := writeTmp(t, "numeric.csv", []byte("id,label\na,1\nb,1.0\n"))
+	if err := CheckLabelDiversity(numeric, "label", true /*dropNA*/, false /*collapseNumeric*/); err != nil {
+		t.Errorf("VARCHAR label '1'/'1.0' must stay 2 classes (no numeric collapse): %v", err)
+	}
+	if err := CheckLabelDiversity(numeric, "label", true /*dropNA*/, true /*collapseNumeric*/); err == nil {
+		t.Error("numeric label '1'/'1.0' must collapse to a single class and be rejected")
+	}
+}
+
+func TestCheckLabelDiversitySchemaTypeDispatch(t *testing.T) {
+	// PreflightDataset must derive the collapse flag from the label's schema
+	// type: a numeric-looking VARCHAR label is accepted (2 classes), the same
+	// data typed FLOAT is rejected (collapses to 1). Locks the fix at the
+	// dispatch level, not just the leaf function.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "data.csv"), []byte("feat,label\nx,1\ny,1.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	layout := &LocalLayout{Root: dir, LabelsCSV: filepath.Join(dir, "data.csv")}
+
+	strSpec := SpecArgs{Category: "tabular_classification", LabelColumn: "label",
+		Schema: map[string]string{"feat": "VARCHAR(255)", "label": "VARCHAR(10)"}}
+	if _, problem := PreflightDataset(strSpec, layout); problem != nil {
+		t.Errorf("VARCHAR label should keep '1'/'1.0' distinct and pass: %v", problem.Err)
+	}
+
+	numSpec := SpecArgs{Category: "tabular_classification", LabelColumn: "label",
+		Schema: map[string]string{"feat": "VARCHAR(255)", "label": "FLOAT"}}
+	if _, problem := PreflightDataset(numSpec, layout); problem == nil {
+		t.Error("FLOAT label should collapse '1'/'1.0' and be rejected")
 	}
 }

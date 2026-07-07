@@ -372,13 +372,17 @@ func TruncateList(items []string, max int) string {
 // in-cluster rejection otherwise lands after the full upload. Mirrors the
 // validator's benign-skip when the label column isn't found (that's
 // CheckLabelColumn's diagnostic, not this one's).
-// tabularSchema is non-nil for tabular_classification: the label is a
-// SCHEMA-TYPED column there, so pandas drops NA-sentinel values to NaN
-// (not classes) and numeric inference collapses "1"/"1.0" — the preview
-// mirrors both. For image/text classification the label column is read
-// untyped with keep_default_na=False, so even an empty string is a real
-// class and every distinct trimmed string counts.
-func CheckLabelDiversity(csvPath, labelColumn string, tabularSchema bool) error {
+//
+// dropNASentinels and collapseNumeric mirror the ingestor's per-column
+// read (LabelDiversityValidator._label_read_kwargs): for a SCHEMA-TYPED
+// tabular label pandas drops NA-sentinel values (na_values) and, for
+// NUMERIC types only, numeric inference collapses "1"/"1.0" — but a
+// string-family type (VARCHAR/CHAR/TEXT/STRING) is pinned to dtype=str, so
+// numeric-looking labels stay distinct (data-ingestors #252). Image/text
+// labels are read untyped with keep_default_na=False (both flags false), so
+// even an empty string is a real class and every distinct trimmed string
+// counts. The caller derives the two flags from the label's schema type.
+func CheckLabelDiversity(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) error {
 	f, err := os.Open(csvPath)
 	if err != nil {
 		return nil // unreadable file is another check's diagnostic
@@ -423,10 +427,12 @@ func CheckLabelDiversity(csvPath, labelColumn string, tabularSchema bool) error 
 			continue
 		}
 		v := strings.TrimSpace(rec[col])
-		if tabularSchema {
+		if dropNASentinels {
 			if _, isNA := naSentinels[v]; isNA {
 				continue
 			}
+		}
+		if collapseNumeric {
 			// Numeric inference collapses "1" and "1.0" into one value
 			// in-cluster; normalize the same way before counting.
 			if f, err := strconv.ParseFloat(v, 64); err == nil {
@@ -498,6 +504,39 @@ func CheckCSVEncoding(path string) error {
 var naSentinels = map[string]struct{}{
 	"": {}, "NA": {}, "N/A": {}, "n/a": {}, "NULL": {}, "null": {},
 	"None": {}, "none": {}, "NaN": {}, "nan": {}, "<NA>": {}, "#N/A": {},
+}
+
+// labelSchemaType resolves the label column's declared SQL type from the
+// schema, matched case- and whitespace-insensitively — mirrors the ingestor's
+// LabelDiversityValidator._schema_type_for. ok is false when the label isn't
+// a schema column (an untyped read, in-cluster).
+func labelSchemaType(schema map[string]string, labelColumn string) (sqlType string, ok bool) {
+	if t, found := schema[labelColumn]; found {
+		return t, true
+	}
+	target := strings.ToLower(strings.TrimSpace(labelColumn))
+	for k, v := range schema {
+		if strings.ToLower(strings.TrimSpace(k)) == target {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// isStringSQLType reports whether an SQL type declaration is a string family
+// (VARCHAR/CHAR/TEXT/STRING) — the types the ingestor pins to dtype=str,
+// which suppresses pandas numeric inference on the label column. Mirrors the
+// base-type check in LabelDiversityValidator._label_read_kwargs.
+func isStringSQLType(sqlType string) bool {
+	base := strings.ToUpper(strings.TrimSpace(sqlType))
+	if i := strings.IndexByte(base, '('); i >= 0 {
+		base = strings.TrimSpace(base[:i])
+	}
+	switch base {
+	case "VARCHAR", "CHAR", "TEXT", "STRING":
+		return true
+	}
+	return false
 }
 
 // CheckSchemaColumns previews DataValidator's missing-schema-column probe
@@ -578,7 +617,16 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 			return nil, &PreflightProblem{Err: err, BadFlag: true}
 		}
 		if spec.Category == "tabular_classification" {
-			if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, true); err != nil {
+			// The label is a schema-typed column: the ingestor drops NA
+			// sentinels for it, and collapses numeric-looking values ONLY
+			// for numeric types — a VARCHAR label is pinned to dtype=str,
+			// keeping "1"/"1.0" distinct (data-ingestors #252). Derive both
+			// flags from the label's declared type so the preview doesn't
+			// wrongly collapse a string label and reject a diverse dataset.
+			sqlType, inSchema := labelSchemaType(spec.Schema, spec.LabelColumn)
+			dropNA := inSchema
+			collapseNumeric := !(inSchema && isStringSQLType(sqlType))
+			if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, dropNA, collapseNumeric); err != nil {
 				return nil, dataProblem(err)
 			}
 		}
@@ -610,8 +658,9 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		// LabelDiversityValidator runs in-cluster for the WHOLE image
 		// family (is_classification covers object_detection + keypoint
 		// too); it benign-skips when no label column resolves, and so
-		// does the preview.
-		if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false); err != nil {
+		// does the preview. Image labels are read untyped, so no NA drop
+		// and no numeric collapse.
+		if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
 			return nil, dataProblem(err)
 		}
 		switch spec.Category {
@@ -664,7 +713,9 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 			if err := CheckLabelColumn(header, spec.LabelColumn, "labels.csv"); err != nil {
 				return nil, &PreflightProblem{Err: err, BadFlag: true}
 			}
-			if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false); err != nil {
+			// Text labels are read untyped (like image), so no NA drop and
+			// no numeric collapse.
+			if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
 				return nil, dataProblem(err)
 			}
 		}
