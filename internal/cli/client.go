@@ -216,6 +216,12 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		// hand. (A supplied --name still tolerates a list blip: it's best-effort for
 		// slug-collision avoidance only.)
 		if listErr != nil {
+			// A 426 means the CLI is too old — retrying won't help, so surface the
+			// upgrade signal verbatim instead of framing it as a transient outage.
+			var ue *api.UpgradeRequiredError
+			if errors.As(listErr, &ue) {
+				return &exitError{code: 1, err: ue}
+			}
 			return &exitError{code: 1, err: fmt.Errorf(
 				"couldn't reach the backend to choose a unique client name (%v) — retry, "+
 					"or pass --name explicitly", listErr)}
@@ -701,10 +707,21 @@ func autoClientName(prof *config.Profile, existing []api.ProvisionedClient) stri
 	if base == "" {
 		base = "client"
 	}
-	taken := make(map[string]struct{}, 2*len(existing))
+	// Reserve each existing client's handle in BOTH raw and slugified form: a legacy
+	// client stored with a display name like "Lukas 01" (and a blank/legacy
+	// namespace) must still block the derived handle "lukas-01", which is what
+	// slug.Derive would produce for it.
+	taken := make(map[string]struct{}, 4*len(existing))
+	reserve := func(s string) {
+		if s == "" {
+			return
+		}
+		taken[s] = struct{}{}
+		taken[slug.Slugify(s)] = struct{}{}
+	}
 	for _, c := range existing {
-		taken[c.Name] = struct{}{}
-		taken[c.Namespace] = struct{}{}
+		reserve(c.Name)
+		reserve(c.Namespace)
 	}
 	for n := 1; ; n++ {
 		suffix := fmt.Sprintf("-%02d", n)

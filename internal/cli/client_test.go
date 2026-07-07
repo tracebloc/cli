@@ -934,3 +934,51 @@ func TestClientCreate_AutoNameCapsAt63(t *testing.T) {
 		t.Errorf("expected a -01 suffix, got %q", body.Name)
 	}
 }
+
+// TestClientCreate_AutoNameSurfacesUpgradeRequired (Bugbot #144-A): a 426 while
+// listing clients for the auto-name must surface as an upgrade signal, not a
+// "retry" reachability error — retrying an outdated CLI never succeeds.
+func TestClientCreate_AutoNameSurfacesUpgradeRequired(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusUpgradeRequired) // 426
+			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true})
+	if code := ExitCodeFromError(err); code != 1 {
+		t.Fatalf("want exit 1, got %d (err=%v)", code, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Errorf("want an upgrade-required message, got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "couldn't reach the backend") {
+		t.Errorf("a 426 must not be framed as a transient reachability error: %v", err)
+	}
+}
+
+// TestClientCreate_AutoNameReservesSluggedNames (Bugbot #144-B): a legacy client
+// whose display name slugifies to the same handle (e.g. "Lukas 01" → lukas-01),
+// even with a blank namespace, must reserve that handle so auto-naming skips it.
+func TestClientCreate_AutoNameReservesSluggedNames(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			// Legacy client: raw display name, no namespace stored.
+			_, _ = w.Write([]byte(`[{"id":1,"first_name":"Lukas 01","username":"u-1","namespace":""}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":2,"first_name":"lukas-02","username":"u-2","namespace":"lukas-02"}`))
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.Name != "lukas-02" {
+		t.Errorf("auto-name = %q, want lukas-02 (lukas-01 reserved by legacy \"Lukas 01\")", body.Name)
+	}
+}
