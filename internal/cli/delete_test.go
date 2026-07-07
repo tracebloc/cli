@@ -158,7 +158,9 @@ func TestDelete_Yes_FullSequence(t *testing.T) {
 	if _, err := os.Stat(dataDir); err != nil {
 		t.Fatalf("expected temp config dir to exist: %v", err)
 	}
-	exe := filepath.Join(t.TempDir(), "bin", "tracebloc")
+	// Lay down a real binary + a real `tb` symlink to it, so removeSelf's
+	// ownership check (aliasStatus) recognizes `tb` as ours and removes it.
+	exe := writeBinaryWithTBAlias(t)
 	fn := &fakeNodeboot{executable: exe}
 	fn.install(t)
 
@@ -588,6 +590,99 @@ func TestLooksBrewManaged_ResolvesSymlink(t *testing.T) {
 	}
 	if looksBrewManaged(filepath.Join(binDir, "nope")) {
 		t.Error("a non-brew, non-existent path should not be flagged")
+	}
+}
+
+// writeBinaryWithTBAlias creates a real `tracebloc` binary in a temp dir plus a
+// real `tb` symlink pointing at it (the layout the installer produces), and
+// returns the binary path. removeSelf reads these off the real filesystem to
+// decide whether `tb` is ours, so the symlink must actually exist.
+func writeBinaryWithTBAlias(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "tracebloc")
+	if err := os.WriteFile(exe, []byte("bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(exe, filepath.Join(dir, "tb")); err != nil {
+		t.Fatal(err)
+	}
+	return exe
+}
+
+// removeSelf must remove `tb` when it is tracebloc's own symlink (target == the
+// binary), matching what the installer created.
+func TestDelete_OwnTBAlias_Removed(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	exe := writeBinaryWithTBAlias(t)
+	fn := &fakeNodeboot{executable: exe}
+	fn.install(t)
+
+	var out bytes.Buffer
+	if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true}); err != nil {
+		t.Fatalf("offboard: %v", err)
+	}
+	assertRemoved(t, fn, filepath.Join(filepath.Dir(exe), "tb"))
+}
+
+// removeSelf must NOT remove a sibling `tb` that isn't tracebloc's alias — a
+// regular file (or a symlink elsewhere) belongs to another tool. This is the
+// wrong-target-deletion guard: without it, offboarding one machine would delete
+// an unrelated `tb` on the same PATH dir.
+func TestDelete_ForeignTBAlias_Left(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	// A real binary, but `tb` is a FOREIGN regular file (another tool's), not our
+	// symlink.
+	dir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "tracebloc")
+	if err := os.WriteFile(exe, []byte("bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreignTB := filepath.Join(dir, "tb")
+	if err := os.WriteFile(foreignTB, []byte("someone else's tb"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fn := &fakeNodeboot{executable: exe}
+	fn.install(t)
+
+	var out bytes.Buffer
+	if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true}); err != nil {
+		t.Fatalf("offboard: %v", err)
+	}
+	for _, p := range fn.removedPaths {
+		if p == foreignTB {
+			t.Fatalf("a foreign `tb` (not our symlink) must NOT be removed; removed: %v", fn.removedPaths)
+		}
+	}
+	if !strings.Contains(out.String(), "isn't tracebloc's `tb` alias") {
+		t.Errorf("expected a note that the foreign `tb` was left in place, got:\n%s", out.String())
+	}
+	// The foreign file must still exist on disk (belt-and-suspenders — osRemoveAll
+	// is faked, but assert the real fs is untouched).
+	if _, err := os.Stat(foreignTB); err != nil {
+		t.Errorf("foreign `tb` should be untouched on disk: %v", err)
 	}
 }
 
