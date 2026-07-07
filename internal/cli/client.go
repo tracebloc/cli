@@ -261,9 +261,14 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		// get-or-create). Derive the namespace slug, avoiding collisions with the
 		// account's OTHER clients — skip the one already anchored here (a re-run
 		// adopts it, so its namespace isn't a collision and must not bump the slug).
+		// Track whether this cluster is already anchored to a client: then
+		// CreateClient will adopt (HTTP 200, no credential minted or printed), so the
+		// consent guard below must not block that idempotent re-run.
 		var existing []string
+		willAdopt := false
 		for _, c := range accountClients {
 			if clusterID != "" && c.ClusterID == clusterID {
+				willAdopt = true
 				continue
 			}
 			if c.Namespace != "" {
@@ -286,13 +291,15 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 				p.Hintf("Cancelled.")
 				return nil
 			}
-		} else if pr == nil && !opts.yes && opts.credentialFile == "" {
-			// Non-interactive with no way to confirm AND no --credential-file: minting
-			// here would side-effect silently and print the machine credential to
+		} else if pr == nil && !opts.yes && opts.credentialFile == "" && !willAdopt {
+			// Non-interactive with no way to confirm AND no --credential-file: a fresh
+			// MINT here would side-effect silently and print the machine credential to
 			// stdout (into whatever captured it). Require an explicit signal first —
 			// --yes to consent, or --credential-file to keep the secret off stdout.
-			// The installer passes both, so it's unaffected; this only stops an
-			// accidental bare `client create` in a pipe / CI from leaking a credential.
+			// Skipped when this cluster is already anchored (willAdopt): that re-run
+			// adopts and prints no credential, so it stays zero-friction. The installer
+			// passes both flags anyway; this only stops an accidental bare
+			// `client create` in a pipe / CI from leaking a freshly minted credential.
 			return &exitError{code: 1, err: errors.New(
 				"refusing to provision non-interactively without confirmation — pass --yes to " +
 					"confirm, and --credential-file to write the credential to a file instead of stdout")}

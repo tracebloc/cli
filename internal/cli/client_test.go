@@ -982,3 +982,39 @@ func TestClientCreate_AutoNameReservesSluggedNames(t *testing.T) {
 		t.Errorf("auto-name = %q, want lukas-02 (lukas-01 reserved by legacy \"Lukas 01\")", body.Name)
 	}
 }
+
+// TestClientCreate_NonInteractiveAdoptNeedsNoConsent (Bugbot follow-up): the
+// non-interactive consent guard must NOT block an idempotent re-run on an
+// already-anchored cluster — that path adopts (HTTP 200) and prints no
+// credential, so it stays zero-friction without --yes/--credential-file.
+func TestClientCreate_NonInteractiveAdoptNeedsNoConsent(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			// This cluster is already anchored to an existing client.
+			_, _ = w.Write([]byte(`[{"id":8,"first_name":"box","username":"u-8","namespace":"existing","cluster_id":"uid-1"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+			w.WriteHeader(http.StatusOK) // 200 = adopted
+			_, _ = w.Write([]byte(`{"id":8,"first_name":"box","username":"u-8","namespace":"existing","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	// pr == nil, no --yes, no --credential-file: a fresh mint would be blocked, but
+	// this is an adopt, so it must proceed.
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), nil, clientCreateOpts{}); err != nil {
+		t.Fatalf("non-interactive re-run on an anchored cluster should adopt, got: %v", err)
+	}
+	if !posted {
+		t.Error("expected the adopt POST")
+	}
+	if !strings.Contains(out.String(), "already registered") {
+		t.Errorf("expected an adopt message, got:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "Machine credential") {
+		t.Errorf("adopt must not print a credential:\n%s", out.String())
+	}
+}
