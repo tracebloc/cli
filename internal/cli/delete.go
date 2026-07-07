@@ -346,11 +346,23 @@ func removeSelf(p *ui.Printer) {
 	}
 
 	// The `tb` alias is a sibling of the binary (the installer symlinks it next to
-	// `tracebloc`); remove it first so a leftover alias doesn't dangle.
+	// `tracebloc`); remove it first so a leftover alias doesn't dangle. Remove it
+	// ONLY when it is our own symlink — a symlink whose target is this binary. The
+	// installer is careful never to clobber a pre-existing `tb` from another tool
+	// (install.sh: `readlink tb == PREFIX/tracebloc`); delete must be just as
+	// careful, or offboarding one machine could delete an unrelated `tb` (e.g.
+	// another CLI on the same PATH dir).
 	tb := filepath.Join(filepath.Dir(exe), "tb")
 	if tb != exe {
-		if rmErr := osRemoveAll(tb); rmErr != nil {
-			p.Hintf("Couldn't remove the `tb` alias (%v) — remove it by hand: rm -f %s", rmErr, tb)
+		switch exists, ours := aliasStatus(tb, exe); {
+		case ours:
+			if rmErr := osRemoveAll(tb); rmErr != nil {
+				p.Hintf("Couldn't remove the `tb` alias (%v) — remove it by hand: rm -f %s", rmErr, tb)
+			}
+		case exists:
+			// A `tb` that isn't our symlink belongs to another tool — leave it, and
+			// say so (mirrors the installer's "already exists and isn't ours" note).
+			p.Hintf("Left %s in place — it isn't tracebloc's `tb` alias.", tb)
 		}
 	}
 
@@ -363,6 +375,41 @@ func removeSelf(p *ui.Printer) {
 		return
 	}
 	p.Successf("Removed the tracebloc CLI from this machine.")
+}
+
+// aliasStatus reports whether a `tb` path exists and whether it is tracebloc's
+// OWN alias — a symlink resolving to this binary. It mirrors the installer's
+// ownership test (install.sh: `readlink tb == PREFIX/tracebloc`) so delete only
+// removes what install created. A regular file, or a symlink pointing elsewhere,
+// is `exists=true, ours=false` — another tool's `tb`, never to be deleted.
+func aliasStatus(tb, exe string) (exists, ours bool) {
+	fi, err := os.Lstat(tb)
+	if err != nil {
+		return false, false // no `tb` sibling at all
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		return true, false // a regular file/dir named `tb` — not ours
+	}
+	target, err := os.Readlink(tb)
+	if err != nil {
+		return true, false
+	}
+	// The installer writes an absolute target; resolve a relative one against the
+	// link's own directory before comparing.
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(tb), target)
+	}
+	if filepath.Clean(target) == filepath.Clean(exe) {
+		return true, true
+	}
+	// exe may itself be a symlink (e.g. Intel Homebrew: /usr/local/bin/tracebloc →
+	// Cellar); compare fully-resolved paths as a fallback.
+	if rt, e1 := filepath.EvalSymlinks(target); e1 == nil {
+		if re, e2 := filepath.EvalSymlinks(exe); e2 == nil && rt == re {
+			return true, true
+		}
+	}
+	return true, false
 }
 
 // looksBrewManaged reports whether a binary path sits under a Homebrew prefix, so
