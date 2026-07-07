@@ -180,8 +180,8 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	//   • location: optional — never prompted, never required. With no --location we
 	//     send nothing (CreateClientRequest.Location is omitempty) and the backend
 	//     records the client with no location rather than a silent default
-	//     (backend#993). internal/geo (detectZone) stays available for opt-in
-	//     enrichment but must not block or prompt here.
+	//     (backend#993). The backend is the source of truth for valid zones — a bad
+	//     --location surfaces as its real create error, not a CLI-side guess.
 
 	// Read the cluster anchor (kube-system UID) so create is get-or-create keyed on
 	// it — re-running on the same cluster adopts the existing client instead of

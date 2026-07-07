@@ -53,9 +53,10 @@
 >   numbered per account — the hostname is neither stable nor account-scoped (§6.6/§7.7).
 > - **Location is optional, not auto-detected.** With no `--location` the CLI omits
 >   it and the backend records the client with **no location** (an explicit "not set"
->   state — backend#993), rather than auto-detecting a zone at provision time.
->   `internal/geo` (§6.7) stays available for opt-in `--location` enrichment but no
->   longer runs on the silent path (§6.7/§7.7).
+>   state — backend#993), rather than auto-detecting a zone at provision time. The
+>   cloud-metadata auto-detect (`internal/geo`, cli#93) is **removed** — the silent
+>   path no longer detects, and the backend is the source of truth for valid zones
+>   (a bad `--location` surfaces as its real create error). §6.7/§7.7.
 >
 > The §6.6/§6.7/§7.7 bodies below are retained as the original design-of-record; the
 > inline **Rev 8** callouts mark where the shipped behavior now differs.
@@ -452,10 +453,11 @@ tracebloc sells.
 > path. With no `--location` the CLI omits it (`CreateClientRequest.location` is
 > `omitempty`) and the backend records the client with **no location** — the explicit
 > "not set" state (backend#993), not a silent zero and not a provision-time GeoIP
-> guess. Detection (`internal/geo`, cli#93) remains available for opt-in `--location`
-> enrichment but must not run, block, or prompt during a zero-flag create. The
+> guess. The cloud-metadata auto-detect (`internal/geo`, cli#93) is **removed**, not
+> parked: the silent path never detects, and the backend is the source of truth for
+> valid zones (a bad `--location` surfaces as its real create error). The
 > "never block / never fake a zero" principle below stands; "auto-detect silently"
-> is the part that changed.
+> is the part that's gone.
 
 **Proposal: auto-detect the zone and use it silently; never prompt, never block,
 never fake a zero.**
