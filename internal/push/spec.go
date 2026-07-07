@@ -144,9 +144,14 @@ type SpecArgs struct {
 	// default apply. Populated by the CLI from --target-size or by
 	// auto-detecting the first image. (Image categories only.)
 	//
-	// NOTE: stored [W, H] here, but EMITTED as [height, width] by
-	// Build — that's the order the ingest.v1 schema documents and the
-	// ingestor reads. buildImage does the swap. (Bugbot, PR #22.)
+	// NOTE: stored [W, H] here AND emitted as [width, height] by
+	// buildImage — no swap. That's the order the ingest.v1 schema
+	// documents ("matches PIL.Image.size and what
+	// ImageResolutionValidator expects") and the order the validator
+	// compares against verbatim (PIL's img.size is (W, H)). An earlier
+	// [H,W] revision (PR #22 review note) was mistaken and made every
+	// non-square dataset fail in-cluster; #147 reverted it. Do not
+	// re-introduce a swap. (See the inline comment in buildImage.)
 	TargetSize []int
 
 	// Schema is the column→SQL-type map for tabular / time-series
