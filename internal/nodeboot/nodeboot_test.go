@@ -137,7 +137,7 @@ func TestUninstallChart(t *testing.T) {
 		f := newFakeRunner()
 		f.install(t)
 
-		if err := UninstallChart(context.Background(), "munich-radiology"); err != nil {
+		if err := UninstallChart(context.Background(), "munich-radiology", "", ""); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := []string{"helm uninstall munich-radiology --namespace munich-radiology"}
@@ -151,7 +151,7 @@ func TestUninstallChart(t *testing.T) {
 		f.on("helm uninstall gone --namespace gone", "Error: uninstall: Release not loaded: gone: release: not found", errors.New("exit 1"))
 		f.install(t)
 
-		if err := UninstallChart(context.Background(), "gone"); err != nil {
+		if err := UninstallChart(context.Background(), "gone", "", ""); err != nil {
 			t.Fatalf("a missing release must be swallowed, got: %v", err)
 		}
 	})
@@ -161,7 +161,7 @@ func TestUninstallChart(t *testing.T) {
 		f.on("helm uninstall ns --namespace ns", "Error: connection refused", errors.New("exit 1"))
 		f.install(t)
 
-		if err := UninstallChart(context.Background(), "ns"); err == nil {
+		if err := UninstallChart(context.Background(), "ns", "", ""); err == nil {
 			t.Fatal("want error for a non-not-found helm failure, got nil")
 		}
 	})
@@ -175,8 +175,21 @@ func TestUninstallChart(t *testing.T) {
 			`Error: Kubernetes cluster unreachable: namespace "kube-system" not found`, errors.New("exit 1"))
 		f.install(t)
 
-		if err := UninstallChart(context.Background(), "ns"); err == nil {
+		if err := UninstallChart(context.Background(), "ns", "", ""); err == nil {
 			t.Fatal("a cluster-unreachable 'not found' must surface, got nil")
+		}
+	})
+
+	t.Run("kubeconfig + context are passed to helm", func(t *testing.T) {
+		f := newFakeRunner()
+		f.install(t)
+
+		if err := UninstallChart(context.Background(), "ns", "/tmp/kc.yaml", "k3d-tracebloc"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"helm uninstall ns --namespace ns --kubeconfig /tmp/kc.yaml --kube-context k3d-tracebloc"}
+		if !reflect.DeepEqual(f.calls, want) {
+			t.Fatalf("calls = %v, want %v", f.calls, want)
 		}
 	})
 }

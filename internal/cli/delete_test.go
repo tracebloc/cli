@@ -41,14 +41,19 @@ type fakeNodeboot struct {
 	removeErr     map[string]error // path → error to return from osRemoveAll
 	executable    string
 	executableErr error
+	// Kubeconfig/context the uninstall seam was handed — so a test can prove the
+	// `tracebloc delete` --kubeconfig/--context flags actually reach helm.
+	uninstallKubeconfig string
+	uninstallContext    string
 }
 
 func (f *fakeNodeboot) install(t *testing.T) {
 	t.Helper()
 	origU, origT, origP := uninstallChart, teardownCluster, pruneImages
 	origExe, origRm := osExecutable, osRemoveAll
-	uninstallChart = func(_ context.Context, ns string) error {
+	uninstallChart = func(_ context.Context, ns, kubeconfig, kubeContext string) error {
 		f.calls = append(f.calls, "uninstall:"+ns)
+		f.uninstallKubeconfig, f.uninstallContext = kubeconfig, kubeContext
 		return f.uninstallErr
 	}
 	teardownCluster = func(_ context.Context, name string) error {
@@ -221,6 +226,40 @@ func TestDelete_KeepData_SparesDataDir(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "--keep-data") {
 		t.Errorf("output should note --keep-data:\n%s", out.String())
+	}
+	// …but the now-dangling active-client pointer must be cleared even under
+	// --keep-data (the credential is revoked; a stale pointer would mislead a
+	// later sign-in / reinstall).
+	cfg, _ := config.Load()
+	if got := cfg.Current().ActiveClientID; got != "" {
+		t.Errorf("--keep-data should clear the active-client pointer, got %q", got)
+	}
+}
+
+// --kubeconfig/--context must reach the helm uninstall — otherwise the release is
+// uninstalled against the ambient current-context, which may be the wrong cluster.
+func TestDelete_KubeconfigContext_ReachHelm(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
+	fn.install(t)
+
+	var out bytes.Buffer
+	err := runDelete(context.Background(), ui.New(&out), nil,
+		deleteOpts{yes: true, kubeconfigPath: "/tmp/kc.yaml", contextOverride: "k3d-tracebloc"})
+	if err != nil {
+		t.Fatalf("offboard: %v", err)
+	}
+	if fn.uninstallKubeconfig != "/tmp/kc.yaml" || fn.uninstallContext != "k3d-tracebloc" {
+		t.Errorf("uninstall got kubeconfig=%q context=%q, want /tmp/kc.yaml + k3d-tracebloc",
+			fn.uninstallKubeconfig, fn.uninstallContext)
 	}
 }
 
