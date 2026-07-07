@@ -359,7 +359,7 @@ func RenderSummary(p *ui.Printer, s *Summary) {
 
 	p.Section("What's next")
 	p.Infof("View it in the dashboard: https://ai.tracebloc.io/metadata")
-	p.Hintf("The table is staged and ready for training jobs.")
+	p.Hintf("Your dataset is ready for training jobs.")
 }
 
 // commaSep formats an int64 with thousands-separator commas to

@@ -641,8 +641,8 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    Errors mirror that command's exit-code contract (3 for
 	//    kubeconfig, 4 for missing release) so behaviour is
 	//    consistent across pre-flight commands.
-	a.Printer.Step(2, 4, "Connect to your workspace's cluster")
-	a.Printer.Hintf("Using your kubeconfig to find the tracebloc release in your workspace and the shared storage your dataset will live on.")
+	a.Printer.Step(2, 4, "Connect to your workspace")
+	a.Printer.Hintf("Finding your tracebloc workspace and the shared storage your dataset will live on.")
 	// 6. PVC discovery (needPVC) confirms the chart's shared-data PVC is
 	//    Bound before we waste time provisioning a Pod that can't mount it.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
@@ -734,7 +734,7 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    pre-flight codes so customers can branch on whether the
 	//    failure was their environment vs the actual data transfer.
 	a.Printer.Step(3, 4, "Stage your files")
-	a.Printer.Hintf("A short-lived helper pod mounts the shared storage and your files stream into it — like `kubectl cp`, but set up and cleaned up for you.")
+	a.Printer.Hintf("Your files upload securely into your workspace's storage — set up and cleaned up for you.")
 	progress := push.NewProgress(out, layout.TotalBytes,
 		fmt.Sprintf("Staging %s", a.Spec.Table))
 	// Defer Finish so a failure path that returns BEFORE
@@ -771,7 +771,12 @@ other collaborators train against it without ever seeing the raw files.`))
 	//     + log stream — can run that long for large ingestions.
 	//     The chart's helm flow uses the same token-mint code path.
 	a.Printer.Step(4, 4, "Run the ingestion")
-	a.Printer.Hintf("Submitting the run to your workspace, then watching as it validates your data and loads it into the table — progress streams below.")
+	if a.Detach {
+		a.Printer.Hintf("Submitting the run — with --detach it keeps running on your workspace after this command returns; the reconnect command is shown below.")
+	} else {
+		a.Printer.Hintf("Submitting the run, then following along as tracebloc validates your data and loads it into the table — progress streams below.")
+		a.Printer.Hintf("This follows the run for up to an hour; a longer run keeps going on its own (or start it with --detach and check back later).")
+	}
 	tok, err := cluster.MintIngestorToken(ctx, cs, resolved.Namespace,
 		release.IngestorSAName, 3600, nil)
 	if err != nil {
@@ -785,7 +790,7 @@ other collaborators train against it without ever seeing the raw files.`))
 	//     through the kubeconfig-authenticated apiserver, same as
 	//     `kubectl port-forward`. Bugbot PR #10 r3 caught the
 	//     original broken-by-design direct-URL POST.
-	_, _ = fmt.Fprintln(out, "Opening port-forward to jobs-manager...")
+	a.Printer.Infof("Connecting to your workspace to submit the run…")
 	pf, err := submit.PortForwardJobsManager(ctx, cs, resolved.RestConfig,
 		resolved.Namespace, release.JobsManagerServiceName, release.JobsManagerPort)
 	if err != nil {
@@ -981,7 +986,7 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 }
 
 // printClusterSummary shows the discovered workspace cluster target —
-// the detail under step 2 ("Connect to your workspace's cluster").
+// the detail under step 2 ("Connect to your workspace").
 func printClusterSummary(p *ui.Printer, release *cluster.ParentRelease, pvc *cluster.SharedPVC) {
 	p.Section("Target cluster")
 	p.Field("release", fmt.Sprintf("%s (chart %s)", release.ReleaseName, release.ChartVersion))
