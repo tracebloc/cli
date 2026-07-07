@@ -273,25 +273,79 @@ family is not** and is genuine modeling intent:
 
 So we sniff the family and only ask the task within it.
 
-## 8. The label column is task-specific
+## 8. The label — wording, convention, and validation (highest-risk input)
 
-Research result (verified against the CLI spec builder, the ingestor
-validators, and the backend): the label column is **not uniform** across
-tasks. It must be asked task-aware:
+The label is the per-example ground truth the model learns. Getting it
+wrong is the most dangerous mistake in the whole flow: today the validators
+match a label column *case-insensitively* while the ingestor's
+`RecordProcessor` reads it **exactly**, so a mis-cased or whitespace-off
+name passes validation and then **silently ingests a NULL label for every
+row** (data-ingestors#340). So the label needs precise wording *and*
+airtight validation. **Never say the ambiguous "label to predict."**
 
-| Tasks | Label column | Prompt wording |
-|---|---|---|
-| image/text/tabular **classification**, sentence-pair, token-classification | required — the **class** | "the column holding the class label" |
-| **regression**, **forecasting**, **survival** | required — the **target** (bucketed via `label_policy` so the raw value never leaves on-prem) | "the column holding the value to predict" |
-| **keypoint** | the keypoints; also needs `--number-of-keypoints` | task-specific prompt |
-| **survival** additionally | a **time column** (`--time-column`) | asked only here |
-| **self-supervised**: masked-LM, causal-LM, seq2seq, embeddings | **none** | not asked |
+**Three shapes — say the right word:**
+- **Class** (categorical) — classification tasks. Say **"class."**
+- **Target / value to predict** (continuous) — the regression family
+  (`tabular_regression`, `time_series_forecasting`,
+  `time_to_event_prediction`). Say **"value to predict" / "target,"** never
+  "class."
+- **Absent from the CSV** — the label is carried in a *sidecar*
+  (`object_detection` Pascal-VOC XML, `semantic_segmentation` PNG mask,
+  `keypoint_detection` annotations), embedded *per-token*
+  (`token_classification` BIO tags), or **does not exist** because the task
+  is self-supervised (MLM, causal-LM, seq2seq, embeddings). For all of
+  these we **do not ask for a label column at all.** (This drops the CLI's
+  current vestigial `--label-column` for object detection / keypoint.)
 
-The current CLI only special-cases `masked_language_modeling`; when the 4
-self-supervised tasks are wired (§11) the skip must cover all of them, and
-the prompt wording must switch on the task ("class label" vs. "target"). The
-"label" is emitted to the spec as a plain string for classification and as
-`{column, policy}` for the regression family.
+**Convention:** the label is a **single column header** in the CSV
+(`labels.csv` for image/text, the data CSV for tabular). The default is a
+column literally named **`label`**; for survival the time column defaults
+to **`time`**.
+
+**Validation — pick from the real headers (this kills #340):** whenever a
+label column is needed, read the CSV header row and have the user **pick
+from the actual column names** — they cannot type a column that doesn't
+exist or mis-case one. Default-select `label` if present.
+- **Interactive:** a select over the real headers; a real column must be
+  chosen.
+- **Flag / non-interactive (`--label-column`):** validate the value against
+  the real header set with an **exact (case- and whitespace-sensitive)
+  match**. On no match, **hard-fail with a non-zero exit and print the
+  available columns** — never fall through to a NULL-labeled ingest, never
+  a partial write. The same rule applies on both paths; no loose matching
+  anywhere.
+
+**Policy (regression family only):** the target is emitted as
+`{column, policy}` with `policy` defaulting to **`bucket`**, which hashes
+the raw continuous value to a bucket id so the actual number never leaves
+the on-prem cluster. `passthrough` is opt-in. Classification implicitly uses
+passthrough (a no-op).
+
+## 8.1 Task-specific questions — all 15 tasks
+
+The exact per-task inputs (verified against the CLI spec builder + the
+ingestor's `modalities/registry.py` + `validators.py`). "Ask" = an
+interactive prompt / flag; everything else is auto-detected or
+sidecar-discovered. `✅` = CLI-supported today; `⏳` = ingestor-ready, CLI
+staging pending (§11 phase 4); `🚧` = blocked deeper.
+
+| Task | Label question | Other task-specific questions | CLI |
+|---|---|---|---|
+| `image_classification` | **class** — "Which column holds the class?" (pick from headers) | `--target-size` W×H (blank = auto-detect from first image); extension auto-detected | ✅ |
+| `object_detection` | **none** — classes live in the XML sidecars | `--target-size`; requires `images/` + `annotations/*.xml` (stem-paired) | ✅ |
+| `keypoint_detection` | **none** — coords are in the annotations | `--number-of-keypoints` **(required)**; `--target-size` | ✅ |
+| `semantic_segmentation` | **none** — label is the PNG mask | `--target-size` (image + mask); requires `images/` + `masks/*_mask.png` | 🚧 (#136) |
+| `text_classification` | **class** — "Which column holds the class?" | requires `texts/*.txt`; optional `--schema` | ✅ |
+| `token_classification` | **per-token BIO tags** — "Which column holds the BIO tags?" (no min-2 gate) | requires `texts/*.txt` of whitespace-tokenised words; optional `--schema` | ⏳ |
+| `sentence_pair_classification` | **class** — "Which column holds the class?" | requires `texts/*.txt` each `text_a⇥text_b`; optional `--schema` | ⏳ |
+| `masked_language_modeling` | **none** — self-supervised | requires `sequences/*.txt` **and `tokenizer.json`** at the root (clear error if missing) | ✅ |
+| `causal_language_modeling` | **none** — self-supervised | requires `texts/*.txt` (raw, or `prompt⇥completion`); optional `--schema` | ⏳ |
+| `seq2seq` | **none** — self-supervised | requires `texts/*.txt` each `source⇥target`; optional `--schema` | ⏳ |
+| `embeddings` | **none** — self-supervised contrastive | requires `texts/*.txt` each `anchor⇥positive[⇥negative]`; optional `--schema` | ⏳ |
+| `tabular_classification` | **class** — "Which column holds the class?" | `--schema` (required; inferred if blank) | ✅ |
+| `tabular_regression` | **target** — "Which column holds the value to predict?" `{column,policy}` | `--schema`; `--label-policy` (default `bucket`) | ✅ |
+| `time_series_forecasting` | **target** — "Which column holds the value to predict?" | `--schema`; `--label-policy` (default `bucket`); needs a `timestamp` column (see §12) | ✅ |
+| `time_to_event_prediction` | **target** — "Which column holds the value to predict?" | `--schema`; `--label-policy`; `--time-column` (default `time`, must be numeric ≥ 0) | ✅ |
 
 ## 9. The taxonomy contract
 
@@ -378,6 +432,22 @@ type per dataset. v0.1 caps: 1 GiB total, 500 MiB per file.
    follow-up RFC/ticket.
 4. **DS display glosses** — this RFC adopts them (§7); confirm the exact
    wording for the divergent three.
+5. **Drop `--label-column` for sidecar-labeled vision** — object detection,
+   keypoint, and segmentation carry labels in sidecars; the CLI's current
+   plain-string `--label-column` for them is vestigial. Confirm we drop the
+   prompt/flag (RFC recommends yes).
+6. **`time_series_forecasting` timestamp gap** — the ingestor *requires* a
+   `timestamp` column (chronological, not future, `TIMESTAMP` type), but the
+   CLI never prompts for or emits it — it rides only in `--schema`. Should
+   forecasting get a dedicated timestamp prompt + preflight parity, like
+   survival's `--time-column`, so a user can't silently omit/mistype it?
+7. **`--target-size` placement divergence** — keypoint emits it top-level;
+   image-classification/detection emit it under `file_options`. Normalize,
+   or document as an intentional ingestor-contract quirk.
+8. **Schema for the regression family** — schema is inferred when `--schema`
+   is blank, but the leading-zeros→INT inference gap can mis-type an
+   id-like column, which interacts with bucket-hashing the target. Should
+   schema be effectively *required* (explicit) for the regression family?
 
 ## 13. Non-goals
 
@@ -396,3 +466,11 @@ type per dataset. v0.1 caps: 1 GiB total, 500 MiB per file.
   it has" + the "✔ Found …" echo that removes the confusion, §4); move the
   **label column** fully into the task-specific questions (§5.5, §8). All
   per @LukasWodka.
+- **Rev 3 (2026-07-07)** — rewrite §8 as the **label design**: three shapes
+  (class / target / absent), precise per-family wording (never "label to
+  predict"), and **pick-from-real-headers + exact-match-or-hard-fail**
+  validation that closes the data-ingestors#340 silent-NULL-label bug. Add
+  §8.1, the **full task-specific input matrix for all 15 tasks**. New open
+  questions (§12.5–8) from reconciling the CLI vs. ingestor: drop vestigial
+  `--label-column` for sidecar-labeled vision, the forecasting-timestamp
+  gap, `--target-size` placement, and schema-required-for-regression.
