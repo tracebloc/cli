@@ -299,6 +299,36 @@ func TestDelete_TeardownFailure_HonestClosing(t *testing.T) {
 	}
 }
 
+// A 426 (CLI too old) during the pre-offboard online check must fail fast with the
+// upgrade message — not warn-and-continue into the revoke/teardown.
+func TestDelete_Guard426_FailsFast(t *testing.T) {
+	revoked := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
+			revoked = true
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusUpgradeRequired) // 426
+			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
+	fn.install(t)
+
+	var out bytes.Buffer
+	err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true})
+	if err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Fatalf("want a fail-fast upgrade error, got: %v", err)
+	}
+	if revoked {
+		t.Error("revoke must NOT run after a 426 guard failure")
+	}
+	if len(fn.calls) != 0 {
+		t.Errorf("no teardown after a 426 guard failure, got: %v", fn.calls)
+	}
+}
+
 // --kubeconfig/--context must reach the helm uninstall — otherwise the release is
 // uninstalled against the ambient current-context, which may be the wrong cluster.
 func TestDelete_KubeconfigContext_ReachHelm(t *testing.T) {
