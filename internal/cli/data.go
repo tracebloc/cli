@@ -828,6 +828,10 @@ other collaborators train against it without ever seeing the raw files.`))
 	// whose status matches the exit code. (Bugbot #38.)
 	status, exitErr := classifyPushOutcome(submitRes, err)
 
+	// Emit the machine-readable result BEFORE the best-effort staging
+	// reclaim below, so a scripted --output-json consumer gets its result
+	// object at ingest-completion latency and never waits on a slow
+	// cluster-side cleanup that has no bearing on the ingest outcome.
 	if a.OutputJSON {
 		var summary *submit.Summary
 		var ns, jobName string
@@ -841,6 +845,35 @@ other collaborators train against it without ever seeing the raw files.`))
 		}
 		writePushJSON(a.JSONOut, status, spec, summary, ns, jobName)
 		jsonEmitted = true
+	}
+
+	// Reclaim the staged source copy on a CLEAN success only. The
+	// ingestor copies (not moves) the staged files into the table, so
+	// leaving .tracebloc-staging/<table> behind doubles PVC use for
+	// file-bearing datasets until the next --overwrite or `data delete`
+	// (the staging-leak found by the ingest UX audit; cli#166 / epic #67).
+	// Gated on status=="succeeded" so we never touch the source on a
+	//   - detached run (status "detached"): the Job is still reading it;
+	//   - partial (status "completed_with_failures") or failed run: the
+	//     user may want the source to inspect/retry.
+	// Best-effort and time-bounded (push.StagingCleanupTimeout): a failed
+	// or slow reclaim must not fail — or noticeably delay — a successful
+	// ingest.
+	if status == "succeeded" {
+		a.Printer.Infof("Reclaiming the temporary staging copy on the cluster…")
+		if cerr := push.CleanStaging(ctx, cs,
+			&push.SPDYExecutor{Config: resolved.RestConfig, Client: cs},
+			resolved.Namespace, a.Spec.Table, push.PodSpecOptions{
+				Namespace:          resolved.Namespace,
+				PVCClaimName:       pvc.ClaimName,
+				PVCMountPath:       pvc.MountPath,
+				Table:              a.Spec.Table,
+				ServiceAccountName: release.IngestorSAName,
+				Image:              a.StagePodImage,
+			}); cerr != nil {
+			a.Printer.Warnf("Couldn't reclaim the temporary staging copy (%v). It's harmless — the next re-ingest of %q or a `tracebloc data delete %s` will clear it.",
+				cerr, a.Spec.Table, a.Spec.Table)
+		}
 	}
 
 	if exitErr != nil {

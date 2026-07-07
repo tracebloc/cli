@@ -17,6 +17,13 @@ import (
 // and the teardown path agree on where a table lives.
 const IngestionDatabase = "training_test_datasets"
 
+// StagingCleanupTimeout bounds the best-effort post-success staging
+// reclaim (CleanStaging). The reclaim pod reuses the image the stage pod
+// just pulled, so it is normally Ready in seconds; this cap keeps a
+// stuck/unschedulable cleanup pod from adding the full pod-ready timeout
+// to a command the user already saw succeed.
+const StagingCleanupTimeout = 45 * time.Second
+
 // TeardownPlan enumerates the in-cluster artifacts `dataset rm` removes
 // for a pushed table: the MySQL table and the dataset's directories on
 // the shared PVC.
@@ -115,6 +122,65 @@ func Teardown(ctx context.Context, cs kubernetes.Interface, exec Executor, names
 	}
 	res.RemovedPaths = plan.PVCPaths
 	return res, nil
+}
+
+// CleanStaging best-effort removes ONLY the staged source copy at
+// StagedPrefix(table) from the shared PVC — never the final table dir
+// (FinalDestPrefix) and never the MySQL table.
+//
+// Why it's needed: the CLI streams a full copy of the dataset into
+// SharedRoot/.tracebloc-staging/<table>, and the in-cluster ingestor
+// COPIES (shutil.copy, not move) those files into the final table dir.
+// So after a successful load the staged source lingers on the PVC until
+// a later --overwrite or `data delete`, doubling disk use for
+// file-bearing datasets (image/detection/segmentation). Reclaiming it on
+// a clean success keeps the shared PVC from silently filling up.
+//
+// It reuses the same ephemeral stage-identity pod Teardown uses: that
+// pod runs as the uid that WROTE the staging files (65532), so it owns
+// them and the rm works by ownership on hostPath and CSI alike.
+//
+// Callers MUST treat a returned error as non-fatal — a leftover source
+// copy must never turn an otherwise-successful ingest into a failure —
+// and MUST only call this once the ingestion Job has SUCCEEDED (the
+// ingestor reads from this path while it runs; removing it mid-run, or
+// on a detached/failed run that may be retried, would corrupt the load).
+func CleanStaging(ctx context.Context, cs kubernetes.Interface, exec Executor, namespace, table string, podOpts PodSpecOptions) error {
+	// Panics on an unsafe name — callers stage only after ValidateTableName.
+	staged := StagedPrefix(table)
+
+	podOpts.Namespace = namespace
+	// Create under a detached, bounded context: a parent-ctx cancel
+	// (Ctrl-C) landing in the create window could otherwise drop a pod the
+	// apiserver already committed, orphaning it because the deferred delete
+	// below wouldn't yet have a name to reap. A fresh context keeps the
+	// create → deferred-delete pair atomic.
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), StagingCleanupTimeout)
+	defer cancelCreate()
+	podName, err := CreateStagePod(createCtx, cs, podOpts)
+	if err != nil {
+		return fmt.Errorf("creating staging-cleanup pod: %w", err)
+	}
+	defer func() {
+		delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = DeleteStagePod(delCtx, cs, namespace, podName)
+	}()
+	// Bound the wait+exec so a stuck cleanup pod (unschedulable, slow image
+	// pull) can't tack the full 60s ready-timeout onto a command the user
+	// already saw succeed — while still honoring a parent-ctx cancel via the
+	// child. This reclaim is best-effort; the caller warns and moves on.
+	workCtx, cancelWork := context.WithTimeout(ctx, StagingCleanupTimeout)
+	defer cancelWork()
+	if _, err := WaitForStagePodReady(workCtx, cs, namespace, podName); err != nil {
+		return fmt.Errorf("waiting for staging-cleanup pod: %w", err)
+	}
+	var stderr bytes.Buffer
+	if err := exec.Exec(workCtx, namespace, podName, "stage",
+		[]string{"rm", "-rf", staged}, nil, nil, &stderr); err != nil {
+		return fmt.Errorf("removing staged copy %s: %w%s", staged, err, stderrSuffix(&stderr))
+	}
+	return nil
 }
 
 // findRunningPod returns the name + first-container name of the first

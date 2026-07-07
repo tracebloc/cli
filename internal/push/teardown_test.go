@@ -2,11 +2,13 @@ package push
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -113,5 +115,71 @@ func TestTeardown_RemovesViaStageIdentityPod(t *testing.T) {
 		metav1.ListOptions{LabelSelector: StagePodManagedByLabel + "=" + StagePodManagedByValue})
 	if len(pods.Items) != 0 {
 		t.Errorf("Teardown leaked %d stage pod(s)", len(pods.Items))
+	}
+}
+
+// TestCleanStaging_RemovesOnlyStagingPrefix pins the staging-leak fix:
+// on a clean success the CLI reclaims ONLY .tracebloc-staging/<table>
+// (StagedPrefix) — never the final table dir (FinalDestPrefix) and never
+// the MySQL table — via the same ephemeral stage-identity pod Teardown
+// uses (so the rm works by ownership on hostPath + CSI).
+func TestCleanStaging_RemovesOnlyStagingPrefix(t *testing.T) {
+	cs := fake.NewClientset()
+	readyOnNextGet(cs)
+	fe := &fakeExecutor{}
+
+	if err := CleanStaging(context.Background(), cs, fe, "tracebloc", "reg_train", PodSpecOptions{
+		Namespace:    "tracebloc",
+		PVCClaimName: "client-pvc",
+		PVCMountPath: "/data/shared",
+		Table:        "reg_train",
+	}); err != nil {
+		t.Fatalf("CleanStaging: %v", err)
+	}
+
+	// The rm must target ONLY the staging prefix — not the final table dir.
+	wantCmd := "rm -rf " + StagedPrefix("reg_train")
+	if got := strings.Join(fe.gotCmd, " "); got != wantCmd {
+		t.Errorf("rm cmd = %q, want %q", got, wantCmd)
+	}
+	if strings.Contains(strings.Join(fe.gotCmd, " "), FinalDestPrefix("reg_train")) {
+		t.Errorf("rm cmd %q touched the final table dir — CleanStaging must never remove FinalDestPrefix", fe.gotCmd)
+	}
+
+	// It must run in the ephemeral stage-identity pod, not jobs-manager.
+	if !strings.HasPrefix(fe.gotPod, "tracebloc-stage-") {
+		t.Errorf("rm ran in pod %q, want the ephemeral stage pod (tracebloc-stage-*)", fe.gotPod)
+	}
+	if fe.gotContainer != "stage" {
+		t.Errorf("rm container = %q, want stage", fe.gotContainer)
+	}
+
+	// No leaked cleanup pods.
+	pods, _ := cs.CoreV1().Pods("tracebloc").List(context.Background(),
+		metav1.ListOptions{LabelSelector: StagePodManagedByLabel + "=" + StagePodManagedByValue})
+	if len(pods.Items) != 0 {
+		t.Errorf("CleanStaging leaked %d stage pod(s)", len(pods.Items))
+	}
+}
+
+// TestCleanStaging_PodCreateFailureReturnsError confirms the reclaim
+// surfaces a pod-create failure as an error (the caller logs it as a
+// non-fatal warning — a leftover staging copy must never fail an
+// otherwise-successful ingest).
+func TestCleanStaging_PodCreateFailureReturnsError(t *testing.T) {
+	cs := fake.NewClientset()
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("PSA denied")
+	})
+	fe := &fakeExecutor{}
+
+	err := CleanStaging(context.Background(), cs, fe, "tracebloc", "reg_train", PodSpecOptions{
+		Namespace: "tracebloc", PVCClaimName: "client-pvc", PVCMountPath: "/data/shared", Table: "reg_train",
+	})
+	if err == nil {
+		t.Fatal("CleanStaging returned nil, want an error when the cleanup pod can't be created")
+	}
+	if fe.gotCmd != nil {
+		t.Errorf("rm ran (%v) despite the pod never being created", fe.gotCmd)
 	}
 }
