@@ -502,6 +502,17 @@ other collaborators train against it without ever seeing the raw files.`))
 	//     synthesized spec carries the right fields before validation.
 	switch {
 	case push.IsTabular(a.Spec.Category):
+		// P3 (cli#71): a BOM'd tabular CSV is doomed in-cluster AND would
+		// corrupt InferSchema's own header read below — reject before
+		// either. The rest of the content preflight runs after the spec
+		// schema validation (mirroring the in-cluster order).
+		if perr := push.CheckTabularBOM(layout.LabelsCSV); perr != nil {
+			return &exitError{code: 3, err: perr}
+		}
+		if perr := push.CheckHasDataRows(layout.LabelsCSV); perr != nil {
+			return &exitError{code: 3, err: perr}
+		}
+
 		// Column schema: an explicit --schema wins; otherwise infer
 		// INT/FLOAT/VARCHAR types from the CSV so the customer doesn't
 		// hand-write one for the common case.
@@ -613,6 +624,15 @@ other collaborators train against it without ever seeing the raw files.`))
 			len(errs), plural(len(errs)))
 		_, _ = fmt.Fprintln(errOut, schema.FormatErrors(errs))
 		return &exitError{code: 2, err: errors.New("synthesized spec failed schema validation; check the flag values above")}
+	}
+
+	// P3 content preflight (backend#828, cli#69/#71/#72/#73): preview the
+	// ingestor's own validators locally — AFTER the spec schema validation,
+	// mirroring the in-cluster order (jsonschema first, then validators),
+	// and BEFORE any cluster work. Each check names the rule it previews;
+	// parity is pinned by internal/push/parity_golden_test.go.
+	if perr := runLocalPreflight(a, layout, errOut); perr != nil {
+		return perr
 	}
 
 	printLocalSummary(a.Printer, layout, spec)
@@ -1041,4 +1061,23 @@ func destTableExists(ctx context.Context, cs kubernetes.Interface, resolved *clu
 		}
 	}
 	return "", ""
+}
+
+// runLocalPreflight maps push.PreflightDataset — THE shared preview
+// dispatch, also exercised verbatim by the parity harness — onto the CLI's
+// conventions: notes print dim to errOut, a BadFlag problem exits 2 (fix a
+// flag), anything else exits 3 (fix the data).
+func runLocalPreflight(a runDataIngestArgs, layout *push.LocalLayout, errOut io.Writer) error {
+	notes, problem := push.PreflightDataset(a.Spec, layout)
+	for _, n := range notes {
+		_, _ = fmt.Fprintln(errOut, n)
+	}
+	if problem == nil {
+		return nil
+	}
+	code := 3
+	if problem.BadFlag {
+		code = 2
+	}
+	return &exitError{code: code, err: problem.Err}
 }

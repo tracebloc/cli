@@ -274,16 +274,22 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 
 	if a.Category == "keypoint_detection" {
 		if len(a.TargetSize) == 2 {
-			// Schema documents target_size as [height, width]; TargetSize
-			// is stored [W, H], so swap on emit. (Bugbot, PR #22.)
-			spec["target_size"] = []int{a.TargetSize[1], a.TargetSize[0]}
+			// Emitted as [width, height] — the schema's own description
+			// says so ("matches PIL.Image.size and what
+			// ImageResolutionValidator expects"), and the validator
+			// compares PIL's (W,H) against this list verbatim (verified
+			// empirically: an 8×4 image passes [8,4], fails [4,8]). An
+			// earlier revision swapped to [H,W] here on a mistaken review
+			// note, which made EVERY non-square dataset fail in-cluster
+			// after the full upload.
+			spec["target_size"] = []int{a.TargetSize[0], a.TargetSize[1]}
 		}
 		if a.NumberOfKeypoints > 0 {
 			spec["number_of_keypoints"] = a.NumberOfKeypoints
 		}
 	} else if len(a.TargetSize) == 2 {
-		// [height, width] per the schema; TargetSize is [W, H].
-		fileOptions["target_size"] = []int{a.TargetSize[1], a.TargetSize[0]}
+		// [width, height] — same contract as the keypoint branch above.
+		fileOptions["target_size"] = []int{a.TargetSize[0], a.TargetSize[1]}
 	}
 
 	if len(fileOptions) > 0 {
