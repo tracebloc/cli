@@ -92,6 +92,10 @@ Helm, no YAML, no kubectl needed.`,
 	root.AddCommand(newLogoutCmd())
 	root.AddCommand(newAuthCmd())
 	root.AddCommand(newClientCmd())
+	// Top-level offboarding — the inverse of install (RFC-0001 §7.10). NOT under
+	// `client` and NOT `client delete --uninstall`: one machine owns one client,
+	// so this removes tracebloc from the host and avoids colliding with `data delete`.
+	root.AddCommand(newDeleteCmd())
 
 	// Bare `tracebloc` (no subcommand) renders a friendly home screen
 	// instead of cobra's raw usage dump. Subcommands and --help are
