@@ -50,17 +50,21 @@ func newClientCreateCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Provision a new client for this machine (--name, --location)",
+		Short: "Provision a tracebloc client for this machine (auto-named; no flags required)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClientCreate(cmd.Context(), printerFor(cmd), clientPrompter(),
 				clientCreateOpts{name: name, location: location, kubeconfigPath: kubeconfigPath, contextOverride: contextOverride, credentialFile: credentialFile, yes: yes})
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "",
-		"human-readable client name (shown on your dashboard + carbon reports)")
-	cmd.Flags().StringVar(&location, "location", "",
-		"location zone for carbon footprint (e.g. DE); prompted if omitted")
+	// --name / --location default from their TRACEBLOC_CLIENT_* env vars so an
+	// unattended run (or the installer) can set them without the flag; an explicit
+	// flag still wins. Empty --name → auto-generated <firstname>-NN; empty
+	// --location → sent as unset (no silent default).
+	cmd.Flags().StringVar(&name, "name", os.Getenv("TRACEBLOC_CLIENT_NAME"),
+		"client name (default: $TRACEBLOC_CLIENT_NAME, else auto-generated <firstname>-NN; shown on your dashboard + carbon reports)")
+	cmd.Flags().StringVar(&location, "location", os.Getenv("TRACEBLOC_CLIENT_LOCATION"),
+		"optional location zone for carbon reporting, e.g. DE (default: $TRACEBLOC_CLIENT_LOCATION; omitted if unset)")
 	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
 		"path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config) — read to anchor the client to this cluster")
 	cmd.Flags().StringVar(&contextOverride, "context", "",
@@ -204,6 +208,18 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	// lukas-02, not a slug -2 bump. The derived name is already slug-clean, so it
 	// passes through slug.Derive unchanged (display name = namespace = handle).
 	if name == "" {
+		// Numbering is only unique if we could actually read the account's clients.
+		// A list failure would otherwise number against an empty set and mint a
+		// DETERMINISTIC duplicate (`<base>-01` almost always already exists), whose
+		// name AND namespace collide with no server-side uniqueness to catch it. So
+		// fail closed here, exactly like the adopt pre-flight — retry, or name it by
+		// hand. (A supplied --name still tolerates a list blip: it's best-effort for
+		// slug-collision avoidance only.)
+		if listErr != nil {
+			return &exitError{code: 1, err: fmt.Errorf(
+				"couldn't reach the backend to choose a unique client name (%v) — retry, "+
+					"or pass --name explicitly", listErr)}
+		}
 		name = autoClientName(cfg.Current(), accountClients)
 		ilog.Logf("auto-named client %q (no --name/TRACEBLOC_CLIENT_NAME)", name)
 	}
@@ -264,6 +280,16 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 				p.Hintf("Cancelled.")
 				return nil
 			}
+		} else if pr == nil && !opts.yes && opts.credentialFile == "" {
+			// Non-interactive with no way to confirm AND no --credential-file: minting
+			// here would side-effect silently and print the machine credential to
+			// stdout (into whatever captured it). Require an explicit signal first —
+			// --yes to consent, or --credential-file to keep the secret off stdout.
+			// The installer passes both, so it's unaffected; this only stops an
+			// accidental bare `client create` in a pipe / CI from leaking a credential.
+			return &exitError{code: 1, err: errors.New(
+				"refusing to provision non-interactively without confirmation — pass --yes to " +
+					"confirm, and --credential-file to write the credential to a file instead of stdout")}
 		}
 
 		// The machine credential: the CLI generates the password, the backend stores
@@ -304,7 +330,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		// client whose cluster_id was null, backfilled the anchor onto it, and
 		// adopted it. Either way — no new credential; the existing one stands.
 		ilog.Logf("adopted existing client id=%d namespace=%s", pc.ID, pc.Namespace)
-		p.Successf("This machine is already registered as client %q (namespace %s) — adopted it.", pc.Name, pc.Namespace)
+		p.Successf("This cluster is already registered as client %q (namespace %s) — adopted it.", pc.Name, pc.Namespace)
 		p.Hintf("No new credential issued; the existing one stands. This machine is set to enroll as client %d.", pc.ID)
 		if opts.credentialFile != "" {
 			// No password to hand over on adopt (it's write-only on the backend and
@@ -681,7 +707,15 @@ func autoClientName(prof *config.Profile, existing []api.ProvisionedClient) stri
 		taken[c.Namespace] = struct{}{}
 	}
 	for n := 1; ; n++ {
-		cand := fmt.Sprintf("%s-%02d", base, n)
+		suffix := fmt.Sprintf("-%02d", n)
+		// Keep the whole handle within the DNS-1123 label cap so it survives
+		// slug.Derive unchanged — otherwise a long first_name yields name != namespace
+		// and reintroduces the exact slug -2 bump this numbering exists to avoid.
+		b := base
+		if len(b)+len(suffix) > slug.MaxLabelLength {
+			b = strings.TrimRight(b[:slug.MaxLabelLength-len(suffix)], "-")
+		}
+		cand := b + suffix
 		if _, clash := taken[cand]; !clash {
 			return cand
 		}

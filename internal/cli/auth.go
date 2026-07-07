@@ -109,6 +109,12 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 			cfg.CurrentEnv = env
 			prof := cfg.Profile(env)
 			prof.Token = tok
+			// Clear any identity carried over from a PREVIOUS sign-in on this env
+			// before the best-effort lookup: if WhoAmI fails here, a re-login as a
+			// different user on a shared box would otherwise keep the prior user's
+			// email/first name — and cli#137 would then auto-name the new client
+			// after the wrong person. Only a successful WhoAmI repopulates these.
+			prof.Email, prof.FirstName = "", ""
 			// Confirm the freshly-issued token actually authenticates, and
 			// capture the account to show + store. Best-effort: don't fail a
 			// successful sign-in just because this lookup couldn't run.

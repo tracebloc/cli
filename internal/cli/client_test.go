@@ -81,6 +81,11 @@ func stubInClusterClient(t *testing.T, lc *cluster.InClusterClient, err error) {
 // withClientBackend, which creates the profile.
 func signInAs(t *testing.T, firstName, email string) {
 	t.Helper()
+	// Guard against writing to the developer's real ~/.tracebloc: this helper only
+	// makes sense once withClientBackend has redirected config to a temp dir.
+	if os.Getenv("TRACEBLOC_CONFIG_DIR") == "" {
+		t.Fatal("signInAs: TRACEBLOC_CONFIG_DIR is unset — call withClientBackend first")
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -680,7 +685,7 @@ func TestClientCreate_ReRunReviewShowsAdoptedNamespace(t *testing.T) {
 	})
 	stubClusterID(t, "uid-1", nil)
 	confirmYes := true
-	pr := &fakePrompter{answers: map[string]string{}, confirm: &confirmYes}
+	pr := &fakePrompter{confirm: &confirmYes}
 	var out bytes.Buffer
 	if err := runClientCreate(context.Background(), ui.New(&out), pr,
 		clientCreateOpts{name: "Lab One", location: "DE"}); err != nil {
@@ -798,5 +803,134 @@ func TestClientCreate_FlagsStillHonored(t *testing.T) {
 	}
 	if body.Name != "Lab One" || body.Location != "US" {
 		t.Errorf("create body = %+v, want name 'Lab One' location US (flags verbatim)", body)
+	}
+}
+
+// TestClientCreate_NonInteractiveNeedsConsent (review #1): a bare non-interactive
+// run (no TTY, no --yes, no --credential-file) must NOT silently mint and print
+// the credential to stdout — it fails closed with guidance before any POST.
+func TestClientCreate_NonInteractiveNeedsConsent(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	// pr == nil (non-interactive), yes == false, no credential file.
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{})
+	if code := ExitCodeFromError(err); code != 1 {
+		t.Fatalf("want exit 1, got %d (err=%v)", code, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "refusing to provision non-interactively") {
+		t.Errorf("want a consent-required error, got: %v", err)
+	}
+	if posted {
+		t.Error("no client should be minted without --yes/--credential-file")
+	}
+}
+
+// TestClientCreate_NonInteractiveWithYes: --yes alone is sufficient consent for a
+// non-interactive mint (the confirm can't run, but the user opted in).
+func TestClientCreate_NonInteractiveWithYes(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"lukas-01","username":"u-5","namespace":"lukas-01"}`))
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true}); err != nil {
+		t.Fatalf("--yes should authorize a non-interactive mint, got: %v", err)
+	}
+	if !posted {
+		t.Error("expected a mint with --yes")
+	}
+}
+
+// TestClientCreate_AutoNameFailsClosedOnListError (review #2): if the account's
+// client list can't be read, auto-naming would number against an empty set and
+// mint a deterministic duplicate. It must fail closed instead — never POST.
+func TestClientCreate_AutoNameFailsClosedOnListError(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			w.WriteHeader(http.StatusBadGateway) // transient list failure
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true})
+	if code := ExitCodeFromError(err); code != 1 {
+		t.Fatalf("want exit 1 on list failure, got %d (err=%v)", code, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "unique client name") {
+		t.Errorf("want a 'couldn't pick a unique name' error, got: %v", err)
+	}
+	if posted {
+		t.Error("must not mint (a duplicate) when the client list is unreadable")
+	}
+}
+
+// TestClientCreate_AutoNameFailsClosedOnListError still lets an explicit --name
+// through a list blip (the list is only best-effort for slug-collision avoidance).
+func TestClientCreate_ExplicitNameToleratesListError(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			w.WriteHeader(http.StatusBadGateway)
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"lab","username":"u-5","namespace":"lab"}`))
+		}
+	})
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{name: "lab", yes: true}); err != nil {
+		t.Fatalf("explicit --name should tolerate a list blip, got: %v", err)
+	}
+	if !posted {
+		t.Error("expected a mint with an explicit --name despite the list error")
+	}
+}
+
+// TestClientCreate_AutoNameCapsAt63 (review #4): a very long first name must still
+// produce name == namespace within the 63-char DNS label cap — no slug -NN bump.
+func TestClientCreate_AutoNameCapsAt63(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"x","username":"u-5","namespace":"x"}`))
+		}
+	})
+	signInAs(t, strings.Repeat("a", 70), "long@tracebloc.io") // slugifies to 63 a's
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.Name != body.Namespace {
+		t.Errorf("name != namespace for a long first name: %q vs %q", body.Name, body.Namespace)
+	}
+	if len(body.Name) > 63 {
+		t.Errorf("name exceeds the 63-char DNS label cap: %d chars (%q)", len(body.Name), body.Name)
+	}
+	if !strings.HasSuffix(body.Name, "-01") {
+		t.Errorf("expected a -01 suffix, got %q", body.Name)
 	}
 }

@@ -139,7 +139,7 @@ func TestClientCreate_CancelLogsCancelledNotDone(t *testing.T) {
 	t.Cleanup(func() { readClusterID = origCID })
 
 	confirmNo := false
-	pr := &fakePrompter{answers: map[string]string{}, confirm: &confirmNo}
+	pr := &fakePrompter{confirm: &confirmNo}
 	var out bytes.Buffer
 	if err := runClientCreate(context.Background(), ui.New(&out), pr,
 		clientCreateOpts{name: "Lab", location: "DE"}); err != nil {
