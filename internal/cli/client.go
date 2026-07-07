@@ -420,7 +420,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	}
 	ilog.Logf("minted client id=%d namespace=%s", pc.ID, pc.Namespace)
 	if serr := cfg.Save(); serr != nil {
-		p.Hintf("Couldn't save the active-client pointer (%v) — run `tracebloc client use %d` to set it.", serr, pc.ID)
+		p.Hintf("Couldn't save the active-client pointer (%v) — re-run `tracebloc client create` (it adopts this cluster's client).", serr)
 	}
 	return nil
 }
