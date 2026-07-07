@@ -17,6 +17,7 @@ import (
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/geo"
+	"github.com/tracebloc/cli/internal/nodeboot"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -54,6 +55,13 @@ func withClientBackend(t *testing.T, h http.HandlerFunc) {
 		return nil, nil
 	}
 	t.Cleanup(func() { readInClusterClient = origLive })
+
+	// Stub the delete-side nodeboot shell-outs (k3d/helm) to no-ops so tests
+	// never spawn real processes. Tests asserting teardown override these.
+	otc, ouc := teardownCluster, uninstallChart
+	teardownCluster = func(context.Context, string) error { return nil }
+	uninstallChart = func(context.Context, string) error { return nil }
+	t.Cleanup(func() { teardownCluster, uninstallChart = otc, ouc })
 }
 
 // stubClusterID overrides the cluster-anchor read for a single test.
@@ -259,19 +267,47 @@ func TestClientList(t *testing.T) {
 	}
 }
 
-func TestClientUse(t *testing.T) {
-	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`[{"id":7,"first_name":"gamma","namespace":"gamma"}]`))
+func TestClientDelete(t *testing.T) {
+	deleted := 0
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/edge-device/7/" {
+			deleted++
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 	})
-	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "7"); err != nil {
-		t.Fatal(err)
-	}
 	cfg, _ := config.Load()
-	if cfg.Current().ActiveClientID != "7" {
-		t.Errorf("active = %q, want 7", cfg.Current().ActiveClientID)
+	setActiveClient(cfg.Current(), &api.ProvisionedClient{ID: 7, Name: "box", Namespace: "ns7"})
+	_ = cfg.Save()
+
+	var uninstalledNS, torndown string
+	uninstallChart = func(_ context.Context, ns string) error { uninstalledNS = ns; return nil }
+	teardownCluster = func(_ context.Context, name string) error { torndown = name; return nil }
+
+	var out bytes.Buffer
+	if err := runClientDelete(context.Background(), ui.New(&out), nil, true); err != nil {
+		t.Fatalf("delete: %v", err)
 	}
-	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "99"); err == nil {
-		t.Error("expected an error for an unknown client id")
+	if deleted != 1 {
+		t.Errorf("expected 1 backend DELETE, got %d", deleted)
+	}
+	if uninstalledNS != "ns7" || torndown != nodeboot.ClusterName {
+		t.Errorf("teardown wrong: uninstalled=%q cluster=%q", uninstalledNS, torndown)
+	}
+	cfg, _ = config.Load()
+	if cfg.Current().ActiveClientID != "" {
+		t.Errorf("active pointer not cleared: %q", cfg.Current().ActiveClientID)
+	}
+}
+
+func TestClientDelete_NoActiveClient(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no backend call expected, got %s %s", r.Method, r.URL.Path)
+	})
+	err := runClientDelete(context.Background(), ui.New(&bytes.Buffer{}), nil, true)
+	if err == nil || !strings.Contains(err.Error(), "no active client") {
+		t.Errorf("want no-active-client error, got %v", err)
 	}
 }
 

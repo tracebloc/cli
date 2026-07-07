@@ -45,6 +45,18 @@
 > server-side revoke needs the `POST /auth/revoke` endpoint (backend#887, not built)
 > + a CLI `logout`→call (backend#845 shipped only the `revoke()` primitive) —
 > §6.3/§7.5/§9/§13/C.6. The earlier "revokes server-side via #845" claim overstated it.
+>
+> **Rev 8 (2026-07-06) — PROPOSED amendment, not yet accepted ([cli#136], draft).**
+> Simplifies the client command surface to a strict **one machine = one client =
+> one cluster** model and reaffirms the installer as the create front door. See
+> **§15** for the full amendment. Net: `client use` is **removed** and the D3
+> arrow-key picker is dropped (nothing to select); `client list` is **hidden**
+> (kept only for the installer's client#303 pre-flight); `client create` stays
+> **provision-only** (the one-line installer bootstraps the cluster, then calls it —
+> the CLI does **not** reimplement k3s/k3d/GPU/proxy); `client delete` gains
+> ownership of the inverse **teardown** (deprovision + Helm uninstall + local
+> cluster delete), folding in R12. This narrows §6.2/§7.1/§7.3 and supersedes the
+> §7.3 "selected-vs-connected" picker work (the closed [cli#133]).
 
 ## 0. Decisions settled in this revision
 
@@ -1257,6 +1269,59 @@ class Meta:
 // One active_client_id PER env → fixes the cross-env clobber (R10).
 // `login --env X` switches current_env without clearing the other profiles.
 ```
+
+## 15. Amendment (Rev 8) — CLI client-surface simplification
+
+> **Status: PROPOSED, not yet accepted** — prototyped on [cli#136] (draft).
+> This section narrows the command surface in §6.2 / §7.1 / §7.3 and the D3
+> decision. Where it conflicts with the body above, this amendment wins **once
+> accepted**; until then the body is the design of record.
+
+### 15.1 Motivation
+
+Live testing surfaced that the account-context, multi-client surface (`list`,
+`use`, the D3 picker, selected-vs-connected) is confusing on the box that *is*
+a cluster: an operator saw ~18 unrelated clients, a stale "active" pointer to a
+client running on another machine, and `cluster info` targeting the wrong
+namespace. The product reality is stricter than the RFC assumed: **one machine
+runs one cluster, which holds one client** (the §3.1 / Q5 invariant). There is
+nothing to *select*, so the selection surface is cost without benefit.
+
+### 15.2 Decisions
+
+| # | Was (body) | Amended |
+|---|---|---|
+| A1 | `client use [<slug>]` selects among clients; D3 arrow-key picker (§6.2/§7.1). | **Removed.** One client per machine — nothing to select. Drop `use` and the picker. |
+| A2 | `client list` is the account-wide fleet view (§8.4). | **Hidden** (not user-facing). Kept callable only for the installer's one-client-per-machine pre-flight (client#303, `provision.sh:_account_owns_namespace`). |
+| A3 | `create` "operates against an already-reachable cluster… never creates a cluster" (§6.2); installer bootstraps first (§6.4). | **Reaffirmed, explicitly.** The one-line installer is the create front door: it bootstraps the cluster (k3s/k3d + GPU + proxy — its existing `scripts/lib/*`) and then calls `client create` to provision. The Go CLI does **not** reimplement cluster bootstrap (a `create → installer` call would recurse; reimplementing the installer in Go is a large, duplicative risk). |
+| A4 | Clean uninstall deferred to a `--uninstall` flag (R12, §6.2). | **`client delete` owns the inverse teardown**: deprovision the backend client (`DELETE /edge-device/<id>/`, C.3), `helm uninstall`, delete the local cluster, clear the local pointer. Confirms; `--yes` skips; `403 → ask-an-admin`. This is R12, realized as `delete`. |
+
+### 15.3 What stays
+
+- **Auth** (§6.1/§6.3), **provisioning + cluster_id anchor** (§6.6/§7.2/§7.9),
+  **the installer/CLI credential contract** (§6.4) — all unchanged. `create`
+  is still get-or-create keyed on the cluster.
+- **§7.3 binding for the *data* + `cluster info` commands** — they still default
+  their namespace to the **active client** (now set only by `create`, since
+  `use` is gone) and give the "runs on another machine" guidance when the
+  reachable cluster doesn't host it.
+- The **1:1 client↔cluster invariant** and **re-parenting deferred** (Q5) are
+  unchanged; a rebuilt cluster still mints a new client (R3).
+
+### 15.4 Consequences / open items
+
+- The §7.3 "selected-vs-connected" picker + connection-state-on-`use` work is
+  **superseded** (the closed [cli#133]); only its `cluster info` binding + the
+  `explain`-on-`ErrNoParentRelease` cleanup were folded into [cli#136].
+- `client delete`'s teardown is **k3d/Linux + shell-out** in the prototype, and
+  is unit-tested only — it needs a real run against a throwaway cluster before
+  release.
+- **Tickets to open on acceptance:** (a) the CLI surface change (this amendment)
+  under the epic; (b) e2e-verify `client delete` teardown; (c) confirm the
+  installer's client#303 pre-flight still works against a hidden `list`.
+
+[cli#133]: https://github.com/tracebloc/cli/pull/133
+[cli#136]: https://github.com/tracebloc/cli/pull/136
 
 [backend#830]: https://github.com/tracebloc/backend/issues/830
 [backend#835]: https://github.com/tracebloc/backend/issues/835

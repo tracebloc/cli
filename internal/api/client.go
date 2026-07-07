@@ -186,6 +186,21 @@ func (c *Client) patch(ctx context.Context, path string, body any) (int, []byte,
 	return c.bodyRequest(ctx, http.MethodPatch, path, body)
 }
 
+// DeleteClient deprovisions an EdgeDevice by its numeric id (RFC-0001 C.3,
+// DELETE /edge-device/<id>/). 2xx or 404 both mean "gone" (idempotent); a 403
+// surfaces as an APIError so the caller can route it to "ask an admin".
+func (c *Client) DeleteClient(ctx context.Context, id int) error {
+	path := fmt.Sprintf("/edge-device/%d/", id)
+	status, raw, err := c.bodyRequest(ctx, http.MethodDelete, path, nil)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusNotFound || (status >= 200 && status < 300) {
+		return nil
+	}
+	return &APIError{StatusCode: status, Body: string(raw), URL: c.BaseURL + path}
+}
+
 // bodyRequest sends an authenticated JSON-body request (POST/PATCH) and returns
 // the status code + raw response. Shared so POST and PATCH stay identical on
 // auth, content-type, and the 426 upgrade-required handling.

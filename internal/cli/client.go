@@ -18,6 +18,7 @@ import (
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/geo"
+	"github.com/tracebloc/cli/internal/nodeboot"
 	"github.com/tracebloc/cli/internal/slug"
 	"github.com/tracebloc/cli/internal/ui"
 )
@@ -32,17 +33,30 @@ var readClusterID = cluster.ClusterID
 // anchor. A package var so tests can stub it without a reachable cluster.
 var readInClusterClient = cluster.DiscoverInClusterClient
 
-// newClientCmd wires the `tracebloc client` subtree — provisioning + selecting
-// the client (machine) this host enrolls as. Consumes the backend provisioning
-// endpoints (backend#836) with the user token from `tracebloc login`.
+// nodeboot hooks — package vars so tests can stub the k3d/helm shell-outs.
+// PROTOTYPE (RFC-0001 §15, cli#136): the one-line installer stays the create
+// front door; `client delete` owns the inverse teardown.
+var (
+	teardownCluster = nodeboot.TeardownCluster
+	uninstallChart  = nodeboot.UninstallChart
+)
+
+// newClientCmd wires the `tracebloc client` subtree. PROTOTYPE (RFC-0001 §15):
+// `use` is withdrawn (one machine owns one client — nothing to select), and
+// `list` is hidden (kept callable for the installer's client#303 pre-flight,
+// off the user-facing surface). `create` provisions this machine's client (the
+// installer bootstraps the cluster first); `delete` tears it all down.
 func newClientCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "client",
-		Short: "Provision and manage the clients in your account",
-		Long: `Provision a tracebloc client for this machine and list/select clients
-in your account.  Requires sign-in first (` + "`tracebloc login`" + `).`,
+		Short: "Provision or remove this machine's tracebloc client",
+		Long: `Provision this machine as a tracebloc client, or tear it (and its
+local cluster) down. Requires sign-in first (` + "`tracebloc login`" + `).
+
+To set up a machine from scratch, run the one-line installer — it bootstraps
+the cluster and provisions the client for you.`,
 	}
-	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientUseCmd())
+	cmd.AddCommand(newClientCreateCmd(), newClientDeleteCmd(), newClientListCmd())
 	return cmd
 }
 
@@ -78,11 +92,16 @@ type clientCreateOpts struct {
 	yes                                                             bool
 }
 
+// newClientListCmd is hidden (RFC-0001 §15): `use` is gone so users have
+// nothing to select, but the installer's client#303 one-client-per-machine
+// pre-flight (provision.sh:_account_owns_namespace) still shells out to
+// `client list`. Keep it callable, off the user-facing surface.
 func newClientListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List the clients in your account",
+		Hidden:  true,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClientList(cmd.Context(), printerFor(cmd))
@@ -90,15 +109,99 @@ func newClientListCmd() *cobra.Command {
 	}
 }
 
-func newClientUseCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "use <client-id>",
-		Short: "Enroll this machine as an existing client",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runClientUse(cmd.Context(), printerFor(cmd), args[0])
+// newClientDeleteCmd implements `tracebloc client delete` (RFC-0001 §15): the
+// inverse of the installer's setup — deprovision this machine's client,
+// uninstall its Helm release, delete the local cluster.
+func newClientDeleteCmd() *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete this machine's client, its chart release, and its local cluster",
+		Long: `Tears down the client this machine is enrolled as: deprovisions the
+backend client, uninstalls the Helm release, and deletes the local cluster.
+Destructive and not undoable.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var pr prompter
+			if !yes && isInteractiveTTY() {
+				pr = surveyPrompter{}
+			}
+			return runClientDelete(cmd.Context(), printerFor(cmd), pr, yes)
 		},
 	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
+	return cmd
+}
+
+func runClientDelete(ctx context.Context, p *ui.Printer, pr prompter, yes bool) error {
+	client, cfg, err := authedClient()
+	if err != nil {
+		return &exitError{code: 1, err: err}
+	}
+	prof := cfg.Current()
+	if prof.ActiveClientID == "" {
+		return &exitError{code: 1, err: errors.New("no active client on this machine — nothing to delete")}
+	}
+	id, cerr := strconv.Atoi(prof.ActiveClientID)
+	if cerr != nil {
+		return &exitError{code: 1, err: fmt.Errorf("stored active client id %q is not numeric: %w", prof.ActiveClientID, cerr)}
+	}
+	ns, name := prof.ActiveClientNamespace, prof.ActiveClientName
+	if name == "" {
+		name = prof.ActiveClientID
+	}
+
+	p.Banner("tracebloc", "delete this machine's client")
+	p.Warnf("This deletes client %q (namespace %s), its Helm release, and the local cluster %q. Not undoable.",
+		name, ns, nodeboot.ClusterName)
+
+	if !yes {
+		if pr == nil {
+			return &exitError{code: 1, err: errors.New(
+				"refusing to delete without confirmation: pass --yes or run on a terminal")}
+		}
+		ok, perr := pr.Confirm(fmt.Sprintf("Delete client %q and its cluster?", name), false)
+		if perr != nil {
+			return mapClientErr(perr)
+		}
+		if !ok {
+			p.Infof("Cancelled — nothing was deleted.")
+			return nil
+		}
+	}
+
+	// 1. Deprovision the backend client (403 → ask an admin).
+	if derr := client.DeleteClient(ctx, id); derr != nil {
+		var ae *api.APIError
+		if errors.As(derr, &ae) && ae.StatusCode == http.StatusForbidden {
+			return askAnAdmin(ctx, p, client)
+		}
+		return &exitError{code: 1, err: fmt.Errorf("deprovisioning the client: %w", derr)}
+	}
+	p.Successf("Deprovisioned client %q.", name)
+
+	// 2. Uninstall the chart release (best-effort — the backend record is gone).
+	if ns != "" {
+		if uerr := uninstallChart(ctx, ns); uerr != nil {
+			p.Warnf("Chart uninstall reported: %v", uerr)
+		} else {
+			p.Successf("Uninstalled the Helm release %s.", ns)
+		}
+	}
+
+	// 3. Tear down the local cluster.
+	if terr := teardownCluster(ctx, nodeboot.ClusterName); terr != nil {
+		p.Warnf("Cluster teardown reported: %v", terr)
+	} else {
+		p.Successf("Deleted local cluster %q.", nodeboot.ClusterName)
+	}
+
+	// 4. Clear the local pointer so a stale client isn't left selected.
+	prof.ActiveClientID, prof.ActiveClientNamespace, prof.ActiveClientName = "", "", ""
+	if serr := cfg.Save(); serr != nil {
+		p.Hintf("Couldn't clear the local active-client pointer: %v", serr)
+	}
+	return nil
 }
 
 // clientPrompter returns the interactive prompter on a TTY, else nil (so
@@ -624,29 +727,6 @@ func clientStateLabel(status int) string {
 	default:
 		return "unknown"
 	}
-}
-
-func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
-	client, cfg, err := authedClient()
-	if err != nil {
-		return &exitError{code: 1, err: err}
-	}
-	clients, err := client.ListClients(ctx)
-	if err != nil {
-		return &exitError{code: 1, err: err}
-	}
-	for _, c := range clients {
-		if strconv.Itoa(c.ID) == id {
-			setActiveClient(cfg.Current(), &c)
-			if serr := cfg.Save(); serr != nil {
-				return &exitError{code: 1, err: serr}
-			}
-			p.Successf("This machine is now set to enroll as client %s (%s).", id, c.Name)
-			return nil
-		}
-	}
-	return &exitError{code: 1, err: fmt.Errorf(
-		"no client %s in your account — run `tracebloc client list` to see the ids", id)}
 }
 
 // setActiveClient points this env's profile at c, caching its namespace and
