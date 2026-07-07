@@ -1223,8 +1223,8 @@ func TestClientStatus_WaitFailsFastOnMissingClient(t *testing.T) {
 	if got := ExitCodeFromError(err); got != 1 {
 		t.Fatalf("exit code = %d, want 1", got)
 	}
-	if err == nil || !strings.Contains(err.Error(), "isn't in your account list") {
-		t.Errorf("want a 'not in account list' error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "isn't in your account") {
+		t.Errorf("want a 'not in account' error, got: %v", err)
 	}
 }
 

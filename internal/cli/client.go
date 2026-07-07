@@ -714,8 +714,8 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 		}
 		if !found {
 			return &exitError{code: 1, err: fmt.Errorf(
-				"active client %s isn't in your account list — run `tracebloc client list` to see "+
-					"your clients, or re-run the installer to provision this machine", active)}
+				"active client %s isn't in your account — run `tracebloc client create` "+
+					"(or re-run the installer) to provision this machine", active)}
 		}
 		p.Section("Client status")
 		p.Field("state", clientStateLabel(st))
@@ -750,8 +750,8 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 			// The active client isn't in the account (deleted / wrong account) — no
 			// amount of waiting surfaces it. Fail fast, matching the one-shot path.
 			return &exitError{code: 1, err: fmt.Errorf(
-				"active client %s isn't in your account list — run `tracebloc client list` to see "+
-					"your clients, or re-run the installer to provision this machine", active)}
+				"active client %s isn't in your account — run `tracebloc client create` "+
+					"(or re-run the installer) to provision this machine", active)}
 		case st == clientStatusOnline:
 			sp.Stop()
 			p.Successf("tracebloc can see this client.")
