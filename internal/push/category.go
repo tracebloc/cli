@@ -74,6 +74,10 @@ var categoryRegistry = []CategorySpec{
 		UnsupportedNote: "schema-recognized; `tracebloc ingest` discover/build for its raw-.txt / source\\ttarget `texts` layout is pending"},
 	{ID: "token_classification", Family: FamilyText, Label: "Token classification", CLISupported: false,
 		UnsupportedNote: "schema-recognized; the CLI doesn't stage its per-token-label `texts` layout yet"},
+	{ID: "sentence_pair_classification", Family: FamilyText, Label: "Sentence-pair classification", CLISupported: false,
+		UnsupportedNote: "schema-recognized; `tracebloc ingest` discover/build for its raw-.txt / text_a\\ttext_b `texts` layout is pending"},
+	{ID: "embeddings", Family: FamilyText, Label: "Embeddings", CLISupported: false,
+		UnsupportedNote: "schema-recognized; `tracebloc ingest` discover/build for its raw-.txt / anchor\\tpositive[\\tnegative] `texts` layout is pending"},
 }
 
 // categoryByID indexes the registry for O(1) lookup, built once.

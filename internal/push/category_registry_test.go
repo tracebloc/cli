@@ -18,6 +18,7 @@ func TestRegistryKnownCategories(t *testing.T) {
 		"semantic_segmentation", "instance_segmentation",
 		"text_classification", "token_classification",
 		"masked_language_modeling", "causal_language_modeling", "seq2seq",
+		"sentence_pair_classification", "embeddings",
 		"tabular_classification", "tabular_regression",
 		"time_series_forecasting", "time_to_event_prediction",
 	}
@@ -46,7 +47,7 @@ func TestSupportedCategories(t *testing.T) {
 	}
 	// segmentation + the self-supervised text categories (CLM, seq2seq) +
 	// token_classification are known but not yet pushable, and must explain why.
-	for _, id := range []string{"semantic_segmentation", "instance_segmentation", "causal_language_modeling", "seq2seq", "token_classification"} {
+	for _, id := range []string{"semantic_segmentation", "instance_segmentation", "causal_language_modeling", "seq2seq", "token_classification", "sentence_pair_classification", "embeddings"} {
 		if !IsKnown(id) {
 			t.Errorf("%s should be known", id)
 		}
