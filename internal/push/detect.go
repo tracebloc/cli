@@ -9,9 +9,9 @@ import (
 
 	// Register the stdlib image decoders so image.DecodeConfig can
 	// read the headers of the formats the image_classification layout
-	// accepts. webp is NOT in the stdlib — DetectImageSize returns an
-	// error for it and the caller falls back to requiring
-	// --target-size. (.jpg/.jpeg both decode via image/jpeg.)
+	// accepts (.jpg/.jpeg both decode via image/jpeg). Formats without
+	// a registered decoder never reach this function anymore — Discover
+	// skips anything outside the ingestor's accept-set (cli#68).
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
@@ -22,9 +22,10 @@ import (
 // read the pixel data, so it's cheap even for large images).
 //
 // Supports the stdlib-registered formats (jpeg, png, gif). Returns an
-// error for formats without a registered decoder (notably webp); the
-// caller treats that as "couldn't auto-detect" and falls back to the
-// ingestor default, advising --target-size.
+// error for formats without a registered decoder; the caller treats
+// that as "couldn't auto-detect" and falls back to the ingestor
+// default, advising --target-size. (Since Discover only yields the
+// ingestor's accept-set — .jpg/.jpeg/.png — that path is defensive.)
 func DetectImageSize(path string) (width, height int, err error) {
 	f, err := os.Open(path)
 	if err != nil {

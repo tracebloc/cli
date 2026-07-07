@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"k8s.io/client-go/kubernetes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,7 @@ func newDataIngestCmd() *cobra.Command {
 
 		// Operations flags.
 		dryRun     bool
+		overwrite  bool
 		noInput    bool
 		outputJSON bool
 
@@ -144,7 +146,9 @@ Expected local layout (image_classification shown):
         002.jpg
         ...
 
-Accepted image extensions: .jpg, .jpeg, .png, .webp (case-insensitive).
+Accepted image extensions: .jpg, .jpeg, or .png (case-insensitive).
+All images in one dataset must share a single type — the cluster
+validates the type it was told to expect.
 
 v0.1 caps the dataset at 1 GiB total + 500 MiB per file. Larger
 datasets need the v0.2 cloud-source story (S3/GCS/HTTPS sources) —
@@ -158,8 +162,11 @@ Exit codes:
   4   cluster reachable but no tracebloc client / shared storage missing
   5   ingestor SA token couldn't be obtained, or jobs-manager
       rejected the token (401/403)
+  6   destination table already exists (re-run with --overwrite to
+      replace it, or pick a different --table)
   7   pre-flight succeeded but staging the files failed
-      (Pod creation, image pull, exec stream, or remote tar error)
+      (Pod creation, image pull, exec stream, or remote tar error) —
+      or, with --overwrite, removing the old table failed
   8   jobs-manager rejected the submit (4xx/5xx other than auth)
   9   ingestion Job exited non-zero, or completed with row-level
       failures the summary panel reports`,
@@ -202,6 +209,7 @@ Exit codes:
 					TargetSizeFlag: targetSize,
 					SchemaFlag:     schemaFlag,
 					DryRun:         dryRun,
+					Overwrite:      overwrite,
 					IngestorSAName: ingestorSAName,
 					StagePodImage:  stagePodImage,
 					Detach:         detach,
@@ -251,6 +259,8 @@ Exit codes:
 	cmd.Flags().IntVar(&numberOfKeypoints, "number-of-keypoints", 0,
 		"keypoint_detection only: number of keypoints per sample (required; e.g. 17 for COCO pose)")
 
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false,
+		"replace the destination table if it already exists: its current table + files are removed first (same as `tracebloc data delete`), then the new data is ingested. Not combinable with --idempotency-key")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"validate + discover + walk, but don't create any cluster resources")
 	cmd.Flags().BoolVar(&noInput, "no-input", false,
@@ -291,6 +301,7 @@ type runDataIngestArgs struct {
 	TargetSizeFlag string // raw --target-size; resolved after Discover (image)
 	SchemaFlag     string // raw --schema; resolved or inferred after Discover (tabular)
 	DryRun         bool
+	Overwrite      bool
 	IngestorSAName string
 	StagePodImage  string
 
@@ -372,6 +383,16 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 	// does, so a first-time user understands it before any prompts.
 	// Routed through a.Printer, so --output-json keeps it on stderr and
 	// --plain/non-TTY degrade cleanly. (#31)
+	// --overwrite + a reused --idempotency-key is a data-loss trap: the
+	// teardown removes the existing data, then jobs-manager treats the
+	// duplicate key as a REPLAY and attaches to the previous run instead of
+	// ingesting anything — old data gone, new data never loaded, exit 0 from
+	// the old Job's status. Refuse the combination outright.
+	if a.Overwrite && a.IdempotencyKey != "" {
+		return &exitError{code: 2, err: errors.New(
+			"--overwrite can't be combined with --idempotency-key: a reused key makes the cluster replay the previous run instead of ingesting the new data — after --overwrite's removal that would report success while loading nothing. Drop one of the two (a fresh per-run key is the default).")}
+	}
+
 	a.Printer.Banner("tracebloc", "data ingest")
 	a.Printer.Para(strings.TrimSpace(`
 This uploads a dataset from your machine into your tracebloc workspace so models
@@ -542,6 +563,15 @@ other collaborators train against it without ever seeing the raw files.`))
 						"resolution mismatch.\n", derr)
 			}
 		}
+		// Extension: every image must share one type, and the spec tells
+		// the cluster which one to validate against (file_options.extension).
+		// Without this the ingestor checked its .jpeg convention default and
+		// rejected .jpg/.png datasets AFTER the full upload (cli#68).
+		ext, exterr := push.DetectExtension(layout.Images)
+		if exterr != nil {
+			return &exitError{code: 3, err: exterr}
+		}
+		a.Spec.Extension = ext
 	default:
 		// Text family: no extra per-category resolution. The label (for
 		// text_classification) comes straight from --label-column;
@@ -610,6 +640,28 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    before any bytes move.
 	printClusterSummary(a.Printer, release, pvc)
 
+	// 8a. Destination guard (cli#70, P4-lite): re-ingesting an existing
+	//     table used to stage EVERYTHING and then fail the in-cluster Job
+	//     on the ingestor's duplicate check — a full upload burned to learn
+	//     the table exists. One cheap read heads that off. The check fails
+	//     open (dim note) — the ingestor still refuses duplicates, so a
+	//     broken check can't cause silent data loss.
+	existingTable, checkNote := destTableExists(ctx, cs, resolved, a.Spec.Table)
+	if checkNote != "" {
+		a.Printer.Hintf("%s", checkNote)
+	}
+	tableExists := existingTable != ""
+	if tableExists && !a.Overwrite {
+		return &exitError{code: 6, err: fmt.Errorf(
+			"table %q already exists in this client. Re-ingesting the same table doesn't merge or replace — "+
+				"the run would fail after uploading everything. Re-run with --overwrite to replace it, "+
+				"or pick a different --table. (`tracebloc data delete %s` also removes it.)",
+			existingTable, existingTable)}
+	}
+	if tableExists && a.Overwrite {
+		a.Printer.Warnf("Table %q already exists — --overwrite replaces it (table + files).", existingTable)
+	}
+
 	// 8. Dry-run stop. Acknowledged success, plus a reminder of the
 	//    live-only steps (stage + ingest) the customer just skipped.
 	if a.DryRun {
@@ -621,6 +673,36 @@ other collaborators train against it without ever seeing the raw files.`))
 			jsonEmitted = true
 		}
 		return nil
+	}
+
+	// 8b. --overwrite: remove the existing table + files before staging —
+	//     the same teardown `data delete` runs, so the semantics match.
+	if tableExists && a.Overwrite {
+		// Tear down the MATCHED name, not the flag's spelling — table names
+		// are case-sensitive on Linux MySQL and PVC paths always are, so
+		// acting on a differently-cased --table would silently no-op the
+		// DROP/rm and then "succeed".
+		a.Printer.Infof("Removing the existing %q first…", existingTable)
+		plan := push.PlanTeardown(existingTable)
+		if _, terr := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
+			Namespace:          resolved.Namespace,
+			PVCClaimName:       pvc.ClaimName,
+			PVCMountPath:       pvc.MountPath,
+			Table:              existingTable,
+			ServiceAccountName: release.IngestorSAName,
+			Image:              a.StagePodImage,
+		}); terr != nil {
+			// The teardown drops the table before removing files, so a
+			// partial failure can leave files the DB-backed guard can no
+			// longer see — a plain re-run would upload everything and then
+			// hit them in-cluster. data delete first is the real recovery.
+			return &exitError{code: 7, err: fmt.Errorf(
+				"replacing table %q failed partway — its removal may be incomplete, and a plain re-run "+
+					"would hit the leftovers after uploading everything. Run `tracebloc data delete %s` "+
+					"first, then re-run this ingest. Nothing new was staged. (%w)",
+				existingTable, existingTable, terr)}
+		}
+		a.Printer.Successf("Removed the old %q — ingesting the new data.", existingTable)
 	}
 
 	// 9. Stage the files: create ephemeral Pod → wait Ready → tar
@@ -814,7 +896,15 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 		}
 	default:
 		p.Field("labels.csv", layout.LabelsCSV)
-		p.Field("images", fmt.Sprintf("%d files", len(layout.Images)))
+		imagesVal := fmt.Sprintf("%d files", len(layout.Images))
+		if ext, _ := spec["spec"].(map[string]any); ext != nil {
+			if fo, _ := ext["file_options"].(map[string]any); fo != nil {
+				if e, _ := fo["extension"].(string); e != "" {
+					imagesVal = fmt.Sprintf("%d files (%s)", len(layout.Images), e)
+				}
+			}
+		}
+		p.Field("images", imagesVal)
 		if anns := layout.Sidecars["annotations"]; len(anns) > 0 {
 			p.Field("annotations", fmt.Sprintf("%d files", len(anns)))
 		}
@@ -926,4 +1016,29 @@ func writePushErrorJSON(w io.Writer, sp push.SpecArgs, e error, code int) {
 		return
 	}
 	_, _ = fmt.Fprintln(w, string(b))
+}
+
+// listDatasetsFn is a test seam over push.ListDatasets.
+var listDatasetsFn = push.ListDatasets
+
+// destTableExists reports whether the destination table already holds an
+// ingested dataset, via the same query `data list` uses. It fails OPEN: a
+// broken check returns (false, note) so the ingest proceeds — the in-cluster
+// duplicate check still backstops it — but the note tells the user the guard
+// didn't run rather than silently skipping it.
+// The first return is the EXISTING table's exact name ("" when absent):
+// matching is case-insensitive (mysql's catalog may be), but any teardown
+// must act on the real spelling — DROP/rm against the flag's casing would
+// silently no-op on case-sensitive systems and then claim success.
+func destTableExists(ctx context.Context, cs kubernetes.Interface, resolved *cluster.ResolvedConfig, table string) (string, string) {
+	names, err := listDatasetsFn(ctx, cs, resolved.RestConfig, resolved.Namespace)
+	if err != nil {
+		return "", fmt.Sprintf("(couldn't check whether %q already exists — continuing; the cluster still refuses duplicates: %v)", table, err)
+	}
+	for _, n := range names {
+		if strings.EqualFold(n, table) {
+			return n, ""
+		}
+	}
+	return "", ""
 }
