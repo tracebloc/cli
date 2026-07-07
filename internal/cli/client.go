@@ -309,6 +309,16 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 			// adopts and prints no credential, so it stays zero-friction. The installer
 			// passes both flags anyway; this only stops an accidental bare
 			// `client create` in a pipe / CI from leaking a freshly minted credential.
+			if listErr != nil {
+				// The list failed, so willAdopt is unknown — we can't tell a fresh mint
+				// (would leak a credential) from an idempotent adopt (safe). Fail closed,
+				// but name the real cause: a retry once the backend is reachable will
+				// adopt an existing client without any flag.
+				return &exitError{code: 1, err: fmt.Errorf(
+					"couldn't read the account's client list to tell whether this cluster is new "+
+						"or already registered (%v) — retry when the backend is reachable (a re-run "+
+						"adopts an existing client), or pass --yes/--credential-file to provision now", listErr)}
+			}
 			return &exitError{code: 1, err: errors.New(
 				"refusing to provision non-interactively without confirmation — pass --yes to " +
 					"confirm, and --credential-file to write the credential to a file instead of stdout")}

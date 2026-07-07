@@ -1044,3 +1044,32 @@ func TestClientCreate_AutoNameReusesAnchoredClientName(t *testing.T) {
 		t.Errorf("re-run should reuse the anchored name lukas-01, got %q (a fresh handle the backend would discard)", body.Name)
 	}
 }
+
+// TestClientCreate_NonInteractiveListFailureExplainsCause (Bugbot follow-up): when
+// the consent guard fires because the client list couldn't be read (willAdopt
+// unknown), the error must name the real cause and note that a retry adopts —
+// not just tell the user to pass --yes.
+func TestClientCreate_NonInteractiveListFailureExplainsCause(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			w.WriteHeader(http.StatusBadGateway) // list fails → willAdopt unknown
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			posted = true
+		}
+	})
+	stubClusterID(t, "uid-1", nil) // a cluster that could well be adopt-only
+	signInAs(t, "Lukas", "lukas@tracebloc.io")
+	// --name given so the auto-name fast-fail is skipped and we reach the guard.
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "lab"})
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "couldn't read the account's client list") {
+		t.Errorf("want a list-failure explanation, got: %v", err)
+	}
+	if posted {
+		t.Error("must not mint when the client list is unreadable")
+	}
+}
