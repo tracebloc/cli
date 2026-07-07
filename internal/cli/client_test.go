@@ -1018,3 +1018,29 @@ func TestClientCreate_NonInteractiveAdoptNeedsNoConsent(t *testing.T) {
 		t.Errorf("adopt must not print a credential:\n%s", out.String())
 	}
 }
+
+// TestClientCreate_AutoNameReusesAnchoredClientName (Bugbot follow-up): a re-run
+// without --name on an already-anchored cluster reuses the anchored client's
+// name, not a freshly-numbered handle the backend would ignore on adopt.
+func TestClientCreate_AutoNameReusesAnchoredClientName(t *testing.T) {
+	var body api.CreateClientRequest
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			// lukas-01 is already anchored to this cluster.
+			_, _ = w.Write([]byte(`[{"id":8,"first_name":"lukas-01","username":"u-8","namespace":"lukas-01","cluster_id":"uid-1"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusOK) // adopt
+			_, _ = w.Write([]byte(`{"id":8,"first_name":"lukas-01","username":"u-8","namespace":"lukas-01","cluster_id":"uid-1"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	signInAs(t, "Lukas", "lukas@tracebloc.io") // would auto-name lukas-02 (lukas-01 taken) if not reused
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{yes: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body.Name != "lukas-01" {
+		t.Errorf("re-run should reuse the anchored name lukas-01, got %q (a fresh handle the backend would discard)", body.Name)
+	}
+}

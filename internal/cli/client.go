@@ -226,8 +226,17 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 				"couldn't reach the backend to choose a unique client name (%v) — retry, "+
 					"or pass --name explicitly", listErr)}
 		}
-		name = autoClientName(cfg.Current(), accountClients)
-		ilog.Logf("auto-named client %q (no --name/TRACEBLOC_CLIENT_NAME)", name)
+		// A re-run on a cluster already anchored to a client will ADOPT that client
+		// (get-or-create by cluster_id), so reuse its existing name — otherwise the
+		// review/confirm and POST body would describe a freshly-numbered handle
+		// (lukas-02) that the backend then ignores in favour of the anchored record.
+		if anchored := anchoredClient(accountClients, clusterID); anchored != nil {
+			name = anchored.Name
+			ilog.Logf("reusing anchored client name %q (re-run on this cluster adopts it)", name)
+		} else {
+			name = autoClientName(cfg.Current(), accountClients)
+			ilog.Logf("auto-named client %q (no --name/TRACEBLOC_CLIENT_NAME)", name)
+		}
 	}
 	// Reflect the resolved name + location back into opts so the failure-path resume
 	// command reproduces them — opts otherwise carries only the raw flags (Bugbot).
@@ -695,6 +704,21 @@ func renderClientReview(p *ui.Printer, name, namespace, location, clusterID stri
 	if clusterID != "" {
 		p.Field("cluster", clusterID+"  (anchors this client — re-runs adopt it)")
 	}
+}
+
+// anchoredClient returns the account client already bound to clusterID (the
+// kube-system UID), or nil. A non-nil result means a re-run on this cluster will
+// adopt that client, so callers should reuse its name rather than mint a new one.
+func anchoredClient(clients []api.ProvisionedClient, clusterID string) *api.ProvisionedClient {
+	if clusterID == "" {
+		return nil
+	}
+	for i := range clients {
+		if clients[i].ClusterID == clusterID {
+			return &clients[i]
+		}
+	}
+	return nil
 }
 
 // autoClientName derives the client name used when neither --name nor
