@@ -90,7 +90,7 @@ and are erased. Not undoable.`,
 	cmd.Flags().BoolVar(&o.keepData, "keep-data", false,
 		"uninstall the software but keep ~/.tracebloc (local config + on-host datasets)")
 	cmd.Flags().BoolVar(&o.force, "force", false,
-		"offboard even if the client is online or has a running training job")
+		"offboard even if tracebloc still reports this client online")
 	cmd.Flags().StringVar(&o.kubeconfigPath, "kubeconfig", "",
 		"path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config)")
 	cmd.Flags().StringVar(&o.contextOverride, "context", "",
@@ -173,7 +173,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	if rerr := client.RevokeClient(ctx, id); rerr != nil {
 		var ae *api.APIError
 		if errors.As(rerr, &ae) && ae.StatusCode == http.StatusForbidden {
-			return askAnAdmin(ctx, p, client)
+			return askAnAdmin(ctx, p, client, "offboard this machine", "offboarding")
 		}
 		return &exitError{code: 1, err: fmt.Errorf("revoking the machine credential: %w", rerr)}
 	}
@@ -187,6 +187,12 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		} else {
 			p.Successf("Uninstalled the Helm release %s.", ns)
 		}
+	} else {
+		// No cached namespace (a pre-cache config, or none passed) — we can't name
+		// the release to uninstall. Say so rather than skip silently: the summary
+		// promised the release would go, so a leftover must be called out.
+		p.Warnf("Couldn't determine this client's namespace — skipped the Helm uninstall. " +
+			"If a release is still installed, re-run with --namespace <ns>.")
 	}
 
 	// 3. Tear down the local cluster (also prunes its kubeconfig entry).
@@ -311,15 +317,25 @@ func removeSelf(p *ui.Printer) {
 // removeSelf can point the user at `brew uninstall` instead of a raw `rm` that
 // leaves brew's metadata dangling. Covers the common Homebrew roots on Apple
 // Silicon (/opt/homebrew), Intel macOS (/usr/local/Cellar), and Linuxbrew.
+//
+// It also checks the symlink-resolved path: on Intel macOS the binary on PATH is
+// /usr/local/bin/tracebloc, a symlink into the Cellar, and os.Executable may hand
+// back that unresolved link — the raw path matches no marker, but its target does.
 func looksBrewManaged(path string) bool {
-	for _, marker := range []string{
-		"/opt/homebrew/",
-		"/usr/local/Cellar/",
-		"/home/linuxbrew/",
-		"/Homebrew/",
-	} {
-		if strings.Contains(path, marker) {
-			return true
+	candidates := []string{path}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
+		candidates = append(candidates, resolved)
+	}
+	for _, cand := range candidates {
+		for _, marker := range []string{
+			"/opt/homebrew/",
+			"/usr/local/Cellar/",
+			"/home/linuxbrew/",
+			"/Homebrew/",
+		} {
+			if strings.Contains(cand, marker) {
+				return true
+			}
 		}
 	}
 	return false

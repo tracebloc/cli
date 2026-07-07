@@ -100,7 +100,7 @@ func setActiveForDelete(t *testing.T, id, name, ns string) {
 func TestDelete_NonInteractive_NoYes_Refuses(t *testing.T) {
 	backendHit := false
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/revoke") {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
 			backendHit = true
 		}
 		// A status lookup (GET) may still fire from the guard — allow it, return empty.
@@ -135,7 +135,7 @@ func TestDelete_Yes_FullSequence(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
 			// Guard's status lookup: report the client OFFLINE so it doesn't block.
 			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/revoke"):
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			revokePath = r.URL.Path
 			if got := r.Header.Get("Authorization"); got != "Bearer tok" {
 				t.Errorf("auth header = %q, want Bearer tok", got)
@@ -162,8 +162,8 @@ func TestDelete_Yes_FullSequence(t *testing.T) {
 		t.Fatalf("offboard: %v", err)
 	}
 
-	if revokePath != "/edge-device/5/revoke" {
-		t.Errorf("revoke POST path = %q, want /edge-device/5/revoke", revokePath)
+	if revokePath != "/edge-device/5/revoke/" {
+		t.Errorf("revoke POST path = %q, want /edge-device/5/revoke/", revokePath)
 	}
 
 	// nodeboot steps in order: uninstall → teardown → prune, then the data + binary
@@ -192,7 +192,7 @@ func TestDelete_KeepData_SparesDataDir(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
 			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/revoke"):
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
@@ -232,7 +232,7 @@ func TestDelete_RunningJob_RefusesUnlessForce(t *testing.T) {
 			case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
 				// status 1 = online (a running client).
 				_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":1}]`))
-			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/revoke"):
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 				w.WriteHeader(http.StatusOK)
 			}
 		}
@@ -241,7 +241,7 @@ func TestDelete_RunningJob_RefusesUnlessForce(t *testing.T) {
 	t.Run("online without --force refuses, no revoke", func(t *testing.T) {
 		revoked := false
 		withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/revoke") {
+			if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
 				revoked = true
 			}
 			newHandler()(w, r)
@@ -266,7 +266,7 @@ func TestDelete_RunningJob_RefusesUnlessForce(t *testing.T) {
 	t.Run("--force offboards an online client", func(t *testing.T) {
 		revoked := false
 		withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/revoke") {
+			if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
 				revoked = true
 			}
 			newHandler()(w, r)
@@ -291,7 +291,7 @@ func TestDelete_ShowsRetainedAndLeftCopy(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
 			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/revoke"):
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}
 	})
@@ -320,7 +320,7 @@ func TestDelete_ShowsRetainedAndLeftCopy(t *testing.T) {
 func TestDelete_TypedNameMismatch_Cancels(t *testing.T) {
 	revoked := false
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/revoke") {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
 			revoked = true
 		}
 		_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
@@ -347,7 +347,7 @@ func TestDelete_BrewManagedBinary_Hint(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
 			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/revoke"):
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}
 	})
@@ -365,6 +365,97 @@ func TestDelete_BrewManagedBinary_Hint(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "brew uninstall tracebloc") {
 		t.Errorf("expected the brew-uninstall hint, got:\n%s", out.String())
+	}
+}
+
+// An empty namespace (no --namespace, no cached ActiveClientNamespace) must warn
+// and skip the uninstall, not skip it silently — the summary promised the release
+// would go, so a leftover has to be called out.
+func TestDelete_NoNamespace_WarnsAndSkipsUninstall(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "") // no cached namespace
+	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
+	fn.install(t)
+
+	var out bytes.Buffer
+	if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true}); err != nil {
+		t.Fatalf("offboard: %v", err)
+	}
+	for _, c := range fn.calls {
+		if strings.HasPrefix(c, "uninstall:") {
+			t.Errorf("no namespace → no uninstall attempt, got call %q", c)
+		}
+	}
+	if !strings.Contains(out.String(), "skipped the Helm uninstall") {
+		t.Errorf("expected a warn that the uninstall was skipped, got:\n%s", out.String())
+	}
+}
+
+// A 403 on revoke must speak in offboard terms ("offboarding requires
+// CLIENT_WRITE"), not the provisioning copy the shared askAnAdmin used to hardcode.
+func TestDelete_RevokeForbidden_OffboardCopy(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/admins/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"detail":"forbidden"}`))
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
+	fn.install(t)
+
+	var out bytes.Buffer
+	err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true})
+	if err == nil || !strings.Contains(err.Error(), "offboarding requires CLIENT_WRITE permission") {
+		t.Fatalf("want an offboard-specific CLIENT_WRITE error, got %v", err)
+	}
+	if strings.Contains(out.String(), "provision") {
+		t.Errorf("offboard 403 copy must not mention provisioning, got:\n%s", out.String())
+	}
+	// A denied revoke aborts before any teardown.
+	if len(fn.calls) != 0 {
+		t.Errorf("no teardown after a 403 revoke, got: %v", fn.calls)
+	}
+}
+
+// looksBrewManaged must see through the symlink: on Intel macOS the PATH binary is
+// /usr/local/bin/tracebloc, a link into the Cellar, and os.Executable may hand back
+// the unresolved link — the raw path matches no marker but the target does.
+func TestLooksBrewManaged_ResolvesSymlink(t *testing.T) {
+	root := t.TempDir()
+	cellar := filepath.Join(root, "usr", "local", "Cellar", "tracebloc", "0.5.0", "bin")
+	if err := os.MkdirAll(cellar, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(cellar, "tracebloc")
+	if err := os.WriteFile(target, []byte("bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(binDir, "tracebloc")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if !looksBrewManaged(link) {
+		t.Errorf("symlink %q into a Cellar path should be detected as brew-managed", link)
+	}
+	if looksBrewManaged(filepath.Join(binDir, "nope")) {
+		t.Error("a non-brew, non-existent path should not be flagged")
 	}
 }
 

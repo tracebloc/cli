@@ -461,7 +461,7 @@ func (c *Client) PatchClientClusterID(ctx context.Context, id int, clusterID str
 }
 
 // RevokeClient offboards a client's machine credential server-side via
-// POST /edge-device/<id>/revoke (RFC-0001 §7.10 / C.6): it unsets the password,
+// POST /edge-device/<id>/revoke/ (RFC-0001 §7.10 / C.6): it unsets the password,
 // deletes the DRF token, and revokes the client's ClientAccessTokens in one
 // transaction while PRESERVING the client row (and thus the shared training
 // history / datasets / use cases retained on offboard). This is deliberately
@@ -469,8 +469,12 @@ func (c *Client) PatchClientClusterID(ctx context.Context, id int, clusterID str
 // training telemetry (§7.10 "hard destroy is rejected"), and DELETE isn't
 // routed. A 200 (or any 2xx) means revoked; a 403 *APIError means the caller
 // lacks CLIENT_WRITE (→ ask-an-admin). Requires Token (Bearer).
+//
+// The trailing slash matches the DRF DefaultRouter route (the `revoke` @action
+// registers as /edge-device/<pk>/revoke/) — a slashless POST hits Django's
+// APPEND_SLASH, which cannot redirect a body-bearing POST and errors instead.
 func (c *Client) RevokeClient(ctx context.Context, id int) error {
-	path := fmt.Sprintf("/edge-device/%d/revoke", id)
+	path := fmt.Sprintf("/edge-device/%d/revoke/", id)
 	url := c.BaseURL + path
 	status, raw, err := c.post(ctx, path, nil)
 	if err != nil {

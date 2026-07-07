@@ -343,7 +343,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 			if errors.As(cerr, &ae) {
 				switch ae.StatusCode {
 				case http.StatusForbidden:
-					return askAnAdmin(ctx, p, client)
+					return askAnAdmin(ctx, p, client, "provision a client", "provisioning")
 				case http.StatusConflict:
 					// Per RFC C.3 the only 409 on POST /edge-device/ is cluster_conflict
 					// (R6): this cluster_id is bound to another account.
@@ -500,7 +500,7 @@ func adoptLiveInClusterClient(
 				// Anchor already taken (write-once / bound elsewhere — R6).
 				return nil, false, &exitError{code: 1, err: errors.New(crossAccountConflictMsg)}
 			case errors.As(perr, &ae) && ae.StatusCode == http.StatusForbidden:
-				return nil, false, askAnAdmin(ctx, p, apiClient)
+				return nil, false, askAnAdmin(ctx, p, apiClient, "provision a client", "provisioning")
 			}
 			return nil, false, &exitError{code: 1, err: fmt.Errorf("backfilling the cluster anchor onto the existing client: %w", perr)}
 		}
@@ -598,13 +598,17 @@ func writeClientCredential(path string, lines []string) error {
 	return nil
 }
 
-// askAnAdmin renders the "you can't provision — here's who can" path (a 403 from
+// askAnAdmin renders the "you can't do this — here's who can" path (a 403 from
 // the backend means no CLIENT_WRITE; backend#836 Q4).
-func askAnAdmin(ctx context.Context, p *ui.Printer, client *api.Client) error {
+// action is the infinitive of what the caller was denied ("provision a client",
+// "offboard this machine"); capability is its noun form for the returned error
+// ("provisioning", "offboarding"). Both take CLIENT_WRITE, so the admin list is
+// the same — only the copy differs between provisioning and offboarding.
+func askAnAdmin(ctx context.Context, p *ui.Printer, client *api.Client, action, capability string) error {
 	p.Newline()
-	p.Hintf("You don't have permission to provision a client in this account.")
+	p.Hintf("You don't have permission to %s in this account.", action)
 	if admins, err := client.ListClientAdmins(ctx); err == nil && len(admins) > 0 {
-		p.Section("Ask one of these admins to provision it (or grant you access)")
+		p.Section("Ask one of these admins (or ask them to grant you access)")
 		for _, a := range admins {
 			label := a.Name
 			if label == "" {
@@ -613,7 +617,7 @@ func askAnAdmin(ctx context.Context, p *ui.Printer, client *api.Client) error {
 			p.Field(label, a.Email)
 		}
 	}
-	return &exitError{code: 1, err: errors.New("provisioning requires CLIENT_WRITE permission")}
+	return &exitError{code: 1, err: fmt.Errorf("%s requires CLIENT_WRITE permission", capability)}
 }
 
 func runClientList(ctx context.Context, p *ui.Printer) error {

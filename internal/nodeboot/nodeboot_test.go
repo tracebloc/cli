@@ -165,6 +165,20 @@ func TestUninstallChart(t *testing.T) {
 			t.Fatal("want error for a non-not-found helm failure, got nil")
 		}
 	})
+
+	t.Run("a non-release 'not found' still surfaces", func(t *testing.T) {
+		// Only helm's "release: not found" is the idempotent no-op. An unrelated
+		// failure whose output merely contains "not found" must NOT be swallowed,
+		// or the offboard reports a phantom uninstall while the release lingers.
+		f := newFakeRunner()
+		f.on("helm uninstall ns --namespace ns",
+			`Error: Kubernetes cluster unreachable: namespace "kube-system" not found`, errors.New("exit 1"))
+		f.install(t)
+
+		if err := UninstallChart(context.Background(), "ns"); err == nil {
+			t.Fatal("a cluster-unreachable 'not found' must surface, got nil")
+		}
+	})
 }
 
 func TestPruneImages(t *testing.T) {

@@ -80,7 +80,11 @@ func TeardownCluster(ctx context.Context, name string) error {
 // installer's convention). A missing release is not an error (idempotent teardown).
 func UninstallChart(ctx context.Context, namespace string) error {
 	_, err := run(ctx, "helm", "uninstall", namespace, "--namespace", namespace)
-	if err != nil && strings.Contains(err.Error(), "not found") {
+	// Match helm's release-not-found wording specifically ("... release: not
+	// found"), not a bare "not found" — an unrelated failure whose output happens
+	// to contain "not found" (e.g. "Kubernetes cluster unreachable: ... not
+	// found") must surface, not be swallowed as an idempotent no-op.
+	if err != nil && strings.Contains(err.Error(), "release: not found") {
 		return nil
 	}
 	return err
