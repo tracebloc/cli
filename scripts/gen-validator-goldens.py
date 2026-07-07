@@ -72,10 +72,15 @@ def run_case(case):
         if case.get("target_size"):
             options["target_size"] = case["target_size"]
         if case["category"].startswith(("tabular", "time_")):
-            try:
-                schema = infer_schema(csv_path)
-            except Exception:
-                schema = {}
+            # An explicit per-case schema (mirroring --schema) wins; else
+            # infer — BOTH sides of the harness use the same source so
+            # dtype-sensitive cases (label diversity) stay comparable.
+            schema = case.get("schema")
+            if not schema:
+                try:
+                    schema = infer_schema(csv_path)
+                except Exception:
+                    schema = {}
             options["schema"] = schema
             options["full_schema"] = schema
 
