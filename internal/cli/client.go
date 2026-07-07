@@ -661,30 +661,42 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 	// local rollout check can't tell whether tracebloc can actually see the client.
 	sp := p.Spinner("Waiting for tracebloc to confirm…", "")
 	deadline := time.Now().Add(timeout)
+	var lastErr error // most recent transient list error, for an honest timeout message
+	var ue *api.UpgradeRequiredError
 	for {
 		st, found, lerr := lookupClientStatus(ctx, client, active)
-		// A 426 (too-old CLI) is not a transient outage — polling it until timeout
-		// just hides the real cause behind a generic "unreachable" message. Fail
-		// fast with the upgrade signal instead.
-		var ue *api.UpgradeRequiredError
-		if errors.As(lerr, &ue) {
+		switch {
+		case errors.As(lerr, &ue):
+			// A 426 (too-old CLI) is not a transient outage — polling it until timeout
+			// just hides the real cause. Fail fast with the upgrade signal.
 			sp.Stop()
-			return &exitError{code: 1, err: ue}
-		}
-		if lerr == nil && found && st == clientStatusOnline {
+			return &exitError{code: 1, err: lerr}
+		case lerr != nil:
+			lastErr = lerr // transient — keep polling, but remember why for the timeout
+		case !found:
+			// The active client isn't in the account (deleted / wrong account). No
+			// amount of waiting surfaces it — fail fast, matching the one-shot path.
+			sp.Stop()
+			return &exitError{code: 1, err: fmt.Errorf(
+				"active client %s isn't in your account list — it may have been deleted", active)}
+		case st == clientStatusOnline:
 			sp.Stop()
 			p.Successf("tracebloc can see this client.")
 			return nil
 		}
 		if time.Now().After(deadline) {
 			sp.Stop()
-			last := "unreachable"
-			if found {
-				last = clientStateLabel(st)
+			if lastErr != nil {
+				// Every check failed — surface the real reason, not a bare "unreachable".
+				return &exitError{code: 1, err: fmt.Errorf(
+					"timed out after %s waiting for tracebloc to report this client online; "+
+						"the last status check failed: %v", timeout, lastErr)}
 			}
+			// Reached here only via lerr==nil && found (else we'd have returned), so
+			// st holds the last real state (offline/pending).
 			return &exitError{code: 1, err: fmt.Errorf(
 				"timed out after %s waiting for tracebloc to report this client online (last state: %s). "+
-					"Check the client is running, then retry.", timeout, last)}
+					"Check the client is running, then retry.", timeout, clientStateLabel(st))}
 		}
 		select {
 		case <-ctx.Done():

@@ -829,3 +829,45 @@ func TestClientStatus_WaitFailsFastOn426(t *testing.T) {
 		t.Errorf("a 426 must fail fast, not time out: %v", err)
 	}
 }
+
+// TestClientStatus_WaitFailsFastOnMissingClient (Bugbot #146-E): --wait must fail
+// fast when the active client isn't in the account (deleted / wrong account),
+// matching the one-shot path, rather than polling to the timeout.
+func TestClientStatus_WaitFailsFastOnMissingClient(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			_, _ = w.Write([]byte(`[{"id":9,"first_name":"other","namespace":"other","status":1}]`)) // active id 5 absent
+		}
+	})
+	setActiveClientID(t, "5")
+	// Long timeout: the test would hang if it didn't fail fast on the missing client.
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, 10*time.Minute)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "isn't in your account list") {
+		t.Errorf("want a 'not in account list' error, got: %v", err)
+	}
+}
+
+// TestClientStatus_WaitTimeoutSurfacesListError (Bugbot #146-F): when every
+// status check fails, the timeout message must name the real error, not a bare
+// "unreachable". A 1ns timeout means the deadline passes on the first failure.
+func TestClientStatus_WaitTimeoutSurfacesListError(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusInternalServerError) // persistent list failure
+		}
+	})
+	setActiveClientID(t, "5")
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, time.Nanosecond)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "last status check failed") {
+		t.Errorf("timeout should surface the real list error, got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "unreachable") {
+		t.Errorf("should not report a bare 'unreachable' when the error is known: %v", err)
+	}
+}
