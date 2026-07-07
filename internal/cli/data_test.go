@@ -3,6 +3,8 @@ package cli
 import (
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/ui"
+	"image"
+	"image/png"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -24,16 +26,25 @@ func imgcLayout(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "labels.csv"),
-		[]byte("image_id,label\n001.jpg,cat\n"), 0o644); err != nil {
+		[]byte("image_id,label\n001.jpg,cat\n002.jpg,dog\n"), 0o644); err != nil {
 		t.Fatalf("write labels.csv: %v", err)
 	}
 	imagesDir := filepath.Join(root, "images")
 	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
 		t.Fatalf("mkdir images: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(imagesDir, "001.jpg"),
-		make([]byte, 100), 0o644); err != nil {
-		t.Fatalf("write image: %v", err)
+	// Real decodable images with two classes: the P3 preflight decodes
+	// EVERY image and requires >=2 label classes, so opaque stubs would
+	// short-circuit any test that needs to get past preflight (a
+	// kubeconfig test failed vacuously on exactly that).
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 4, 4))); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"001.jpg", "002.jpg"} {
+		if err := os.WriteFile(filepath.Join(imagesDir, name), buf.Bytes(), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
 	return root
 }

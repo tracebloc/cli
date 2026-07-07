@@ -197,36 +197,29 @@ func TestBuild_NoTargetSize_OmitsSpecBlock(t *testing.T) {
 	}
 }
 
-// TestBuild_TargetSize_EmittedHeightWidth locks the [height, width]
-// emit order (Bugbot, PR #22). TargetSize is stored [W, H] but the
-// ingest.v1 schema + ingestor read target_size as [height, width].
-// Square sizes can't catch a swap, so this uses a NON-square
-// resolution: [W, H] = [640, 480] must emit [480, 640].
-func TestBuild_TargetSize_EmittedHeightWidth(t *testing.T) {
-	// image_classification → under spec.file_options
-	icSpec := SpecArgs{
+// TestBuild_TargetSize_EmittedWidthHeight locks the [width, height]
+// emission order: the ingest.v1 schema's own description says target_size
+// "matches PIL.Image.size" (which is (W,H)) and ImageResolutionValidator
+// compares that tuple against the list verbatim — verified empirically
+// against the real validator (8×4 image passes [8,4], fails [4,8]). The
+// parity harness pins this end-to-end with the non-square cases.
+func TestBuild_TargetSize_EmittedWidthHeight(t *testing.T) {
+	// TargetSize is stored [W, H] = [640, 480] (a landscape image).
+	imgSpec := SpecArgs{
 		Table: "t", Category: "image_classification", Intent: "train",
-		LabelColumn: "label", TargetSize: []int{640, 480}, // [W, H]
+		LabelColumn: "label", TargetSize: []int{640, 480},
 	}.Build()
-	sb, ok := icSpec["spec"].(map[string]any)
-	if !ok {
-		t.Fatalf("image: no spec block: %#v", icSpec["spec"])
-	}
-	fo, ok := sb["file_options"].(map[string]any)
-	if !ok {
-		t.Fatalf("image: no file_options: %#v", sb["file_options"])
-	}
-	if ts, ok := fo["target_size"].([]int); !ok || len(ts) != 2 || ts[0] != 480 || ts[1] != 640 {
-		t.Errorf("image target_size = %#v, want [480 640] (height, width)", fo["target_size"])
+	fo := imgSpec["spec"].(map[string]any)["file_options"].(map[string]any)
+	if ts, ok := fo["target_size"].([]int); !ok || len(ts) != 2 || ts[0] != 640 || ts[1] != 480 {
+		t.Errorf("image target_size = %#v, want [640 480] (width, height)", fo["target_size"])
 	}
 
-	// keypoint_detection → top-level
 	kpSpec := SpecArgs{
 		Table: "t", Category: "keypoint_detection", Intent: "train",
-		LabelColumn: "image_label", TargetSize: []int{640, 480}, NumberOfKeypoints: 9,
+		LabelColumn: "label", TargetSize: []int{640, 480}, NumberOfKeypoints: 17,
 	}.Build()
-	if ts, ok := kpSpec["target_size"].([]int); !ok || len(ts) != 2 || ts[0] != 480 || ts[1] != 640 {
-		t.Errorf("keypoint top-level target_size = %#v, want [480 640] (height, width)", kpSpec["target_size"])
+	if ts, ok := kpSpec["target_size"].([]int); !ok || len(ts) != 2 || ts[0] != 640 || ts[1] != 480 {
+		t.Errorf("keypoint top-level target_size = %#v, want [640 480] (width, height)", kpSpec["target_size"])
 	}
 }
 
