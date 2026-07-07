@@ -97,6 +97,27 @@ tabular/time (one CSV), and that is exactly the case that fails today. So
 "flexible path" concretely means: **accept a `.csv` file directly; otherwise
 expect a directory**, and always say which in the error.
 
+**The user's mental model (this is the whole point):** the user points at
+**their data, in whatever shape it already has — they never wrap or
+rearrange it.** If their dataset is one table, that's a CSV file; if it's a
+collection (images/texts + labels), that's the folder holding them. A data
+scientist already knows which their data is; we don't make them learn our
+convention. Then — critically — the tool **echoes what it found** before
+going further:
+
+```
+? Where is your data? (file or folder)   ~/data/churn.csv
+  ✔ Found a CSV table — this is tabular data.
+```
+```
+? Where is your data? (file or folder)   ~/data/cats-and-dogs/
+  ✔ Found 1,240 images + labels.csv — this is an image dataset.
+```
+
+That echo line is where the "file or folder?" confusion is removed: the user
+points at their data and the tool confirms it understood, rather than making
+the user reason about our layout rules up front.
+
 The full per-family layout is in Appendix A (§10).
 
 ## 5. The flow — inverted: data first, then task
@@ -106,27 +127,36 @@ before the tool knows anything about their data. We invert it:
 
 ### Phase 1 — Your dataset (the only place the user decides anything)
 
+Order (settled with @LukasWodka): commit to *what* you're creating, then
+point at *where* it is. The same four questions run for every data type:
+
 1. **Split** — "Is this training or test data?" (`--split train|test`,
    default `train`; renamed from `--intent`).
-2. **Point at the data** — a file or a directory (§4). This is the one
-   unavoidable input.
-3. **Detect the family from the data** — a `.csv` ⇒ tabular/time; `images/`
-   ⇒ image; `texts/`/`sequences/` ⇒ text. Where the layout uniquely pins a
-   task (`annotations/` ⇒ object detection, `sequences/`+`tokenizer.json` ⇒
-   masked language modeling) pre-select it. **The sniff is a hint, never a
+2. **Name it** — the dataset's identifier: how you'll refer to it when you
+   start a training run (`--name`; renamed from `--table`, the wire field
+   stays `table`). It is **not** the same as the split — but the convention
+   is to bake the split into the name, e.g. `churn_train` / `chest_xrays_test`
+   (the code's own examples). Because the name is asked before the path, it
+   is a deliberate prompt with an example placeholder, not an
+   auto-filled-from-the-path default — a small, accepted friction trade for
+   the clearer "name it, then point at it" model.
+3. **Point at the data** — "Where is your data? (file or folder)" — a file
+   or a directory (§4). The one unavoidable input. The tool immediately
+   **detects the family and echoes it** ("✔ Found a CSV table — this is
+   tabular data"). Where the layout uniquely pins a task (`annotations/` ⇒
+   object detection, `sequences/`+`tokenizer.json` ⇒ masked language
+   modeling) it pre-selects that task. **The sniff is a hint, never a
    lock** — see §5.1.
 4. **Pick the task** — show only the tasks in the detected family, each as
    `Display name — one-liner · task_id`, split into **Available now** and
    **Not yet in the CLI** (greyed, with the reason). Never the flat 16-item
    wall. (§7 for the taxonomy.)
 5. **Task-specific questions, only when the task needs them** (§8): the
-   label column (worded per task), `--number-of-keypoints` (keypoint),
-   `--time-column` (survival), etc. Skipped entirely for self-supervised
-   tasks.
-6. **Name it** — `--name`, default = the dataset's basename sanitized
-   (`~/datasets/churn_train` or `churn_train.csv` ⇒ `churn_train`). (Renamed
-   from `--table`; the wire field stays `table`.)
-7. **Review + confirm** — a single "Proceed with the ingest?" gate.
+   **label column lives here, not as a core prompt** — it is asked only for
+   the tasks that use one, worded per task ("the class label" vs "the value
+   to predict"), and skipped entirely for the self-supervised tasks.
+   Likewise `--number-of-keypoints` (keypoint), `--time-column` (survival).
+6. **Review + confirm** — a single "Proceed with the ingest?" gate.
 
 ### Phase 2 — Ingesting (progress only; zero decisions, zero Kubernetes)
 
@@ -321,11 +351,12 @@ type per dataset. v0.1 caps: 1 GiB total, 500 MiB per file.
 1. **Terminology + ceremony** — remove upload/push/stage from user copy
    (amends #173), collapse Step 2, silence Kubernetes behind `--verbose`,
    add the on-prem reassurance at the copy step.
-2. **Inverted flow + `--task`** — data-first ordering, family sniff (§5),
-   the family-scoped task picker with glosses and the Available/CLI-pending
-   split; rename `--category`→`--task` (required, hidden `--category` alias,
-   drop the `image_classification` default); default `--name` from the path
-   basename; rename `--intent`→`--split` (default `train`).
+2. **Inverted flow + `--task`** — the split → name → path → task ordering
+   (§5), family sniff + the "✔ Found …" echo, the family-scoped task picker
+   with glosses and the Available/CLI-pending split; rename
+   `--category`→`--task` (required, hidden `--category` alias, drop the
+   `image_classification` default); rename `--table`→`--name` and
+   `--intent`→`--split` (default `train`).
 3. **Flexible input + clarity + path bugs** — accept a bare `.csv`;
    per-family layout help; the `~user` and check-ordering fixes.
 4. **Wire the 5 text-family layouts** — make token_classification,
@@ -337,8 +368,8 @@ type per dataset. v0.1 caps: 1 GiB total, 500 MiB per file.
 
 ## 12. Open questions
 
-1. **`--split` position** — before or after the data path? (This RFC puts it
-   first, per the flow proposal; it is order-independent.)
+1. ~~**`--split` position**~~ — *settled (Rev 2): the order is split → name →
+   path → task (§5).*
 2. **`semantic_segmentation` / `instance_segmentation`** — is
    `instance_segmentation` a planned task (add to the schema) or dead
    (remove from the CLI registry)? Confirm before the contract test lands.
@@ -359,3 +390,9 @@ type per dataset. v0.1 caps: 1 GiB total, 500 MiB per file.
 
 - **Rev 1 (2026-07-07)** — initial draft from the ingest-flow UX audit,
   DS-vocabulary research, and the flow-inversion discussion with @LukasWodka.
+- **Rev 2 (2026-07-07)** — settle the Phase-1 order to **split → name →
+  path → task** (name is a deliberate prompt, not path-derived); make the
+  **file-or-folder** model explicit ("point at your data in whatever shape
+  it has" + the "✔ Found …" echo that removes the confusion, §4); move the
+  **label column** fully into the task-specific questions (§5.5, §8). All
+  per @LukasWodka.
