@@ -144,7 +144,7 @@ func pollForToken(ctx context.Context, p *ui.Printer, client *api.Client, dc *ap
 		}
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", &exitError{code: 130} // Ctrl-C: exit quietly (no "Error: context canceled")
 		case <-pollAfter(time.Duration(interval) * time.Second):
 		}
 
@@ -328,7 +328,15 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 			return &exitError{code: 1, err: ue}
 		}
 		if p.Verbose() {
-			p.Hintf("Signed-in token was rejected by the backend — run `tracebloc login`.")
+			// Only a 401/403 is genuinely a rejected token (where re-login helps); a
+			// network/DNS/5xx failure means we couldn't verify, not that the session
+			// is invalid — don't send the user to re-login for an outage.
+			var apiErr *api.APIError
+			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+				p.Hintf("Signed-in token was rejected by the backend — run `tracebloc login`.")
+			} else {
+				p.Hintf("Couldn't verify your session with the backend (%v).", err)
+			}
 		}
 		return &exitError{code: 1}
 	}

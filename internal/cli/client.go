@@ -706,30 +706,29 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 	// The backend-reported status is the honest Online signal (RFC-0001 §8.5); a
 	// local rollout check can't tell whether tracebloc can actually see the client.
 	sp := p.Spinner("Waiting for tracebloc to confirm…", "")
+	defer sp.Stop() // leak-proof net for every return; the online path Stops explicitly before its ✔
 	deadline := time.Now().Add(timeout)
-	var lastErr error // most recent transient list error, for an honest timeout message
+	var lastErr error // most recent transient (retryable) error, for the timeout message
+	lastState := -1   // most recent successfully-read status; -1 = none read yet
 	var ue *api.UpgradeRequiredError
 	var apiErr *api.APIError
 	for {
 		st, found, lerr := lookupClientStatus(ctx, client, active)
 		switch {
 		case errors.As(lerr, &ue):
-			// A 426 (too-old CLI) is not a transient outage — polling it until timeout
-			// just hides the real cause. Fail fast with the upgrade signal.
-			sp.Stop()
+			// 426 (CLI too old) won't recover by waiting — surface the upgrade signal.
 			return &exitError{code: 1, err: lerr}
 		case errors.As(lerr, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden):
 			// A revoked/expired/forbidden token (401/403) won't recover by waiting —
-			// the client itself may be perfectly online. Fail fast, point at sign-in.
-			sp.Stop()
+			// the client itself may be online. Fail fast, point at sign-in. Note 429
+			// and 5xx stay transient (below): those DO recover on retry.
 			return &exitError{code: 1, err: errors.New(
 				"tracebloc rejected your credentials while waiting — run `tracebloc login`, then retry")}
 		case lerr != nil:
-			lastErr = lerr // transient — keep polling, but remember why for the timeout
+			lastErr = lerr // transient (5xx / 429 / network) — keep waiting, remember why
 		case !found:
-			// The active client isn't in the account (deleted / wrong account). No
-			// amount of waiting surfaces it — fail fast, matching the one-shot path.
-			sp.Stop()
+			// The active client isn't in the account (deleted / wrong account) — no
+			// amount of waiting surfaces it. Fail fast, matching the one-shot path.
 			return &exitError{code: 1, err: fmt.Errorf(
 				"active client %s isn't in your account list — run `tracebloc client list` to see "+
 					"your clients, or re-run the installer to provision this machine", active)}
@@ -738,30 +737,39 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 			p.Successf("tracebloc can see this client.")
 			return nil
 		default:
-			// A successful poll — client present, just not online yet (offline/pending).
-			// Clear any earlier transient error so a timeout reports the real last
-			// state, not a stale "last check failed".
-			lastErr = nil
+			// A good poll (present, not online yet) supersedes any earlier transient
+			// error, so a later timeout reports the real state, not a stale failure.
+			lastErr, lastState = nil, st
 		}
-		if time.Now().After(deadline) {
-			sp.Stop()
-			if lastErr != nil {
-				// Every check failed — surface the real reason, not a bare "unreachable".
+
+		// --timeout caps how long we WAIT: stop once the budget is spent, and clamp
+		// the sleep to what remains so total runtime doesn't overshoot by a poll
+		// cycle. A poll begun within budget is still honored (online → ✔ above).
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			switch {
+			case lastErr != nil:
 				return &exitError{code: 1, err: fmt.Errorf(
 					"timed out after %s waiting for tracebloc to report this client online; "+
 						"the last status check failed: %v", timeout, lastErr)}
+			case lastState >= 0:
+				return &exitError{code: 1, err: fmt.Errorf(
+					"timed out after %s waiting for tracebloc to report this client online (last state: %s). "+
+						"Run `tracebloc cluster doctor` to diagnose, or re-run the installer.", timeout, clientStateLabel(lastState))}
+			default:
+				return &exitError{code: 1, err: fmt.Errorf(
+					"timed out after %s before tracebloc could confirm this client — retry, "+
+						"or run `tracebloc cluster doctor`.", timeout)}
 			}
-			// Reached here only via lerr==nil && found (else we'd have returned), so
-			// st holds the last real state (offline/pending).
-			return &exitError{code: 1, err: fmt.Errorf(
-				"timed out after %s waiting for tracebloc to report this client online (last state: %s). "+
-					"Run `tracebloc cluster doctor` to diagnose, or re-run the installer.", timeout, clientStateLabel(st))}
+		}
+		wait := clientStatusPollInterval
+		if wait > remaining {
+			wait = remaining
 		}
 		select {
 		case <-ctx.Done():
-			sp.Stop()
-			return ctx.Err()
-		case <-pollAfter(clientStatusPollInterval):
+			return &exitError{code: 130} // Ctrl-C: exit quietly (no "Error: context canceled")
+		case <-pollAfter(wait):
 		}
 	}
 }

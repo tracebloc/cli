@@ -1295,3 +1295,23 @@ func TestClientStatus_WaitTimeoutClearsStaleError(t *testing.T) {
 		t.Errorf("a stale transient error must be cleared after a later successful poll: %v", err)
 	}
 }
+
+// TestClientStatus_WaitCtrlCIsSilent (review #4): cancelling the context (Ctrl-C)
+// during --wait exits quietly with code 130 — not a bare "Error: context canceled".
+func TestClientStatus_WaitCtrlCIsSilent(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":0}]`)) // offline
+		}
+	})
+	setActiveClientID(t, "5")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate Ctrl-C
+	err := runClientStatus(ctx, ui.New(&bytes.Buffer{}), true, 10*time.Second)
+	if got := ExitCodeFromError(err); got != 130 {
+		t.Fatalf("exit code = %d, want 130 on Ctrl-C", got)
+	}
+	if !IsSilentError(err) {
+		t.Errorf("Ctrl-C should exit silently (nil-inner exitError), got: %v", err)
+	}
+}

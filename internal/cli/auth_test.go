@@ -413,6 +413,28 @@ func TestAuthCheck_EnvMismatch_Exit1(t *testing.T) {
 	}
 }
 
+// TestAuthCheck_VerboseUnreachableNotRejected (review #2): a non-401/403 WhoAmI
+// failure (e.g. backend 500 / outage) must read as "couldn't verify", not a
+// rejected token telling the user to re-login (which wouldn't help).
+func TestAuthCheck_VerboseUnreachableNotRejected(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			w.WriteHeader(http.StatusInternalServerError) // reachable but erroring — not a rejection
+		}
+	})
+	saveSignedIn(t, "tok") // CurrentEnv=dev
+	out, err := runCmd(t, "auth", "status", "--check", "--verbose", "--env", "dev")
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if !strings.Contains(out, "Couldn't verify your session") {
+		t.Errorf("a 500 should read as 'couldn't verify', got:\n%s", out)
+	}
+	if strings.Contains(out, "was rejected") {
+		t.Errorf("a 500 must not be labelled a rejected token: %s", out)
+	}
+}
+
 // TestLogin_ClearsStaleIdentityOnWhoAmIFailure (review #3): a re-login as a
 // different user must not inherit the previous user's identity if the WhoAmI
 // confirmation fails — otherwise cli#137 would auto-name the new client after the
