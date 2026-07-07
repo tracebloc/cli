@@ -285,6 +285,13 @@ func runAuthCheck(ctx context.Context, p *ui.Printer) error {
 	client := newAPIClient(sessionEnv(cfg))
 	client.Token = cfg.Current().Token
 	if _, err := client.WhoAmI(ctx); err != nil {
+		// A 426 means the CLI is too old, not that the session is invalid — surface
+		// the upgrade instruction (non-silent, so it shows even without --verbose)
+		// instead of the "re-login" advice, which wouldn't help.
+		var ue *api.UpgradeRequiredError
+		if errors.As(err, &ue) {
+			return &exitError{code: 1, err: ue}
+		}
 		if p.Verbose() {
 			p.Hintf("Signed-in token was rejected by the backend — run `tracebloc login`.")
 		}

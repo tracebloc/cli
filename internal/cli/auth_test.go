@@ -369,3 +369,23 @@ func TestAuthCheck_VerboseNarrates(t *testing.T) {
 		t.Errorf("--verbose should narrate the account, got:\n%s", out)
 	}
 }
+
+// TestAuthCheck_UpgradeRequiredSurfaces (Bugbot #146-C): a 426 from WhoAmI must
+// surface the upgrade instruction (even without --verbose), not be reported like
+// a rejected token telling the user to re-login.
+func TestAuthCheck_UpgradeRequiredSurfaces(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			w.WriteHeader(http.StatusUpgradeRequired) // 426
+			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
+		}
+	})
+	saveSignedIn(t, "tok")
+	_, err := runCmd(t, "auth", "status", "--check") // no --verbose
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if IsSilentError(err) || err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Errorf("a 426 must surface the upgrade message (non-silent), got: %v", err)
+	}
+}

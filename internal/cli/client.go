@@ -663,6 +663,14 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 	deadline := time.Now().Add(timeout)
 	for {
 		st, found, lerr := lookupClientStatus(ctx, client, active)
+		// A 426 (too-old CLI) is not a transient outage — polling it until timeout
+		// just hides the real cause behind a generic "unreachable" message. Fail
+		// fast with the upgrade signal instead.
+		var ue *api.UpgradeRequiredError
+		if errors.As(lerr, &ue) {
+			sp.Stop()
+			return &exitError{code: 1, err: ue}
+		}
 		if lerr == nil && found && st == clientStatusOnline {
 			sp.Stop()
 			p.Successf("tracebloc can see this client.")

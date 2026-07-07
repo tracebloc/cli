@@ -806,3 +806,26 @@ func TestClientStatus_NoActiveClient(t *testing.T) {
 		t.Errorf("want a 'no active client' error, got: %v", err)
 	}
 }
+
+// TestClientStatus_WaitFailsFastOn426 (Bugbot #146-D): --wait must not retry a
+// 426 until timeout — it fails fast with the upgrade signal. A long timeout
+// proves we didn't poll to exhaustion.
+func TestClientStatus_WaitFailsFastOn426(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusUpgradeRequired) // 426
+			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
+		}
+	})
+	setActiveClientID(t, "5")
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, 10*time.Minute)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Errorf("want the upgrade message, got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "timed out") {
+		t.Errorf("a 426 must fail fast, not time out: %v", err)
+	}
+}
