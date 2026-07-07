@@ -123,10 +123,14 @@ func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 func checkReachable(release *cluster.ParentRelease, err error, ns string) Result {
 	const name = "Cluster reachable"
 	if err != nil {
+		// The discovery error's remediation tail points at cluster doctor —
+		// which is what's running. Strip it so doctor never tells the user
+		// to run doctor.
+		detail := strings.TrimSuffix(strings.TrimSpace(err.Error()), "Diagnose with `tracebloc cluster doctor`.")
 		return Result{
 			Name:   name,
 			Status: StatusFail,
-			Detail: err.Error(),
+			Detail: strings.TrimSpace(detail),
 			Remedy: "Check your kubeconfig/context and that the tracebloc client chart is installed here: kubectl get deploy -n " + ns,
 		}
 	}
@@ -418,7 +422,7 @@ func checkImagePull(ctx context.Context, cs kubernetes.Interface, ns string, rel
 			Name:   name,
 			Status: StatusWarn,
 			Detail: "couldn't read jobs-manager to resolve image pull secrets — skipping",
-			Remedy: "Check the parent client release is installed in " + ns + ".",
+			Remedy: "Check a tracebloc client is installed in " + ns + ".",
 		}
 	}
 	secrets := dep.Spec.Template.Spec.ImagePullSecrets

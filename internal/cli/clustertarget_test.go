@@ -1,13 +1,20 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 func TestSetActiveClient_CachesNamespaceAndName(t *testing.T) {
@@ -110,5 +117,114 @@ func TestActiveClientBinding_Explain(t *testing.T) {
 	// Not applied → always pass through.
 	if (activeClientBinding{}).explain(noRelease) != noRelease {
 		t.Error("unbound explain should pass the error through")
+	}
+}
+
+// jmDep builds a chart-labeled jobs-manager Deployment in the given namespace,
+// for the fallback-scan tests (mirrors the cluster package's fixture).
+func jmDep(namespace string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tracebloc-jobs-manager",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "client",
+				"app.kubernetes.io/instance":   "tracebloc",
+				"app.kubernetes.io/managed-by": "Helm",
+				"helm.sh/chart":                "client-1.6.0",
+			},
+		},
+	}
+}
+
+// The cluster-wide fallback scan (§7.3): a default-namespace miss must find
+// the single client in its slug namespace and retarget — visibly, not
+// silently — instead of dead-ending on "default".
+func TestDiscoverRelease_ScanFindsSingleClientElsewhere(t *testing.T) {
+	cs := fake.NewSimpleClientset(jmDep("lukas-01"))
+	var buf bytes.Buffer
+	p := ui.New(&buf, ui.WithColor(false))
+	release, nsUsed, err := discoverRelease(context.Background(), p, cs, "default", true)
+	if err != nil {
+		t.Fatalf("expected scan to find the client, got: %v", err)
+	}
+	if nsUsed != "lukas-01" {
+		t.Errorf("nsUsed = %q, want lukas-01", nsUsed)
+	}
+	if release == nil || release.ReleaseName != "tracebloc" {
+		t.Errorf("release = %+v", release)
+	}
+	// never a silent redirect
+	if !strings.Contains(buf.String(), "lukas-01") {
+		t.Errorf("expected a visible note about the redirect, got: %q", buf.String())
+	}
+}
+
+func TestDiscoverRelease_ScanMultipleNamespacesRefuses(t *testing.T) {
+	cs := fake.NewSimpleClientset(jmDep("alpha"), jmDep("beta"))
+	_, _, err := discoverRelease(context.Background(), nil, cs, "default", true)
+	if err == nil {
+		t.Fatal("expected an error for multiple client namespaces")
+	}
+	for _, want := range []string{"alpha", "beta", "--namespace", "client use"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %s", want, err)
+		}
+	}
+	if !errors.Is(err, cluster.ErrNoParentRelease) {
+		t.Errorf("multi-namespace refusal should stay errors.Is-identifiable, got: %v", err)
+	}
+}
+
+func TestDiscoverRelease_NoScanWhenExplicit(t *testing.T) {
+	// The client exists in lukas-01, but the caller pinned the namespace —
+	// the scan must NOT engage and the plain discovery error stands.
+	cs := fake.NewSimpleClientset(jmDep("lukas-01"))
+	_, nsUsed, err := discoverRelease(context.Background(), nil, cs, "default", false)
+	if err == nil {
+		t.Fatal("expected the namespace miss to stand when scan is disallowed")
+	}
+	if nsUsed != "default" {
+		t.Errorf("nsUsed = %q, want default (no retarget)", nsUsed)
+	}
+	if !errors.Is(err, cluster.ErrNoParentRelease) {
+		t.Errorf("expected ErrNoParentRelease, got: %v", err)
+	}
+}
+
+func TestDiscoverRelease_ScanFindsNothingKeepsOriginalError(t *testing.T) {
+	cs := fake.NewSimpleClientset() // empty cluster
+	_, _, err := discoverRelease(context.Background(), nil, cs, "default", true)
+	if err == nil {
+		t.Fatal("expected an error on an empty cluster")
+	}
+	if !errors.Is(err, cluster.ErrNoParentRelease) {
+		t.Errorf("expected ErrNoParentRelease, got: %v", err)
+	}
+	// The no-client error must stay customer-actionable without Helm.
+	if strings.Contains(err.Error(), "helm") {
+		t.Errorf("error must not tell customers to run helm: %s", err)
+	}
+}
+
+// The §7.5 contract at the caller level: the scan may engage ONLY when nobody
+// chose the namespace — never for an explicit flag, never for a binding miss
+// (which could silently retarget a different machine's client).
+func TestActiveClientBinding_AllowScan(t *testing.T) {
+	cases := []struct {
+		name string
+		b    activeClientBinding
+		want bool
+	}{
+		{"kubeconfig default (nobody chose)", activeClientBinding{}, true},
+		{"explicit --namespace/--context", activeClientBinding{explicit: true}, false},
+		{"active-client binding applied", activeClientBinding{applied: true}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.b.allowScan(); got != c.want {
+				t.Errorf("allowScan() = %v, want %v", got, c.want)
+			}
+		})
 	}
 }

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // noParentReleaseError marks the exit-4 case where the reached cluster
@@ -42,7 +44,7 @@ type clusterTarget struct {
 // `cluster doctor` is deliberately NOT a caller — it has a different exit
 // contract (2/3 escalation, with discovery reported as a check Result rather
 // than a hard error).
-func resolveClusterTarget(ctx context.Context, opts cluster.KubeconfigOptions, needPVC bool) (*clusterTarget, error) {
+func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, b activeClientBinding, needPVC bool) (*clusterTarget, error) {
 	resolved, err := cluster.Load(opts)
 	if err != nil {
 		return nil, &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
@@ -51,7 +53,12 @@ func resolveClusterTarget(ctx context.Context, opts cluster.KubeconfigOptions, n
 	if err != nil {
 		return nil, &exitError{code: 3, err: err}
 	}
-	release, err := cluster.DiscoverParentRelease(ctx, cs, resolved.Namespace)
+	// The cluster-wide fallback scan only engages when the target namespace is
+	// the kubeconfig's default — i.e. nobody chose it: not the user (explicit
+	// --namespace/--context) and not the active-client binding. A binding miss
+	// must NOT silently redirect to some other client (§7.5 — that could be a
+	// different machine's client); it keeps the §7.3 "runs elsewhere" message.
+	release, nsUsed, err := discoverRelease(ctx, p, cs, resolved.Namespace, b.allowScan())
 	if err != nil {
 		// Only a genuine "namespace has no release" maps to the §7.3
 		// "runs elsewhere" rewrite; an API/RBAC list failure or an
@@ -61,6 +68,10 @@ func resolveClusterTarget(ctx context.Context, opts cluster.KubeconfigOptions, n
 		}
 		return nil, &exitError{code: 4, err: err}
 	}
+	// The scan may have retargeted discovery to the namespace that actually
+	// hosts the client; everything downstream (PVC discovery, dataset listing,
+	// prints) keys on Resolved.Namespace, so it must follow.
+	resolved.Namespace = nsUsed
 	t := &clusterTarget{Resolved: resolved, Clientset: cs, Release: release}
 	if needPVC {
 		pvc, err := cluster.DiscoverSharedPVC(ctx, cs, resolved.Namespace)
@@ -72,12 +83,41 @@ func resolveClusterTarget(ctx context.Context, opts cluster.KubeconfigOptions, n
 	return t, nil
 }
 
+// discoverRelease wraps DiscoverParentRelease with the cluster-wide fallback
+// scan: when allowScan is set and the target namespace hosts no client, every
+// namespace is scanned for one. Exactly one → target it, with a visible note
+// (never a silent redirect); several → name them and ask the user to pick;
+// none, or a scan failure (e.g. RBAC forbids the cluster-wide list) → the
+// original discovery error stands. Returns the namespace actually used.
+func discoverRelease(ctx context.Context, p *ui.Printer, cs kubernetes.Interface, namespace string, allowScan bool) (*cluster.ParentRelease, string, error) {
+	release, err := cluster.DiscoverParentRelease(ctx, cs, namespace)
+	if err == nil || !allowScan || !errors.Is(err, cluster.ErrNoParentRelease) {
+		return release, namespace, err
+	}
+	found, scanErr := cluster.FindClientNamespaces(ctx, cs)
+	if scanErr != nil || len(found) == 0 {
+		return nil, namespace, err
+	}
+	if len(found) > 1 {
+		return nil, namespace, fmt.Errorf(
+			"%w in namespace %q, but tracebloc clients are running in: %s. "+
+				"Pass --namespace to pick one, or set your active client with `tracebloc client use`.",
+			cluster.ErrNoParentRelease, namespace, strings.Join(found, ", "))
+	}
+	if p != nil {
+		p.Infof("No client in namespace %q — using the one in %q (override with --namespace).", namespace, found[0])
+	}
+	release, err = cluster.DiscoverParentRelease(ctx, cs, found[0])
+	return release, found[0], err
+}
+
 // activeClientBinding records that a data command defaulted its target
 // namespace to the active client's cached namespace (§7.3), so a subsequent
 // "no release here" failure can be explained as "the active client runs
 // elsewhere" rather than a bare discovery error.
 type activeClientBinding struct {
 	applied   bool
+	explicit  bool // user pinned --namespace/--context themselves
 	name      string
 	namespace string
 }
@@ -89,7 +129,7 @@ type activeClientBinding struct {
 // backward compatible for anyone who hasn't run `client use`/`create`.
 func bindActiveClientNamespace(opts *cluster.KubeconfigOptions) activeClientBinding {
 	if opts.Namespace != "" || opts.Context != "" {
-		return activeClientBinding{} // user was explicit — don't second-guess
+		return activeClientBinding{explicit: true} // user was explicit — don't second-guess
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -102,6 +142,13 @@ func bindActiveClientNamespace(opts *cluster.KubeconfigOptions) activeClientBind
 	opts.Namespace = p.ActiveClientNamespace
 	return activeClientBinding{applied: true, name: p.ActiveClientName, namespace: p.ActiveClientNamespace}
 }
+
+// allowScan reports whether the cluster-wide fallback scan may engage: only
+// when the target namespace is the kubeconfig's default — i.e. nobody chose
+// it. An explicit --namespace/--context is never second-guessed, and a
+// binding miss must NOT silently retarget to some other client (§7.5 — it
+// could be a different machine's); it keeps the §7.3 "runs elsewhere" message.
+func (b activeClientBinding) allowScan() bool { return !b.applied && !b.explicit }
 
 // explain rewrites a "no tracebloc release in namespace" failure (exit 4) into
 // §7.3's "client runs on another machine" guidance when the target namespace

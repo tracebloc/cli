@@ -57,7 +57,7 @@ Exit codes:
   0  artifacts removed (or --dry-run, or the user declined)
   2  invalid table name
   3  kubeconfig error, or refused (no confirmation off a terminal)
-  4  cluster reachable but parent release / shared PVC missing
+  4  cluster reachable but no tracebloc client / shared storage missing
   7  teardown failed mid-flight (table drop or PVC rm errored)`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -84,7 +84,7 @@ Exit codes:
 	cmd.Flags().StringVar(&contextOverride, "context", "",
 		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
 	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where the parent tracebloc/client release is installed")
+		"namespace where your tracebloc client is installed")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"show what would be deleted without deleting anything")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false,
@@ -116,7 +116,7 @@ undone — re-ingesting the data is the only way back.`)
 	//    running teardown against a cluster with no tracebloc install.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTarget(ctx, opts, true)
+	target, err := resolveClusterTarget(ctx, a.Printer, opts, binding, true)
 	if err != nil {
 		return binding.explain(err)
 	}

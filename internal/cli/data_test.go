@@ -314,6 +314,18 @@ func TestAliasResolution(t *testing.T) {
 			args: []string{"data", "delete", "--help"},
 			want: "Removes the in-cluster artifacts",
 		},
+		{
+			// `ingest validate` moved under data (top-level `ingest` is a
+			// hidden deprecated alias) — both paths must keep resolving.
+			name: "data validate canonical",
+			args: []string{"data", "validate", "--help"},
+			want: "validates it against the bundled",
+		},
+		{
+			name: "ingest validate alias resolves",
+			args: []string{"ingest", "validate", "--help"},
+			want: "validates it against the bundled",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

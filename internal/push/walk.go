@@ -152,8 +152,7 @@ func Discover(rootDir string) (*LocalLayout, error) {
 			return nil, fmt.Errorf(
 				"missing labels.csv in %q. The CLI expects "+
 					"<dir>/labels.csv + <dir>/images/ for image_classification; "+
-					"see https://github.com/tracebloc/client/issues/147 for the "+
-					"v0.1 layout contract.",
+					"see https://docs.tracebloc.io for the dataset layout.",
 				abs)
 		}
 		return nil, fmt.Errorf("stat labels.csv: %w", err)

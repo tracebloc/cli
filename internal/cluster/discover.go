@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -15,7 +16,7 @@ import (
 // has no tracebloc release" case — distinct from an API/RBAC list failure or an
 // ambiguous multiple-release match. Callers use errors.Is to tell "this cluster
 // doesn't host the release" apart from "couldn't determine the release."
-var ErrNoParentRelease = errors.New("no tracebloc parent client release found")
+var ErrNoParentRelease = errors.New("no tracebloc client found")
 
 // ParentRelease describes the tracebloc parent client chart release
 // discovered in the customer's cluster. The information comes from
@@ -120,12 +121,16 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 
 	switch len(jmDeps) {
 	case 0:
+		// Customer-actionable, no Helm: the CLI's own contract is that
+		// customers never touch Helm, so the remediation is the flag,
+		// the installer, or the doctor — not a helm invocation.
 		return nil, fmt.Errorf(
-			"%w in namespace %q "+
-				"(no chart-managed Deployment named *-jobs-manager). "+
-				"Install with `helm install <release> tracebloc/client --namespace %s` first, "+
-				"or pass --namespace to point at the namespace where it's running.",
-			ErrNoParentRelease, namespace, namespace,
+			"%w in namespace %q. "+
+				"If your client runs in another namespace, pass --namespace; "+
+				"if this cluster has no tracebloc client yet, run the installer: "+
+				"bash <(curl -fsSL https://tracebloc.io/i.sh). "+
+				"Diagnose with `tracebloc cluster doctor`.",
+			ErrNoParentRelease, namespace,
 		)
 	case 1:
 		// happy path
@@ -135,9 +140,9 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 			names = append(names, d.Name)
 		}
 		return nil, fmt.Errorf(
-			"found %d tracebloc parent releases in namespace %q (%s); "+
+			"found %d tracebloc clients in namespace %q (%s); "+
 				"this CLI doesn't yet support disambiguating between multiple. "+
-				"Pass --namespace to target a namespace with exactly one release.",
+				"Pass --namespace to target a namespace with exactly one client.",
 			len(jmDeps), namespace, strings.Join(names, ", "),
 		)
 	}
@@ -186,6 +191,36 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 	}
 
 	return release, nil
+}
+
+// FindClientNamespaces scans every namespace the kubeconfig user may list for
+// jobs-manager Deployments (the same selector + name filter DiscoverParentRelease
+// uses) and returns the sorted, de-duplicated namespaces hosting one. It backs
+// the fallback that makes `data list`/`cluster info` work out of the box when
+// the client lives in its slug namespace rather than the kubeconfig's default
+// (§7.3): a miss in the default namespace triggers this scan instead of a dead
+// end. An RBAC-restricted user (cluster-wide list forbidden) gets the error
+// back; callers treat that as "scan unavailable" and keep the original message.
+func FindClientNamespaces(ctx context.Context, cs kubernetes.Interface) ([]string, error) {
+	deps, err := cs.AppsV1().Deployments(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=client,app.kubernetes.io/managed-by=Helm",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scanning the cluster for tracebloc clients: %w", err)
+	}
+	seen := make(map[string]bool)
+	var namespaces []string
+	for _, d := range deps.Items {
+		if d.Name != "jobs-manager" && !strings.HasSuffix(d.Name, "-jobs-manager") {
+			continue
+		}
+		if !seen[d.Namespace] {
+			seen[d.Namespace] = true
+			namespaces = append(namespaces, d.Namespace)
+		}
+	}
+	sort.Strings(namespaces)
+	return namespaces, nil
 }
 
 // InClusterClient identifies a tracebloc client already installed on the cluster:

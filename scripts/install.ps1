@@ -185,8 +185,27 @@ try {
     $target = Join-Path $InstallPrefix $BinaryName
     Move-Item -Path (Join-Path $tmpDir $binaryFile) -Destination $target -Force
 
+    # Short alias: `tb` — a cmd shim next to the exe (symlinks need admin or
+    # dev-mode on Windows). Best-effort: an alias must never fail the install
+    # (mirrors install.sh), and we never clobber an unrelated tb.cmd — "ours"
+    # means it invokes exactly our binary path, not merely mentions the name.
+    $tbShim = Join-Path $InstallPrefix 'tb.cmd'
+    $shimBody = "@echo off`r`n`"$target`" %*`r`n"
+    $tbNote = ''
+    $tbExisting = if (Test-Path $tbShim) { Get-Content $tbShim -Raw -ErrorAction SilentlyContinue } else { $null }
+    if (-not (Test-Path $tbShim) -or ($tbExisting -like ('*"' + $target + '"*'))) {
+        try {
+            Set-Content -Path $tbShim -Value $shimBody -Encoding ascii -ErrorAction Stop
+            $tbNote = ' (short alias: tb)'
+        } catch {
+            Write-Host "Note: couldn't create the tb alias ($($_.Exception.Message)) — skipping."
+        }
+    } else {
+        Write-Host "Note: $tbShim already exists and isn't ours — skipping the tb alias."
+    }
+
     Write-Host ""
-    Write-Host "✓ tracebloc CLI installed: $target"
+    Write-Host "✓ tracebloc CLI installed: $target$tbNote"
     Write-Host ""
     Write-Host "Verify with:"
     Write-Host "  $target version"
@@ -216,6 +235,8 @@ try {
     Write-Host "First steps:"
     Write-Host "  tracebloc cluster info        # confirm the CLI can reach your cluster"
     Write-Host "  tracebloc data ingest --help  # stage a dataset onto the cluster"
+    Write-Host ""
+    Write-Host "Short alias: tb works everywhere tracebloc does (tb data ingest .\data)"
 }
 finally {
     # Always clean up the temp dir, even on early exit / Ctrl-C.

@@ -3,28 +3,35 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/tracebloc/cli/internal/schema"
 )
 
-// newIngestCmd implements the `tracebloc ingest` subtree. Today it
-// has only one verb — `validate` — which runs the schema check
-// locally without touching the cluster. Future verbs (status, retry,
-// cancel) hang off this same parent in later phases.
+// newIngestCmd implements the `tracebloc ingest` subtree — kept as a HIDDEN
+// alias for one deprecation cycle: its only verb, `validate`, moved to
+// `tracebloc data validate`, so the top level no longer carries two different
+// things named "ingest" (`ingest validate` vs `data ingest`). Scripts using
+// the old path keep working; help and docs point at the new one.
 func newIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "ingest",
-		Short: "Inspect and manage ingestion configurations",
-		Long: `Commands for working with ingest.yaml files and ingestion runs.
-
-Today only ` + "`validate`" + ` is implemented — it runs the same schema check
-the cluster's jobs-manager runs, but locally and instantly. Use it to
-catch typos and missing fields before submitting an ingestion.
-
-Future verbs (status, retry, cancel) will land alongside the
-push/list/show commands in later phases.`,
+		Use:    "ingest",
+		Short:  "Deprecated alias for `tracebloc data validate`",
+		Hidden: true,
+		// A bare path here is almost always someone meaning `data ingest`
+		// (the home screen advertises it) — redirect instead of dumping a
+		// confusing deprecation usage block.
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf(
+					"`tracebloc ingest` doesn't stage datasets — did you mean:\n"+
+						"    tracebloc data ingest %s",
+					strings.Join(args, " "))
+			}
+			return cmd.Help()
+		},
 	}
 
 	cmd.AddCommand(newIngestValidateCmd())
@@ -49,9 +56,7 @@ ingest.v1.json schema (synced from tracebloc/data-ingestors). Prints
 violations in the same JSON-pointer-prefixed format the cluster's
 jobs-manager uses, and exits non-zero if any are found.
 
-Useful as a pre-flight before ` + "`tracebloc data ingest`" + ` lands in a
-future phase; for now, customers running the Helm chart can validate
-their ` + "`ingest.yaml`" + ` before invoking ` + "`helm install`" + `, getting
+Useful as a pre-flight before running ` + "`tracebloc data ingest`" + ` —
 millisecond local feedback instead of a multi-second cluster round
 trip.
 

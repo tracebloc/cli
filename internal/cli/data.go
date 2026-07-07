@@ -34,13 +34,14 @@ func newDataCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "data",
 		Aliases: []string{"dataset"},
-		Short:   "Manage datasets in the parent client release",
-		Long: `Commands for staging and managing datasets on the cluster's
-shared PVC.
+		Short:   "Manage the datasets in your client",
+		Long: `Commands for staging and managing the datasets your client holds —
+the data models train on. It stays on your infrastructure.
 
-` + "`data ingest`" + ` stages a local dataset to the cluster's shared
-PVC, submits the ingestion run to jobs-manager, and watches the
-ingestor Job to completion (streaming logs + the final summary).
+` + "`data ingest`" + ` stages a local dataset into your client's storage,
+submits the ingestion run, and watches it to completion (streaming
+logs + the final summary). ` + "`data validate`" + ` checks an ingest.yaml
+locally first.
 
 ` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run
 before the first ingest.`,
@@ -48,6 +49,7 @@ before the first ingest.`,
 	cmd.AddCommand(newDataIngestCmd())
 	cmd.AddCommand(newDataListCmd())
 	cmd.AddCommand(newDataDeleteCmd())
+	cmd.AddCommand(newIngestValidateCmd())
 	return cmd
 }
 
@@ -126,8 +128,8 @@ func newDataIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ingest <local-path>",
 		Aliases: []string{"push"},
-		Short:   "Stage a local dataset to the cluster's shared PVC",
-		Long: `Stages a local dataset to the parent client release's shared PVC,
+		Short:   "Stage a local dataset into your client's storage",
+		Long: `Stages a local dataset into your client's shared storage,
 submits an ingestion run to jobs-manager, and watches the ingestor Job
 to completion. Supports 9 task categories (image classification,
 object/keypoint detection, text classification, masked language
@@ -153,7 +155,7 @@ Exit codes:
   2   schema validation failed (synthesized spec rejected) or
       v0.1-unsupported category passed
   3   local-layout or kubeconfig error
-  4   cluster reachable but parent release / shared PVC missing
+  4   cluster reachable but no tracebloc client / shared storage missing
   5   ingestor SA token couldn't be obtained, or jobs-manager
       rejected the token (401/403)
   7   pre-flight succeeded but staging the files failed
@@ -220,7 +222,7 @@ Exit codes:
 	cmd.Flags().StringVar(&contextOverride, "context", "",
 		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
 	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where the parent tracebloc/client release is installed")
+		"namespace where your tracebloc client is installed")
 
 	// Required spec flags. We DON'T mark them required-at-cobra-level
 	// because cobra's "required flag" error message is terse and
@@ -257,7 +259,7 @@ Exit codes:
 		"emit a machine-readable JSON result on stdout (human output → stderr; implies --no-input)")
 	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
 		"override the ingestor ServiceAccount name (default: \"ingestor\"); "+
-			"set this if you customized ingestionAuthz.serviceAccountName in the parent client chart")
+			"set this if you customized ingestionAuthz.serviceAccountName in your client's install")
 	cmd.Flags().StringVar(&stagePodImage, "stage-pod-image", "",
 		"override the ephemeral stage Pod's image (default: digest-pinned alpine 3.20 baked into the CLI). "+
 			"Pin by digest in your override too — tag-only refs drift silently.")
@@ -376,7 +378,7 @@ This uploads a dataset from your machine into your tracebloc workspace so models
 can be trained on it. Your files are sent to the Kubernetes cluster your
 workspace was installed on — tracebloc checks them and loads them into a table
 your training runs read from. Your data stays on that cluster the whole time;
-contributors train against it without ever seeing the raw files.`))
+other collaborators train against it without ever seeing the raw files.`))
 	a.Printer.Hintf("Learn more: https://docs.tracebloc.io")
 
 	// 0. Guided mode: prompt for any missing core inputs before
@@ -595,7 +597,7 @@ contributors train against it without ever seeing the raw files.`))
 	//    Bound before we waste time provisioning a Pod that can't mount it.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTarget(ctx, opts, true)
+	target, err := resolveClusterTarget(ctx, a.Printer, opts, binding, true)
 	if err != nil {
 		return binding.explain(err)
 	}
