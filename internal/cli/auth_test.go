@@ -290,3 +290,82 @@ func TestAuthStatus_NotSignedIn(t *testing.T) {
 		t.Errorf("got:\n%s", out)
 	}
 }
+
+// saveSignedIn writes a signed-in profile for the "dev" env into the isolated
+// config dir set up by a prior withTestBackend/t.Setenv.
+func saveSignedIn(t *testing.T, token string) {
+	t.Helper()
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: token, Email: "ds@co"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAuthCheck_SignedInValid_Exit0: `auth status --check` exits 0 and is silent
+// when a token is present and the backend accepts it.
+func TestAuthCheck_SignedInValid_Exit0(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			_, _ = w.Write([]byte(`{"email":"ds@co","account":"Acme"}`))
+			return
+		}
+		t.Errorf("unexpected request path %s", r.URL.Path)
+	})
+	saveSignedIn(t, "tok")
+	out, err := runCmd(t, "auth", "status", "--check")
+	if err != nil {
+		t.Fatalf("--check should exit 0 when signed in + token valid, got: %v", err)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("--check should be silent by default, got:\n%s", out)
+	}
+}
+
+// TestAuthCheck_NotSignedIn_Exit1: silent exit 1 when there's no token.
+func TestAuthCheck_NotSignedIn_Exit1(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	out, err := runCmd(t, "auth", "status", "--check")
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1 (err=%v)", got, err)
+	}
+	if !IsSilentError(err) {
+		t.Errorf("--check exit 1 should be silent (nil-inner exitError), err=%v", err)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("--check should print nothing, got:\n%s", out)
+	}
+}
+
+// TestAuthCheck_TokenRejected_Exit1: a stored token the backend rejects (401)
+// exits 1 — not a false "signed in".
+func TestAuthCheck_TokenRejected_Exit1(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	})
+	saveSignedIn(t, "stale")
+	_, err := runCmd(t, "auth", "status", "--check")
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1 on a rejected token", got)
+	}
+}
+
+// TestAuthCheck_VerboseNarrates: --check --verbose prints the verdict.
+func TestAuthCheck_VerboseNarrates(t *testing.T) {
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			_, _ = w.Write([]byte(`{"email":"ds@co","account":"Acme"}`))
+		}
+	})
+	saveSignedIn(t, "tok")
+	out, err := runCmd(t, "auth", "status", "--check", "--verbose")
+	if err != nil {
+		t.Fatalf("--check --verbose signed-in should exit 0, got: %v", err)
+	}
+	if !strings.Contains(out, "ds@co") {
+		t.Errorf("--verbose should narrate the account, got:\n%s", out)
+	}
+}

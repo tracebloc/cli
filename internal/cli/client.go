@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -42,7 +43,7 @@ func newClientCmd() *cobra.Command {
 		Long: `Provision a tracebloc client for this machine and list/select clients
 in your account.  Requires sign-in first (` + "`tracebloc login`" + `).`,
 	}
-	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientUseCmd())
+	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientUseCmd(), newClientStatusCmd())
 	return cmd
 }
 
@@ -601,6 +602,106 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 	// (the backend's last-heartbeat state) so a stale pointer is visible.
 	p.Hintf("\"active\" is this machine's selected client; state is its last reported status to tracebloc.")
 	return nil
+}
+
+func newClientStatusCmd() *cobra.Command {
+	var wait bool
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show whether tracebloc can see this machine's client (online)",
+		Long: `Report the backend's view of this machine's active client — online,
+offline, or pending. With --wait, poll until tracebloc reports it online
+(exit 0) or the timeout elapses (non-zero) — the honest source for the
+installer's closing "tracebloc can see this client" confirmation, which today
+is inferred only from a local rollout check (RFC-0001 §8.5).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClientStatus(cmd.Context(), printerFor(cmd), wait, timeout)
+		},
+	}
+	cmd.Flags().BoolVar(&wait, "wait", false, "poll until the backend reports this client online")
+	cmd.Flags().DurationVar(&timeout, "timeout", 120*time.Second, "with --wait, give up after this long")
+	return cmd
+}
+
+// clientStatusPollInterval is how often --wait re-checks the backend. A package
+// var so tests can shorten it; the wait itself goes through pollAfter (also a
+// seam), so a test drives many iterations with no real delay.
+var clientStatusPollInterval = 3 * time.Second
+
+func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time.Duration) error {
+	client, cfg, err := authedClient()
+	if err != nil {
+		return &exitError{code: 1, err: err}
+	}
+	active := cfg.Current().ActiveClientID
+	if active == "" {
+		return &exitError{code: 1, err: errors.New(
+			"no active client on this machine — run `tracebloc client create` (or `client use <id>`) first")}
+	}
+
+	// One-shot: report the current state and exit 0 (informational).
+	if !wait {
+		st, found, lerr := lookupClientStatus(ctx, client, active)
+		if lerr != nil {
+			return &exitError{code: 1, err: lerr}
+		}
+		if !found {
+			return &exitError{code: 1, err: fmt.Errorf(
+				"active client %s isn't in your account list — it may have been deleted", active)}
+		}
+		p.Section("Client status")
+		p.Field("state", clientStateLabel(st))
+		return nil
+	}
+
+	// --wait: poll the same source `client list` renders until online or timeout.
+	// The backend-reported status is the honest Online signal (RFC-0001 §8.5); a
+	// local rollout check can't tell whether tracebloc can actually see the client.
+	sp := p.Spinner("Waiting for tracebloc to confirm…", "")
+	deadline := time.Now().Add(timeout)
+	for {
+		st, found, lerr := lookupClientStatus(ctx, client, active)
+		if lerr == nil && found && st == clientStatusOnline {
+			sp.Stop()
+			p.Successf("tracebloc can see this client.")
+			return nil
+		}
+		if time.Now().After(deadline) {
+			sp.Stop()
+			last := "unreachable"
+			if found {
+				last = clientStateLabel(st)
+			}
+			return &exitError{code: 1, err: fmt.Errorf(
+				"timed out after %s waiting for tracebloc to report this client online (last state: %s). "+
+					"Check the client is running, then retry.", timeout, last)}
+		}
+		select {
+		case <-ctx.Done():
+			sp.Stop()
+			return ctx.Err()
+		case <-pollAfter(clientStatusPollInterval):
+		}
+	}
+}
+
+// lookupClientStatus finds the account client whose numeric id matches active and
+// returns its backend status code. found=false means no such client (deleted, or
+// signed into the wrong account). A list error is returned verbatim so --wait can
+// treat it as transient and retry.
+func lookupClientStatus(ctx context.Context, client *api.Client, active string) (status int, found bool, err error) {
+	clients, err := client.ListClients(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	for _, c := range clients {
+		if strconv.Itoa(c.ID) == active {
+			return c.Status, true, nil
+		}
+	}
+	return 0, false, nil
 }
 
 // EdgeDevice.status codes mirrored from the backend (metaApi User.py).

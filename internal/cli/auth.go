@@ -75,11 +75,50 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	if uri == "" {
 		uri = dc.VerificationURI
 	}
-	p.Field("open", uri)
-	p.Field("code", dc.UserCode)
+	p.Action("Open", uri)
+	p.Action("Enter", dc.UserCode)
 	p.Newline()
-	p.Hintf("Waiting for you to approve in the browser… (Ctrl-C to cancel)")
 
+	// Poll the device-token endpoint behind a live "Waiting…" spinner (static on
+	// a pipe / --plain). The spinner line is cleared on return, so the ✔ / error
+	// below prints in its place.
+	tok, err := pollForToken(ctx, p, client, dc)
+	if err != nil {
+		return err
+	}
+
+	// Switch the active env and write into THAT env's profile, leaving the other
+	// envs' tokens + active-client pointers intact (R10). Profile() returns env's
+	// existing profile, so a re-login preserves its active_client_id.
+	cfg.CurrentEnv = env
+	prof := cfg.Profile(env)
+	prof.Token = tok
+	// Confirm the freshly-issued token authenticates and capture the account to
+	// show + store. Best-effort: don't fail a successful sign-in if this can't run.
+	client.Token = tok
+	p.Detailf("authorized — confirming the token with the backend …")
+	if id, werr := client.WhoAmI(ctx); werr == nil {
+		prof.Email = id.Email
+	}
+	if err := cfg.Save(); err != nil {
+		return &exitError{code: 1, err: err}
+	}
+	if prof.Email != "" {
+		p.Successf("Signed in as %s.", prof.Email)
+	} else {
+		p.Successf("Signed in.")
+	}
+	// The credential detail is demoted to a dim, verbose-only line — the ✔ above is
+	// the headline (RFC-0001 §8.1: the happy path stays quiet).
+	p.Detailf("token saved to ~/.tracebloc (0600)")
+	return nil
+}
+
+// pollForToken runs the RFC 8628 device-token poll loop behind a live wait
+// spinner, returning the issued token or an *exitError. The spinner is cleared
+// on every return path (deferred Stop), so the caller prints the ✔ / error line
+// on the freed line.
+func pollForToken(ctx context.Context, p *ui.Printer, client *api.Client, dc *api.DeviceCodeResponse) (string, error) {
 	interval := dc.Interval
 	if interval <= 0 {
 		interval = 5
@@ -89,44 +128,23 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 		deadline = time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
 	}
 
+	sp := p.Spinner("Waiting for your browser…", "Ctrl-C to cancel")
+	defer sp.Stop()
+
 	for {
 		if !deadline.IsZero() && time.Now().After(deadline) {
-			return &exitError{code: 1, err: errors.New("login timed out — re-run `tracebloc login`")}
+			return "", &exitError{code: 1, err: errors.New("login timed out — re-run `tracebloc login`")}
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return "", ctx.Err()
 		case <-pollAfter(time.Duration(interval) * time.Second):
 		}
 
 		tok, err := client.PollToken(ctx, dc.DeviceCode)
 		switch {
 		case err == nil:
-			// Switch the active env and write into THAT env's profile, leaving the
-			// other envs' tokens + active-client pointers intact (R10). Profile()
-			// returns env's existing profile, so a re-login preserves its
-			// active_client_id rather than clobbering it.
-			cfg.CurrentEnv = env
-			prof := cfg.Profile(env)
-			prof.Token = tok
-			// Confirm the freshly-issued token actually authenticates, and
-			// capture the account to show + store. Best-effort: don't fail a
-			// successful sign-in just because this lookup couldn't run.
-			client.Token = tok
-			p.Detailf("authorized — confirming the token with the backend …")
-			if id, werr := client.WhoAmI(ctx); werr == nil {
-				prof.Email = id.Email
-			}
-			if err := cfg.Save(); err != nil {
-				return &exitError{code: 1, err: err}
-			}
-			p.Newline()
-			if prof.Email != "" {
-				p.Successf("Signed in as %s. Token saved to ~/.tracebloc (0600).", prof.Email)
-			} else {
-				p.Successf("Signed in. Token saved to ~/.tracebloc (0600).")
-			}
-			return nil
+			return tok, nil
 		case errors.Is(err, api.ErrAuthorizationPending):
 			// not approved yet — keep polling
 		case errors.Is(err, api.ErrSlowDown):
@@ -134,11 +152,11 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 			// interval by 5 seconds for this and all subsequent polls.
 			interval += 5
 		case errors.Is(err, api.ErrExpiredToken):
-			return &exitError{code: 1, err: errors.New("the sign-in code expired — re-run `tracebloc login`")}
+			return "", &exitError{code: 1, err: errors.New("the sign-in code expired — re-run `tracebloc login`")}
 		case errors.Is(err, api.ErrAccessDenied):
-			return &exitError{code: 1, err: errors.New("sign-in was denied in the browser")}
+			return "", &exitError{code: 1, err: errors.New("sign-in was denied in the browser")}
 		default:
-			return &exitError{code: 1, err: err}
+			return "", &exitError{code: 1, err: err}
 		}
 	}
 }
@@ -209,11 +227,15 @@ func newAuthCmd() *cobra.Command {
 
 // newAuthStatusCmd implements `tracebloc auth status`.
 func newAuthStatusCmd() *cobra.Command {
-	return &cobra.Command{
+	var check bool
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show whether you're signed in, and to which backend",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if check {
+				return runAuthCheck(cmd.Context(), printerFor(cmd))
+			}
 			cfg, err := config.Load()
 			if err != nil {
 				return &exitError{code: 1, err: err}
@@ -239,4 +261,41 @@ func newAuthStatusCmd() *cobra.Command {
 			return nil
 		},
 	}
+	// --check is the installer's session probe: `auth status` alone exits 0 whether
+	// signed in or not (it's a human display), so scripts had to grep its prose.
+	// --check makes the exit CODE the contract instead.
+	cmd.Flags().BoolVar(&check, "check", false,
+		"exit 0 only if signed in with a backend-valid token, else 1; silent unless --verbose")
+	return cmd
+}
+
+// runAuthCheck is `auth status --check`: a machine-readable session probe for the
+// installer. Exit 0 = a token is present AND the backend accepts it (a live
+// WhoAmI); exit 1 = signed out, or the stored token was rejected/unreachable.
+// Silent by default; --verbose narrates the verdict. The exit-1 paths return a
+// nil-inner *exitError (IsSilentError) so main() prints nothing.
+func runAuthCheck(ctx context.Context, p *ui.Printer) error {
+	cfg, err := config.Load()
+	if err != nil || !cfg.SignedIn() {
+		if p.Verbose() {
+			p.Hintf("Not signed in. Run `tracebloc login`.")
+		}
+		return &exitError{code: 1}
+	}
+	client := newAPIClient(sessionEnv(cfg))
+	client.Token = cfg.Current().Token
+	if _, err := client.WhoAmI(ctx); err != nil {
+		if p.Verbose() {
+			p.Hintf("Signed-in token was rejected by the backend — run `tracebloc login`.")
+		}
+		return &exitError{code: 1}
+	}
+	if p.Verbose() {
+		if email := cfg.Current().Email; email != "" {
+			p.Successf("Signed in as %s.", email)
+		} else {
+			p.Successf("Signed in.")
+		}
+	}
+	return nil
 }

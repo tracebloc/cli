@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
@@ -716,5 +717,92 @@ func TestClientCreate_AcceptsDetectedZone(t *testing.T) {
 	}
 	if body.Location != "FR" {
 		t.Errorf("location = %q, want FR (detected zone accepted as the default)", body.Location)
+	}
+}
+
+// setActiveClientID points the signed-in profile at client id `id` (the local
+// "this machine enrolls as" pointer that `client status` reads).
+func setActiveClientID(t *testing.T, id string) {
+	t.Helper()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Current().ActiveClientID = id
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestClientStatus_WaitOnline_Exit0: --wait exits 0 as soon as the backend
+// reports the active client online, and says so.
+func TestClientStatus_WaitOnline_Exit0(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":1}]`)) // 1 = online
+			return
+		}
+		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+	})
+	setActiveClientID(t, "5")
+	var out bytes.Buffer
+	if err := runClientStatus(context.Background(), ui.New(&out), true, 5*time.Second); err != nil {
+		t.Fatalf("--wait should exit 0 when the client is online, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "can see this client") {
+		t.Errorf("expected the confirmation line, got:\n%s", out.String())
+	}
+}
+
+// TestClientStatus_WaitTimeout_Exit1: --wait times out non-zero (with a
+// plain-language line naming the last observed state) when the client never
+// comes online. A 1ns timeout means the deadline has passed by the first check,
+// so the loop never sleeps.
+func TestClientStatus_WaitTimeout_Exit1(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":0}]`)) // 0 = offline
+		}
+	})
+	setActiveClientID(t, "5")
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, time.Nanosecond)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1 on timeout", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("timeout error should say so, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "offline") {
+		t.Errorf("timeout error should name the last state (offline), got: %v", err)
+	}
+}
+
+// TestClientStatus_OneShot: without --wait, report the current state and exit 0.
+func TestClientStatus_OneShot(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":2}]`)) // 2 = pending
+		}
+	})
+	setActiveClientID(t, "5")
+	var out bytes.Buffer
+	if err := runClientStatus(context.Background(), ui.New(&out), false, 0); err != nil {
+		t.Fatalf("one-shot status should exit 0, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "pending") {
+		t.Errorf("expected the state label, got:\n%s", out.String())
+	}
+}
+
+// TestClientStatus_NoActiveClient: a machine with no active client is a clear
+// error, not a hang or a false "offline".
+func TestClientStatus_NoActiveClient(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	})
+	// withClientBackend leaves ActiveClientID empty.
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), false, 0)
+	if err == nil || !strings.Contains(err.Error(), "no active client") {
+		t.Errorf("want a 'no active client' error, got: %v", err)
 	}
 }
