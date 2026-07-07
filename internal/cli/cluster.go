@@ -149,7 +149,6 @@ func runClusterInfo(
 	p.Section("Kubeconfig")
 	p.Field("context", resolved.Context)
 	p.Field("server", resolved.ServerURL)
-	p.Field("namespace", resolved.Namespace)
 
 	// Discover the client's release — with the cluster-wide fallback scan
 	// when the namespace is just the kubeconfig default, so diagnostics find
@@ -167,6 +166,10 @@ func runClusterInfo(
 		return &exitError{code: 4, err: err}
 	}
 	resolved.Namespace = nsUsed
+	// Printed after discovery so it reflects the namespace the scan actually
+	// retargeted to — this pre-flight's whole job is to report what the next
+	// `data ingest` will target, so it must not show the pre-scan default.
+	p.Field("namespace", resolved.Namespace)
 
 	// Apply the SA-name override here. Discovery doesn't read the
 	// name from the cluster (see #7); customers with a non-default

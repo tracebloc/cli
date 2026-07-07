@@ -186,15 +186,22 @@ try {
     Move-Item -Path (Join-Path $tmpDir $binaryFile) -Destination $target -Force
 
     # Short alias: `tb` — a cmd shim next to the exe (symlinks need admin or
-    # dev-mode on Windows). Skipped if an unrelated tb.cmd already exists.
+    # dev-mode on Windows). Best-effort: an alias must never fail the install
+    # (mirrors install.sh), and we never clobber an unrelated tb.cmd — "ours"
+    # means it invokes exactly our binary path, not merely mentions the name.
     $tbShim = Join-Path $InstallPrefix 'tb.cmd'
     $shimBody = "@echo off`r`n`"$target`" %*`r`n"
-    if (-not (Test-Path $tbShim) -or ((Get-Content $tbShim -Raw -ErrorAction SilentlyContinue) -like "*$BinaryName*")) {
-        Set-Content -Path $tbShim -Value $shimBody -Encoding ascii
-        $tbNote = ' (short alias: tb)'
+    $tbNote = ''
+    $tbExisting = if (Test-Path $tbShim) { Get-Content $tbShim -Raw -ErrorAction SilentlyContinue } else { $null }
+    if (-not (Test-Path $tbShim) -or ($tbExisting -like ('*"' + $target + '"*'))) {
+        try {
+            Set-Content -Path $tbShim -Value $shimBody -Encoding ascii -ErrorAction Stop
+            $tbNote = ' (short alias: tb)'
+        } catch {
+            Write-Host "Note: couldn't create the tb alias ($($_.Exception.Message)) — skipping."
+        }
     } else {
         Write-Host "Note: $tbShim already exists and isn't ours — skipping the tb alias."
-        $tbNote = ''
     }
 
     Write-Host ""
