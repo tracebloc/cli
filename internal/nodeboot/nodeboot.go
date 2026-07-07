@@ -78,8 +78,20 @@ func TeardownCluster(ctx context.Context, name string) error {
 
 // UninstallChart removes the client's Helm release (release name = namespace, the
 // installer's convention). A missing release is not an error (idempotent teardown).
-func UninstallChart(ctx context.Context, namespace string) error {
-	_, err := run(ctx, "helm", "uninstall", namespace, "--namespace", namespace)
+//
+// kubeconfig and kubeContext target the release's cluster: helm otherwise acts on
+// the ambient $KUBECONFIG + current-context, so an operator whose current context
+// isn't the tracebloc cluster could uninstall the wrong release. Both are appended
+// only when non-empty, preserving the default-context behavior.
+func UninstallChart(ctx context.Context, namespace, kubeconfig, kubeContext string) error {
+	args := []string{"uninstall", namespace, "--namespace", namespace}
+	if kubeconfig != "" {
+		args = append(args, "--kubeconfig", kubeconfig)
+	}
+	if kubeContext != "" {
+		args = append(args, "--kube-context", kubeContext)
+	}
+	_, err := run(ctx, "helm", args...)
 	// Match helm's release-not-found wording specifically ("... release: not
 	// found"), not a bare "not found" — an unrelated failure whose output happens
 	// to contain "not found" (e.g. "Kubernetes cluster unreachable: ... not

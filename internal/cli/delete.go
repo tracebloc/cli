@@ -182,7 +182,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	// 2. Uninstall the Helm release (best-effort — the credential is already
 	//    revoked; a leftover release is harmless and re-runnable).
 	if ns != "" {
-		if uerr := uninstallChart(ctx, ns); uerr != nil {
+		if uerr := uninstallChart(ctx, ns, o.kubeconfigPath, o.contextOverride); uerr != nil {
 			p.Warnf("Chart uninstall reported: %v", uerr)
 		} else {
 			p.Successf("Uninstalled the Helm release %s.", ns)
@@ -213,7 +213,16 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	// 5. Remove ~/.tracebloc (config + on-host datasets on a single-host install)
 	//    unless --keep-data. This is the one irreversible step on that path.
 	if o.keepData {
-		p.Infof("Kept local data and config (~/.tracebloc) — --keep-data.")
+		// Spare ~/.tracebloc, but still clear the now-dangling active-client pointer:
+		// the credential is revoked, so leaving this host "enrolled" as the client
+		// would mislead a later sign-in / reinstall (§7.5). The token and on-host
+		// data stay; re-running `client create` re-adopts by cluster_id.
+		prof.ActiveClientID, prof.ActiveClientName, prof.ActiveClientNamespace = "", "", ""
+		if serr := cfg.Save(); serr != nil {
+			p.Warnf("Kept local data, but couldn't clear the active-client pointer (%v).", serr)
+		} else {
+			p.Infof("Kept local data and config (~/.tracebloc); cleared the active-client pointer — --keep-data.")
+		}
 	} else {
 		if derr := removeHostDataDir(); derr != nil {
 			p.Warnf("Couldn't remove local data (%v) — remove it by hand: rm -rf %s", derr, hostDataDirDisplay())
