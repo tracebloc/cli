@@ -312,8 +312,8 @@ func TestAuthCheck_SignedInValid_Exit0(t *testing.T) {
 		}
 		t.Errorf("unexpected request path %s", r.URL.Path)
 	})
-	saveSignedIn(t, "tok")
-	out, err := runCmd(t, "auth", "status", "--check")
+	saveSignedIn(t, "tok") // CurrentEnv=dev
+	out, err := runCmd(t, "auth", "status", "--check", "--env", "dev")
 	if err != nil {
 		t.Fatalf("--check should exit 0 when signed in + token valid, got: %v", err)
 	}
@@ -346,8 +346,8 @@ func TestAuthCheck_TokenRejected_Exit1(t *testing.T) {
 			return
 		}
 	})
-	saveSignedIn(t, "stale")
-	_, err := runCmd(t, "auth", "status", "--check")
+	saveSignedIn(t, "stale") // CurrentEnv=dev
+	_, err := runCmd(t, "auth", "status", "--check", "--env", "dev")
 	if got := ExitCodeFromError(err); got != 1 {
 		t.Fatalf("exit code = %d, want 1 on a rejected token", got)
 	}
@@ -360,8 +360,8 @@ func TestAuthCheck_VerboseNarrates(t *testing.T) {
 			_, _ = w.Write([]byte(`{"email":"ds@co","account":"Acme"}`))
 		}
 	})
-	saveSignedIn(t, "tok")
-	out, err := runCmd(t, "auth", "status", "--check", "--verbose")
+	saveSignedIn(t, "tok") // CurrentEnv=dev
+	out, err := runCmd(t, "auth", "status", "--check", "--verbose", "--env", "dev")
 	if err != nil {
 		t.Fatalf("--check --verbose signed-in should exit 0, got: %v", err)
 	}
@@ -380,12 +380,35 @@ func TestAuthCheck_UpgradeRequiredSurfaces(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
 		}
 	})
-	saveSignedIn(t, "tok")
-	_, err := runCmd(t, "auth", "status", "--check") // no --verbose
+	saveSignedIn(t, "tok")                                           // CurrentEnv=dev
+	_, err := runCmd(t, "auth", "status", "--check", "--env", "dev") // no --verbose
 	if got := ExitCodeFromError(err); got != 1 {
 		t.Fatalf("exit code = %d, want 1", got)
 	}
 	if IsSilentError(err) || err == nil || !strings.Contains(err.Error(), "too old") {
 		t.Errorf("a 426 must surface the upgrade message (non-silent), got: %v", err)
+	}
+}
+
+// TestAuthCheck_EnvMismatch_Exit1 (Lukas #1): a valid session for one env must NOT
+// pass --check for a DIFFERENT target env — otherwise the installer skips the
+// login that switches env and provisions into the wrong account. Exit 1 without
+// even probing the backend (no /userinfo/ call).
+func TestAuthCheck_EnvMismatch_Exit1(t *testing.T) {
+	probed := false
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/userinfo/" {
+			probed = true
+			_, _ = w.Write([]byte(`{"email":"ds@co","account":"Acme"}`))
+		}
+	})
+	saveSignedIn(t, "tok") // CurrentEnv=dev, valid dev session
+	// The installer targets prod this run; the dev session must not satisfy it.
+	_, err := runCmd(t, "auth", "status", "--check", "--env", "prod")
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1 on an env mismatch", got)
+	}
+	if probed {
+		t.Error("must not probe the backend when the signed-in env differs from the target")
 	}
 }

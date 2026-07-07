@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -248,8 +249,11 @@ type Spinner struct {
 // animate-vs-static contract; the returned handle is always safe to Stop.
 func (p *Printer) Spinner(msg, hint string) *Spinner {
 	s := &Spinner{p: p, msg: msg, hint: hint, start: time.Now()}
-	if !p.color {
-		// Static: one line, no redraw, no clock (nothing would ever update it).
+	// Static line (no redraw) when we can't animate cleanly: non-color/non-TTY, or
+	// Windows — the redraw writes raw \r\033[K + SGR straight to the writer, which
+	// fatih/color's Windows VT-enable path never sees, so legacy consoles would show
+	// escape garbage every tick. Windows gets the clean one-liner instead.
+	if !p.color || runtime.GOOS == "windows" {
 		p.out("  %s %s\n", "·", msg)
 		return s
 	}

@@ -871,3 +871,38 @@ func TestClientStatus_WaitTimeoutSurfacesListError(t *testing.T) {
 		t.Errorf("should not report a bare 'unreachable' when the error is known: %v", err)
 	}
 }
+
+// TestClientStatus_WaitFailsFastOn401 (Lukas #2): a revoked/expired token (401)
+// won't recover by waiting — --wait must fail fast pointing at sign-in, not burn
+// the full timeout. A 10-minute timeout would hang the test if it didn't.
+func TestClientStatus_WaitFailsFastOn401(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusUnauthorized) // dead credential
+		}
+	})
+	setActiveClientID(t, "5")
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, 10*time.Minute)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "rejected your credentials") {
+		t.Errorf("want a credentials-rejected error pointing at login, got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "timed out") {
+		t.Errorf("a 401 must fail fast, not time out: %v", err)
+	}
+}
+
+// TestClientStatus_TimeoutWithoutWaitRejected (Lukas #4): --timeout without --wait
+// is a silent no-op, so it's rejected rather than accepted misleadingly.
+func TestClientStatus_TimeoutWithoutWaitRejected(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // defensive; the guard returns before config access
+	_, err := runCmd(t, "client", "status", "--timeout", "5s")
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "no effect without --wait") {
+		t.Errorf("want a '--timeout needs --wait' error, got: %v", err)
+	}
+}

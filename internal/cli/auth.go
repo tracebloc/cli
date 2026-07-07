@@ -228,13 +228,14 @@ func newAuthCmd() *cobra.Command {
 // newAuthStatusCmd implements `tracebloc auth status`.
 func newAuthStatusCmd() *cobra.Command {
 	var check bool
+	var envFlag string
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show whether you're signed in, and to which backend",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if check {
-				return runAuthCheck(cmd.Context(), printerFor(cmd))
+				return runAuthCheck(cmd.Context(), printerFor(cmd), envFlag)
 			}
 			cfg, err := config.Load()
 			if err != nil {
@@ -266,24 +267,51 @@ func newAuthStatusCmd() *cobra.Command {
 	// --check makes the exit CODE the contract instead.
 	cmd.Flags().BoolVar(&check, "check", false,
 		"exit 0 only if signed in with a backend-valid token, else 1; silent unless --verbose")
+	cmd.Flags().StringVar(&envFlag, "env", "",
+		"backend environment the check targets: dev|stg|prod (default: $CLIENT_ENV, then prod)")
 	return cmd
 }
 
 // runAuthCheck is `auth status --check`: a machine-readable session probe for the
-// installer. Exit 0 = a token is present AND the backend accepts it (a live
-// WhoAmI); exit 1 = signed out, or the stored token was rejected/unreachable.
-// Silent by default; --verbose narrates the verdict. The exit-1 paths return a
-// nil-inner *exitError (IsSilentError) so main() prints nothing.
-func runAuthCheck(ctx context.Context, p *ui.Printer) error {
+// installer. Exit 0 = the machine is signed in to the TARGET environment with a
+// token the backend accepts (a live WhoAmI); exit 1 = signed out, signed in to a
+// different env, or the token was rejected/unreachable. Silent by default;
+// --verbose narrates the verdict. The exit-1 paths return a nil-inner *exitError
+// (IsSilentError) so main() prints nothing.
+//
+// The target env is resolved exactly like `login` (--env, then $CLIENT_ENV, then
+// prod), and must match the signed-in CurrentEnv — otherwise the probe would OK a
+// stale session for the wrong backend and the installer would skip the very
+// `login` that switches env, provisioning into the wrong account (RFC-0001 §10).
+func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 	cfg, err := config.Load()
-	if err != nil || !cfg.SignedIn() {
+	if err != nil {
 		if p.Verbose() {
 			p.Hintf("Not signed in. Run `tracebloc login`.")
 		}
 		return &exitError{code: 1}
 	}
-	client := newAPIClient(sessionEnv(cfg))
-	client.Token = cfg.Current().Token
+	target := api.ResolveEnv(envFlag)
+	if !cfg.SignedIn() || cfg.CurrentEnv != target {
+		if p.Verbose() {
+			if cfg.SignedIn() && cfg.CurrentEnv != target {
+				p.Hintf("Signed in to %q, but this run targets %q — run `tracebloc login`.", cfg.CurrentEnv, target)
+			} else {
+				p.Hintf("Not signed in. Run `tracebloc login`.")
+			}
+		}
+		return &exitError{code: 1}
+	}
+	// Signed in AND CurrentEnv == target: probe it. authedClient() builds the client
+	// for sessionEnv (== CurrentEnv == target) with the stored token — reuse it and
+	// discard its message (the exit code is the contract here).
+	client, _, err := authedClient()
+	if err != nil {
+		if p.Verbose() {
+			p.Hintf("Not signed in. Run `tracebloc login`.")
+		}
+		return &exitError{code: 1}
+	}
 	if _, err := client.WhoAmI(ctx); err != nil {
 		// A 426 means the CLI is too old, not that the session is invalid — surface
 		// the upgrade instruction (non-silent, so it shows even without --verbose)
