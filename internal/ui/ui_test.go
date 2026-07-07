@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 // esc is the ANSI SGR prefix every color escape starts with. Its
@@ -96,5 +97,66 @@ func TestNoColorEnv_DefaultsPlain(t *testing.T) {
 
 	if strings.Contains(buf.String(), esc) {
 		t.Errorf("NO_COLOR set but ANSI emitted: %q", buf.String())
+	}
+}
+
+// TestAction_Plain: the imperative Open/Enter rows surface label + value with no
+// ANSI when color is off.
+func TestAction_Plain(t *testing.T) {
+	var buf bytes.Buffer
+	p := New(&buf, WithColor(false))
+	p.Action("Open", "https://x/activate")
+	p.Action("Enter", "WDJB-MJHT")
+
+	out := buf.String()
+	if strings.Contains(out, esc) {
+		t.Errorf("Action emitted ANSI with color off: %q", out)
+	}
+	for _, want := range []string{"Open", "https://x/activate", "Enter", "WDJB-MJHT"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Action output missing %q: %q", want, out)
+		}
+	}
+}
+
+// TestSpinner_StaticWhenPlain: on a non-animating Printer the spinner prints ONE
+// static line — no carriage return, no ANSI — and Stop is a no-op.
+func TestSpinner_StaticWhenPlain(t *testing.T) {
+	var buf bytes.Buffer
+	p := New(&buf, WithColor(false))
+	s := p.Spinner("Waiting for your browser…", "Ctrl-C to cancel")
+	s.Stop()
+
+	out := buf.String()
+	if strings.Contains(out, "\r") || strings.Contains(out, esc) {
+		t.Errorf("static spinner emitted \\r or ANSI: %q", out)
+	}
+	if !strings.Contains(out, "Waiting for your browser…") {
+		t.Errorf("static spinner missing message: %q", out)
+	}
+	if n := strings.Count(out, "\n"); n != 1 {
+		t.Errorf("static spinner should print exactly one line, got %d: %q", n, out)
+	}
+}
+
+// TestSpinner_DrawFormatsElapsed exercises the animated redraw directly (without
+// the goroutine, to stay race-free): it renders mm:ss elapsed, the message, and
+// the \r + clear-to-EOL control so the line self-overwrites.
+func TestSpinner_DrawFormatsElapsed(t *testing.T) {
+	var buf bytes.Buffer
+	p := New(&buf, WithColor(true))
+	s := &Spinner{p: p, msg: "Waiting for your browser…", hint: "Ctrl-C to cancel",
+		start: time.Now().Add(-65 * time.Second)}
+	s.draw(spinnerFrames[0])
+
+	out := buf.String()
+	if !strings.HasPrefix(out, "\r\x1b[K") {
+		t.Errorf("draw should start with a carriage return + clear-to-EOL, got: %q", out)
+	}
+	if !strings.Contains(out, "1:05") {
+		t.Errorf("draw should render 65s as 1:05, got: %q", out)
+	}
+	if !strings.Contains(out, "Waiting for your browser…") {
+		t.Errorf("draw missing message: %q", out)
 	}
 }

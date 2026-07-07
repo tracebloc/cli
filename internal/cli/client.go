@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -41,7 +42,7 @@ func newClientCmd() *cobra.Command {
 		Long: `Provision a tracebloc client for this machine and list/select clients
 in your account.  Requires sign-in first (` + "`tracebloc login`" + `).`,
 	}
-	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientUseCmd())
+	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientUseCmd(), newClientStatusCmd())
 	return cmd
 }
 
@@ -645,6 +646,160 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 	return nil
 }
 
+func newClientStatusCmd() *cobra.Command {
+	var wait bool
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show whether tracebloc can see this machine's client (online)",
+		Long: `Report tracebloc's view of this machine's active client — online, offline,
+or pending. With --wait, poll until tracebloc reports it online (exit 0) or the
+timeout elapses (non-zero), to confirm the client connected after setup.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// --timeout only governs the --wait poll; accepting it alone would be a
+			// silent no-op, so reject it rather than mislead.
+			if cmd.Flags().Changed("timeout") && !wait {
+				return &exitError{code: 1, err: errors.New("--timeout has no effect without --wait")}
+			}
+			return runClientStatus(cmd.Context(), printerFor(cmd), wait, timeout)
+		},
+	}
+	cmd.Flags().BoolVar(&wait, "wait", false, "poll until tracebloc reports this client online")
+	cmd.Flags().DurationVar(&timeout, "timeout", 120*time.Second, "with --wait, give up after this long")
+	return cmd
+}
+
+// clientStatusPollInterval is how often --wait re-checks the backend. A const,
+// not a seam: tests inject through pollAfter (which ignores the duration and
+// fires instantly), so the value never needs overriding.
+const clientStatusPollInterval = 3 * time.Second
+
+func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time.Duration) error {
+	client, cfg, err := authedClient()
+	if err != nil {
+		return &exitError{code: 1, err: err}
+	}
+	active := cfg.Current().ActiveClientID
+	if active == "" {
+		return &exitError{code: 1, err: errors.New(
+			"no active client on this machine — run `tracebloc client create` (or `client use <id>`) first")}
+	}
+
+	// One-shot: report the current state and exit 0 (informational).
+	if !wait {
+		st, found, lerr := lookupClientStatus(ctx, client, active)
+		if lerr != nil {
+			return &exitError{code: 1, err: lerr}
+		}
+		if !found {
+			return &exitError{code: 1, err: fmt.Errorf(
+				"active client %s isn't in your account list — run `tracebloc client list` to see "+
+					"your clients, or re-run the installer to provision this machine", active)}
+		}
+		p.Section("Client status")
+		p.Field("state", clientStateLabel(st))
+		return nil
+	}
+
+	// --wait: poll the same source `client list` renders until online or timeout.
+	// The backend-reported status is the honest Online signal (RFC-0001 §8.5); a
+	// local rollout check can't tell whether tracebloc can actually see the client.
+	sp := p.Spinner("Waiting for tracebloc to confirm…", "")
+	defer sp.Stop() // leak-proof net for every return; the online path Stops explicitly before its ✔
+	deadline := time.Now().Add(timeout)
+	var lastErr error // most recent transient (retryable) error, for the timeout message
+	lastState := -1   // most recent successfully-read status; -1 = none read yet
+	var ue *api.UpgradeRequiredError
+	var apiErr *api.APIError
+	for {
+		st, found, lerr := lookupClientStatus(ctx, client, active)
+		switch {
+		case errors.As(lerr, &ue):
+			// 426 (CLI too old) won't recover by waiting — surface the upgrade signal.
+			return &exitError{code: 1, err: lerr}
+		case errors.As(lerr, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden):
+			// A revoked/expired/forbidden token (401/403) won't recover by waiting —
+			// the client itself may be online. Fail fast, point at sign-in. Note 429
+			// and 5xx stay transient (below): those DO recover on retry.
+			return &exitError{code: 1, err: errors.New(
+				"tracebloc rejected your credentials while waiting — run `tracebloc login`, then retry")}
+		case lerr != nil:
+			lastErr = lerr // transient (5xx / 429 / network) — keep waiting, remember why
+		case !found:
+			// The active client isn't in the account (deleted / wrong account) — no
+			// amount of waiting surfaces it. Fail fast, matching the one-shot path.
+			return &exitError{code: 1, err: fmt.Errorf(
+				"active client %s isn't in your account list — run `tracebloc client list` to see "+
+					"your clients, or re-run the installer to provision this machine", active)}
+		case st == clientStatusOnline:
+			sp.Stop()
+			p.Successf("tracebloc can see this client.")
+			return nil
+		default:
+			// A good poll (present, not online yet) supersedes any earlier transient
+			// error, so a later timeout reports the real state, not a stale failure.
+			lastErr, lastState = nil, st
+		}
+
+		// --timeout caps how long we WAIT: stop once the budget is spent, and clamp
+		// the sleep to what remains so total runtime doesn't overshoot by a poll
+		// cycle. A poll begun within budget is still honored (online → ✔ above).
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			switch {
+			case lastErr != nil:
+				return &exitError{code: 1, err: fmt.Errorf(
+					"timed out after %s waiting for tracebloc to report this client online; "+
+						"the last status check failed: %v", timeout, lastErr)}
+			case lastState >= 0:
+				return &exitError{code: 1, err: fmt.Errorf(
+					"timed out after %s waiting for tracebloc to report this client online (last state: %s). "+
+						"Run `tracebloc cluster doctor` to diagnose, or re-run the installer.", timeout, clientStateLabel(lastState))}
+			default:
+				return &exitError{code: 1, err: fmt.Errorf(
+					"timed out after %s before tracebloc could confirm this client — retry, "+
+						"or run `tracebloc cluster doctor`.", timeout)}
+			}
+		}
+		wait := clientStatusPollInterval
+		if wait > remaining {
+			wait = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return &exitError{code: 130} // Ctrl-C: exit quietly (no "Error: context canceled")
+		case <-pollAfter(wait):
+		}
+	}
+}
+
+// lookupClientStatus finds the account client whose numeric id matches active and
+// returns its backend status code. found=false means no such client (deleted, or
+// signed into the wrong account). A list error is returned verbatim so --wait can
+// treat it as transient and retry.
+func lookupClientStatus(ctx context.Context, client *api.Client, active string) (status int, found bool, err error) {
+	clients, err := client.ListClients(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	if c := findClientByID(clients, active); c != nil {
+		return c.Status, true, nil
+	}
+	return 0, false, nil
+}
+
+// findClientByID returns the account client whose numeric dashboard id equals id
+// (the string form stored as the active-client pointer), or nil if none match.
+func findClientByID(clients []api.ProvisionedClient, id string) *api.ProvisionedClient {
+	for i := range clients {
+		if strconv.Itoa(clients[i].ID) == id {
+			return &clients[i]
+		}
+	}
+	return nil
+}
+
 // EdgeDevice.status codes mirrored from the backend (metaApi User.py).
 const (
 	clientStatusOffline = 0
@@ -677,15 +832,13 @@ func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
 	if err != nil {
 		return &exitError{code: 1, err: err}
 	}
-	for _, c := range clients {
-		if strconv.Itoa(c.ID) == id {
-			setActiveClient(cfg.Current(), &c)
-			if serr := cfg.Save(); serr != nil {
-				return &exitError{code: 1, err: serr}
-			}
-			p.Successf("This machine is now set to enroll as client %s (%s).", id, c.Name)
-			return nil
+	if c := findClientByID(clients, id); c != nil {
+		setActiveClient(cfg.Current(), c)
+		if serr := cfg.Save(); serr != nil {
+			return &exitError{code: 1, err: serr}
 		}
+		p.Successf("This machine is now set to enroll as client %s (%s).", id, c.Name)
+		return nil
 	}
 	return &exitError{code: 1, err: fmt.Errorf(
 		"no client %s in your account — run `tracebloc client list` to see the ids", id)}

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
@@ -1071,5 +1072,246 @@ func TestClientCreate_NonInteractiveListFailureExplainsCause(t *testing.T) {
 	}
 	if posted {
 		t.Error("must not mint when the client list is unreadable")
+	}
+}
+
+// setActiveClientID points the signed-in profile at client id `id` (the local
+// "this machine enrolls as" pointer that `client status` reads).
+func setActiveClientID(t *testing.T, id string) {
+	t.Helper()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Current().ActiveClientID = id
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestClientStatus_WaitOnline_Exit0: --wait exits 0 as soon as the backend
+// reports the active client online, and says so.
+func TestClientStatus_WaitOnline_Exit0(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":1}]`)) // 1 = online
+			return
+		}
+		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+	})
+	setActiveClientID(t, "5")
+	var out bytes.Buffer
+	if err := runClientStatus(context.Background(), ui.New(&out), true, 5*time.Second); err != nil {
+		t.Fatalf("--wait should exit 0 when the client is online, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "can see this client") {
+		t.Errorf("expected the confirmation line, got:\n%s", out.String())
+	}
+}
+
+// TestClientStatus_WaitTimeout_Exit1: --wait times out non-zero (with a
+// plain-language line naming the last observed state) when the client never
+// comes online. A 1ns timeout means the deadline has passed by the first check,
+// so the loop never sleeps.
+func TestClientStatus_WaitTimeout_Exit1(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":0}]`)) // 0 = offline
+		}
+	})
+	setActiveClientID(t, "5")
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, time.Nanosecond)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1 on timeout", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("timeout error should say so, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "offline") {
+		t.Errorf("timeout error should name the last state (offline), got: %v", err)
+	}
+}
+
+// TestClientStatus_OneShot: without --wait, report the current state and exit 0.
+func TestClientStatus_OneShot(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":2}]`)) // 2 = pending
+		}
+	})
+	setActiveClientID(t, "5")
+	var out bytes.Buffer
+	if err := runClientStatus(context.Background(), ui.New(&out), false, 0); err != nil {
+		t.Fatalf("one-shot status should exit 0, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "pending") {
+		t.Errorf("expected the state label, got:\n%s", out.String())
+	}
+}
+
+// TestClientStatus_NoActiveClient: a machine with no active client is a clear
+// error, not a hang or a false "offline".
+func TestClientStatus_NoActiveClient(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	})
+	// withClientBackend leaves ActiveClientID empty.
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), false, 0)
+	if err == nil || !strings.Contains(err.Error(), "no active client") {
+		t.Errorf("want a 'no active client' error, got: %v", err)
+	}
+}
+
+// TestClientStatus_WaitFailsFastOn426 (Bugbot #146-D): --wait must not retry a
+// 426 until timeout — it fails fast with the upgrade signal. A long timeout
+// proves we didn't poll to exhaustion.
+func TestClientStatus_WaitFailsFastOn426(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusUpgradeRequired) // 426
+			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
+		}
+	})
+	setActiveClientID(t, "5")
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, 10*time.Minute)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Errorf("want the upgrade message, got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "timed out") {
+		t.Errorf("a 426 must fail fast, not time out: %v", err)
+	}
+}
+
+// TestClientStatus_WaitFailsFastOnMissingClient (Bugbot #146-E): --wait must fail
+// fast when the active client isn't in the account (deleted / wrong account),
+// matching the one-shot path, rather than polling to the timeout.
+func TestClientStatus_WaitFailsFastOnMissingClient(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			_, _ = w.Write([]byte(`[{"id":9,"first_name":"other","namespace":"other","status":1}]`)) // active id 5 absent
+		}
+	})
+	setActiveClientID(t, "5")
+	// Long timeout: the test would hang if it didn't fail fast on the missing client.
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, 10*time.Minute)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "isn't in your account list") {
+		t.Errorf("want a 'not in account list' error, got: %v", err)
+	}
+}
+
+// TestClientStatus_WaitTimeoutSurfacesListError (Bugbot #146-F): when every
+// status check fails, the timeout message must name the real error, not a bare
+// "unreachable". A 1ns timeout means the deadline passes on the first failure.
+func TestClientStatus_WaitTimeoutSurfacesListError(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusInternalServerError) // persistent list failure
+		}
+	})
+	setActiveClientID(t, "5")
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, time.Nanosecond)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "last status check failed") {
+		t.Errorf("timeout should surface the real list error, got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "unreachable") {
+		t.Errorf("should not report a bare 'unreachable' when the error is known: %v", err)
+	}
+}
+
+// TestClientStatus_WaitFailsFastOn401 (Lukas #2): a revoked/expired token (401)
+// won't recover by waiting — --wait must fail fast pointing at sign-in, not burn
+// the full timeout. A 10-minute timeout would hang the test if it didn't.
+func TestClientStatus_WaitFailsFastOn401(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusUnauthorized) // dead credential
+		}
+	})
+	setActiveClientID(t, "5")
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, 10*time.Minute)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "rejected your credentials") {
+		t.Errorf("want a credentials-rejected error pointing at login, got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "timed out") {
+		t.Errorf("a 401 must fail fast, not time out: %v", err)
+	}
+}
+
+// TestClientStatus_TimeoutWithoutWaitRejected (Lukas #4): --timeout without --wait
+// is a silent no-op, so it's rejected rather than accepted misleadingly.
+func TestClientStatus_TimeoutWithoutWaitRejected(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // defensive; the guard returns before config access
+	_, err := runCmd(t, "client", "status", "--timeout", "5s")
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "no effect without --wait") {
+		t.Errorf("want a '--timeout needs --wait' error, got: %v", err)
+	}
+}
+
+// TestClientStatus_WaitTimeoutClearsStaleError (Bugbot): an early transient list
+// error must not mask the real last state at timeout — once a later poll succeeds
+// (client present but offline), the timeout reports "offline", not the old error.
+func TestClientStatus_WaitTimeoutClearsStaleError(t *testing.T) {
+	calls := 0
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			calls++
+			if calls == 1 {
+				w.WriteHeader(http.StatusBadGateway) // one transient blip
+				return
+			}
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":0}]`)) // then offline
+		}
+	})
+	setActiveClientID(t, "5")
+	// Instant polling so many iterations fit inside the timeout — the first is the
+	// 502, all the rest are the successful offline poll that clears lastErr.
+	origAfter := pollAfter
+	pollAfter = func(time.Duration) <-chan time.Time { ch := make(chan time.Time, 1); ch <- time.Time{}; return ch }
+	t.Cleanup(func() { pollAfter = origAfter })
+
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, 100*time.Millisecond)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "last state: offline") {
+		t.Errorf("timeout should report the real last state (offline), got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "last status check failed") {
+		t.Errorf("a stale transient error must be cleared after a later successful poll: %v", err)
+	}
+}
+
+// TestClientStatus_WaitCtrlCIsSilent (review #4): cancelling the context (Ctrl-C)
+// during --wait exits quietly with code 130 — not a bare "Error: context canceled".
+func TestClientStatus_WaitCtrlCIsSilent(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":0}]`)) // offline
+		}
+	})
+	setActiveClientID(t, "5")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate Ctrl-C
+	err := runClientStatus(ctx, ui.New(&bytes.Buffer{}), true, 10*time.Second)
+	if got := ExitCodeFromError(err); got != 130 {
+		t.Fatalf("exit code = %d, want 130 on Ctrl-C", got)
+	}
+	if !IsSilentError(err) {
+		t.Errorf("Ctrl-C should exit silently (nil-inner exitError), got: %v", err)
 	}
 }
