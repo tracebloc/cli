@@ -10,6 +10,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ErrNoParentRelease is the sentinel for DiscoverParentRelease's "the namespace
@@ -57,14 +59,12 @@ type ParentRelease struct {
 	JobsManagerServiceName string
 	JobsManagerPort        int
 
-	// IngestorSAName is the name of the ServiceAccount the chart's
-	// hook pods run as. Today this is always the chart's default
-	// "ingestor". Customers who set `ingestionAuthz.serviceAccountName`
-	// to a non-default name in the parent client chart need to
-	// override via `tracebloc cluster info --ingestor-sa=<name>`
-	// (and similarly for the future `dataset push` command). Reading
-	// the name from the cluster's ingestionAuthz ConfigMap so this
-	// flag becomes unnecessary is a v0.2 follow-up (see #7).
+	// IngestorSAName is the name of the ServiceAccount the CLI mints a
+	// jobs-manager token for and runs its stage/teardown pods as. It is
+	// discovered from the chart's ingestionAuthz ConfigMap — the policy
+	// jobs-manager actually enforces (see discoverIngestorSAName, #7) — and
+	// defaults to the chart default "ingestor" when the ConfigMap is absent
+	// (older chart), unreadable, or ambiguous.
 	IngestorSAName string
 
 	// IngestorImageDigest is the canonical digest the cluster's
@@ -171,17 +171,16 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 	release.JobsManagerServiceName = svc
 	release.JobsManagerPort = jobsManagerPort
 
-	// Read INGESTOR_IMAGE_DIGEST from jobs-manager's pod-spec env.
-	// The chart pipes images.ingestor.digest through to here.
-	//
-	// SA name is NOT discovered today — the chart doesn't surface
-	// `ingestionAuthz.serviceAccountName` through the jobs-manager
-	// env, and reading the ingestionAuthz ConfigMap to learn it is a
-	// v0.2 follow-up (see #7). We default to "ingestor" (the chart
-	// default); customers who renamed it pass --ingestor-sa from
-	// the CLI. Bugbot caught the earlier version that incorrectly
-	// claimed to read the SA name from env.
+	// The ingestor ServiceAccount name. Default to the chart default
+	// ("ingestor"), then let the ingestionAuthz ConfigMap override it — that
+	// ConfigMap IS the policy jobs-manager enforces, so it is the authoritative
+	// source for which SA may call submit-ingestion-run (#7). Best-effort:
+	// a missing ConfigMap (older chart), an RBAC denial, or an ambiguous
+	// policy all leave the default in place.
 	release.IngestorSAName = "ingestor"
+	if sa := discoverIngestorSAName(ctx, cs, namespace, release.ReleaseName); sa != "" {
+		release.IngestorSAName = sa
+	}
 	if len(d.Spec.Template.Spec.Containers) > 0 {
 		for _, env := range d.Spec.Template.Spec.Containers[0].Env {
 			if env.Name == "INGESTOR_IMAGE_DIGEST" {
@@ -191,6 +190,61 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 	}
 
 	return release, nil
+}
+
+// discoverIngestorSAName reads the chart's ingestion-authz ConfigMap
+// (`<release>-ingestion-authz`, key `ingestion-authz.yaml`) and returns the
+// ServiceAccount the CLI should mint a token for — the one jobs-manager will
+// accept on POST /internal/submit-ingestion-run. It replaces the old hardcoded
+// "ingestor" default + the manual --ingestor-sa flag (#7).
+//
+// The policy lists `allowed[]` entries of (service_account, namespace,
+// table_prefixes). We keep only entries whose namespace matches the namespace
+// we'll mint in (the rendered ConfigMap always populates namespace, defaulting
+// to the release namespace), then require exactly one distinct non-empty
+// service_account. Anything else — ConfigMap absent (older chart), RBAC denial,
+// empty policy, or two different SAs — returns "" so the caller keeps the
+// "ingestor" default rather than guessing an SA the server would reject.
+// Best-effort by contract: never returns an error.
+func discoverIngestorSAName(ctx context.Context, cs kubernetes.Interface, namespace, releaseName string) string {
+	if releaseName == "" {
+		return ""
+	}
+	cm, err := cs.CoreV1().ConfigMaps(namespace).Get(
+		ctx, releaseName+"-ingestion-authz", metav1.GetOptions{})
+	if err != nil {
+		// NotFound (older chart / no ingestor subchart) or an RBAC/API error —
+		// both non-fatal; fall back to the default.
+		return ""
+	}
+	raw, ok := cm.Data["ingestion-authz.yaml"]
+	if !ok {
+		return ""
+	}
+	var policy struct {
+		Allowed []struct {
+			ServiceAccount string `yaml:"service_account"`
+			Namespace      string `yaml:"namespace"`
+		} `yaml:"allowed"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &policy); err != nil {
+		return ""
+	}
+	sa := ""
+	for _, e := range policy.Allowed {
+		// Only entries that apply to the namespace we mint in — a token minted
+		// here is worthless against a policy entry scoped to a different ns.
+		if e.Namespace != namespace || e.ServiceAccount == "" {
+			continue
+		}
+		switch {
+		case sa == "":
+			sa = e.ServiceAccount
+		case sa != e.ServiceAccount:
+			return "" // ambiguous — more than one SA for this namespace; keep the default
+		}
+	}
+	return sa
 }
 
 // FindClientNamespaces scans every namespace the kubeconfig user may list for
