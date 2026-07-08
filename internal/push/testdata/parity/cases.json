@@ -7,7 +7,8 @@
       "csv": "data.csv",
       "label_column": "label",
       "cli_verdict": "accept",
-      "ingestor_verdict": "accept"
+      "ingestor_verdict": "accept",
+      "value_parity": true
     },
     {
       "name": "tabular-dup-header",
@@ -56,7 +57,8 @@
         8
       ],
       "cli_verdict": "accept",
-      "ingestor_verdict": "accept"
+      "ingestor_verdict": "accept",
+      "value_parity": true
     },
     {
       "name": "imgc-bom-labels",
@@ -70,7 +72,8 @@
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "pandas strips the BOM in-cluster \u2014 the CLI must NOT reject what the cluster accepts (cli#71 parity)"
+      "note": "pandas strips the BOM in-cluster \u2014 the CLI must NOT reject what the cluster accepts (cli#71 parity)",
+      "value_parity": true
     },
     {
       "name": "imgc-label-missing",
@@ -98,7 +101,8 @@
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "the ingestor's _match_column is case-insensitive + trimmed \u2014 the CLI must be exactly as loose"
+      "note": "the ingestor's _match_column is case-insensitive + trimmed \u2014 the CLI must be exactly as loose",
+      "value_parity": true
     },
     {
       "name": "imgc-zero-byte",
@@ -196,7 +200,8 @@
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "non-square [W,H]=[8,4]: pins the target_size ORIENTATION end-to-end \u2014 an [H,W] swap on emit (the pre-P3 bug) flips this to reject in-cluster"
+      "note": "non-square [W,H]=[8,4]: pins the target_size ORIENTATION end-to-end \u2014 an [H,W] swap on emit (the pre-P3 bug) flips this to reject in-cluster",
+      "value_parity": true
     },
     {
       "name": "imgc-nonsquare-swapped",
@@ -238,7 +243,8 @@
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "empty-string label IS a class for image categories (keep_default_na=False): the CLI must not be stricter"
+      "note": "empty-string label IS a class for image categories (keep_default_na=False): the CLI must not be stricter",
+      "value_parity": true
     },
     {
       "name": "imgc-dotted-stem",
@@ -252,7 +258,8 @@
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "row 'photo.2024' resolves to photo.2024.jpg via _has_extension (dotted stems are not extensions) \u2014 the CLI's cross-check must mirror, not reject"
+      "note": "row 'photo.2024' resolves to photo.2024.jpg via _has_extension (dotted stems are not extensions) \u2014 the CLI's cross-check must mirror, not reject",
+      "value_parity": true
     },
     {
       "name": "tabular-na-labels",
@@ -280,7 +287,8 @@
       "extension": ".txt",
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "pins the text-family dispatch"
+      "note": "pins the text-family dispatch",
+      "value_parity": true
     },
     {
       "name": "tabular-varchar-numeric-labels",
@@ -293,7 +301,8 @@
       },
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "labels '1' vs '1.0' under a VARCHAR label: the ingestor pins dtype=str (no numeric collapse) so they are 2 classes \u2014 pins #152's schema-type-aware collapse (the earlier blanket collapse falsely rejected this)"
+      "note": "labels '1' vs '1.0' under a VARCHAR label: the ingestor pins dtype=str (no numeric collapse) so they are 2 classes \u2014 pins #152's schema-type-aware collapse (the earlier blanket collapse falsely rejected this)",
+      "value_parity": true
     },
     {
       "name": "tabular-float-numeric-labels",

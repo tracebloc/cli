@@ -22,6 +22,16 @@ error copy may drift harmlessly; verdicts may not. TableNameValidator and
 DuplicateValidator are skipped (they check cluster-side state — the table
 name is validated separately by both sides, and destination-duplicate
 handling is the cli#70 guard's territory, not a data-hygiene rule).
+
+For cases the manifest flags ``value_parity`` (and the ingestor accepts),
+this also records a VALUE-level golden — the label column the ingestor read
+path RESOLVES to, the row count, and the class set it stores — by driving the
+REAL read path (CSVIngestor.read_data + the #340 label resolution +
+RecordProcessor). parity_golden_test.go then pins that the Go preview reads
+exactly the same values, catching accept/accept-with-divergent-label — the
+#340 class a verdict alone is blind to (backend#1009). This requires the #340
+fix in the target ingestor; the generator fails loudly without it rather than
+pin the bug.
 """
 
 import json
@@ -58,6 +68,59 @@ def infer_schema(csv_path):
 
     cols = list(pd.read_csv(csv_path, nrows=0, encoding="utf-8").columns)
     return {str(c).strip(): "VARCHAR(255)" for c in cols}
+
+
+def read_label_values(case, csv_path, cfg, options):
+    """Drive the REAL ingestor read path — CSVIngestor.read_data + the #340
+    label-column resolution + RecordProcessor — to capture the value-level view
+    the parity harness pins: the resolved label header, the row count, and the
+    sorted distinct classes the ingestor actually stores. This is the only
+    thing that catches accept/accept-with-divergent-label (the #340 class):
+    verdicts stay 'accept' while the stored labels silently go null.
+
+    Requires the #340 fix (BaseIngestor._resolve_label_column) in the target
+    ingestor — without it a case-/whitespace-mismatched label would read null
+    and this generator would pin the BUG. Fails loudly if it's absent.
+    """
+    from unittest.mock import MagicMock
+
+    from tracebloc_ingestor.ingestors.csv_ingestor import CSVIngestor
+
+    db = MagicMock()
+    db.config = cfg
+    file_opts = {k: v for k, v in options.items() if k != "schema"}
+    ing = CSVIngestor(
+        database=db,
+        api_client=MagicMock(),
+        table_name="parity_t",
+        schema=options.get("schema", {}) or {},
+        label_column=case.get("label_column", "label"),
+        intent="train",
+        category=case["category"],
+        file_options=file_opts,
+    )
+    if not hasattr(ing, "_resolve_label_column"):
+        sys.exit(
+            "the target ingestor predates the #340 label-resolution fix; "
+            "value-level parity requires it. Point DATA_INGESTORS_DIR at a "
+            "checkout that includes BaseIngestor._resolve_label_column."
+        )
+    records = list(ing.read_data(csv_path))
+    # Pin the label column on the first record that CONTAINS it (mirrors the
+    # ingest loop; sparse-record-safe), then read every row's stored label.
+    for rec in records:
+        if ing._resolve_label_column(rec.keys()):
+            break
+    labels = []
+    for rec in records:
+        cleaned = ing.process_record(rec)
+        labels.append(cleaned.get("label") if cleaned else None)
+    classes = sorted({str(v) for v in labels if v is not None})
+    return {
+        "resolved_label": ing.label_column,
+        "row_count": len(records),
+        "classes": classes,
+    }
 
 
 def run_case(case):
@@ -103,10 +166,18 @@ def run_case(case):
             except Exception as exc:  # a raising validator is a rejection too
                 errors.append(f"{type(v).__name__}: raised {exc}")
 
-    return {
+    result = {
         "verdict": "reject" if errors else "accept",
         "errors": errors[:6],
     }
+    # Value-level golden (data-ingestors #340 class): for cases the manifest
+    # flags value_parity AND the ingestor accepts, pin the resolved label,
+    # row count, and class set the REAL read path produces — parity_golden_test
+    # asserts the Go preview reads exactly these. Only meaningful when accepted
+    # (a rejected run never reaches the read path).
+    if case.get("value_parity") and not errors:
+        result["values"] = read_label_values(case, csv_path, cfg, options)
+    return result
 
 
 def main():

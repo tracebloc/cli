@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"testing"
 )
 
-// The validator-parity harness (backend#828 P3). Two assertions per case:
+// The validator-parity harness (backend#828 P3; value-level from backend#1009).
+// Per case:
 //
 //  1. the Go preflight's verdict matches the manifest's cli_verdict —
 //     pins the CLI side;
@@ -17,6 +19,11 @@ import (
 //     manifest's ingestor_verdict — so when the ingestor's rules change,
 //     regenerating the goldens fails this test until the manifest (and,
 //     where needed, the Go preview) is consciously updated.
+//  3. for cases flagged value_parity, the Go preview's VALUE-level read of
+//     the label column (resolved header + row count + class set) equals the
+//     REAL ingestor's — the only assertion that catches accept/accept with
+//     divergent stored data (data-ingestors #340: a case-/whitespace-
+//     mismatched label passes both verdicts, then reads null in-cluster).
 //
 // Deliberate divergences (the CLI previewing read-/transfer-time failures
 // the ingestor's preflight can't see) are explicit in the manifest, never
@@ -32,6 +39,7 @@ type parityCase struct {
 	Schema          map[string]string `json:"schema"`
 	CLIVerdict      string            `json:"cli_verdict"`
 	IngestorVerdict string            `json:"ingestor_verdict"`
+	ValueParity     bool              `json:"value_parity"`
 	Note            string            `json:"note"`
 }
 
@@ -45,6 +53,11 @@ func TestValidatorParity(t *testing.T) {
 		Verdicts map[string]struct {
 			Verdict string   `json:"verdict"`
 			Errors  []string `json:"errors"`
+			Values  *struct {
+				Resolved string   `json:"resolved_label"`
+				RowCount int      `json:"row_count"`
+				Classes  []string `json:"classes"`
+			} `json:"values"`
 		} `json:"verdicts"`
 	}
 	mustLoad(t, filepath.Join("testdata", "parity", "goldens.json"), &goldens)
@@ -64,8 +77,54 @@ func TestValidatorParity(t *testing.T) {
 			if got != c.CLIVerdict {
 				t.Errorf("Go preflight = %q, manifest expects %q (note: %s)", got, c.CLIVerdict, c.Note)
 			}
+
+			if !c.ValueParity {
+				return
+			}
+			// Value-level parity (backend#1009): the Go preview must read the
+			// SAME label header, row count, and class set the real ingestor
+			// does. Catches accept/accept-with-divergent-label (#340).
+			if golden.Values == nil {
+				t.Fatalf("case %s is value_parity but goldens.json has no values — "+
+					"regenerate with scripts/gen-validator-goldens.py against a data-ingestors "+
+					"checkout that includes the #340 label-resolution fix", c.Name)
+			}
+			gv := goLabelValues(t, c)
+			if gv.Resolved != golden.Values.Resolved {
+				t.Errorf("resolved label: Go preview = %q, ingestor golden = %q "+
+					"(the read paths resolve the label column differently — #340 class)",
+					gv.Resolved, golden.Values.Resolved)
+			}
+			if gv.RowCount != golden.Values.RowCount {
+				t.Errorf("row count: Go preview = %d, ingestor golden = %d", gv.RowCount, golden.Values.RowCount)
+			}
+			if !slices.Equal(gv.Classes, golden.Values.Classes) {
+				t.Errorf("class set: Go preview = %v, ingestor golden = %v", gv.Classes, golden.Values.Classes)
+			}
 		})
 	}
+}
+
+// goLabelValues runs the Go preview's value-level label read for a case,
+// deriving the NA-drop / numeric-collapse flags from the label's schema type
+// exactly as PreflightDataset does — so the value comparison uses the same
+// read semantics the production preflight would.
+func goLabelValues(t *testing.T, c parityCase) LabelReadValues {
+	t.Helper()
+	csvPath := filepath.Join("testdata", "parity", "cases", c.Name, c.CSV)
+	schema := c.Schema
+	if IsTabular(c.Category) && len(schema) == 0 {
+		if sch, _, _, err := InferSchema(csvPath); err == nil {
+			schema = sch
+		}
+	}
+	dropNA, collapse := false, false
+	if IsTabular(c.Category) {
+		sqlType, inSchema := labelSchemaType(schema, c.LabelColumn)
+		dropNA = inSchema
+		collapse = !(inSchema && isStringSQLType(sqlType))
+	}
+	return ReadLabelValues(csvPath, c.LabelColumn, dropNA, collapse)
 }
 
 // runGoPreflight runs THE production dispatch (push.PreflightDataset) over

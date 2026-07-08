@@ -383,9 +383,54 @@ func TruncateList(items []string, max int) string {
 // even an empty string is a real class and every distinct trimmed string
 // counts. The caller derives the two flags from the label's schema type.
 func CheckLabelDiversity(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) error {
+	v := readLabelColumnValues(csvPath, labelColumn, dropNASentinels, collapseNumeric)
+	// Benign-skip when the column is absent (that's CheckLabelColumn's
+	// diagnostic) or an unreadable file (another check's) — both leave Found
+	// false. Two or more classes is diverse enough.
+	if !v.Found || len(v.Classes) >= 2 {
+		return nil
+	}
+	return fmt.Errorf(
+		"the label column %q has %d distinct value(s) — a classification dataset needs at "+
+			"least 2 classes. The cluster rejects this after the upload; check the labels and re-run.",
+		labelColumn, len(v.Classes))
+}
+
+// LabelReadValues is the value-level view of a label column: the header the
+// read path RESOLVES the configured name to (case/whitespace-insensitively —
+// the ingestor's rule), the sorted distinct classes the ingestor counts, and
+// the data-row count. It is what the value-level parity harness pins, so a
+// preview that says "N rows, K classes" cannot silently diverge from what the
+// ingestor actually reads — the accept/accept-with-divergent-label class the
+// verdict-only harness is blind to (data-ingestors #340).
+type LabelReadValues struct {
+	Resolved string   `json:"resolved_label"`
+	Classes  []string `json:"classes"`
+	RowCount int      `json:"row_count"`
+	Found    bool     `json:"-"`
+}
+
+// ReadLabelValues is the exported value-level read used by the parity harness
+// (and, later, the RFC-0002 "check your data" preview). It shares the exact
+// read/resolve/NA/collapse rules with CheckLabelDiversity via
+// readLabelColumnValues, so the value preview and the diversity verdict cannot
+// drift from each other.
+func ReadLabelValues(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) LabelReadValues {
+	return readLabelColumnValues(csvPath, labelColumn, dropNASentinels, collapseNumeric)
+}
+
+// readLabelColumnValues reads csvPath's label column once and returns its
+// value-level view. The column is resolved exactly, then case/whitespace-
+// insensitively (mirroring the ingestor's resolve_column rule); each row value
+// is whitespace-trimmed; NA sentinels are dropped and numeric values collapsed
+// per the caller's flags (see CheckLabelDiversity's doc for how those mirror
+// the ingestor's per-column read). Unlike the previous early-exit diversity
+// scan, this reads the whole column to build the full class set + row count —
+// one scan now backs both the diversity verdict and the value-level preview.
+func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) LabelReadValues {
 	f, err := os.Open(csvPath)
 	if err != nil {
-		return nil // unreadable file is another check's diagnostic
+		return LabelReadValues{} // Found=false: unreadable file is another check's diagnostic
 	}
 	defer func() { _ = f.Close() }()
 	br := bufio.NewReader(f)
@@ -396,12 +441,12 @@ func CheckLabelDiversity(csvPath, labelColumn string, dropNASentinels, collapseN
 	r.FieldsPerRecord = -1
 	header, err := r.Read()
 	if err != nil {
-		return nil
+		return LabelReadValues{}
 	}
-	col := -1
+	col, resolved := -1, ""
 	for i, c := range header {
 		if strings.TrimSpace(c) == labelColumn {
-			col = i
+			col, resolved = i, strings.TrimSpace(c)
 			break
 		}
 	}
@@ -409,21 +454,26 @@ func CheckLabelDiversity(csvPath, labelColumn string, dropNASentinels, collapseN
 		want := strings.ToLower(strings.TrimSpace(labelColumn))
 		for i, c := range header {
 			if strings.ToLower(strings.TrimSpace(c)) == want {
-				col = i
+				col, resolved = i, strings.TrimSpace(c)
 				break
 			}
 		}
 	}
 	if col == -1 {
-		return nil // benign-skip, like the ingestor
+		return LabelReadValues{} // Found=false — benign skip, like the ingestor
 	}
 	distinct := map[string]bool{}
+	rowCount := 0
 	for {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
 			break
 		}
-		if err != nil || len(rec) <= col {
+		if err != nil {
+			continue
+		}
+		rowCount++
+		if len(rec) <= col {
 			continue
 		}
 		v := strings.TrimSpace(rec[col])
@@ -435,22 +485,18 @@ func CheckLabelDiversity(csvPath, labelColumn string, dropNASentinels, collapseN
 		if collapseNumeric {
 			// Numeric inference collapses "1" and "1.0" into one value
 			// in-cluster; normalize the same way before counting.
-			if f, err := strconv.ParseFloat(v, 64); err == nil {
-				v = strconv.FormatFloat(f, 'g', -1, 64)
+			if fv, err := strconv.ParseFloat(v, 64); err == nil {
+				v = strconv.FormatFloat(fv, 'g', -1, 64)
 			}
 		}
 		distinct[v] = true
-		if len(distinct) >= 2 {
-			return nil
-		}
 	}
-	if len(distinct) >= 2 {
-		return nil
+	classes := make([]string, 0, len(distinct))
+	for k := range distinct {
+		classes = append(classes, k)
 	}
-	return fmt.Errorf(
-		"the label column %q has %d distinct value(s) — a classification dataset needs at "+
-			"least 2 classes. The cluster rejects this after the upload; check the labels and re-run.",
-		labelColumn, len(distinct))
+	sort.Strings(classes)
+	return LabelReadValues{Resolved: resolved, Classes: classes, RowCount: rowCount, Found: true}
 }
 
 // knownMediaExtensions mirrors the ingestor's FileExtension.get_all_extensions
