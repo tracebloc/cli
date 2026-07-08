@@ -8,7 +8,7 @@ The customer-facing CLI for the tracebloc declarative ingestion path. Wraps the 
 
 **v0.3.0 is released** — the latest stable [release](https://github.com/tracebloc/cli/releases/latest), cut from `develop`. It builds on v0.2.0's guided `data ingest` and `dataset rm` with a new `dataset list` command plus home-screen / output polish (clearer copy, guided-first framing). The binary implements `version`, `completion`, `data validate`, `cluster info`, and the full `data ingest` / `dataset list` / `dataset rm` flow — local schema validation, cluster discovery, data staging, submission, and Job watching, end to end.
 
-`data ingest` covers **9 of 10 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `text_classification`, `masked_language_modeling`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, and `time_to_event_prediction`. `semantic_segmentation` is pending mask-sidecar support upstream ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)); `instance_segmentation` is not yet implemented.
+`data ingest` covers **9 of 10 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `text_classification`, `masked_language_modeling`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, and `time_to_event_prediction`. `semantic_segmentation` is pending mask-sidecar support upstream ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)).
 
 The release pipeline ships [`v0.3.0`](https://github.com/tracebloc/cli/releases/latest) as **cosign-signed, multi-arch binaries** — Linux (`amd64`, `arm64`, `386`, `arm`), macOS (`amd64`, `arm64`), and Windows (`amd64`, `arm64`) — each with `SHA256SUMS` and the install scripts. Install via [Customer experience](#customer-experience) or [build from source](#building-from-source). (A Homebrew tap and the `install.tracebloc.io` vanity URL are later follow-ups; the GitHub release URL serves installs today.)
 
@@ -117,7 +117,7 @@ All v0.1 phases are merged:
 
 Beyond the original phases, `data ingest` was widened from image-classification-only to 9 of 10 modalities, and the test suite gained unit-coverage wins plus a kind-based integration harness for the real-I/O seams.
 
-**v0.2.0** added a friendlier guided `data ingest` and `dataset rm` on the home screen (#44, #47). **v0.3.0** added the `dataset list` command (#53) plus home-screen / output-spacing polish and feedback-copy refinements (#52, #56). **Next:** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap; `semantic_segmentation` ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)) and `instance_segmentation`. Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues).
+**v0.2.0** added a friendlier guided `data ingest` and `dataset rm` on the home screen (#44, #47). **v0.3.0** added the `dataset list` command (#53) plus home-screen / output-spacing polish and feedback-copy refinements (#52, #56). **Next:** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap; `semantic_segmentation` ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues).
 
 Epic: [tracebloc/client#147](https://github.com/tracebloc/client/issues/147).
 
