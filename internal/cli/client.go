@@ -64,7 +64,14 @@ func newClientCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Provision a tracebloc client for this machine (auto-named; no flags required)",
-		Args:  cobra.NoArgs,
+		// HIDDEN: provisioning is the installer's job — provision.sh calls this with
+		// zero flags (cli#137). It stays fully callable (including `--help`, so the
+		// installer's capability probe still works), but is kept off the user-facing
+		// surface: a human running `client create` STANDALONE mints a client the
+		// installer never deploys — an orphaned "phantom" (backend#970). Mirrors the
+		// hidden `list`; leaves `tracebloc client` showing only the user-useful `status`.
+		Hidden: true,
+		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClientCreate(cmd.Context(), printerFor(cmd), clientPrompter(),
 				clientCreateOpts{name: name, location: location, kubeconfigPath: kubeconfigPath, contextOverride: contextOverride, credentialFile: credentialFile, yes: yes})
