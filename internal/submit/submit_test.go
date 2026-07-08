@@ -54,8 +54,8 @@ func TestRun_DetachPath_HappyPath(t *testing.T) {
 		t.Errorf("Result.Watch = %+v, want nil (detach skips watch)", res.Watch)
 	}
 	for _, want := range []string{
-		"Submitted: jobs-manager spawned ingestor Job tracebloc/ingestor-abc",
-		"Detached (no log streaming)",
+		"Submitted — tracebloc is validating your data",
+		"Detached — the ingestion runs in the background",
 		"kubectl logs -f -n tracebloc job/ingestor-abc",
 	} {
 		if !strings.Contains(out.String(), want) {
@@ -65,8 +65,8 @@ func TestRun_DetachPath_HappyPath(t *testing.T) {
 }
 
 // TestRun_ReplayPath: replay=true changes the announcement
-// wording — "attaching to existing Job" instead of "spawned" —
-// because the cluster is already doing the work.
+// wording — "attaching to the run already in progress" — because the
+// cluster is already doing the work.
 func TestRun_ReplayPath(t *testing.T) {
 	sub := &fakeSubmitter{
 		resp: &SubmitResponse{
@@ -87,10 +87,10 @@ func TestRun_ReplayPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(out.String(), "Replayed:") {
-		t.Errorf("output missing Replayed framing:\n%s", out.String())
+	if !strings.Contains(out.String(), "matches a previous run") {
+		t.Errorf("output missing replay framing:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "attaching to existing Job") {
+	if !strings.Contains(out.String(), "attaching to the run already in progress") {
 		t.Errorf("output missing replay-specific wording:\n%s", out.String())
 	}
 }

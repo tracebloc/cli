@@ -101,34 +101,38 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
-	// 201 announcement. Customer sees this whether --detach is
-	// set or not, so they have the Job name for kubectl-poke
-	// follow-up.
+	// A Printer for the human-facing status lines (spinner, detach
+	// notes, summary). nil-safe fallback so callers that didn't thread
+	// the --plain decision still get sensible auto-detected rendering.
+	p := opts.Printer
+	if p == nil {
+		p = ui.New(opts.Out)
+	}
+
+	// Submission announcement. Customers see this whether or not
+	// --detach is set. The raw namespace/job identifiers are kept only
+	// where they're actionable (detach + replay, which need them to
+	// reconnect) — not on the happy streaming path.
 	if resp.Replay {
-		_, _ = fmt.Fprintf(opts.Out,
-			"Replayed: idempotency key matches a previous run; attaching to existing Job %s/%s\n",
-			resp.Namespace, resp.JobName)
+		p.Infof("This matches a previous run (same idempotency key) — attaching to the run already in progress.")
 	} else {
-		_, _ = fmt.Fprintf(opts.Out,
-			"Submitted: jobs-manager spawned ingestor Job %s/%s\n",
-			resp.Namespace, resp.JobName)
+		p.Successf("Submitted — tracebloc is validating your data and loading it into the table.")
 	}
 
 	if opts.Detach {
-		// --detach: print the reconnect hint and bail. The
-		// cluster continues without us; the customer can come
-		// back with `kubectl logs -f -n <ns> job/<job-name>`.
-		_, _ = fmt.Fprintf(opts.Out,
-			"Detached (no log streaming). Reconnect with: kubectl logs -f -n %s job/%s\n",
-			resp.Namespace, resp.JobName)
+		// --detach: report and bail. The run continues in the cluster;
+		// there is no CLI re-attach verb yet, so the honest way back is
+		// the raw log follow, offered as a labelled command.
+		p.Infof("Detached — the ingestion runs in the background on your workspace.")
+		p.Hintf("Follow it later with:  kubectl logs -f -n %s job/%s", resp.Namespace, resp.JobName)
 		return &Result{Submit: resp}, nil
 	}
 
 	// Watch loop. ctx propagates SIGINT cancellation (main.go's
 	// signal.NotifyContext); a Ctrl-C during the watch produces
-	// Outcome=Detached + the reconnect hint below.
-	_, _ = fmt.Fprintf(opts.Out, "Streaming logs from Job %s/%s:\n", resp.Namespace, resp.JobName)
-	wr, err := WatchJob(ctx, opts.Client, resp.Namespace, resp.JobName, opts.Out)
+	// Outcome=Detached + the reconnect hint below. WatchJob renders its
+	// own start spinner + "Ingestion started" header via p.
+	wr, err := WatchJob(ctx, opts.Client, resp.Namespace, resp.JobName, opts.Out, p)
 	if err != nil {
 		// Tag as WatchError so the orchestrator picks the
 		// ingest-flavored exit code (9), not the submit-flavored
@@ -144,24 +148,19 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	// PodReadyTimeout or 1-hour JobWatchTimeout aren't pressing
 	// Ctrl-C, so attributing it to "signal" was wrong.
 	if wr.Outcome == JobOutcomeDetached {
-		_, _ = fmt.Fprintln(opts.Out)
+		p.Newline()
 		switch wr.DetachReason {
 		case DetachReasonSignal:
-			_, _ = fmt.Fprintln(opts.Out, "Detached on signal.")
+			p.Infof("Stopped watching — the ingestion keeps running on your workspace.")
 		case DetachReasonPodWaitTimeout:
-			_, _ = fmt.Fprintln(opts.Out,
-				"Detached: the ingestor Pod didn't reach Ready within the observation window. "+
-					"This usually means slow image pull or scheduling backlog — the run is in "+
-					"jobs-manager's queue and will execute when the Pod starts.")
+			p.Infof("The ingestion hasn't started yet (usually a slow image pull or a busy cluster). " +
+				"It's queued to run once the cluster can schedule it — check on it with the command below.")
 		case DetachReasonWatchCap:
-			_, _ = fmt.Fprintln(opts.Out,
-				"Detached: the watch window (1 hour) elapsed while the ingestion was still running.")
+			p.Infof("Stopped following after 1 hour — the ingestion is still running and will finish on its own.")
 		default:
-			_, _ = fmt.Fprintln(opts.Out, "Detached.")
+			p.Infof("Stopped watching — the ingestion keeps running on your workspace.")
 		}
-		_, _ = fmt.Fprintf(opts.Out,
-			"Ingestion continues in the cluster. Reconnect with: kubectl logs -f -n %s job/%s\n",
-			resp.Namespace, resp.JobName)
+		p.Hintf("Check on it later with:  kubectl logs -f -n %s job/%s", resp.Namespace, resp.JobName)
 		return &Result{Submit: resp, Watch: wr}, nil
 	}
 
@@ -169,11 +168,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	// Both Succeeded and Failed paths print it — on Failed, the
 	// banner tells the customer what got partially through.
 	if wr.Summary != nil {
-		p := opts.Printer
-		if p == nil {
-			p = ui.New(opts.Out)
-		}
-		_, _ = fmt.Fprintln(opts.Out)
+		p.Newline()
 		RenderSummary(p, wr.Summary)
 	}
 

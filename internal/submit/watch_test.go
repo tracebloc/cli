@@ -40,12 +40,15 @@ func TestWaitForJobPod_RunningPodSurfaces(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	name, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor-abc")
+	name, phase, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor-abc")
 	if err != nil {
 		t.Fatalf("waitForJobPod: %v", err)
 	}
 	if name != "ingestor-abc-xyz" {
 		t.Errorf("name = %q, want ingestor-abc-xyz", name)
+	}
+	if phase != corev1.PodRunning {
+		t.Errorf("phase = %q, want Running (drives the success-vs-neutral start line)", phase)
 	}
 }
 
@@ -68,13 +71,16 @@ func TestWaitForJobPod_PicksMostRecentNotFirst(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	name, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor")
+	name, phase, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor")
 	if err != nil {
 		t.Fatalf("waitForJobPod: %v", err)
 	}
 	if name != "ingestor-new-running" {
 		t.Errorf("name = %q, want ingestor-new-running "+
 			"(most-recent useful-phase Pod, not items[0])", name)
+	}
+	if phase != corev1.PodRunning {
+		t.Errorf("phase = %q, want Running (the newer pod's phase, not the old Failed one)", phase)
 	}
 }
 
@@ -88,7 +94,7 @@ func TestWaitForJobPod_AllPendingKeepsPolling(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor")
+	_, _, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor")
 	if err == nil {
 		t.Fatal("waitForJobPod returned nil on all-Pending; expected DeadlineExceeded")
 	}
@@ -107,12 +113,15 @@ func TestWaitForJobPod_FastCompletionPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	name, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor")
+	name, phase, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor")
 	if err != nil {
 		t.Fatalf("waitForJobPod on Succeeded: %v", err)
 	}
 	if name != "ingestor-fast" {
 		t.Errorf("name = %q, want ingestor-fast", name)
+	}
+	if phase != corev1.PodSucceeded {
+		t.Errorf("phase = %q, want Succeeded", phase)
 	}
 }
 
@@ -133,7 +142,7 @@ func TestWaitForJobPod_ForbiddenIsTerminal(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, err := waitForJobPod(ctx, cs, "tracebloc", "j")
+	_, _, err := waitForJobPod(ctx, cs, "tracebloc", "j")
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("waitForJobPod returned nil on Forbidden")
@@ -153,7 +162,7 @@ func TestWaitForJobPod_NoPodEverShows(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, err := waitForJobPod(ctx, cs, "tracebloc", "missing-job")
+	_, _, err := waitForJobPod(ctx, cs, "tracebloc", "missing-job")
 	if err == nil {
 		t.Fatal("waitForJobPod returned nil when no Pod ever appeared")
 	}
@@ -251,7 +260,7 @@ func TestWatchJob_PodWaitTimeoutMapsToDetach(t *testing.T) {
 	defer cancel()
 
 	var out bytes.Buffer
-	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor-stuck", &out)
+	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor-stuck", &out, nil)
 	if err != nil {
 		t.Fatalf("WatchJob returned error on Pod-wait timeout; want nil + Detached: %v", err)
 	}
@@ -282,7 +291,7 @@ func TestWatchJob_TerminalJobStatusWins(t *testing.T) {
 	defer cancel()
 
 	var out bytes.Buffer
-	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor", &out)
+	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor", &out, nil)
 	if err != nil {
 		t.Fatalf("WatchJob returned error; want nil + Succeeded: %v", err)
 	}
@@ -307,7 +316,7 @@ func TestWatchJob_TerminalFailedJobReported(t *testing.T) {
 	defer cancel()
 
 	var out bytes.Buffer
-	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor", &out)
+	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor", &out, nil)
 	if err != nil {
 		t.Fatalf("WatchJob returned error; want nil + Failed: %v", err)
 	}
