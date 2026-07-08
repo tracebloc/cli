@@ -32,17 +32,29 @@ var readClusterID = cluster.ClusterID
 // anchor. A package var so tests can stub it without a reachable cluster.
 var readInClusterClient = cluster.DiscoverInClusterClient
 
-// newClientCmd wires the `tracebloc client` subtree — provisioning + selecting
-// the client (machine) this host enrolls as. Consumes the backend provisioning
-// endpoints (backend#836) with the user token from `tracebloc login`.
+// newClientCmd wires the `tracebloc client` subtree — provisioning the client
+// (machine) this host enrolls as. Consumes the backend provisioning endpoints
+// (backend#836) with the user token from `tracebloc login`.
+//
+// The single-machine CLI (RFC-0001 §7.10) owns exactly one client, so there is
+// nothing to *select*: `client use` is withdrawn, and `client list` is hidden
+// (kept callable for the installer's one-client-per-machine pre-flight, off the
+// user-facing surface). `create` provisions this machine's client; offboarding
+// is the top-level `tracebloc delete`.
 func newClientCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "client",
-		Short: "Provision and manage the clients in your account",
-		Long: `Provision a tracebloc client for this machine and list/select clients
-in your account.  Requires sign-in first (` + "`tracebloc login`" + `).`,
+		Short: "Provision this machine's tracebloc client",
+		Long: `Provision a tracebloc client for this machine. Requires sign-in first
+(` + "`tracebloc login`" + `). To remove tracebloc from this machine, use
+` + "`tracebloc delete`" + `.`,
+		// Bare `tracebloc client` prints help; a mistyped subcommand errors with a
+		// suggestion instead of silently exiting 0. The hidden `list` is excluded
+		// from suggestions by SuggestionsFor (#75).
+		RunE:                       runGroup,
+		SuggestionsMinimumDistance: 2,
 	}
-	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientUseCmd(), newClientStatusCmd())
+	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientStatusCmd())
 	return cmd
 }
 
@@ -82,25 +94,18 @@ type clientCreateOpts struct {
 	yes                                                             bool
 }
 
+// newClientListCmd is HIDDEN (RFC-0001 §7.10): with `use` withdrawn a user has
+// nothing to select, but the installer's one-client-per-machine pre-flight still
+// shells out to `client list`. Keep it callable, off the user-facing surface.
 func newClientListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List the clients in your account",
+		Hidden:  true,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClientList(cmd.Context(), printerFor(cmd))
-		},
-	}
-}
-
-func newClientUseCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "use <client-id>",
-		Short: "Enroll this machine as an existing client",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runClientUse(cmd.Context(), printerFor(cmd), args[0])
 		},
 	}
 }
@@ -349,7 +354,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 			if errors.As(cerr, &ae) {
 				switch ae.StatusCode {
 				case http.StatusForbidden:
-					return askAnAdmin(ctx, p, client)
+					return askAnAdmin(ctx, p, client, "provision a client", "provisioning")
 				case http.StatusConflict:
 					// Per RFC C.3 the only 409 on POST /edge-device/ is cluster_conflict
 					// (R6): this cluster_id is bound to another account.
@@ -393,7 +398,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		// Mirror the mint path: a config-save failure shouldn't bury the result —
 		// hint how to set the pointer by hand and still exit clean.
 		if serr := cfg.Save(); serr != nil {
-			p.Hintf("Couldn't save the active-client pointer (%v) — run `tracebloc client use %d` to set it.", serr, pc.ID)
+			p.Hintf("Couldn't save the active-client pointer (%v) — re-run `tracebloc client create` (it adopts this cluster's client) to set it.", serr)
 		}
 		return nil
 	}
@@ -426,7 +431,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	}
 	ilog.Logf("minted client id=%d namespace=%s", pc.ID, pc.Namespace)
 	if serr := cfg.Save(); serr != nil {
-		p.Hintf("Couldn't save the active-client pointer (%v) — run `tracebloc client use %d` to set it.", serr, pc.ID)
+		p.Hintf("Couldn't save the active-client pointer (%v) — re-run `tracebloc client create` (it adopts this cluster's client).", serr)
 	}
 	return nil
 }
@@ -516,7 +521,7 @@ func adoptLiveInClusterClient(
 				// Anchor already taken (write-once / bound elsewhere — R6).
 				return nil, false, &exitError{code: 1, err: errors.New(crossAccountConflictMsg)}
 			case errors.As(perr, &ae) && ae.StatusCode == http.StatusForbidden:
-				return nil, false, askAnAdmin(ctx, p, apiClient)
+				return nil, false, askAnAdmin(ctx, p, apiClient, "provision a client", "provisioning")
 			}
 			return nil, false, &exitError{code: 1, err: fmt.Errorf("backfilling the cluster anchor onto the existing client: %w", perr)}
 		}
@@ -614,13 +619,17 @@ func writeClientCredential(path string, lines []string) error {
 	return nil
 }
 
-// askAnAdmin renders the "you can't provision — here's who can" path (a 403 from
+// askAnAdmin renders the "you can't do this — here's who can" path (a 403 from
 // the backend means no CLIENT_WRITE; backend#836 Q4).
-func askAnAdmin(ctx context.Context, p *ui.Printer, client *api.Client) error {
+// action is the infinitive of what the caller was denied ("provision a client",
+// "offboard this machine"); capability is its noun form for the returned error
+// ("provisioning", "offboarding"). Both take CLIENT_WRITE, so the admin list is
+// the same — only the copy differs between provisioning and offboarding.
+func askAnAdmin(ctx context.Context, p *ui.Printer, client *api.Client, action, capability string) error {
 	p.Newline()
-	p.Hintf("You don't have permission to provision a client in this account.")
+	p.Hintf("You don't have permission to %s in this account.", action)
 	if admins, err := client.ListClientAdmins(ctx); err == nil && len(admins) > 0 {
-		p.Section("Ask one of these admins to provision it (or grant you access)")
+		p.Section("Ask one of these admins (or ask them to grant you access)")
 		for _, a := range admins {
 			label := a.Name
 			if label == "" {
@@ -629,7 +638,7 @@ func askAnAdmin(ctx context.Context, p *ui.Printer, client *api.Client) error {
 			p.Field(label, a.Email)
 		}
 	}
-	return &exitError{code: 1, err: errors.New("provisioning requires CLIENT_WRITE permission")}
+	return &exitError{code: 1, err: fmt.Errorf("%s requires CLIENT_WRITE permission", capability)}
 }
 
 func runClientList(ctx context.Context, p *ui.Printer) error {
@@ -699,7 +708,7 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 	active := cfg.Current().ActiveClientID
 	if active == "" {
 		return &exitError{code: 1, err: errors.New(
-			"no active client on this machine — run `tracebloc client create` (or `client use <id>`) first")}
+			"no active client on this machine — run `tracebloc client create` (or re-run the installer) first")}
 	}
 
 	// One-shot: report the current state and exit 0 (informational).
@@ -710,8 +719,8 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 		}
 		if !found {
 			return &exitError{code: 1, err: fmt.Errorf(
-				"active client %s isn't in your account list — run `tracebloc client list` to see "+
-					"your clients, or re-run the installer to provision this machine", active)}
+				"active client %s isn't in your account — run `tracebloc client create` "+
+					"(or re-run the installer) to provision this machine", active)}
 		}
 		p.Section("Client status")
 		p.Field("state", clientStateLabel(st))
@@ -746,8 +755,8 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 			// The active client isn't in the account (deleted / wrong account) — no
 			// amount of waiting surfaces it. Fail fast, matching the one-shot path.
 			return &exitError{code: 1, err: fmt.Errorf(
-				"active client %s isn't in your account list — run `tracebloc client list` to see "+
-					"your clients, or re-run the installer to provision this machine", active)}
+				"active client %s isn't in your account — run `tracebloc client create` "+
+					"(or re-run the installer) to provision this machine", active)}
 		case st == clientStatusOnline:
 			sp.Stop()
 			p.Successf("tracebloc can see this client.")
@@ -837,27 +846,6 @@ func clientStateLabel(status int) string {
 	default:
 		return "unknown"
 	}
-}
-
-func runClientUse(ctx context.Context, p *ui.Printer, id string) error {
-	client, cfg, err := authedClient()
-	if err != nil {
-		return &exitError{code: 1, err: err}
-	}
-	clients, err := client.ListClients(ctx)
-	if err != nil {
-		return &exitError{code: 1, err: err}
-	}
-	if c := findClientByID(clients, id); c != nil {
-		setActiveClient(cfg.Current(), c)
-		if serr := cfg.Save(); serr != nil {
-			return &exitError{code: 1, err: serr}
-		}
-		p.Successf("This machine is now set to enroll as client %s (%s).", id, c.Name)
-		return nil
-	}
-	return &exitError{code: 1, err: fmt.Errorf(
-		"no client %s in your account — run `tracebloc client list` to see the ids", id)}
 }
 
 // setActiveClient points this env's profile at c, caching its namespace and

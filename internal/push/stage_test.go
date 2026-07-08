@@ -82,7 +82,7 @@ func TestStage_HappyPath(t *testing.T) {
 	// Diagnostic output: customer should see the lifecycle
 	// breadcrumbs. Pin a few key phrases so a regression that
 	// silences them is caught.
-	for _, want := range []string{"Created stage Pod", "Waiting for stage Pod", "Streaming", "Staged"} {
+	for _, want := range []string{"Opened a secure upload channel", "Preparing the upload channel", "Uploading", "Uploaded"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
@@ -188,13 +188,12 @@ func TestStage_OrphanWarningSurfaces(t *testing.T) {
 	}
 }
 
-// TestStage_IngestorSANameFlowsToPod: the --ingestor-sa override
-// MUST land on the stage Pod's ServiceAccountName — otherwise the
-// flag is silently ignored and customers who renamed the chart's
-// ingestor SA get pods running as the default SA (no PVC write
-// access). Pin the integration here at the Stage layer since the
-// flag wiring's effect is only observable end-to-end. Bugbot
-// flagged the missing test coverage on PR-a.
+// TestStage_IngestorSANameFlowsToPod: the discovered ingestor SA name
+// MUST land on the stage Pod's ServiceAccountName — otherwise customers
+// whose ingestionAuthz policy names a non-default SA (#7) get pods
+// running as the wrong SA (no PVC write access). Pin the integration
+// here at the Stage layer since the wiring's effect is only observable
+// end-to-end. Bugbot flagged the missing test coverage on PR-a.
 func TestStage_IngestorSANameFlowsToPod(t *testing.T) {
 	root := imgcDir(t)
 	layout, err := Discover(root)

@@ -45,7 +45,7 @@ type Profile struct {
 	ActiveClientID string `json:"active_client_id,omitempty"` // client this machine enrolls as, for THIS env
 
 	// ActiveClientNamespace + ActiveClientName cache the active client's k8s
-	// namespace and display name at `client use`/`create` time, so the data
+	// namespace and display name at `client create` time, so the data
 	// commands can bind to the active client's cluster (RFC-0001 §7.3) without
 	// a backend round-trip — they run cluster-local and may be offline. Empty
 	// when no client is active or for pre-v2 configs that predate the cache.

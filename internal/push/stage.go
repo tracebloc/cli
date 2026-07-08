@@ -25,8 +25,8 @@ type StageOptions struct {
 	// Tests: a fakeExecutor (see stream_test.go).
 	Executor Executor
 
-	// Namespace + IngestorSAName come from Phase 2's parent-release
-	// discovery (with optional --ingestor-sa override).
+	// Namespace + IngestorSAName come from parent-release discovery
+	// (IngestorSAName is read from the ingestionAuthz ConfigMap, #7).
 	Namespace      string
 	IngestorSAName string
 
@@ -50,7 +50,7 @@ type StageOptions struct {
 	Progress Progress
 
 	// Out is where Stage prints non-progress diagnostic output
-	// (orphan warnings, "Created stage Pod X" etc.). Nil = io.Discard.
+	// (orphan warnings, upload-channel status, etc.). Nil = io.Discard.
 	// Progress bar output is separate — schollz writes to its own
 	// configured writer (typically the same one).
 	Out io.Writer
@@ -106,7 +106,7 @@ func Stage(ctx context.Context, opts StageOptions) error {
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(opts.Out, "Created stage Pod %s/%s\n", opts.Namespace, podName)
+	_, _ = fmt.Fprintf(opts.Out, "Opened a secure upload channel to your workspace.\n")
 
 	// 3. Defer cleanup. The deferred call uses a FRESH context with
 	//    its own deadline — if the parent ctx is cancelled (SIGINT,
@@ -130,14 +130,14 @@ func Stage(ctx context.Context, opts StageOptions) error {
 	//    accept exec). Times out at StagePodReadyTimeout with
 	//    diagnostic hints from container statuses (image pull,
 	//    scheduling) when we have them.
-	_, _ = fmt.Fprintf(opts.Out, "Waiting for stage Pod to be Ready (timeout %s)...\n", StagePodReadyTimeout)
+	_, _ = fmt.Fprintf(opts.Out, "Preparing the upload channel (up to %s)…\n", StagePodReadyTimeout)
 	if _, err := WaitForStagePodReady(ctx, opts.Client, opts.Namespace, podName); err != nil {
 		return err
 	}
 
 	// 5. Stream the tar. This is where actual bytes flow. The
 	//    progress bar (if TTY) renders during this call.
-	_, _ = fmt.Fprintf(opts.Out, "Streaming %d files (%s) for table %q...\n",
+	_, _ = fmt.Fprintf(opts.Out, "Uploading %d files (%s) into %q…\n",
 		opts.Layout.FileCount(), HumanBytes(opts.Layout.TotalBytes), opts.Table)
 
 	if err := StreamLayout(ctx, opts.Executor,
@@ -147,7 +147,7 @@ func Stage(ctx context.Context, opts StageOptions) error {
 	}
 
 	// 6. Print "done" message. The deferred cleanup runs after this.
-	_, _ = fmt.Fprintf(opts.Out, "Staged %d files for table %q\n",
+	_, _ = fmt.Fprintf(opts.Out, "Uploaded %d files into %q.\n",
 		opts.Layout.FileCount(), opts.Table)
 	return nil
 }

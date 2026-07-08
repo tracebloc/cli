@@ -180,7 +180,7 @@ func runAuthChecks(ctx context.Context, p *ui.Printer) doctor.Status {
 	worst := doctor.StatusOK
 	if prof.ActiveClientID == "" {
 		p.Warnf("Active client — none selected for %s", env)
-		p.Hintf("     run `tracebloc client use <id>` (or `tracebloc client create`) to set the client this machine enrolls as")
+		p.Hintf("     run `tracebloc client create` (or re-run the installer) to set the client this machine enrolls as")
 		worst = doctor.StatusWarn
 	} else {
 		p.Successf("Active client — %s", prof.ActiveClientID)

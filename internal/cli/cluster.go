@@ -33,6 +33,10 @@ Use ` + "`cluster info`" + ` to verify which cluster, namespace, and
 client the next ` + "`data ingest`" + ` will target. Useful as a
 pre-flight before doing anything destructive (e.g. ingesting into
 the wrong cluster).`,
+		// Bare `tracebloc cluster` prints help; a mistyped subcommand errors with a
+		// suggestion instead of silently exiting 0 (#75).
+		RunE:                       runGroup,
+		SuggestionsMinimumDistance: 2,
 	}
 
 	cmd.AddCommand(newClusterInfoCmd())
@@ -59,7 +63,6 @@ func newClusterInfoCmd() *cobra.Command {
 		kubeconfigPath  string
 		contextOverride string
 		nsOverride      string
-		ingestorSAName  string
 		tokenExpiry     int64
 	)
 
@@ -93,7 +96,6 @@ Exit codes:
 				cmd.Context(),
 				printerFor(cmd),
 				kubeconfigPath, contextOverride, nsOverride,
-				ingestorSAName,
 				tokenExpiry,
 			)
 		},
@@ -105,9 +107,6 @@ Exit codes:
 		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
 	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
 		"namespace where your tracebloc client is installed (default: the context's namespace, or 'default')")
-	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
-		"override the ingestor ServiceAccount name (default: \"ingestor\", the chart default; "+
-			"set this if you customized `ingestionAuthz.serviceAccountName` in your client's install)")
 	cmd.Flags().Int64Var(&tokenExpiry, "token-expiry-seconds", 600,
 		"requested SA token expiration in seconds (default 600 = 10 min; ignored for static-secret fallback)")
 
@@ -118,7 +117,6 @@ func runClusterInfo(
 	ctx context.Context,
 	p *ui.Printer,
 	kubeconfigPath, contextOverride, nsOverride string,
-	ingestorSAOverride string,
 	tokenExpiry int64,
 ) error {
 	p.Banner("tracebloc", "cluster diagnostics")
@@ -171,12 +169,8 @@ func runClusterInfo(
 	// `data ingest` will target, so it must not show the pre-scan default.
 	p.Field("namespace", resolved.Namespace)
 
-	// Apply the SA-name override here. Discovery doesn't read the
-	// name from the cluster (see #7); customers with a non-default
-	// name pass --ingestor-sa.
-	if ingestorSAOverride != "" {
-		release.IngestorSAName = ingestorSAOverride
-	}
+	// release.IngestorSAName is discovered from the ingestionAuthz ConfigMap by
+	// DiscoverParentRelease (#7) — no --ingestor-sa override needed.
 
 	p.Section("Client install")
 	p.Field("name", release.ReleaseName)
@@ -206,10 +200,17 @@ func runClusterInfo(
 	p.Section("Ingestor SA token")
 	p.Field("source", tok.Source.String())
 	p.Field("sha256[:8]", hex.EncodeToString(hash[:8]))
-	if tok.ExpirationSeconds > 0 {
+	switch {
+	case !tok.ExpiresAt.IsZero():
+		// The server's authoritative, policy-capped expiry (TokenRequest path).
+		// "~" hedges the client/server clock skew in time.Until (#4).
+		remaining := time.Until(tok.ExpiresAt).Round(time.Second)
+		p.Field("expires in", fmt.Sprintf("~%s", remaining))
+	case tok.ExpirationSeconds > 0:
+		// No server timestamp — fall back to the requested lifetime.
 		exp := time.Duration(tok.ExpirationSeconds) * time.Second
-		p.Field("expires in", fmt.Sprintf("~%s (server may cap shorter)", exp))
-	} else {
+		p.Field("expires in", fmt.Sprintf("~%s (requested; server may cap shorter)", exp))
+	default:
 		p.Field("expires in", "never (static-secret fallback)")
 	}
 

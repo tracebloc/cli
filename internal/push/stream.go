@@ -192,7 +192,8 @@ func StreamLayout(
 	// next command regardless of prior status, and `|| true` then
 	// forces exit 0. A failed tar mid-script would silently
 	// return success to the exec subprocess, and the CLI would
-	// report "Staged N files" on what was actually a failed push.
+	// report the "Uploaded N files" success line on what was
+	// actually a failed push.
 	//
 	// set -e fixes that: any unguarded non-zero exits the script
 	// with that status. The find's `|| true` is still fine

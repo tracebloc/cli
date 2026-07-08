@@ -7,6 +7,8 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -92,6 +94,10 @@ Helm, no YAML, no kubectl needed.`,
 	root.AddCommand(newLogoutCmd())
 	root.AddCommand(newAuthCmd())
 	root.AddCommand(newClientCmd())
+	// Top-level offboarding — the inverse of install (RFC-0001 §7.10). NOT under
+	// `client` and NOT `client delete --uninstall`: one machine owns one client,
+	// so this removes tracebloc from the host and avoids colliding with `data delete`.
+	root.AddCommand(newDeleteCmd())
 
 	// Bare `tracebloc` (no subcommand) renders a friendly home screen
 	// instead of cobra's raw usage dump. Subcommands and --help are
@@ -107,14 +113,47 @@ Helm, no YAML, no kubectl needed.`,
 		p.Infof("tracebloc data ingest ./data     — stage a dataset into your client")
 		p.Infof("tracebloc data list              — datasets in the cluster")
 		p.Infof("tracebloc data delete <table>    — delete an ingested dataset")
-		p.Infof("tracebloc client list            — your clients and their status")
 		p.Infof("tracebloc cluster doctor         — diagnose connection issues")
+		p.Infof("tracebloc delete                 — remove tracebloc from this machine")
 		p.Newline()
 		p.Hintf("Add --help to any command for the full flag list.")
 		return nil
 	}
 
 	return root
+}
+
+// runGroup is the RunE for a parent "group" command (data, cluster, auth,
+// client). A bare `tracebloc <group>` prints its help and exits 0; a mistyped
+// subcommand (`tracebloc data ingst`) is a hard error (exit 1) with a
+// nearest-match suggestion.
+//
+// Why a RunE at all: a parent command with subcommands but no Run/RunE is
+// "not runnable", and cobra short-circuits a non-runnable command to
+// flag.ErrHelp BEFORE it validates args (command.go: `if !c.Runnable() {
+// return flag.ErrHelp }` precedes ValidateArgs). So `data ingst` printed help
+// and exited 0, silently swallowing the typo. Giving the group a RunE makes it
+// runnable, so the unknown token reaches here instead. (`cobra.NoArgs` does
+// NOT fix this — it's an arg validator, never reached on a non-runnable
+// command.) The root command needs none of this: as the parent-less command
+// its default legacyArgs already errors on an unknown token. See #75.
+func runGroup(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+	// Mirror cobra's own "unknown command" wording (what the root emits) so a
+	// group typo reads identically. Suggestions come from SuggestionsFor, which
+	// skips hidden commands (e.g. the hidden `client list`) and keys off the
+	// group's SuggestionsMinimumDistance.
+	msg := fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())
+	if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
+		msg += "\n\nDid you mean this?"
+		for _, s := range suggestions {
+			msg += "\n\t" + s
+		}
+	}
+	msg += fmt.Sprintf("\n\nRun '%s --help' for the available commands.", cmd.CommandPath())
+	return &exitError{code: 1, err: errors.New(msg)}
 }
 
 // printerFor builds a ui.Printer for a command's stdout, honoring the

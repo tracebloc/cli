@@ -330,3 +330,78 @@ func siblingDeployment(name, namespace string) *appsv1.Deployment {
 		},
 	}
 }
+
+// ingestionAuthzCM builds the chart's `<release>-ingestion-authz` ConfigMap
+// with the given rendered policy body under the `ingestion-authz.yaml` key —
+// the contract DiscoverParentRelease reads the ingestor SA name from (#7).
+func ingestionAuthzCM(release, namespace, policyYAML string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      release + "-ingestion-authz",
+			Namespace: namespace,
+		},
+		Data: map[string]string{"ingestion-authz.yaml": policyYAML},
+	}
+}
+
+// A renamed ingestor SA in the ingestionAuthz policy is discovered and
+// overrides the "ingestor" default — the whole point of #7 (no --ingestor-sa).
+func TestDiscoverParentRelease_DiscoversRenamedSAFromConfigMap(t *testing.T) {
+	const ns = "tracebloc"
+	cs := fake.NewClientset(
+		jobsManagerDeployment("tracebloc", ns, "client-1.3.5", "1.3.5", "d"),
+		jobsManagerService("jobs-manager", ns),
+		ingestionAuthzCM("tracebloc", ns,
+			"allowed:\n  - service_account: \"foo-ingestor\"\n    namespace: \""+ns+"\"\n    table_prefixes: [\"\"]\n"),
+	)
+	release, err := DiscoverParentRelease(context.Background(), cs, ns)
+	if err != nil {
+		t.Fatalf("DiscoverParentRelease: %v", err)
+	}
+	if release.IngestorSAName != "foo-ingestor" {
+		t.Errorf("IngestorSAName = %q, want %q (discovered from the ingestionAuthz ConfigMap)",
+			release.IngestorSAName, "foo-ingestor")
+	}
+}
+
+// Two entries naming different SAs for the same namespace is ambiguous — keep
+// the "ingestor" default rather than guess one the server would reject.
+func TestDiscoverParentRelease_AmbiguousSAKeepsDefault(t *testing.T) {
+	const ns = "tracebloc"
+	cs := fake.NewClientset(
+		jobsManagerDeployment("tracebloc", ns, "client-1.3.5", "1.3.5", "d"),
+		jobsManagerService("jobs-manager", ns),
+		ingestionAuthzCM("tracebloc", ns,
+			"allowed:\n  - service_account: \"sa-one\"\n    namespace: \""+ns+"\"\n"+
+				"  - service_account: \"sa-two\"\n    namespace: \""+ns+"\"\n"),
+	)
+	release, err := DiscoverParentRelease(context.Background(), cs, ns)
+	if err != nil {
+		t.Fatalf("DiscoverParentRelease: %v", err)
+	}
+	if release.IngestorSAName != "ingestor" {
+		t.Errorf("IngestorSAName = %q, want the default %q on an ambiguous policy",
+			release.IngestorSAName, "ingestor")
+	}
+}
+
+// An entry scoped to a DIFFERENT namespace than the one we resolve/mint in must
+// be ignored — a token minted in our namespace is worthless against it. Pins
+// the namespace-gate (#7 stress-review refinement).
+func TestDiscoverParentRelease_CrossNamespaceSAIgnored(t *testing.T) {
+	const ns = "tracebloc"
+	cs := fake.NewClientset(
+		jobsManagerDeployment("tracebloc", ns, "client-1.3.5", "1.3.5", "d"),
+		jobsManagerService("jobs-manager", ns),
+		ingestionAuthzCM("tracebloc", ns,
+			"allowed:\n  - service_account: \"other-ns-sa\"\n    namespace: \"somewhere-else\"\n    table_prefixes: [\"\"]\n"),
+	)
+	release, err := DiscoverParentRelease(context.Background(), cs, ns)
+	if err != nil {
+		t.Fatalf("DiscoverParentRelease: %v", err)
+	}
+	if release.IngestorSAName != "ingestor" {
+		t.Errorf("IngestorSAName = %q, want the default %q (cross-namespace entry must be ignored)",
+			release.IngestorSAName, "ingestor")
+	}
+}

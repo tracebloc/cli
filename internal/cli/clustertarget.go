@@ -101,7 +101,7 @@ func discoverRelease(ctx context.Context, p *ui.Printer, cs kubernetes.Interface
 	if len(found) > 1 {
 		return nil, namespace, fmt.Errorf(
 			"%w in namespace %q, but tracebloc clients are running in: %s. "+
-				"Pass --namespace to pick one, or set your active client with `tracebloc client use`.",
+				"Pass --namespace to pick one.",
 			cluster.ErrNoParentRelease, namespace, strings.Join(found, ", "))
 	}
 	if p != nil {
@@ -126,7 +126,7 @@ type activeClientBinding struct {
 // cached namespace when the user overrode neither --namespace nor --context.
 // It never fails: no config, no active client, or no cached namespace all
 // leave opts untouched (unchanged current-context behavior), so this is
-// backward compatible for anyone who hasn't run `client use`/`create`.
+// backward compatible for anyone who hasn't run `client create`.
 func bindActiveClientNamespace(opts *cluster.KubeconfigOptions) activeClientBinding {
 	if opts.Namespace != "" || opts.Context != "" {
 		return activeClientBinding{explicit: true} // user was explicit — don't second-guess
@@ -169,6 +169,6 @@ func (b activeClientBinding) explain(err error) error {
 	}
 	return &exitError{code: 4, err: fmt.Errorf(
 		"active client %q runs on another machine — namespace %q isn't on the cluster your kubeconfig points at; "+
-			"run this command there, `tracebloc client use` a client on this cluster, or override with --namespace/--context",
+			"run this command there, or override with --namespace/--context",
 		handle, b.namespace)}
 }

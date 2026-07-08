@@ -90,6 +90,12 @@
       ],
       "verdict": "reject"
     },
+    "tabular-float-numeric-labels": {
+      "errors": [
+        "LabelDiversityValidator: Classification category requires at least 2 distinct label values in column 'label' (after whitespace stripping); this dataset has 1 distinct value(s): [np.float64(1.0)]. Raw value counts: {1.0: 2}. If this is intentional (e.g. you have a continuous target), pick a regression-family category like tabular_regression or time_series_forecasting instead."
+      ],
+      "verdict": "reject"
+    },
     "tabular-header-only": {
       "errors": [
         "IngestableRecordsValidator: No data rows found in CSV 'data.csv': the file has a header but no data rows (0 ingestable records). Add at least one data row and re-ingest.",
@@ -116,6 +122,10 @@
       "verdict": "reject"
     },
     "tabular-ok": {
+      "errors": [],
+      "verdict": "accept"
+    },
+    "tabular-varchar-numeric-labels": {
       "errors": [],
       "verdict": "accept"
     },

@@ -50,8 +50,9 @@ func newDataDeleteCmd() *cobra.Command {
 for a table: the MySQL table in ` + push.IngestionDatabase + ` and the dataset's
 directories on the shared PVC. Destructive and not undoable.
 
-The dataset's catalog metadata on the tracebloc backend is removed
-automatically after deletion — no manual step required.
+The dataset's catalog metadata on the tracebloc backend is never removed — it
+is kept as a record on tracebloc, marked unavailable, so a collaborator's run
+that referenced it still has its history.
 
 Exit codes:
   0  artifacts removed (or --dry-run, or the user declined)
@@ -198,6 +199,6 @@ undone — re-ingesting the data is the only way back.`)
 
 	p.Newline()
 	p.Successf("Deleted %s.%s and %d PVC path(s).", plan.Database, plan.Table, len(res.RemovedPaths))
-	p.Infof("The dataset's catalog metadata will be removed automatically — no further action needed.")
+	p.Infof("The dataset's catalog metadata is kept as a record on tracebloc, marked unavailable — never removed.")
 	return nil
 }

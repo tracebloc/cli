@@ -46,6 +46,10 @@ locally first.
 
 ` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run
 before the first ingest.`,
+		// A bare `tracebloc data` prints help; a mistyped subcommand errors with a
+		// suggestion instead of silently exiting 0 (#75).
+		RunE:                       runGroup,
+		SuggestionsMinimumDistance: 2,
 	}
 	cmd.AddCommand(newDataIngestCmd())
 	cmd.AddCommand(newDataListCmd())
@@ -102,12 +106,6 @@ func newDataIngestCmd() *cobra.Command {
 		overwrite  bool
 		noInput    bool
 		outputJSON bool
-
-		// Ingestor SA name override. Used as the ServiceAccountName
-		// of the ephemeral stage Pod, so the Pod inherits whatever
-		// imagePullSecrets + PSA exemptions the admin already
-		// configured for that SA.
-		ingestorSAName string
 
 		// Stage Pod image override. Defaults to the digest-pinned
 		// alpine that ships with the CLI; air-gapped customers
@@ -210,7 +208,6 @@ Exit codes:
 					SchemaFlag:     schemaFlag,
 					DryRun:         dryRun,
 					Overwrite:      overwrite,
-					IngestorSAName: ingestorSAName,
 					StagePodImage:  stagePodImage,
 					Detach:         detach,
 					IdempotencyKey: idempotencyKey,
@@ -267,9 +264,6 @@ Exit codes:
 		"disable interactive prompts; fail on missing required values (for CI/scripts)")
 	cmd.Flags().BoolVar(&outputJSON, "output-json", false,
 		"emit a machine-readable JSON result on stdout (human output → stderr; implies --no-input)")
-	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
-		"override the ingestor ServiceAccount name (default: \"ingestor\"); "+
-			"set this if you customized ingestionAuthz.serviceAccountName in your client's install")
 	cmd.Flags().StringVar(&stagePodImage, "stage-pod-image", "",
 		"override the ephemeral stage Pod's image (default: digest-pinned alpine 3.20 baked into the CLI). "+
 			"Pin by digest in your override too — tag-only refs drift silently.")
@@ -302,7 +296,6 @@ type runDataIngestArgs struct {
 	SchemaFlag     string // raw --schema; resolved or inferred after Discover (tabular)
 	DryRun         bool
 	Overwrite      bool
-	IngestorSAName string
 	StagePodImage  string
 
 	// Printer renders the pre-flight summary + status output. Built in
@@ -641,8 +634,8 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    Errors mirror that command's exit-code contract (3 for
 	//    kubeconfig, 4 for missing release) so behaviour is
 	//    consistent across pre-flight commands.
-	a.Printer.Step(2, 4, "Connect to your workspace's cluster")
-	a.Printer.Hintf("Using your kubeconfig to find the tracebloc release in your workspace and the shared storage your dataset will live on.")
+	a.Printer.Step(2, 4, "Connect to your workspace")
+	a.Printer.Hintf("Finding your tracebloc workspace and the shared storage your dataset will live on.")
 	// 6. PVC discovery (needPVC) confirms the chart's shared-data PVC is
 	//    Bound before we waste time provisioning a Pod that can't mount it.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
@@ -652,9 +645,9 @@ other collaborators train against it without ever seeing the raw files.`))
 		return binding.explain(err)
 	}
 	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
-	if a.IngestorSAName != "" {
-		release.IngestorSAName = a.IngestorSAName
-	}
+	// release.IngestorSAName is discovered from the ingestionAuthz ConfigMap by
+	// DiscoverParentRelease (#7) and flows into the stage/teardown pods + the
+	// jobs-manager token mint below — no --ingestor-sa override.
 
 	// 7. Show what we found on the cluster — the customer's last look
 	//    before any bytes move.
@@ -734,7 +727,7 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    pre-flight codes so customers can branch on whether the
 	//    failure was their environment vs the actual data transfer.
 	a.Printer.Step(3, 4, "Stage your files")
-	a.Printer.Hintf("A short-lived helper pod mounts the shared storage and your files stream into it — like `kubectl cp`, but set up and cleaned up for you.")
+	a.Printer.Hintf("Your files upload securely into your workspace's storage — set up and cleaned up for you.")
 	progress := push.NewProgress(out, layout.TotalBytes,
 		fmt.Sprintf("Staging %s", a.Spec.Table))
 	// Defer Finish so a failure path that returns BEFORE
@@ -771,7 +764,12 @@ other collaborators train against it without ever seeing the raw files.`))
 	//     + log stream — can run that long for large ingestions.
 	//     The chart's helm flow uses the same token-mint code path.
 	a.Printer.Step(4, 4, "Run the ingestion")
-	a.Printer.Hintf("Submitting the run to your workspace, then watching as it validates your data and loads it into the table — progress streams below.")
+	if a.Detach {
+		a.Printer.Hintf("Submitting the run — with --detach it keeps running on your workspace after this command returns; the reconnect command is shown below.")
+	} else {
+		a.Printer.Hintf("Submitting the run, then following along as tracebloc validates your data and loads it into the table — progress streams below.")
+		a.Printer.Hintf("This follows the run for up to an hour; a longer run keeps going on its own (or start it with --detach and check back later).")
+	}
 	tok, err := cluster.MintIngestorToken(ctx, cs, resolved.Namespace,
 		release.IngestorSAName, 3600, nil)
 	if err != nil {
@@ -785,7 +783,7 @@ other collaborators train against it without ever seeing the raw files.`))
 	//     through the kubeconfig-authenticated apiserver, same as
 	//     `kubectl port-forward`. Bugbot PR #10 r3 caught the
 	//     original broken-by-design direct-URL POST.
-	_, _ = fmt.Fprintln(out, "Opening port-forward to jobs-manager...")
+	a.Printer.Infof("Connecting to your workspace to submit the run…")
 	pf, err := submit.PortForwardJobsManager(ctx, cs, resolved.RestConfig,
 		resolved.Namespace, release.JobsManagerServiceName, release.JobsManagerPort)
 	if err != nil {
@@ -828,6 +826,10 @@ other collaborators train against it without ever seeing the raw files.`))
 	// whose status matches the exit code. (Bugbot #38.)
 	status, exitErr := classifyPushOutcome(submitRes, err)
 
+	// Emit the machine-readable result BEFORE the best-effort staging
+	// reclaim below, so a scripted --output-json consumer gets its result
+	// object at ingest-completion latency and never waits on a slow
+	// cluster-side cleanup that has no bearing on the ingest outcome.
 	if a.OutputJSON {
 		var summary *submit.Summary
 		var ns, jobName string
@@ -841,6 +843,35 @@ other collaborators train against it without ever seeing the raw files.`))
 		}
 		writePushJSON(a.JSONOut, status, spec, summary, ns, jobName)
 		jsonEmitted = true
+	}
+
+	// Reclaim the staged source copy on a CLEAN success only. The
+	// ingestor copies (not moves) the staged files into the table, so
+	// leaving .tracebloc-staging/<table> behind doubles PVC use for
+	// file-bearing datasets until the next --overwrite or `data delete`
+	// (the staging-leak found by the ingest UX audit; cli#166 / epic #67).
+	// Gated on status=="succeeded" so we never touch the source on a
+	//   - detached run (status "detached"): the Job is still reading it;
+	//   - partial (status "completed_with_failures") or failed run: the
+	//     user may want the source to inspect/retry.
+	// Best-effort and time-bounded (push.StagingCleanupTimeout): a failed
+	// or slow reclaim must not fail — or noticeably delay — a successful
+	// ingest.
+	if status == "succeeded" {
+		a.Printer.Infof("Reclaiming the temporary staging copy on the cluster…")
+		if cerr := push.CleanStaging(ctx, cs,
+			&push.SPDYExecutor{Config: resolved.RestConfig, Client: cs},
+			resolved.Namespace, a.Spec.Table, push.PodSpecOptions{
+				Namespace:          resolved.Namespace,
+				PVCClaimName:       pvc.ClaimName,
+				PVCMountPath:       pvc.MountPath,
+				Table:              a.Spec.Table,
+				ServiceAccountName: release.IngestorSAName,
+				Image:              a.StagePodImage,
+			}); cerr != nil {
+			a.Printer.Warnf("Couldn't reclaim the temporary staging copy (%v). It's harmless — the next re-ingest of %q or a `tracebloc data delete %s` will clear it.",
+				cerr, a.Spec.Table, a.Spec.Table)
+		}
 	}
 
 	if exitErr != nil {
@@ -948,7 +979,7 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 }
 
 // printClusterSummary shows the discovered workspace cluster target —
-// the detail under step 2 ("Connect to your workspace's cluster").
+// the detail under step 2 ("Connect to your workspace").
 func printClusterSummary(p *ui.Printer, release *cluster.ParentRelease, pvc *cluster.SharedPVC) {
 	p.Section("Target cluster")
 	p.Field("release", fmt.Sprintf("%s (chart %s)", release.ReleaseName, release.ChartVersion))

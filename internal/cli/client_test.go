@@ -311,22 +311,6 @@ func TestClientList(t *testing.T) {
 	}
 }
 
-func TestClientUse(t *testing.T) {
-	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`[{"id":7,"first_name":"gamma","namespace":"gamma"}]`))
-	})
-	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "7"); err != nil {
-		t.Fatal(err)
-	}
-	cfg, _ := config.Load()
-	if cfg.Current().ActiveClientID != "7" {
-		t.Errorf("active = %q, want 7", cfg.Current().ActiveClientID)
-	}
-	if err := runClientUse(context.Background(), ui.New(&bytes.Buffer{}), "99"); err == nil {
-		t.Error("expected an error for an unknown client id")
-	}
-}
-
 func TestClientCreate_Interactive(t *testing.T) {
 	var body api.CreateClientRequest
 	posted := false
@@ -1239,8 +1223,8 @@ func TestClientStatus_WaitFailsFastOnMissingClient(t *testing.T) {
 	if got := ExitCodeFromError(err); got != 1 {
 		t.Fatalf("exit code = %d, want 1", got)
 	}
-	if err == nil || !strings.Contains(err.Error(), "isn't in your account list") {
-		t.Errorf("want a 'not in account list' error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "isn't in your account") {
+		t.Errorf("want a 'not in account' error, got: %v", err)
 	}
 }
 

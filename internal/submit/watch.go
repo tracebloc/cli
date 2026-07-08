@@ -14,6 +14,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // Watch-loop tunables. Both deliberately conservative — Phase 4's
@@ -107,9 +109,9 @@ type WatchResult struct {
 
 	// DetachReason qualifies the Detached outcome — set only
 	// when Outcome == JobOutcomeDetached. Lets the orchestrator
-	// print accurate diagnostics ("Detached on signal" vs
-	// "Pod didn't become Ready within timeout" vs "Watch cap
-	// exceeded") instead of the previous one-size-fits-all
+	// print an accurate per-reason diagnostic (signal → stopped
+	// watching, pod-wait timeout → not started yet, watch cap →
+	// stopped following after 1 hour) instead of one one-size-fits-all
 	// message. Bugbot PR #10 r7 flagged the misleading "signal"
 	// framing for the timeout-detach paths.
 	DetachReason DetachReason
@@ -157,11 +159,18 @@ const (
 // out is the customer-facing log stream (typically os.Stdout).
 // Logs are written verbatim — no prefix, no munging — so the
 // stream looks identical to `kubectl logs -f <pod>`.
+//
+// p (may be nil) renders a live spinner during the otherwise-silent
+// wait for the ingestor Pod to schedule + pull its image — without it
+// the CLI printed one line and then went quiet for up to PodReadyTimeout
+// (5 min), looking hung. When p is nil (tests, --output-json-to-a-pipe)
+// the wait is silent as before.
 func WatchJob(
 	ctx context.Context,
 	cs kubernetes.Interface,
 	namespace, jobName string,
 	out io.Writer,
+	p *ui.Printer,
 ) (*WatchResult, error) {
 	// Keep the customer's original ctx separately so finalJobStatus
 	// can derive a FRESH 30s context from it (rather than inheriting
@@ -180,8 +189,19 @@ func WatchJob(
 	// 1. Wait for the ingestor Job's Pod to exist + reach Running.
 	//    jobs-manager creates the Job and Kubernetes spawns the
 	//    Pod asynchronously, so the Pod usually isn't there the
-	//    moment after the 201 comes back.
-	podName, err := waitForJobPod(watchCtx, cs, namespace, jobName)
+	//    moment after the 201 comes back — and scheduling + image
+	//    pull can take minutes. A spinner keeps that wait honest
+	//    instead of looking hung (the pre-spinner behaviour).
+	var startSpin *ui.Spinner
+	if p != nil {
+		startSpin = p.Spinner(
+			"Waiting for the ingestion to start (scheduling + pulling the image)",
+			"Ctrl-C to stop watching — the run keeps going on the cluster")
+	}
+	podName, podPhase, err := waitForJobPod(watchCtx, cs, namespace, jobName)
+	if startSpin != nil {
+		startSpin.Stop()
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// SIGINT before the Pod even appeared. jobs-manager
@@ -219,6 +239,24 @@ func WatchJob(
 	//    a side-channel to the summary parser so we end up with
 	//    a structured representation of the banner without
 	//    requiring a second log fetch post-completion.
+	if p != nil {
+		switch podPhase {
+		case corev1.PodFailed:
+			// Don't success-frame a pod that's already Failed (immediate crash, or a
+			// Failed pod left by a prior backoffLimit retry that bestPod selected) —
+			// its crash logs are about to stream and finalJobStatus will report the
+			// failure. Neutral line, no green ✔.
+			p.Infof("Ingestion started — streaming logs:")
+		case corev1.PodSucceeded:
+			// A fast ingestion the poll caught only after it already finished — the
+			// logs below are REPLAYED, not a live stream, so don't imply "live
+			// progress". The final summary still confirms the outcome.
+			p.Successf("Ingestion complete — showing its logs:")
+		default:
+			// Running (the common case): the stream below is live.
+			p.Successf("Ingestion started — live progress:")
+		}
+	}
 	summary, logErr := streamPodLogsAndParse(watchCtx, cs, namespace, podName, out)
 
 	// 3. Detach branches — checked FIRST, since the customer's SIGINT
@@ -326,8 +364,9 @@ func WatchJob(
 // Pod has reached Phase=Running. The selection key is the
 // `job-name=<jobName>` label that batch/v1 controllers attach to
 // every Pod they create.
-func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobName string) (string, error) {
+func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobName string) (string, corev1.PodPhase, error) {
 	var podName string
+	var podPhase corev1.PodPhase
 	err := wait.PollUntilContextTimeout(ctx, PodPollInterval, PodReadyTimeout, true,
 		func(ctx context.Context) (bool, error) {
 			pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
@@ -374,12 +413,13 @@ func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobN
 				return false, nil // all Pods still Pending
 			}
 			podName = bestPod.Name
+			podPhase = bestPod.Status.Phase
 			return true, nil
 		})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return podName, nil
+	return podName, podPhase, nil
 }
 
 // streamPodLogsAndParse opens a streaming log read on the Pod and
