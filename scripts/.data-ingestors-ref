@@ -1,0 +1,12 @@
+# Pinned tracebloc/data-ingestors commit the CLI's embedded schema (and, when
+# the goldens drift job lands, the validator goldens) are synced from. CI
+# checks against THIS ref, not a floating branch — so an unrelated upstream
+# commit can't red every open CLI PR (backend#1009).
+#
+# To adopt upstream changes: bump this SHA, then run `scripts/sync-schema.sh`
+# (and `scripts/sync-validator-goldens.sh` once its CI job exists) and commit
+# the regenerated files together in one deliberate PR.
+#
+# Format: the first non-comment, non-blank line is the ref (a full commit SHA
+# preferred; a branch name works but reintroduces floating drift).
+0de1f148f9f19c8838d275ab9e5295ae224385c2

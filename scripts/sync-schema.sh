@@ -16,8 +16,15 @@
 #   scripts/sync-schema.sh --check        # verify in-tree copy matches upstream; exit non-zero on drift
 #
 # Env knobs:
-#   SCHEMA_SOURCE_URL  override the upstream URL (default: data-ingestors' master)
-#   SCHEMA_OUT         override the in-tree destination (default: internal/schema/ingest.v1.json)
+#   SCHEMA_SOURCE_URL   override the upstream URL (default: built from the
+#                       pinned ref below)
+#   DATA_INGESTORS_REF  override the data-ingestors ref (default: the pinned
+#                       SHA in scripts/.data-ingestors-ref, else master)
+#   SCHEMA_OUT          override the in-tree destination (default: internal/schema/ingest.v1.json)
+#
+# The ref is PINNED (scripts/.data-ingestors-ref), not a floating branch, so an
+# unrelated upstream commit doesn't red every open CLI PR — adopting upstream
+# is a deliberate SHA bump + re-sync (backend#1009).
 #
 # Future: when we cut a v2 schema, this script will need to learn
 # about multiple versions (e.g. embed v1 AND v2 side-by-side, picked
@@ -26,7 +33,15 @@
 
 set -euo pipefail
 
-readonly DEFAULT_URL="https://raw.githubusercontent.com/tracebloc/data-ingestors/master/tracebloc_ingestor/schema/ingest.v1.json"
+# The pinned data-ingestors ref: first non-comment, non-blank line of the ref
+# file (a full commit SHA), overridable via DATA_INGESTORS_REF, falling back to
+# master if the file is somehow absent.
+REF_FILE="$(cd "$(dirname "$0")" && pwd)/.data-ingestors-ref"
+readonly REF_FILE
+_pinned_ref="$(grep -vE '^[[:space:]]*(#|$)' "$REF_FILE" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+DATA_INGESTORS_REF="${DATA_INGESTORS_REF:-${_pinned_ref:-master}}"
+
+readonly DEFAULT_URL="https://raw.githubusercontent.com/tracebloc/data-ingestors/${DATA_INGESTORS_REF}/tracebloc_ingestor/schema/ingest.v1.json"
 readonly DEFAULT_OUT="internal/schema/ingest.v1.json"
 
 SCHEMA_SOURCE_URL="${SCHEMA_SOURCE_URL:-$DEFAULT_URL}"
