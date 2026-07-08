@@ -758,6 +758,37 @@ other collaborators train against it without ever seeing the raw files.`))
 		return &exitError{code: 7, err: stageErr}
 	}
 
+	// 10–12. The ingestion-run tail: mint token → port-forward → submit →
+	//         classify → emit JSON → reclaim staging. Extracted so its
+	//         outcome matrix (exit 5/8/9, JSON emission, and the
+	//         must-NOT-reclaim-on-partial gate) is table-testable via the
+	//         injected seams without a cluster (#1009). jsonEmitted flows
+	//         back so the --output-json error defer above stays correct.
+	je, runErr := runIngestionRun(ctx, out, a, target, specBytes, spec)
+	jsonEmitted = je
+	return runErr
+}
+
+// runIngestionRun is the money path's outcome tail. It mints the ingestor
+// token, port-forwards to jobs-manager, POSTs the run, classifies the result
+// into a status + process exit code (kept in lockstep by classifyPushOutcome),
+// emits the machine-readable JSON in --output-json mode, and reclaims the
+// staged source copy on a clean success only.
+//
+// Split out of runDataIngest purely for testability: the four cluster-touching
+// steps go through package-level seams (mintIngestorTokenFn /
+// portForwardJobsManagerFn / submitRunFn / cleanStagingFn), so a table test can
+// drive the full classify → exit-code → JSON → reclaim matrix — including the
+// "must NOT reclaim on partial failure" gate — without standing up a cluster
+// (#1009).
+//
+// Returns jsonEmitted so runDataIngest's --output-json error defer knows
+// whether a result object already reached stdout: the mint / port-forward
+// failures return before the emit and rely on that defer; the submit path
+// always emits.
+func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, target *clusterTarget, specBytes []byte, spec map[string]any) (jsonEmitted bool, err error) {
+	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
+
 	// 10. Mint the SA token Phase 4 uses to authenticate the POST
 	//     to jobs-manager. Expiry is 1 hour (vs cluster info's 10
 	//     min) because the full Phase 4 lifecycle — submit + watch
@@ -770,10 +801,10 @@ other collaborators train against it without ever seeing the raw files.`))
 		a.Printer.Hintf("Submitting the run, then following along as tracebloc validates your data and loads it into the table — progress streams below.")
 		a.Printer.Hintf("This follows the run for up to an hour; a longer run keeps going on its own (or start it with --detach and check back later).")
 	}
-	tok, err := cluster.MintIngestorToken(ctx, cs, resolved.Namespace,
+	tok, err := mintIngestorTokenFn(ctx, cs, resolved.Namespace,
 		release.IngestorSAName, 3600, nil)
 	if err != nil {
-		return &exitError{code: 5, err: err}
+		return false, &exitError{code: 5, err: err}
 	}
 
 	// 11. Open a port-forward to a Pod backing the jobs-manager
@@ -784,10 +815,10 @@ other collaborators train against it without ever seeing the raw files.`))
 	//     `kubectl port-forward`. Bugbot PR #10 r3 caught the
 	//     original broken-by-design direct-URL POST.
 	a.Printer.Infof("Connecting to your workspace to submit the run…")
-	pf, err := submit.PortForwardJobsManager(ctx, cs, resolved.RestConfig,
+	pf, err := portForwardJobsManagerFn(ctx, cs, resolved.RestConfig,
 		resolved.Namespace, release.JobsManagerServiceName, release.JobsManagerPort)
 	if err != nil {
-		return &exitError{code: 8, err: fmt.Errorf("setting up jobs-manager port-forward: %w", err)}
+		return false, &exitError{code: 8, err: fmt.Errorf("setting up jobs-manager port-forward: %w", err)}
 	}
 	defer pf.Close()
 
@@ -810,7 +841,7 @@ other collaborators train against it without ever seeing the raw files.`))
 	//        WatchResult Detached        → 0 (cluster keeps running)
 	//        WatchResult Succeeded clean → 0
 	localEndpoint := fmt.Sprintf("http://localhost:%d", pf.LocalPort)
-	submitRes, err := submit.Run(ctx, submit.Options{
+	submitRes, err := submitRunFn(ctx, submit.Options{
 		Submitter:        submit.NewHTTPSubmitter(localEndpoint, tok.Token),
 		Client:           cs,
 		IngestConfigYAML: string(specBytes),
@@ -845,21 +876,13 @@ other collaborators train against it without ever seeing the raw files.`))
 		jsonEmitted = true
 	}
 
-	// Reclaim the staged source copy on a CLEAN success only. The
-	// ingestor copies (not moves) the staged files into the table, so
-	// leaving .tracebloc-staging/<table> behind doubles PVC use for
-	// file-bearing datasets until the next --overwrite or `data delete`
-	// (the staging-leak found by the ingest UX audit; cli#166 / epic #67).
-	// Gated on status=="succeeded" so we never touch the source on a
-	//   - detached run (status "detached"): the Job is still reading it;
-	//   - partial (status "completed_with_failures") or failed run: the
-	//     user may want the source to inspect/retry.
-	// Best-effort and time-bounded (push.StagingCleanupTimeout): a failed
-	// or slow reclaim must not fail — or noticeably delay — a successful
-	// ingest.
-	if status == "succeeded" {
+	// Reclaim the staged source copy on a CLEAN success only (see
+	// shouldReclaimStaging). Best-effort and time-bounded
+	// (push.StagingCleanupTimeout): a failed or slow reclaim must not
+	// fail — or noticeably delay — a successful ingest.
+	if shouldReclaimStaging(status) {
 		a.Printer.Infof("Reclaiming the temporary staging copy on the cluster…")
-		if cerr := push.CleanStaging(ctx, cs,
+		if cerr := cleanStagingFn(ctx, cs,
 			&push.SPDYExecutor{Config: resolved.RestConfig, Client: cs},
 			resolved.Namespace, a.Spec.Table, push.PodSpecOptions{
 				Namespace:          resolved.Namespace,
@@ -875,9 +898,25 @@ other collaborators train against it without ever seeing the raw files.`))
 	}
 
 	if exitErr != nil {
-		return exitErr
+		return jsonEmitted, exitErr
 	}
-	return nil
+	return jsonEmitted, nil
+}
+
+// shouldReclaimStaging reports whether the staged source copy should be
+// reclaimed after the run. ONLY on a clean success: the ingestor copies (not
+// moves) the staged files into the table, so leaving .tracebloc-staging/<table>
+// behind doubles PVC use for file-bearing datasets until the next --overwrite
+// or `data delete` (the staging-leak found by the ingest UX audit; cli#166 /
+// epic #67). Everything else keeps the source:
+//   - a detached run ("detached") — the Job is still reading it;
+//   - a partial ("completed_with_failures") or failed/errored run — the user
+//     may want the source to inspect or retry.
+//
+// This is the "must NOT reclaim on partial failure" gate (#1009), named so the
+// invariant is table-testable in isolation.
+func shouldReclaimStaging(status string) bool {
+	return status == "succeeded"
 }
 
 // classifyPushOutcome maps the result of submit.Run to a machine-
@@ -1071,6 +1110,18 @@ func writePushErrorJSON(w io.Writer, sp push.SpecArgs, e error, code int) {
 
 // listDatasetsFn is a test seam over push.ListDatasets.
 var listDatasetsFn = push.ListDatasets
+
+// Test seams over the cluster-touching steps of runIngestionRun (#1009).
+// Production wires them to the real functions; a table test overrides them to
+// drive the classify → exit-code → JSON → reclaim matrix without a cluster
+// (mirrors the listDatasetsFn seam). cleanStagingFn is here too so a test can
+// observe whether the staging reclaim ran (the must-NOT-reclaim gate).
+var (
+	mintIngestorTokenFn      = cluster.MintIngestorToken
+	portForwardJobsManagerFn = submit.PortForwardJobsManager
+	submitRunFn              = submit.Run
+	cleanStagingFn           = push.CleanStaging
+)
 
 // destTableExists reports whether the destination table already holds an
 // ingested dataset, via the same query `data list` uses. It fails OPEN: a
