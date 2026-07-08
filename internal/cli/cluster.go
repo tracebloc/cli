@@ -206,10 +206,17 @@ func runClusterInfo(
 	p.Section("Ingestor SA token")
 	p.Field("source", tok.Source.String())
 	p.Field("sha256[:8]", hex.EncodeToString(hash[:8]))
-	if tok.ExpirationSeconds > 0 {
+	switch {
+	case !tok.ExpiresAt.IsZero():
+		// The server's authoritative, policy-capped expiry (TokenRequest path).
+		// "~" hedges the client/server clock skew in time.Until (#4).
+		remaining := time.Until(tok.ExpiresAt).Round(time.Second)
+		p.Field("expires in", fmt.Sprintf("~%s", remaining))
+	case tok.ExpirationSeconds > 0:
+		// No server timestamp — fall back to the requested lifetime.
 		exp := time.Duration(tok.ExpirationSeconds) * time.Second
-		p.Field("expires in", fmt.Sprintf("~%s (server may cap shorter)", exp))
-	} else {
+		p.Field("expires in", fmt.Sprintf("~%s (requested; server may cap shorter)", exp))
+	default:
 		p.Field("expires in", "never (static-secret fallback)")
 	}
 

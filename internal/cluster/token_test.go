@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -51,6 +52,80 @@ func TestMintIngestorToken_TokenRequest_HappyPath(t *testing.T) {
 	}
 	if tok.ExpirationSeconds != 600 {
 		t.Errorf("ExpirationSeconds = %d, want 600", tok.ExpirationSeconds)
+	}
+}
+
+// The TokenRequest response's ExpirationTimestamp — the server's
+// authoritative, policy-capped expiry — must be captured on ExpiresAt so
+// `cluster info` shows the REAL remaining lifetime, not the requested one (#4).
+func TestMintIngestorToken_CapturesServerExpiry(t *testing.T) {
+	const ns = "tracebloc"
+	// Server caps to 300s even though we request 3600 — the case #4 exists for.
+	capped := metav1.NewTime(time.Now().Add(300 * time.Second).UTC())
+	cs := fake.NewClientset(&corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "ingestor", Namespace: ns},
+	})
+	cs.PrependReactor("create", "serviceaccounts",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			ca, ok := action.(k8stesting.CreateAction)
+			if !ok || ca.GetSubresource() != "token" {
+				return false, nil, nil
+			}
+			tr := ca.GetObject().(*authenticationv1.TokenRequest)
+			tr.Status.Token = "fake-token"
+			tr.Status.ExpirationTimestamp = capped
+			return true, tr, nil
+		})
+
+	tok, err := MintIngestorToken(context.Background(), cs, ns, "ingestor", 3600, nil)
+	if err != nil {
+		t.Fatalf("MintIngestorToken: %v", err)
+	}
+	if !tok.ExpiresAt.Equal(capped.Time) {
+		t.Errorf("ExpiresAt = %v, want the server timestamp %v", tok.ExpiresAt, capped.Time)
+	}
+	// The requested seconds are still recorded, but ExpiresAt (300s out) is the
+	// authoritative value the display prefers — well under the 3600 requested.
+	if remaining := time.Until(tok.ExpiresAt); remaining > 310*time.Second {
+		t.Errorf("ExpiresAt should reflect the 300s server cap, got %v remaining", remaining)
+	}
+}
+
+// The static-secret fallback has no expiry — ExpiresAt stays zero so the
+// display reads "never", not a bogus "expires in ~0s".
+func TestMintIngestorToken_StaticSecretHasNoExpiresAt(t *testing.T) {
+	const ns = "tracebloc"
+	staticSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "ingestor-token-x",
+			Namespace:   ns,
+			Annotations: map[string]string{corev1.ServiceAccountNameKey: "ingestor"},
+		},
+		Type: corev1.SecretTypeServiceAccountToken,
+		Data: map[string][]byte{"token": []byte("static-tok")},
+	}
+	cs := fake.NewClientset(
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "ingestor", Namespace: ns}},
+		staticSecret,
+	)
+	cs.PrependReactor("create", "serviceaccounts",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			if ca, ok := action.(k8stesting.CreateAction); ok && ca.GetSubresource() == "token" {
+				return true, nil, apierrors.NewForbidden(
+					corev1.Resource("serviceaccounts/token"), "ingestor", errors.New("denied"))
+			}
+			return false, nil, nil
+		})
+
+	tok, err := MintIngestorToken(context.Background(), cs, ns, "ingestor", 600, nil)
+	if err != nil {
+		t.Fatalf("MintIngestorToken: %v", err)
+	}
+	if tok.Source != TokenSourceStaticSecret {
+		t.Fatalf("Source = %v, want static-secret", tok.Source)
+	}
+	if !tok.ExpiresAt.IsZero() {
+		t.Errorf("static-secret token should have a zero ExpiresAt, got %v", tok.ExpiresAt)
 	}
 }
 
