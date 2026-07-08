@@ -41,6 +41,19 @@ readonly REF_FILE
 _pinned_ref="$(grep -vE '^[[:space:]]*(#|$)' "$REF_FILE" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
 DATA_INGESTORS_REF="${DATA_INGESTORS_REF:-${_pinned_ref:-master}}"
 
+# The ref is interpolated into a download URL, so validate it before use
+# (like scripts/install.sh does for its release tag): a crafted ref — most
+# plausibly via the DATA_INGESTORS_REF override — could otherwise inject path
+# traversal ("../..") or extra segments into the raw.githubusercontent path.
+# Allow only a SHA / branch / tag shape: alnum start, then alnum . _ - / and
+# no ".." component.
+if ! printf '%s' "$DATA_INGESTORS_REF" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' \
+   || printf '%s' "$DATA_INGESTORS_REF" | grep -q '\.\.'; then
+  echo "error: invalid data-ingestors ref '$DATA_INGESTORS_REF' — expected a commit SHA, branch, or tag" >&2
+  echo "(set it in scripts/.data-ingestors-ref or via DATA_INGESTORS_REF)" >&2
+  exit 2
+fi
+
 readonly DEFAULT_URL="https://raw.githubusercontent.com/tracebloc/data-ingestors/${DATA_INGESTORS_REF}/tracebloc_ingestor/schema/ingest.v1.json"
 readonly DEFAULT_OUT="internal/schema/ingest.v1.json"
 
