@@ -465,13 +465,28 @@ func adoptLiveInClusterClient(
 ) (*api.ProvisionedClient, bool, error) {
 	live, err := readInClusterClient(ctx, cluster.KubeconfigOptions{Path: opts.kubeconfigPath, Context: opts.contextOverride})
 	if err != nil {
-		// Best-effort: couldn't inspect the cluster for a live client. Fall through
-		// to a plain create (the backend's cluster_id get-or-create still applies).
-		ilog.Logf("in-cluster client discovery failed (non-fatal): %v", err)
+		// We couldn't inspect the cluster for an existing client. Whether that's
+		// safe to ignore depends on reachability: clusterID != "" means we DID read
+		// the cluster's kube-system UID over the same kubeconfig, so the cluster is
+		// reachable and this is an RBAC/transient read failure — NOT proof it's
+		// empty. Minting here could create a duplicate over a live client that then
+		// never deploys and permanently strands the cluster anchor (the phantom-1060
+		// class). Fail closed. Only a genuinely unreachable cluster (clusterID == "",
+		// where the UID read failed too) falls through to a plain, non-anchored
+		// create — that mint stamps no anchor, so it can't orphan one.
+		if clusterID != "" {
+			ilog.Logf("in-cluster client discovery failed on a reachable cluster (failing closed): %v", err)
+			return nil, false, &exitError{code: 1, err: fmt.Errorf(
+				"couldn't check whether a tracebloc client is already running on this cluster (%w) — "+
+					"provisioning now could mint a duplicate that never deploys and locks the cluster to it. "+
+					"Re-run (if this was transient); if it persists, ensure your kubeconfig/context can list "+
+					"deployments and secrets across namespaces. Diagnose with `tracebloc cluster doctor`", err)}
+		}
+		ilog.Logf("in-cluster client discovery skipped — cluster unreachable (non-fatal): %v", err)
 		return nil, false, nil
 	}
 	if live == nil {
-		return nil, false, nil // fresh cluster — nothing installed to adopt
+		return nil, false, nil // reachable, nothing installed to adopt — a genuine fresh cluster
 	}
 	ilog.Logf("live in-cluster client: id=%s namespace=%s", live.ClientID, live.Namespace)
 
