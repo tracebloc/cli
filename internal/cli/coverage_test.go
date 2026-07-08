@@ -99,7 +99,7 @@ func TestClassifyPushOutcome(t *testing.T) {
 		wantStat string
 		wantCode int
 	}{
-		{"clean", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 10}}}, nil, "succeeded", 0},
+		{"clean", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 10, APISentRecords: 10}}}, nil, "succeeded", 0},
 		{"partial", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 7, FailedRecords: 3}}}, nil, "completed_with_failures", 9},
 		{"failed", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeFailed}}, nil, "failed", 9},
 		{"detached", &submit.Result{Submit: resp}, nil, "detached", 0},

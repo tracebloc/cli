@@ -71,20 +71,24 @@ func TestSummaryParser_RealBannerEndToEnd(t *testing.T) {
 // that the orchestrator uses to choose between success exit code
 // (0) and ingest-failure exit code (9).
 func TestSummaryParser_HasFailures(t *testing.T) {
+	// Mirrors the ingestor's IngestionSummary.has_failures exactly.
 	cases := []struct {
 		name string
 		s    *Summary
 		want bool
 	}{
 		{"nil", nil, false},
-		{"all zero", &Summary{TotalRecords: 100, ProcessedRecords: 100}, false},
-		{"file transfer failures", &Summary{FileTransferFailures: 1}, true},
-		{"failed records", &Summary{FailedRecords: 1}, true},
-		{"both", &Summary{FileTransferFailures: 1, FailedRecords: 1}, true},
-		// Skipped records are NOT failures — they're rows that
-		// validators rejected. The customer wants to see the
-		// count but it doesn't change the exit code.
-		{"skipped is not failure", &Summary{SkippedRecords: 100}, false},
+		// A genuinely clean run: every counter equal, nothing skipped/failed.
+		{"clean", &Summary{TotalRecords: 100, ProcessedRecords: 100, InsertedRecords: 100, APISentRecords: 100}, false},
+		{"file transfer failures", &Summary{TotalRecords: 1, InsertedRecords: 1, APISentRecords: 1, FileTransferFailures: 1}, true},
+		{"failed records", &Summary{TotalRecords: 1, InsertedRecords: 1, APISentRecords: 1, FailedRecords: 1}, true},
+		// Skipped rows ARE a failure — a dropped row is silent data loss
+		// (#234); the ingestor counts it, so the CLI must too (was the bug).
+		{"skipped is a failure", &Summary{TotalRecords: 100, InsertedRecords: 100, APISentRecords: 100, SkippedRecords: 5}, true},
+		// Fewer rows in MySQL than the ingestor saw → partial run.
+		{"inserted < total", &Summary{TotalRecords: 100, ProcessedRecords: 100, InsertedRecords: 99, APISentRecords: 99}, true},
+		// Rows in MySQL but the central catalog got fewer.
+		{"api_sent < inserted", &Summary{TotalRecords: 100, InsertedRecords: 100, APISentRecords: 99}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -99,6 +103,7 @@ func TestSummaryParser_HasFailures(t *testing.T) {
 // rendered panel's "Success rate: XX%" line. Divide-by-zero on
 // empty banner is the critical edge case.
 func TestSummaryParser_SuccessRate(t *testing.T) {
+	// Rate is INSERTED/total (matches the ingestor banner), not processed/total.
 	cases := []struct {
 		name string
 		s    *Summary
@@ -106,8 +111,11 @@ func TestSummaryParser_SuccessRate(t *testing.T) {
 	}{
 		{"nil", nil, 0},
 		{"empty banner", &Summary{}, 0},
-		{"100%", &Summary{TotalRecords: 100, ProcessedRecords: 100}, 100},
-		{"50%", &Summary{TotalRecords: 100, ProcessedRecords: 50}, 50},
+		{"100%", &Summary{TotalRecords: 100, ProcessedRecords: 100, InsertedRecords: 100}, 100},
+		{"50%", &Summary{TotalRecords: 100, InsertedRecords: 50}, 50},
+		// The overstatement the fix closes: all rows validated (processed=100)
+		// but only 70 landed in MySQL → 70%, not the old 100%.
+		{"processed overstates: inserted<processed", &Summary{TotalRecords: 100, ProcessedRecords: 100, InsertedRecords: 70}, 70},
 		{"all failed", &Summary{TotalRecords: 100}, 0},
 	}
 	for _, c := range cases {
@@ -233,9 +241,9 @@ func TestRenderSummary_OutcomeHeadline(t *testing.T) {
 		s    *Summary
 		want string
 	}{
-		{"clean", &Summary{TotalRecords: 10, ProcessedRecords: 10, InsertedRecords: 10}, "complete —"},
-		{"skips", &Summary{TotalRecords: 10, InsertedRecords: 8, SkippedRecords: 2}, "skips"},
-		{"failures", &Summary{TotalRecords: 10, InsertedRecords: 7, FailedRecords: 3}, "failures"},
+		{"clean", &Summary{TotalRecords: 10, ProcessedRecords: 10, InsertedRecords: 10, APISentRecords: 10}, "complete —"},
+		{"skips", &Summary{TotalRecords: 10, ProcessedRecords: 8, InsertedRecords: 8, APISentRecords: 8, SkippedRecords: 2}, "skips"},
+		{"failures", &Summary{TotalRecords: 10, ProcessedRecords: 7, InsertedRecords: 7, APISentRecords: 7, FailedRecords: 3}, "failures"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
