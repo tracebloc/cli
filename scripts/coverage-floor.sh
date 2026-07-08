@@ -28,6 +28,16 @@ status=0
 for entry in $FLOORS; do
   pkg="${entry%%:*}"
   min="${entry##*:}"
+  # A malformed entry (no ":floor", or a non-integer floor) must fail loudly,
+  # not slip through. Without this, a dropped colon leaves min="$entry" (the
+  # whole token); the awk comparison below then errors on that as bare source
+  # and exits non-zero — which `if awk` reads as "not below floor", prints a
+  # bogus "ok", and turns the ratchet into a silent no-op for that package.
+  if [ "$pkg" = "$entry" ] || ! printf '%s' "$min" | grep -qE '^[0-9]+$'; then
+    echo "::error::malformed FLOORS entry '$entry' (want 'package:INT') — fix scripts/coverage-floor.sh" >&2
+    status=1
+    continue
+  fi
   line="$(go test -cover "./$pkg/" 2>/dev/null | grep -E 'coverage: [0-9]' || true)"
   pct="$(printf '%s\n' "$line" | sed -nE 's/.*coverage: ([0-9]+(\.[0-9]+)?)% of statements.*/\1/p' | head -1)"
   if [ -z "$pct" ]; then
