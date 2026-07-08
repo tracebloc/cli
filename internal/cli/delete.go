@@ -139,12 +139,23 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		if st, found, lerr := lookupClientStatus(ctx, client, prof.ActiveClientID); lerr != nil {
 			// A 426 (CLI too old) won't recover by continuing — the whole offboard
 			// talks to the same backend, so fail fast with the upgrade message rather
-			// than imply the guard was merely skipped. Other errors (5xx/429/network)
-			// are transient: warn and continue, since the teardown is the real gate.
+			// than imply the guard was merely skipped.
 			var ue *api.UpgradeRequiredError
 			if errors.As(lerr, &ue) {
 				return &exitError{code: 1, err: lerr}
 			}
+			// A 401/403 means the signed-in credential is revoked/expired — it won't
+			// recover by continuing either, and every later step (the revoke included)
+			// hits the same backend. Fail fast and point at sign-in rather than march
+			// the user through the confirm only to fail at revoke. Mirrors the --wait
+			// poll loop's auth handling in client.go.
+			var ae *api.APIError
+			if errors.As(lerr, &ae) && (ae.StatusCode == http.StatusUnauthorized || ae.StatusCode == http.StatusForbidden) {
+				return &exitError{code: 1, err: errors.New(
+					"tracebloc rejected your credentials — run `tracebloc login`, then retry `tracebloc delete`")}
+			}
+			// Other errors (5xx/429/network) are transient: warn and continue, since
+			// the teardown is the real gate.
 			p.Hintf("Couldn't check whether this client is still online (%v) — continuing; pass --force to skip this check.", lerr)
 		} else if !found {
 			// The stored id isn't among this account's clients — likely a stale
@@ -199,6 +210,20 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	// it's intentionally excluded — its own warning already surfaces it).
 	degraded := false
 
+	// Clear the local enrollment pointer and persist it IMMEDIATELY — before the
+	// best-effort teardown below — so the host never looks enrolled under the
+	// now-revoked credential, even if a later step fails or the process is
+	// interrupted mid-teardown (§7.5). On the default (wipe) path ~/.tracebloc —
+	// config.json included — is removed below anyway; persisting here first makes
+	// the --keep-data and killed-mid-teardown cases safe. Re-running `client create`
+	// re-adopts by cluster_id.
+	prof.ActiveClientID, prof.ActiveClientName, prof.ActiveClientNamespace = "", "", ""
+	if serr := cfg.Save(); serr != nil {
+		degraded = true
+		p.Warnf("Couldn't clear the stored active-client pointer (%v) — the on-disk config "+
+			"still names the revoked client; run `tracebloc logout` or remove it by hand.", serr)
+	}
+
 	// 2. Uninstall the Helm release (best-effort — the credential is already
 	//    revoked; a leftover release is harmless and re-runnable).
 	if ns != "" {
@@ -233,34 +258,16 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		p.Successf("Reclaimed the tracebloc container images.")
 	}
 
-	// 5. The credential is revoked, so the enrollment is dead — clear the local
-	//    active-client pointer FIRST, regardless of --keep-data, so the host never
-	//    looks enrolled as a revoked client (§7.5). Then either spare or wipe
-	//    ~/.tracebloc. The token and (under --keep-data) on-host data stay;
-	//    re-running `client create` re-adopts by cluster_id.
-	prof.ActiveClientID, prof.ActiveClientName, prof.ActiveClientNamespace = "", "", ""
+	// 5. Spare or wipe ~/.tracebloc. The active-client pointer was already cleared
+	//    and persisted above, so here we only decide whether the data directory
+	//    stays. Under --keep-data the token and on-host datasets remain.
 	if o.keepData {
-		if serr := cfg.Save(); serr != nil {
-			// The in-memory pointer was cleared but not persisted — the on-disk config
-			// still names the revoked client. Mark degraded so the closing doesn't read
-			// as a clean offboard, and tell the user it needs a hand.
-			degraded = true
-			p.Warnf("Kept local data, but couldn't clear the stored active-client pointer (%v) — "+
-				"the on-disk config still names the revoked client; run `tracebloc logout` or remove it by hand.", serr)
-		} else {
-			p.Infof("Kept local data and config (~/.tracebloc); cleared the active-client pointer — --keep-data.")
-		}
+		p.Infof("Kept local data and config (~/.tracebloc); cleared the active-client pointer — --keep-data.")
 	} else {
 		if derr := removeHostDataDir(); derr != nil {
-			// The wipe failed, so the pointer isn't gone with the directory —
-			// persist the cleared pointer so the host doesn't still look enrolled
-			// under a dead credential.
 			degraded = true
-			if serr := cfg.Save(); serr != nil {
-				p.Warnf("Couldn't remove local data (%v) or clear the active-client pointer (%v) — remove it by hand: rm -rf %s", derr, serr, hostDataDirDisplay())
-			} else {
-				p.Warnf("Couldn't remove local data (%v) — cleared the active-client pointer; remove the data by hand: rm -rf %s", derr, hostDataDirDisplay())
-			}
+			p.Warnf("Couldn't remove local data (%v) — cleared the active-client pointer; "+
+				"remove the data by hand: rm -rf %s", derr, hostDataDirDisplay())
 		} else {
 			p.Successf("Removed local tracebloc data and config.")
 		}
@@ -269,8 +276,11 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	// 6. Remove the running CLI binary + its `tb` sibling symlink LAST (best-effort
 	//    — on failure print the exact command; a brew-managed binary gets the brew
 	//    hint instead). Done last so the earlier steps still run even if we can't
-	//    delete ourselves.
-	removeSelf(p)
+	//    delete ourselves. A failed self-removal leaves the CLI on disk, which the
+	//    pre-confirm summary promised would go — so mark the offboard degraded.
+	if !removeSelf(p) {
+		degraded = true
+	}
 
 	p.Newline()
 	// The credential is revoked either way, so the machine can no longer connect —
@@ -338,11 +348,16 @@ func hostDataDirDisplay() string {
 // last offboarding step. Best-effort: on failure it prints the exact command to
 // finish by hand (or a `brew uninstall` hint when the binary looks brew-managed),
 // rather than fail the whole offboard, which has already succeeded.
-func removeSelf(p *ui.Printer) {
+//
+// Returns false when the binary (or tracebloc's own `tb` alias) could not be
+// removed, so the caller can mark the offboard degraded rather than print a
+// clean-success closing while the CLI is still on disk.
+func removeSelf(p *ui.Printer) (ok bool) {
+	ok = true
 	exe, err := osExecutable()
 	if err != nil {
 		p.Hintf("Couldn't locate the CLI binary to remove it (%v) — delete it by hand.", err)
-		return
+		return false
 	}
 
 	// The `tb` alias is a sibling of the binary (the installer symlinks it next to
@@ -358,6 +373,7 @@ func removeSelf(p *ui.Printer) {
 		case ours:
 			if rmErr := osRemoveAll(tb); rmErr != nil {
 				p.Hintf("Couldn't remove the `tb` alias (%v) — remove it by hand: rm -f %s", rmErr, tb)
+				ok = false
 			}
 		case exists:
 			// A `tb` that isn't our symlink belongs to another tool — leave it, and
@@ -372,9 +388,10 @@ func removeSelf(p *ui.Printer) {
 		} else {
 			p.Hintf("Couldn't remove the CLI (%v) — remove it by hand: rm -f %s", rmErr, exe)
 		}
-		return
+		return false
 	}
 	p.Successf("Removed the tracebloc CLI from this machine.")
+	return ok
 }
 
 // aliasStatus reports whether a `tb` path exists and whether it is tracebloc's

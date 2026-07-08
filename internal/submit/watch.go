@@ -240,14 +240,20 @@ func WatchJob(
 	//    a structured representation of the banner without
 	//    requiring a second log fetch post-completion.
 	if p != nil {
-		// Don't success-frame a pod that's already Failed (immediate
-		// crash, or a Failed pod left by a prior backoffLimit retry that
-		// bestPod selected) — its crash logs are about to stream and
-		// finalJobStatus will report the failure. A neutral line for that
-		// case; the green ✔ only for a live/completed pod.
-		if podPhase == corev1.PodFailed {
+		switch podPhase {
+		case corev1.PodFailed:
+			// Don't success-frame a pod that's already Failed (immediate crash, or a
+			// Failed pod left by a prior backoffLimit retry that bestPod selected) —
+			// its crash logs are about to stream and finalJobStatus will report the
+			// failure. Neutral line, no green ✔.
 			p.Infof("Ingestion started — streaming logs:")
-		} else {
+		case corev1.PodSucceeded:
+			// A fast ingestion the poll caught only after it already finished — the
+			// logs below are REPLAYED, not a live stream, so don't imply "live
+			// progress". The final summary still confirms the outcome.
+			p.Successf("Ingestion complete — showing its logs:")
+		default:
+			// Running (the common case): the stream below is live.
 			p.Successf("Ingestion started — live progress:")
 		}
 	}

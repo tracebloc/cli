@@ -15,6 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // jobPod constructs a Pod owned by `jobName` via the standard
@@ -325,6 +327,37 @@ func TestWatchJob_TerminalFailedJobReported(t *testing.T) {
 	}
 	if wr.Outcome != JobOutcomeFailed {
 		t.Fatalf("Outcome = %v, want Failed", wr.Outcome)
+	}
+}
+
+// TestWatchJob_SucceededPodShowsReplayNotLive: a fast ingestion the poll catches
+// only after the Pod already Succeeded must not be framed as "live progress" —
+// the logs that follow are replayed, not a live stream. Pins the phase-aware
+// start line (bugbot #164).
+func TestWatchJob_SucceededPodShowsReplayNotLive(t *testing.T) {
+	cs := fake.NewClientset(
+		jobPod("ingestor-fast", "ingestor", corev1.PodSucceeded),
+		jobWithCondition("ingestor", batchv1.JobComplete),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var buf bytes.Buffer
+	p := ui.New(&buf) // the start line is rendered via the printer
+	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor", &buf, p)
+	if err != nil {
+		t.Fatalf("WatchJob: %v", err)
+	}
+	if wr.Outcome != JobOutcomeSucceeded {
+		t.Fatalf("Outcome = %v, want Succeeded", wr.Outcome)
+	}
+	s := buf.String()
+	if !strings.Contains(s, "Ingestion complete — showing its logs:") {
+		t.Errorf("succeeded-pod start line missing; got:\n%s", s)
+	}
+	if strings.Contains(s, "live progress") {
+		t.Errorf("must not claim live progress for an already-completed pod:\n%s", s)
 	}
 }
 

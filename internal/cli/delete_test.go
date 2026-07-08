@@ -331,6 +331,70 @@ func TestDelete_Guard426_FailsFast(t *testing.T) {
 	}
 }
 
+// A 401/403 during the pre-offboard online check means the signed-in credential
+// is revoked/expired — fail fast with a sign-in hint instead of warning and
+// marching the user through the confirm only to fail at revoke (bugbot #164).
+func TestDelete_GuardAuthError_FailsFast(t *testing.T) {
+	revoked := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
+			revoked = true
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusUnauthorized) // 401 — token revoked/expired
+			_, _ = w.Write([]byte(`{"detail":"invalid token"}`))
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
+	fn.install(t)
+
+	var out bytes.Buffer
+	err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true})
+	if err == nil || !strings.Contains(err.Error(), "tracebloc login") {
+		t.Fatalf("want a fail-fast sign-in error, got: %v", err)
+	}
+	if revoked {
+		t.Error("revoke must NOT run after an auth-error guard failure")
+	}
+	if len(fn.calls) != 0 {
+		t.Errorf("no teardown after an auth-error guard failure, got: %v", fn.calls)
+	}
+}
+
+// A failed CLI self-removal leaves the binary on disk — the pre-confirm summary
+// promised it would go, so the closing must be the honest degraded line, not a
+// clean success (bugbot #164).
+func TestDelete_SelfRemovalFails_HonestClosing(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	exe := filepath.Join(t.TempDir(), "tracebloc")
+	fn := &fakeNodeboot{
+		executable: exe,
+		removeErr:  map[string]error{exe: errors.New("permission denied")},
+	}
+	fn.install(t)
+
+	var out bytes.Buffer
+	if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true}); err != nil {
+		t.Fatalf("offboard should still return nil (revoke succeeded): %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "some cleanup above didn't complete") {
+		t.Errorf("a failed self-removal should produce the degraded closing, got:\n%s", s)
+	}
+	if strings.Contains(s, "no longer connected to tracebloc") {
+		t.Errorf("must not print the clean-success closing when self-removal failed:\n%s", s)
+	}
+}
+
 // --kubeconfig/--context must reach the helm uninstall — otherwise the release is
 // uninstalled against the ambient current-context, which may be the wrong cluster.
 func TestDelete_KubeconfigContext_ReachHelm(t *testing.T) {
