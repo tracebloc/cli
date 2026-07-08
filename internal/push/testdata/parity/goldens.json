@@ -3,6 +3,14 @@
   "verdicts": {
     "imgc-bom-labels": {
       "errors": [],
+      "values": {
+        "classes": [
+          "cat",
+          "dog"
+        ],
+        "resolved_label": "label",
+        "row_count": 2
+      },
       "verdict": "accept"
     },
     "imgc-corrupt": {
@@ -13,6 +21,14 @@
     },
     "imgc-dotted-stem": {
       "errors": [],
+      "values": {
+        "classes": [
+          "cat",
+          "dog"
+        ],
+        "resolved_label": "label",
+        "row_count": 2
+      },
       "verdict": "accept"
     },
     "imgc-dup-header": {
@@ -21,6 +37,14 @@
     },
     "imgc-empty-label": {
       "errors": [],
+      "values": {
+        "classes": [
+          "",
+          "A"
+        ],
+        "resolved_label": "label",
+        "row_count": 2
+      },
       "verdict": "accept"
     },
     "imgc-header-only": {
@@ -31,6 +55,14 @@
     },
     "imgc-label-case": {
       "errors": [],
+      "values": {
+        "classes": [
+          "cat",
+          "dog"
+        ],
+        "resolved_label": "Label",
+        "row_count": 2
+      },
       "verdict": "accept"
     },
     "imgc-label-missing": {
@@ -51,6 +83,14 @@
     },
     "imgc-nonsquare": {
       "errors": [],
+      "values": {
+        "classes": [
+          "cat",
+          "dog"
+        ],
+        "resolved_label": "label",
+        "row_count": 2
+      },
       "verdict": "accept"
     },
     "imgc-nonsquare-swapped": {
@@ -61,6 +101,14 @@
     },
     "imgc-ok": {
       "errors": [],
+      "values": {
+        "classes": [
+          "cat",
+          "dog"
+        ],
+        "resolved_label": "label",
+        "row_count": 2
+      },
       "verdict": "accept"
     },
     "imgc-res-mismatch": {
@@ -123,14 +171,38 @@
     },
     "tabular-ok": {
       "errors": [],
+      "values": {
+        "classes": [
+          "0",
+          "1"
+        ],
+        "resolved_label": "label",
+        "row_count": 2
+      },
       "verdict": "accept"
     },
     "tabular-varchar-numeric-labels": {
       "errors": [],
+      "values": {
+        "classes": [
+          "1",
+          "1.0"
+        ],
+        "resolved_label": "label",
+        "row_count": 2
+      },
       "verdict": "accept"
     },
     "text-clf-ok": {
       "errors": [],
+      "values": {
+        "classes": [
+          "neg",
+          "pos"
+        ],
+        "resolved_label": "label",
+        "row_count": 2
+      },
       "verdict": "accept"
     }
   }
