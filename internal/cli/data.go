@@ -107,12 +107,6 @@ func newDataIngestCmd() *cobra.Command {
 		noInput    bool
 		outputJSON bool
 
-		// Ingestor SA name override. Used as the ServiceAccountName
-		// of the ephemeral stage Pod, so the Pod inherits whatever
-		// imagePullSecrets + PSA exemptions the admin already
-		// configured for that SA.
-		ingestorSAName string
-
 		// Stage Pod image override. Defaults to the digest-pinned
 		// alpine that ships with the CLI; air-gapped customers
 		// override this to an image their registry mirror serves.
@@ -214,7 +208,6 @@ Exit codes:
 					SchemaFlag:     schemaFlag,
 					DryRun:         dryRun,
 					Overwrite:      overwrite,
-					IngestorSAName: ingestorSAName,
 					StagePodImage:  stagePodImage,
 					Detach:         detach,
 					IdempotencyKey: idempotencyKey,
@@ -271,9 +264,6 @@ Exit codes:
 		"disable interactive prompts; fail on missing required values (for CI/scripts)")
 	cmd.Flags().BoolVar(&outputJSON, "output-json", false,
 		"emit a machine-readable JSON result on stdout (human output → stderr; implies --no-input)")
-	cmd.Flags().StringVar(&ingestorSAName, "ingestor-sa", "",
-		"override the ingestor ServiceAccount name (default: \"ingestor\"); "+
-			"set this if you customized ingestionAuthz.serviceAccountName in your client's install")
 	cmd.Flags().StringVar(&stagePodImage, "stage-pod-image", "",
 		"override the ephemeral stage Pod's image (default: digest-pinned alpine 3.20 baked into the CLI). "+
 			"Pin by digest in your override too — tag-only refs drift silently.")
@@ -306,7 +296,6 @@ type runDataIngestArgs struct {
 	SchemaFlag     string // raw --schema; resolved or inferred after Discover (tabular)
 	DryRun         bool
 	Overwrite      bool
-	IngestorSAName string
 	StagePodImage  string
 
 	// Printer renders the pre-flight summary + status output. Built in
@@ -656,9 +645,9 @@ other collaborators train against it without ever seeing the raw files.`))
 		return binding.explain(err)
 	}
 	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
-	if a.IngestorSAName != "" {
-		release.IngestorSAName = a.IngestorSAName
-	}
+	// release.IngestorSAName is discovered from the ingestionAuthz ConfigMap by
+	// DiscoverParentRelease (#7) and flows into the stage/teardown pods + the
+	// jobs-manager token mint below — no --ingestor-sa override.
 
 	// 7. Show what we found on the cluster — the customer's last look
 	//    before any bytes move.

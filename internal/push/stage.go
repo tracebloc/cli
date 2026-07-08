@@ -25,8 +25,8 @@ type StageOptions struct {
 	// Tests: a fakeExecutor (see stream_test.go).
 	Executor Executor
 
-	// Namespace + IngestorSAName come from Phase 2's parent-release
-	// discovery (with optional --ingestor-sa override).
+	// Namespace + IngestorSAName come from parent-release discovery
+	// (IngestorSAName is read from the ingestionAuthz ConfigMap, #7).
 	Namespace      string
 	IngestorSAName string
 

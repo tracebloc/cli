@@ -226,7 +226,7 @@ func TestRunClusterInfo_BadKubeconfigExitsThree(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := runClusterInfo(context.Background(), ui.New(&buf), bad, "", "", "", 600)
+	err := runClusterInfo(context.Background(), ui.New(&buf), bad, "", "", 600)
 	if err == nil {
 		t.Fatal("runClusterInfo with a broken kubeconfig returned nil; want an exitError")
 	}

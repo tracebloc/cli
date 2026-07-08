@@ -123,9 +123,9 @@ type PodSpecOptions struct {
 	// Image overrides DefaultStagePodImage. Empty = use default.
 	Image string
 
-	// ServiceAccountName is the SA the Pod runs as. Phase 2's
-	// discovery surfaces this as `ingestor` (the chart default) or
-	// whatever the customer's `--ingestor-sa` flag overrides to.
+	// ServiceAccountName is the SA the Pod runs as. Discovery surfaces
+	// this from the ingestionAuthz ConfigMap (the chart default `ingestor`
+	// when the policy is absent/ambiguous — see cluster.discoverIngestorSAName).
 	// Using the chart's existing SA means the Pod inherits any
 	// imagePullSecrets and PSA exemptions the admin already
 	// configured for it.
