@@ -33,6 +33,10 @@ Use ` + "`cluster info`" + ` to verify which cluster, namespace, and
 client the next ` + "`data ingest`" + ` will target. Useful as a
 pre-flight before doing anything destructive (e.g. ingesting into
 the wrong cluster).`,
+		// Bare `tracebloc cluster` prints help; a mistyped subcommand errors with a
+		// suggestion instead of silently exiting 0 (#75).
+		RunE:                       runGroup,
+		SuggestionsMinimumDistance: 2,
 	}
 
 	cmd.AddCommand(newClusterInfoCmd())

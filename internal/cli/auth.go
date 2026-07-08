@@ -227,6 +227,10 @@ func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
 		Short: "Inspect tracebloc authentication state",
+		// Bare `tracebloc auth` prints help; a mistyped subcommand errors with a
+		// suggestion instead of silently exiting 0 (#75).
+		RunE:                       runGroup,
+		SuggestionsMinimumDistance: 2,
 	}
 	cmd.AddCommand(newAuthStatusCmd())
 	return cmd

@@ -48,6 +48,11 @@ func newClientCmd() *cobra.Command {
 		Long: `Provision a tracebloc client for this machine. Requires sign-in first
 (` + "`tracebloc login`" + `). To remove tracebloc from this machine, use
 ` + "`tracebloc delete`" + `.`,
+		// Bare `tracebloc client` prints help; a mistyped subcommand errors with a
+		// suggestion instead of silently exiting 0. The hidden `list` is excluded
+		// from suggestions by SuggestionsFor (#75).
+		RunE:                       runGroup,
+		SuggestionsMinimumDistance: 2,
 	}
 	cmd.AddCommand(newClientCreateCmd(), newClientListCmd(), newClientStatusCmd())
 	return cmd
