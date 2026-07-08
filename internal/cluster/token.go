@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -21,13 +22,20 @@ type IngestorToken struct {
 	// don't log it. Diagnostics print SHA256(Token)[:8] instead.
 	Token string
 
-	// ExpirationSeconds matches the request — actual server-side
-	// expiration may be capped by cluster policy
-	// (--service-account-max-token-expiration on kube-apiserver).
-	// We don't try to parse the JWT to read its `exp` claim
-	// because the customer's diagnostic ("token expires in ~N
-	// min") is accurate enough using the requested value.
+	// ExpirationSeconds is the REQUESTED lifetime. The actual grant may
+	// be capped shorter by cluster policy
+	// (--service-account-max-token-expiration on kube-apiserver); see
+	// ExpiresAt for the authoritative value on the TokenRequest path.
 	ExpirationSeconds int64
+
+	// ExpiresAt is the server's AUTHORITATIVE expiry for a TokenRequest
+	// token — TokenRequestStatus.ExpirationTimestamp, already capped by
+	// cluster policy. Zero for the static-secret fallback (long-lived,
+	// no expiry). `cluster info` shows this real value when set, so the
+	// customer sees the actual remaining lifetime rather than the
+	// requested one (#4). No JWT parsing needed — the API tells us
+	// directly.
+	ExpiresAt time.Time
 
 	// Source records how the token was obtained — TokenRequest
 	// (the modern path) or a static secret (the fallback for
@@ -104,7 +112,10 @@ func MintIngestorToken(
 		return &IngestorToken{
 			Token:             tr.Status.Token,
 			ExpirationSeconds: expirationSeconds,
-			Source:            TokenSourceTokenRequest,
+			// The server's authoritative, policy-capped expiry — may be
+			// shorter than requested (#4).
+			ExpiresAt: tr.Status.ExpirationTimestamp.Time,
+			Source:    TokenSourceTokenRequest,
 		}, nil
 	}
 
