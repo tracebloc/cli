@@ -344,8 +344,19 @@ staging pending (§11 phase 4); `🚧` = blocked deeper.
 | `embeddings` | **none** — self-supervised contrastive | requires `texts/*.txt` each `anchor⇥positive[⇥negative]`; optional `--schema` | ⏳ |
 | `tabular_classification` | **class** — "Which column holds the class?" | `--schema` (required; inferred if blank) | ✅ |
 | `tabular_regression` | **target** — "Which column holds the value to predict?" `{column,policy}` | `--schema`; `--label-policy` (default `bucket`) | ✅ |
-| `time_series_forecasting` | **target** — "Which column holds the value to predict?" | `--schema`; `--label-policy` (default `bucket`); needs a `timestamp` column (see §12) | ✅ |
-| `time_to_event_prediction` | **target** — "Which column holds the value to predict?" | `--schema`; `--label-policy`; `--time-column` (default `time`, must be numeric ≥ 0) | ✅ |
+| `time_series_forecasting` | **target** — "Which column holds the value to predict?" | **`--timestamp-column`** (Rev 4: now prompted + preflight-validated, not left to `--schema`); `--schema` (confirmed); `--label-policy` (default `bucket`) | ✅ |
+| `time_to_event_prediction` | **target** — "Which column holds the value to predict?" | `--time-column` (default `time`, numeric ≥ 0); `--schema` (confirmed); `--label-policy` | ✅ |
+
+Rev 4 decisions folded in: the label column is **dropped** for object
+detection / keypoint / segmentation (labels are sidecar-carried); the
+regression family (`tabular_regression`, `time_series_forecasting`,
+`time_to_event_prediction`) **surfaces the inferred schema for
+confirmation** rather than silently inferring (a mis-typed target column is
+too costly to guess); `--target-size` is **normalized to `file_options`**
+for every image task (keypoint moves off its top-level placement — must
+track the ingestor schema); and forecasting gains a first-class
+**timestamp** prompt + preflight parity so the required timestamp column
+can't be silently omitted.
 
 ## 9. The taxonomy contract
 
@@ -432,22 +443,16 @@ type per dataset. v0.1 caps: 1 GiB total, 500 MiB per file.
    follow-up RFC/ticket.
 4. **DS display glosses** — this RFC adopts them (§7); confirm the exact
    wording for the divergent three.
-5. **Drop `--label-column` for sidecar-labeled vision** — object detection,
-   keypoint, and segmentation carry labels in sidecars; the CLI's current
-   plain-string `--label-column` for them is vestigial. Confirm we drop the
-   prompt/flag (RFC recommends yes).
-6. **`time_series_forecasting` timestamp gap** — the ingestor *requires* a
-   `timestamp` column (chronological, not future, `TIMESTAMP` type), but the
-   CLI never prompts for or emits it — it rides only in `--schema`. Should
-   forecasting get a dedicated timestamp prompt + preflight parity, like
-   survival's `--time-column`, so a user can't silently omit/mistype it?
-7. **`--target-size` placement divergence** — keypoint emits it top-level;
-   image-classification/detection emit it under `file_options`. Normalize,
-   or document as an intentional ingestor-contract quirk.
-8. **Schema for the regression family** — schema is inferred when `--schema`
-   is blank, but the leading-zeros→INT inference gap can mis-type an
-   id-like column, which interacts with bucket-hashing the target. Should
-   schema be effectively *required* (explicit) for the regression family?
+**Decided (Rev 4):**
+5. ~~Drop `--label-column` for sidecar-labeled vision~~ → **yes**, dropped
+   for object detection / keypoint / segmentation.
+6. ~~`time_series_forecasting` timestamp gap~~ → **yes**, forecasting gets a
+   first-class timestamp prompt + preflight parity.
+7. ~~`--target-size` placement divergence~~ → **normalize** to `file_options`
+   for all image tasks (keypoint moves; must track the ingestor schema).
+8. ~~Schema for the regression family~~ → **yes**, the regression family
+   surfaces the inferred schema for explicit confirmation rather than
+   silently inferring.
 
 ## 13. Non-goals
 
@@ -466,6 +471,13 @@ type per dataset. v0.1 caps: 1 GiB total, 500 MiB per file.
   it has" + the "✔ Found …" echo that removes the confusion, §4); move the
   **label column** fully into the task-specific questions (§5.5, §8). All
   per @LukasWodka.
+- **Rev 4 (2026-07-07)** — settle the four §12 reconciliation questions
+  (all per @LukasWodka): drop `--label-column` for the sidecar-labeled
+  vision tasks; give forecasting a first-class timestamp prompt; normalize
+  `--target-size` to `file_options`; surface the inferred schema for
+  confirmation on the regression family. Task labels are still under
+  review — display names are decoupled from the wire `task_id`, so they can
+  change freely without touching the schema/backend.
 - **Rev 3 (2026-07-07)** — rewrite §8 as the **label design**: three shapes
   (class / target / absent), precise per-family wording (never "label to
   predict"), and **pick-from-real-headers + exact-match-or-hard-fail**
