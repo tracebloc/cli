@@ -106,6 +106,21 @@ func ResolveEnv(explicit string) string {
 	return EnvProd
 }
 
+// IsKnownEnv reports whether env is one of the recognized backends (dev/stg/prod,
+// case-insensitively). Callers that let a human PICK the env (e.g. `login`) use it
+// to reject a typo up front — BaseURL deliberately falls unknown values back to
+// prod (a lenient library default), so without this a `--env staging`/`prd` typo
+// would silently target production. Empty is NOT known here: resolve first
+// (ResolveEnv turns empty into the prod default), then validate the result.
+func IsKnownEnv(env string) bool {
+	switch strings.ToLower(env) {
+	case EnvDev, EnvStg, EnvProd:
+		return true
+	default:
+		return false
+	}
+}
+
 // Client talks to the backend REST API. Token (the user token from login) is
 // optional: the device-flow endpoints are unauthenticated; provisioning calls
 // set it.

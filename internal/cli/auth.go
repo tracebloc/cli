@@ -56,6 +56,15 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 		return &exitError{code: 1, err: err}
 	}
 	env := api.ResolveEnv(envFlag)
+	// login PICKS the session env and persists it (cfg.CurrentEnv below), so a
+	// typo must fail HERE, not silently resolve to prod. BaseURL's lenient
+	// unknown→prod fallback would otherwise route `--env staging` / `CLIENT_ENV=prd`
+	// to production and store it as the active env for every later command.
+	if !api.IsKnownEnv(env) {
+		return &exitError{code: 1, err: fmt.Errorf(
+			"unknown backend environment %q — valid values are dev, stg, prod (default). "+
+				"Check --env / $CLIENT_ENV", env)}
+	}
 	client := newAPIClient(env)
 	p.Detailf("backend %s — requesting a device code …", client.BaseURL)
 
