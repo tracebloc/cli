@@ -638,10 +638,16 @@ collaborators can train against that table without ever seeing the raw files.`))
 	//    consistent across pre-flight commands.
 	// Connecting to the workspace + discovering its shared storage is
 	// Kubernetes plumbing (release / PVC / jobs-manager) the happy path keeps
-	// quiet — it's no longer a numbered step (RFC-0002 §6). --verbose narrates
+	// quiet — it's no longer a numbered step (RFC-0002 §6), and --verbose adds
+	// the release/PVC detail below. But the discovery itself is several blocking
+	// apiserver round-trips (kubeconfig load, release + PVC discovery, then the
+	// destination-exists check), so it still needs a visible status line — no
+	// silent wait on the happy path (RFC-0002 "progress on every wait").
+	// A plain line, not a spinner: discoverRelease can print its own
+	// namespace-fallback note mid-call, and a spinner's \r redraw would clobber
 	// it. ALL the logic below (discovery + the exit-6 destination guard) is
 	// unchanged; only the presentation moved.
-	a.Printer.Detailf("Connecting to your workspace and finding the shared storage your data will live on…")
+	a.Printer.Infof("Connecting to your workspace…")
 	// 6. PVC discovery (needPVC) confirms the chart's shared-data PVC is
 	//    Bound before we waste time provisioning a Pod that can't mount it.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
