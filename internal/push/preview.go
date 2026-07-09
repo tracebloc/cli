@@ -30,8 +30,8 @@ type FamilySniff struct {
 // SniffFamily previews the family of the dataset at path by looking for
 // the same layout markers Discover / DiscoverText / DiscoverTabular key
 // on — labels.csv + an images/ dir (image), labels.csv + a texts/ or
-// sequences/ dir (text), or a CSV in a directory with none of those
-// (tabular). It reads directory entries only; it opens no files and
+// sequences/ dir (text), or exactly one CSV in a directory with none of
+// those (tabular). It reads directory entries only; it opens no files and
 // validates nothing.
 //
 // It never claims more than the matching Discover* would accept: the
@@ -40,14 +40,18 @@ type FamilySniff struct {
 // Lstats — a mis-cased "Images/" is not the walk's marker, so it is not
 // sniffed as confident image. Image / text are confident only when BOTH
 // labels.csv AND the subdir are present, mirroring Discover / DiscoverText.
-// Only the .csv extension match stays case-insensitive, mirroring
+// Tabular is confident only on EXACTLY ONE CSV, mirroring DiscoverTabular's
+// findSingleCSV count rule — a directory with two or more CSVs is a layout
+// the tabular walk refuses, so the sniff must not confidently place it
+// either. Only the .csv extension match stays case-insensitive, mirroring
 // DiscoverTabular's EqualFold.
 //
 // Every family's walk requires a directory (bare-file support is
 // cli#181), so a file path is never a confident sniff. Anything we can't
 // place — a missing path, a bare file, a directory with no recognizable
-// marker, an image+text mix, an image/text dir without labels.csv — comes
-// back Confident=false so the caller asks the family plainly.
+// marker, an image+text mix, an image/text dir without labels.csv, a
+// multi-CSV directory the tabular walk would reject — comes back
+// Confident=false so the caller asks the family plainly.
 func SniffFamily(path string) FamilySniff {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -115,7 +119,10 @@ func SniffFamily(path string) FamilySniff {
 		}
 		return FamilySniff{Family: FamilyText, Confident: true,
 			Echo: fmt.Sprintf("Found labels.csv and a %s folder — this is text data.", dir)}
-	case !hasImages && !hasText && csvCount > 0:
+	case !hasImages && !hasText && csvCount == 1:
+		// Exactly one CSV, mirroring DiscoverTabular's findSingleCSV rule.
+		// Two or more CSVs is a directory the tabular walk rejects, so stay
+		// ambiguous rather than confidently promise a layout it refuses.
 		return FamilySniff{Family: FamilyTabular, Confident: true,
 			Echo: "Found a CSV table — this is tabular data."}
 	default:

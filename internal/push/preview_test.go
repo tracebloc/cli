@@ -27,6 +27,23 @@ func TestSniffFamily(t *testing.T) {
 		}
 	})
 
+	t.Run("multi-csv dir is ambiguous (walk rejects >1 csv)", func(t *testing.T) {
+		// DiscoverTabular's findSingleCSV requires exactly one CSV; a dir with
+		// two would fail the walk, so the sniff must not confidently place it
+		// as tabular (it would echo "this is tabular data" then the walk would
+		// reject). Mirrors the walk's exactly-one rule.
+		dir := t.TempDir()
+		writePrev(t, filepath.Join(dir, "a.csv"), "x\n1\n")
+		writePrev(t, filepath.Join(dir, "b.csv"), "y\n2\n")
+		if s := SniffFamily(dir); s.Confident {
+			t.Fatalf("a multi-csv dir should be ambiguous, got %+v", s)
+		}
+		// And the walk it mirrors does reject it.
+		if _, err := DiscoverTabular(dir); err == nil {
+			t.Fatal("DiscoverTabular should reject a multi-csv dir")
+		}
+	})
+
 	t.Run("bare .csv file is ambiguous (walk requires a directory)", func(t *testing.T) {
 		// DiscoverTabular rejects a bare file (bare-file support is cli#181),
 		// so the sniff must not confidently place a lone .csv — otherwise it
