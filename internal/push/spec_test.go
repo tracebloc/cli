@@ -181,6 +181,65 @@ func TestBuild_WithTargetSize_PassesSchema(t *testing.T) {
 	}
 }
 
+// TestBuild_WithMinSize_PassesSchema pins the #183 plumbing: when the
+// customer overrides the minimum-image-size floor (--min-size →
+// SpecArgs.MinSize), Build emits spec.file_options.min_size as
+// [width, height] and the result still validates against the embedded v1
+// schema (which learned about min_size in the #348 re-sync).
+func TestBuild_WithMinSize_PassesSchema(t *testing.T) {
+	spec := SpecArgs{
+		Table:       "cats_dogs_train",
+		Category:    "image_classification",
+		Intent:      "train",
+		LabelColumn: "label",
+		MinSize:     []int{64, 48}, // non-square, to also lock the [W, H] order
+	}.Build()
+
+	fo, ok := spec["spec"].(map[string]any)["file_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec.file_options missing/wrong type: %#v", spec["spec"])
+	}
+	ms, ok := fo["min_size"].([]int)
+	if !ok || len(ms) != 2 || ms[0] != 64 || ms[1] != 48 {
+		t.Fatalf("spec.file_options.min_size = %#v, want [64 48] (width, height)", fo["min_size"])
+	}
+
+	specBytes, err := yaml.Marshal(spec)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	v, err := schema.NewV1Validator()
+	if err != nil {
+		t.Fatalf("NewV1Validator: %v", err)
+	}
+	_, errs, parseErr := v.ValidateYAML(specBytes)
+	if parseErr != nil {
+		t.Fatalf("ValidateYAML parse error on our own output: %v\n%s", parseErr, specBytes)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("spec with min_size failed schema validation: %s\nspec:\n%s",
+			schema.FormatErrors(errs), specBytes)
+	}
+}
+
+// TestBuild_NoMinSize_OmitsMinSize: with no --min-size override, Build must
+// NOT emit file_options.min_size — both the CLI preview and the ingestor
+// then fall back to the shared 32x32 default (MinImageSize / MIN_IMAGE_SIZE).
+func TestBuild_NoMinSize_OmitsMinSize(t *testing.T) {
+	spec := SpecArgs{
+		Table:       "t",
+		Category:    "image_classification",
+		Intent:      "train",
+		LabelColumn: "label",
+		TargetSize:  []int{64, 64}, // emits a spec block, but min_size must be absent
+	}.Build()
+	if fo, ok := spec["spec"].(map[string]any)["file_options"].(map[string]any); ok {
+		if _, present := fo["min_size"]; present {
+			t.Errorf("Build() with no MinSize emitted file_options.min_size; want omitted")
+		}
+	}
+}
+
 // TestBuild_NoTargetSize_OmitsSpecBlock: when no resolution is set,
 // Build must NOT emit a spec block (the ingestor's per-category
 // default applies). Asserting the omission keeps the minimal-spec

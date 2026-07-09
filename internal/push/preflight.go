@@ -188,18 +188,28 @@ func CheckHasDataRows(path string) error {
 
 // ValidateImages previews the ingestor's ImageResolutionValidator
 // (image_validator.py): it opens EVERY image (header-only decode — cheap)
-// and rejects zero-byte files, undecodable files, and any image whose
-// resolution differs from the expected size (exact equality, zero
-// tolerance — the ingestor validates, it does not resize). Previously the
-// CLI decoded only the first image, so a single odd-sized or corrupt file
-// failed in-cluster after the full upload (cli#72b/c).
+// and rejects zero-byte files, undecodable files, images below the
+// minimum-size floor, and any image whose resolution differs from the
+// expected size (exact equality, zero tolerance — the ingestor validates,
+// it does not resize). Previously the CLI decoded only the first image, so
+// a single odd-sized or corrupt file failed in-cluster after the full
+// upload (cli#72b/c).
 //
 // expectedW/expectedH of 0 skips the resolution comparison (the caller
 // couldn't establish a target size — the ingestor would then auto-detect
 // from its first file, which the CLI's detection already mirrors).
-func ValidateImages(images []string, expectedW, expectedH int) error {
+//
+// minW/minH is the minimum-size floor (#348), mirroring the ingestor's
+// _meets_min_size: an image is too small when EITHER side is below the
+// floor; an image exactly at the floor passes. 0/0 disables the floor (a
+// caller opt-out — production always passes push.MinImageSize or the
+// --min-size override, so the floor is live end-to-end). The too-small
+// check takes precedence over the resolution mismatch, exactly as
+// data-ingestors #348 returns the too_small error before the
+// target_size uniformity error.
+func ValidateImages(images []string, expectedW, expectedH, minW, minH int) error {
 	const maxListed = 5
-	var broken, mismatched []string
+	var broken, tooSmall, mismatched []string
 	for _, path := range images {
 		name := filepath.Base(path)
 		f, err := os.Open(path)
@@ -217,10 +227,24 @@ func ValidateImages(images []string, expectedW, expectedH int) error {
 			}
 			continue
 		}
+		if minW > 0 && minH > 0 && (cfg.Width < minW || cfg.Height < minH) {
+			tooSmall = append(tooSmall,
+				fmt.Sprintf("%s (%dx%d)", name, cfg.Width, cfg.Height))
+		}
 		if expectedW > 0 && expectedH > 0 && (cfg.Width != expectedW || cfg.Height != expectedH) {
 			mismatched = append(mismatched,
 				fmt.Sprintf("%s (%dx%d)", name, cfg.Width, cfg.Height))
 		}
+	}
+	// Floor first: an image below the minimum size simply can't be trained
+	// on, so it's the most fundamental, actionable failure — data-ingestors
+	// #348 returns it ahead of the uniformity / target_size mismatch.
+	if len(tooSmall) > 0 {
+		return fmt.Errorf(
+			"%d image(s) are smaller than the %dx%d minimum: %s. The cluster rejects images below "+
+				"this size after the upload — they're too small to train on. Provide larger images, "+
+				"or lower the floor with --min-size, then re-run.",
+			len(tooSmall), minW, minH, TruncateList(tooSmall, maxListed))
 	}
 	if len(broken) > 0 {
 		return fmt.Errorf(
@@ -688,7 +712,17 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if len(spec.TargetSize) == 2 {
 			expW, expH = spec.TargetSize[0], spec.TargetSize[1]
 		}
-		if err := ValidateImages(layout.Images, expW, expH); err != nil {
+		// Effective minimum-size floor (#348): the --min-size override
+		// (spec.MinSize) if the customer set one, else MinImageSize — the
+		// same default the ingestor applies when file_options.min_size is
+		// unset. Resolving the default HERE (not inside ValidateImages)
+		// mirrors the ingestor, whose __init__ defaults min_size to
+		// MIN_IMAGE_SIZE.
+		minW, minH := MinImageSize[0], MinImageSize[1]
+		if len(spec.MinSize) == 2 {
+			minW, minH = spec.MinSize[0], spec.MinSize[1]
+		}
+		if err := ValidateImages(layout.Images, expW, expH, minW, minH); err != nil {
 			return nil, dataProblem(err)
 		}
 		if err := CheckHasDataRows(layout.LabelsCSV); err != nil {

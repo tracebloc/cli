@@ -127,25 +127,74 @@ func TestValidateImages(t *testing.T) {
 	zero := write("zero.png", nil)
 	corrupt := write("corrupt.png", []byte("not an image at all"))
 
-	if err := ValidateImages([]string{good}, 8, 8); err != nil {
+	// minW/minH of 0 disables the floor so these decode/mismatch cases
+	// exercise the same behavior as before the #348 floor landed (the
+	// 8x8 / 4x4 fixtures are below the real 32x32 default).
+	if err := ValidateImages([]string{good}, 8, 8, 0, 0); err != nil {
 		t.Errorf("valid image rejected: %v", err)
 	}
-	if err := ValidateImages([]string{good, zero}, 8, 8); err == nil {
+	if err := ValidateImages([]string{good, zero}, 8, 8, 0, 0); err == nil {
 		t.Fatal("zero-byte image must be rejected (cli#72b)")
 	} else if !strings.Contains(err.Error(), "0 bytes") {
 		t.Errorf("zero-byte diagnosis missing: %v", err)
 	}
-	if err := ValidateImages([]string{good, corrupt}, 8, 8); err == nil {
+	if err := ValidateImages([]string{good, corrupt}, 8, 8, 0, 0); err == nil {
 		t.Fatal("corrupt image must be rejected (cli#72b)")
 	}
-	if err := ValidateImages([]string{good, odd}, 8, 8); err == nil {
+	if err := ValidateImages([]string{good, odd}, 8, 8, 0, 0); err == nil {
 		t.Fatal("resolution mismatch must be rejected (cli#72c — the ingestor validates, it does not resize)")
 	} else if !strings.Contains(err.Error(), "4x4") || !strings.Contains(err.Error(), "8x8") {
 		t.Errorf("mismatch error must show both sizes: %v", err)
 	}
 	// 0x0 expectation skips the resolution comparison entirely.
-	if err := ValidateImages([]string{good, odd}, 0, 0); err != nil {
+	if err := ValidateImages([]string{good, odd}, 0, 0, 0, 0); err != nil {
 		t.Errorf("no expected size → no resolution rejection: %v", err)
+	}
+}
+
+// TestValidateImagesMinSize covers the #348 minimum-size floor preview:
+// an image below the floor is rejected (naming the file, its dimensions,
+// and the floor); an image exactly at the floor passes; the floor takes
+// precedence over a target_size mismatch; and it mirrors the ingestor's
+// default (push.MinImageSize).
+func TestValidateImagesMinSize(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, w, h int) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, pngBytes(t, w, h), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	minW, minH := MinImageSize[0], MinImageSize[1] // 32x32, mirrors data-ingestors #348
+
+	atFloor := write("at_floor.png", minW, minH)
+	aboveFloor := write("above.png", minW+16, minH+16)
+	belowW := write("below_w.png", minW-1, minH) // one side under → too small
+	tiny := write("tiny.png", 8, 8)              // both sides under
+
+	// At or above the floor passes (exact-floor image is accepted).
+	if err := ValidateImages([]string{atFloor, aboveFloor}, 0, 0, minW, minH); err != nil {
+		t.Errorf("at/above-floor images rejected: %v", err)
+	}
+	// One side below the floor → rejected, naming the file, its size, and the floor.
+	err := ValidateImages([]string{atFloor, belowW}, 0, 0, minW, minH)
+	if err == nil {
+		t.Fatal("below-floor image must be rejected (#348)")
+	}
+	for _, want := range []string{"below_w.png", "31x32", "32x32", "min-size"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("too-small error missing %q: %v", want, err)
+		}
+	}
+	// The floor takes precedence over a target_size mismatch: tiny is both
+	// below the floor AND != the 64x64 target, but the too-small message wins.
+	err = ValidateImages([]string{tiny}, 64, 64, minW, minH)
+	if err == nil {
+		t.Fatal("tiny image must be rejected")
+	}
+	if !strings.Contains(err.Error(), "minimum") {
+		t.Errorf("floor must take precedence over the mismatch message: %v", err)
 	}
 }
 

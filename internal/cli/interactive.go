@@ -307,9 +307,9 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			prompted = true
 		}
 		if a.TargetSizeFlag == "" {
-			p.PromptHint("All images must share one resolution; the ingestor checks it (it won't resize). Blank = auto-detect from the first image.  e.g. 224x224")
-			ans, err := pr.Input("Image resolution as WxH (blank = auto-detect from the first image)",
-				"all images must share it; the ingestor validates, it doesn't resize", "",
+			p.PromptHint("The resolution your images already are. tracebloc never resizes — it checks every image is exactly this size and rejects any that differ. Blank = read it from your first image.  e.g. 224x224")
+			ans, err := pr.Input("Image resolution as WxH (blank = read it from your first image)",
+				"the size your images already are; tracebloc checks it, it never resizes", "",
 				validateOptionalTargetSize)
 			if err != nil {
 				return prompted, err

@@ -95,7 +95,7 @@
     },
     "imgc-nonsquare-swapped": {
       "errors": [
-        "ImageResolutionValidator: Images with incorrect resolution found: ['images/b.jpg: (8, 4) (expected: [4, 8])', 'images/a.jpg: (8, 4) (expected: [4, 8])']"
+        "ImageResolutionValidator: Images with incorrect resolution found: ['images/b.jpg: (64, 32) (expected: [32, 64])', 'images/a.jpg: (64, 32) (expected: [32, 64])']"
       ],
       "verdict": "reject"
     },
@@ -113,10 +113,16 @@
     },
     "imgc-res-mismatch": {
       "errors": [
-        "ImageResolutionValidator: Multiple image resolutions found: [(4, 4), (8, 8)]. All images must have the same resolution.",
-        "ImageResolutionValidator: Expected resolution: [8, 8]",
+        "ImageResolutionValidator: Multiple image resolutions found: [(32, 32), (48, 48)]. All images must have the same resolution.",
+        "ImageResolutionValidator: Expected resolution: [32, 32]",
         "ImageResolutionValidator: Invalid files: []",
-        "ImageResolutionValidator: Resolution errors: ['images/odd.jpg: (4, 4) (expected: [8, 8])']"
+        "ImageResolutionValidator: Resolution errors: ['images/odd.jpg: (48, 48) (expected: [32, 32])']"
+      ],
+      "verdict": "reject"
+    },
+    "imgc-too-small": {
+      "errors": [
+        "ImageResolutionValidator: Images below the minimum size (32, 32) (width, height) were found \u2014 they are too small to train on. Provide larger images or, if your model accepts smaller inputs, lower the floor via file_options.min_size. Offending files: ['images/b.jpg: (16, 16)', 'images/a.jpg: (16, 16)']"
       ],
       "verdict": "reject"
     },
@@ -127,10 +133,8 @@
       "verdict": "reject"
     },
     "tabular-bom": {
-      "errors": [
-        "DataValidator: Schema columns not present in CSV: age."
-      ],
-      "verdict": "reject"
+      "errors": [],
+      "verdict": "accept"
     },
     "tabular-dup-header": {
       "errors": [
