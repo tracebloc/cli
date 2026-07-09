@@ -137,8 +137,9 @@ func newDataIngestCmd() *cobra.Command {
 		Aliases: []string{"push"},
 		Short:   "Ingest a local dataset into your workspace",
 		Long: `Ingests a local dataset into your workspace's storage,
-submits an ingestion run to jobs-manager, and watches the ingestor Job
-to completion. Supports 9 tasks (image classification,
+submits the ingestion run, and follows it to completion (streaming
+progress + the final summary). Your data never leaves your own
+infrastructure. Supports 9 tasks (image classification,
 object/keypoint detection, text classification, masked language
 modeling, and the tabular / time-series family); pick one with --task.
 
@@ -1252,7 +1253,7 @@ func existingTableAction(a *runDataIngestArgs, existingTable string) (proceed bo
 		return ok, nil
 	}
 	return false, &exitError{code: 6, err: fmt.Errorf(
-		"table %q already exists in this client. Re-ingesting the same table doesn't merge or replace — "+
+		"table %q already exists in this workspace. Re-ingesting the same table doesn't merge or replace — "+
 			"the run would fail after uploading everything. Re-run with --overwrite to replace it, "+
 			"or pick a different --name. (`tracebloc data delete %s` also removes it.)",
 		existingTable, existingTable)}
