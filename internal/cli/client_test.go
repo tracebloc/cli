@@ -1445,3 +1445,29 @@ func TestClientStatus_WaitCtrlCIsSilent(t *testing.T) {
 		t.Errorf("Ctrl-C should exit silently (nil-inner exitError), got: %v", err)
 	}
 }
+
+func TestClientSubcommandVisibility(t *testing.T) {
+	// `create` and `list` are installer-internal — Hidden so a user isn't invited to
+	// run them (a standalone `tracebloc client create` mints a client the installer
+	// never deploys, i.e. an orphaned phantom, backend#970). `status` stays
+	// user-visible. Hidden != disabled: all remain runnable (the installer still
+	// invokes create/list).
+	hidden := map[string]bool{}
+	runnable := map[string]bool{}
+	for _, c := range newClientCmd().Commands() {
+		hidden[c.Name()] = c.Hidden
+		runnable[c.Name()] = c.RunE != nil
+	}
+	if !hidden["create"] {
+		t.Error("client create must be Hidden (installer-internal; standalone mints a phantom)")
+	}
+	if !hidden["list"] {
+		t.Error("client list must stay Hidden")
+	}
+	if hidden["status"] {
+		t.Error("client status must stay user-visible")
+	}
+	if !runnable["create"] {
+		t.Error("hidden create must still be runnable (the installer invokes it)")
+	}
+}
