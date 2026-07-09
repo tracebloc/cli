@@ -21,6 +21,16 @@ type CategorySpec struct {
 	Family Family
 	// Label is the human-friendly name shown in the interactive picker.
 	Label string
+	// Gloss, when set, is the name users actually search for — it wins over
+	// Label in the picker. A few tasks have a technical id + label but a
+	// far more recognizable common name (time_to_event_prediction is
+	// "survival analysis"; masked_language_modeling is "fill-mask";
+	// seq2seq is "translation / summarization"). Empty ⇒ show Label.
+	Gloss string
+	// Blurb is the one-line "what is this for?" shown after the display name
+	// in the picker ("Display — blurb · task_id"). Plain and concrete so a
+	// user can tell tasks apart without leaving the terminal.
+	Blurb string
 	// RegressionClass marks categories that predict a numeric target and
 	// therefore need label.policy (object label form) so the raw target
 	// never ships to the central backend by default.
@@ -59,26 +69,41 @@ const (
 // nor carry an extra the ingestor won't accept (the instance_segmentation
 // half-ingest class — data-ingestors #240/#99, #1005).
 var categoryRegistry = []CategorySpec{
-	{ID: "image_classification", Family: FamilyImage, Label: "Image classification", CLISupported: true},
-	{ID: "object_detection", Family: FamilyImage, Label: "Object detection", CLISupported: true},
-	{ID: "keypoint_detection", Family: FamilyImage, Label: "Keypoint detection", CLISupported: true},
-	{ID: "text_classification", Family: FamilyText, Label: "Text classification", CLISupported: true},
-	{ID: "masked_language_modeling", Family: FamilyText, Label: "Masked language modeling", CLISupported: true},
-	{ID: "tabular_classification", Family: FamilyTabular, Label: "Tabular classification", CLISupported: true},
-	{ID: "tabular_regression", Family: FamilyTabular, Label: "Tabular regression", RegressionClass: true, CLISupported: true},
-	{ID: "time_series_forecasting", Family: FamilyTabular, Label: "Time-series forecasting", RegressionClass: true, CLISupported: true},
-	{ID: "time_to_event_prediction", Family: FamilyTabular, Label: "Time-to-event prediction", RegressionClass: true, CLISupported: true},
+	{ID: "image_classification", Family: FamilyImage, Label: "Image classification", CLISupported: true,
+		Blurb: "sort images into classes"},
+	{ID: "object_detection", Family: FamilyImage, Label: "Object detection", CLISupported: true,
+		Blurb: "draw boxes around objects in an image"},
+	{ID: "keypoint_detection", Family: FamilyImage, Label: "Keypoint detection", CLISupported: true,
+		Blurb: "locate landmark points on an image (e.g. pose)"},
+	{ID: "text_classification", Family: FamilyText, Label: "Text classification", CLISupported: true,
+		Blurb: "sort text snippets into classes"},
+	{ID: "masked_language_modeling", Family: FamilyText, Label: "Masked language modeling", Gloss: "fill-mask", CLISupported: true,
+		Blurb: "predict masked-out words — no labels needed"},
+	{ID: "tabular_classification", Family: FamilyTabular, Label: "Tabular classification", CLISupported: true,
+		Blurb: "predict a class from table columns"},
+	{ID: "tabular_regression", Family: FamilyTabular, Label: "Tabular regression", RegressionClass: true, CLISupported: true,
+		Blurb: "predict a number from table columns"},
+	{ID: "time_series_forecasting", Family: FamilyTabular, Label: "Time-series forecasting", RegressionClass: true, CLISupported: true,
+		Blurb: "predict future values from past ones"},
+	{ID: "time_to_event_prediction", Family: FamilyTabular, Label: "Time-to-event prediction", Gloss: "Survival analysis", RegressionClass: true, CLISupported: true,
+		Blurb: "predict how long until an event happens"},
 	{ID: "semantic_segmentation", Family: FamilyImage, Label: "Semantic segmentation", CLISupported: false,
+		Blurb:           "label every pixel in an image",
 		UnsupportedNote: "blocked on the ingestor's mask-sidecar support (data-ingestors#136)"},
 	{ID: "causal_language_modeling", Family: FamilyText, Label: "Causal language modeling", CLISupported: false,
+		Blurb:           "predict the next word in a sequence",
 		UnsupportedNote: "schema-recognized (data-ingestors#805); `tracebloc ingest` discover/build for its raw-.txt / prompt\\tcompletion `texts` layout is pending"},
-	{ID: "seq2seq", Family: FamilyText, Label: "Sequence-to-sequence", CLISupported: false,
+	{ID: "seq2seq", Family: FamilyText, Label: "Sequence-to-sequence", Gloss: "translation / summarization", CLISupported: false,
+		Blurb:           "map an input sequence to an output one",
 		UnsupportedNote: "schema-recognized; `tracebloc ingest` discover/build for its raw-.txt / source\\ttarget `texts` layout is pending"},
 	{ID: "token_classification", Family: FamilyText, Label: "Token classification", CLISupported: false,
+		Blurb:           "label each word in a sequence",
 		UnsupportedNote: "schema-recognized; the CLI doesn't stage its per-token-label `texts` layout yet"},
 	{ID: "sentence_pair_classification", Family: FamilyText, Label: "Sentence-pair classification", CLISupported: false,
+		Blurb:           "label how two texts relate",
 		UnsupportedNote: "schema-recognized; `tracebloc ingest` discover/build for its raw-.txt / text_a\\ttext_b `texts` layout is pending"},
 	{ID: "embeddings", Family: FamilyText, Label: "Embeddings", CLISupported: false,
+		Blurb:           "learn vector representations from text pairs",
 		UnsupportedNote: "schema-recognized; `tracebloc ingest` discover/build for its raw-.txt / anchor\\tpositive[\\tnegative] `texts` layout is pending"},
 }
 
@@ -95,6 +120,59 @@ var categoryByID = func() map[string]CategorySpec {
 func Lookup(category string) (CategorySpec, bool) {
 	c, ok := categoryByID[category]
 	return c, ok
+}
+
+// DisplayName is the name to show a user: the recognizable Gloss when a
+// task has one, otherwise the Label. Kept a method so the picker never
+// re-derives the gloss-vs-label rule itself.
+func (c CategorySpec) DisplayName() string {
+	if c.Gloss != "" {
+		return c.Gloss
+	}
+	return c.Label
+}
+
+// CategoriesByFamily returns every registry spec in fam, in registry
+// (display) order — CLI-supported first, then the not-yet-implemented
+// ones. The data-first picker calls this once the family is known so it
+// only ever offers that family's tasks, never the flat 15-item wall.
+func CategoriesByFamily(fam Family) []CategorySpec {
+	out := make([]CategorySpec, 0, len(categoryRegistry))
+	for _, c := range categoryRegistry {
+		if c.Family == fam {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// FamilyOf returns the family a known category belongs to (and whether
+// the category is known). Thin accessor so callers outside the package
+// don't reach into the registry.
+func FamilyOf(category string) (Family, bool) {
+	c, ok := categoryByID[category]
+	return c.Family, ok
+}
+
+// FamilyNoun is the plain word for a family, used in prompts and echoes
+// ("tasks for tabular data", "this is image data").
+func FamilyNoun(fam Family) string {
+	switch fam {
+	case FamilyImage:
+		return "image"
+	case FamilyText:
+		return "text"
+	default:
+		return "tabular"
+	}
+}
+
+// SelfSupervisedText reports whether a text category trains without an
+// explicit label column — the target is derived from the text itself, so
+// the CLI skips the "which column is the label?" question. MLM masks
+// tokens; CLM predicts the next token; neither reads a labels column.
+func SelfSupervisedText(category string) bool {
+	return category == "masked_language_modeling" || category == "causal_language_modeling"
 }
 
 // IsKnown reports whether category is a recognized task category (in the
