@@ -57,7 +57,7 @@ func TestRunInteractive_FillsAllWhenEmpty(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{
 		"Path to your dataset directory": "./data",
 		"Task":                           "tabular_classification",
-		"Destination table name":         "churn_train",
+		"Dataset name":                   "churn_train",
 		"Is this training or test data?": "test",
 		"Label column":                   "churned",
 	}}
@@ -90,7 +90,7 @@ func TestRunInteractive_FillsAllWhenEmpty(t *testing.T) {
 func TestRunInteractive_ShowsExampleHints(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{
 		"Path to your dataset directory": "./d",
-		"Destination table name":         "churn_train",
+		"Dataset name":                   "churn_train",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Category: "tabular_regression"}}
 
@@ -192,7 +192,7 @@ func TestRunInteractive_Cancel(t *testing.T) {
 // label column, so it must not be prompted.
 func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{
-		"Destination table name":         "mlm_train",
+		"Dataset name":                   "mlm_train",
 		"Is this training or test data?": "train",
 	}}
 	a := &runDataIngestArgs{
@@ -215,7 +215,7 @@ func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 // TestRunInteractive_RejectsBadTable: the table prompt runs
 // push.ValidateTableName, so an unsafe name surfaces as an error.
 func TestRunInteractive_RejectsBadTable(t *testing.T) {
-	f := &fakePrompter{answers: map[string]string{"Destination table name": "../bad"}}
+	f := &fakePrompter{answers: map[string]string{"Dataset name": "../bad"}}
 	a := &runDataIngestArgs{
 		LocalPath: "./data",
 		Spec:      push.SpecArgs{Category: "image_classification", Intent: "train", LabelColumn: "label"},
