@@ -8,6 +8,7 @@ import (
 	"io"
 	"k8s.io/client-go/kubernetes"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -44,6 +45,11 @@ submits the ingestion run, and watches it to completion (streaming
 logs + the final summary). ` + "`data validate`" + ` checks an ingest.yaml
 locally first.
 
+What a dataset looks like depends on the task:
+  tabular / time-series — a .csv file, or a folder with one .csv
+  image                  — a folder with labels.csv + images/
+  text                   — a folder with labels.csv + texts/
+
 ` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run
 before the first ingest.`,
 		// A bare `tracebloc data` prints help; a mistyped subcommand errors with a
@@ -58,7 +64,7 @@ before the first ingest.`,
 	return cmd
 }
 
-// newDataIngestCmd implements `tracebloc data ingest <local-path>`.
+// newDataIngestCmd implements `tracebloc data ingest <dataset>`.
 //
 // Phase 3 scope (now complete across PR-a + PR-b):
 //
@@ -133,7 +139,7 @@ func newDataIngestCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:     "ingest <local-path>",
+		Use:     "ingest <dataset>",
 		Aliases: []string{"push"},
 		Short:   "Ingest a local dataset into your workspace",
 		Long: `Ingests a local dataset into your workspace's storage,
@@ -143,14 +149,36 @@ infrastructure. Supports 9 tasks (image classification,
 object/keypoint detection, text classification, masked language
 modeling, and the tabular / time-series family); pick one with --task.
 
-Expected local layout (image_classification shown):
+<dataset> is the data itself. What it looks like depends on the task:
 
-    <local-path>/
-      labels.csv             (required)
-      images/                (required)
-        001.jpg
-        002.jpg
-        ...
+  tabular / time-series — the dataset is a single CSV. Pass the .csv
+  file directly, or a folder holding exactly one .csv:
+
+      churn.csv                (the .csv file itself)
+    or
+      churn/
+        data.csv               (the one .csv in the folder)
+
+  image (classification, object/keypoint detection) — a folder with
+  labels.csv + an images/ subfolder:
+
+      cats_dogs/
+        labels.csv             (required)
+        images/                (required)
+          001.jpg
+          ...
+
+  text (classification, masked language modeling) — a folder with
+  labels.csv + a texts/ subfolder:
+
+      reviews/
+        labels.csv             (required)
+        texts/                 (required)
+          001.txt
+          ...
+
+A bare .csv file is accepted only for the tabular / time-series family;
+image and text datasets must be a folder.
 
 Accepted image extensions: .jpg, .jpeg, or .png (case-insensitive).
 All images in one dataset must share a single type — the cluster
@@ -358,25 +386,42 @@ type runDataIngestArgs struct {
 	ImageDigest    string
 }
 
-// expandHome expands a leading ~ or ~/… to $HOME, leaving every other
-// path (relative, absolute, empty) untouched. It mirrors
-// cluster.expandPath — kept as a small local copy rather than coupling
-// the data path-handling to the cluster package's internals; if a
-// third caller appears, promote both to a shared pathutil.
+// expandHome expands a leading ~ to a home directory, leaving every
+// other path (relative, absolute, empty) untouched:
+//
+//   - "~" and "~/…"        → the current user's $HOME
+//   - "~user" and "~user/…" → that named user's home (via user.Lookup)
+//
+// It mirrors cluster.expandPath's current-user handling and adds the
+// ~user form (#181). When a home can't be resolved (no $HOME, or an
+// unknown/unlookupable ~user), the literal path is returned unchanged
+// so the early path-existence check reports it plainly — a clear "no
+// such file or directory: ~bob/data" beats us silently mangling it.
 func expandHome(path string) string {
 	if path == "" || path[0] != '~' {
 		return path
 	}
-	home, err := os.UserHomeDir()
+	// "~" or "~/…" → the current user's home. path[1:] is "" for "~"
+	// (→ home) and "/x" for "~/x" (→ home/x); filepath.Join cleans it.
+	if len(path) == 1 || path[1] == '/' {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return filepath.Join(home, path[1:])
+	}
+	// "~user" or "~user/…" → the named user's home. Split the username
+	// off at the first slash; the remainder (possibly empty) joins onto
+	// their home directory.
+	name, rest, _ := strings.Cut(path[1:], "/")
+	u, err := user.Lookup(name)
 	if err != nil {
-		// Can't resolve $HOME — leave it and let the downstream
-		// Discover* error mention the literal path, which is more
-		// useful than a generic failure here.
+		// Unknown user, or lookup unsupported on this build (a static
+		// CGO-less binary can't read /etc/passwd for a foreign user).
+		// Leave the literal so the path-existence check surfaces it.
 		return path
 	}
-	// path[1:] is "" for "~" (→ home) and "/x" for "~/x" (→ home/x);
-	// filepath.Join cleans the join either way.
-	return filepath.Join(home, path[1:])
+	return filepath.Join(u.HomeDir, rest)
 }
 
 // runDataIngest is the full Phase 3 implementation: pre-flight
@@ -459,6 +504,22 @@ collaborators can train against that table without ever seeing the raw files.`))
 	// cluster.expandPath; done here so it covers both entry points
 	// before any push.Discover* call. (#37)
 	a.LocalPath = expandHome(a.LocalPath)
+
+	// 0b. Path existence FIRST — before any spec / schema / family
+	//     validation. A typo'd path should fail on the path with a plain
+	//     "no such file or directory", not surface later as a confusing
+	//     downstream error (e.g. the task gate asking which task the
+	//     non-existent data is for). The family walk below stats again for
+	//     its layout-specific diagnostics; this is only about ordering the
+	//     first failure a customer sees. (#181)
+	if _, serr := os.Stat(a.LocalPath); serr != nil {
+		if errors.Is(serr, os.ErrNotExist) {
+			return &exitError{code: 3, err: fmt.Errorf(
+				"no such file or directory: %q — check the path to your dataset", a.LocalPath)}
+		}
+		return &exitError{code: 3, err: fmt.Errorf(
+			"can't read %q: %w", a.LocalPath, serr)}
+	}
 
 	// 1. Validate the table name BEFORE anything else. It's both
 	//    the MySQL identifier and the /data/shared/<table>/ PVC

@@ -39,11 +39,17 @@ var reservedColumns = map[string]bool{
 // turns float on row 10k) is the case --schema exists to override.
 const schemaInferenceSampleRows = 5000
 
-// DiscoverTabular validates a local directory for a tabular /
-// time-series ingestion. Unlike the image layout, tabular categories
-// have NO sidecar files — the dataset IS a single CSV. The directory
-// must contain exactly one .csv file; that becomes the labels/data
-// CSV staged for the ingestor.
+// DiscoverTabular validates a local input for a tabular / time-series
+// ingestion. Unlike the image layout, tabular categories have NO
+// sidecar files — the dataset IS a single CSV. Two shapes are accepted
+// (#181):
+//
+//   - a bare .csv file: the dataset itself, passed directly;
+//   - a directory containing exactly one .csv file.
+//
+// Both resolve to the SAME staged layout — the CSV is staged as the one
+// labels.csv under the dataset — so the ingestor's contract is unchanged
+// (this is a CLI-side input convenience, not an ingestor-side change).
 //
 // The returned LocalLayout reuses the image layout's LabelsCSV field
 // (staged as labels.csv) with an empty Images slice, so the existing
@@ -92,16 +98,31 @@ func DiscoverTabular(rootDir string) (*LocalLayout, error) {
 	}
 	st, err := os.Stat(abs)
 	if err != nil {
-		return nil, fmt.Errorf("reading dataset directory %q: %w", abs, err)
-	}
-	if !st.IsDir() {
-		return nil, fmt.Errorf(
-			"%q is not a directory; pass the directory containing the dataset CSV", abs)
+		return nil, fmt.Errorf("reading dataset path %q: %w", abs, err)
 	}
 
-	csvPath, err := findSingleCSV(abs)
-	if err != nil {
-		return nil, err
+	// Resolve the CSV + the layout root from either shape. A directory
+	// takes DiscoverTabular's exactly-one-CSV rule (findSingleCSV); a bare
+	// file is accepted only when it's a .csv — the dataset IS that CSV, so
+	// it stages identically to a one-CSV directory (#181). The root is the
+	// directory either way (the file's parent for the bare-file case), so
+	// the pre-flight summary's "root" field stays a directory.
+	var csvPath, root string
+	if st.IsDir() {
+		root = abs
+		csvPath, err = findSingleCSV(abs)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if !strings.EqualFold(filepath.Ext(abs), ".csv") {
+			return nil, fmt.Errorf(
+				"%q is not a .csv file. Tabular / time-series data is a single CSV — "+
+					"pass the .csv file itself, or a directory containing exactly one .csv.",
+				abs)
+		}
+		root = filepath.Dir(abs)
+		csvPath = abs
 	}
 	csvName := filepath.Base(csvPath)
 	// Lstat (not Stat) so a symlinked CSV is rejected rather than
@@ -117,7 +138,7 @@ func DiscoverTabular(rootDir string) (*LocalLayout, error) {
 		return nil, sizeError(csvName, info.Size(), MaxSingleFileBytes)
 	}
 
-	layout := &LocalLayout{Root: abs, LabelsCSV: csvPath, TotalBytes: info.Size()}
+	layout := &LocalLayout{Root: root, LabelsCSV: csvPath, TotalBytes: info.Size()}
 	if layout.TotalBytes > MaxTotalBytes {
 		return nil, fmt.Errorf(
 			"dataset is %s, exceeds v0.1 cap of %s. For larger datasets, the "+

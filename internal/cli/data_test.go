@@ -212,6 +212,85 @@ func TestDataIngest_NonexistentLocalPath_ExitsThree(t *testing.T) {
 	}
 }
 
+// TestDataIngest_NonexistentPath_BeatsTaskGate: a typo'd path must fail on
+// the path (exit 3), NOT on a downstream spec/family error, even when the
+// task is also wrong. Pins the #181 ordering fix: path existence is checked
+// before the category gate (which would otherwise exit 2 for the bad task
+// and send the user chasing the wrong problem).
+func TestDataIngest_NonexistentPath_BeatsTaskGate(t *testing.T) {
+	code, _, _ := execDataIngest(t, []string{
+		"/tmp/tracebloc-cli-test-no-such-dir-" + t.Name(),
+		"--name=t1",
+		"--task=definitely-not-a-task", // would be exit 2 at the task gate
+		"--intent=train",
+	})
+	if code != 3 {
+		t.Fatalf("expected exit 3 (path checked before the task gate), got %d", code)
+	}
+}
+
+// TestDataIngest_BareCSVFile_Accepted: a bare .csv is a valid tabular input
+// (#181). It gets PAST the layout walk — proven by the "Inferred schema"
+// line, which prints only after DiscoverTabular accepted the file — and then
+// falls through the local checks to the injected bad kubeconfig (exit 3),
+// the same fall-through a valid directory reaches.
+func TestDataIngest_BareCSVFile_Accepted(t *testing.T) {
+	dir := t.TempDir()
+	csv := filepath.Join(dir, "churn.csv")
+	if err := os.WriteFile(csv, []byte("age,churned\n30,yes\n40,no\n"), 0o644); err != nil {
+		t.Fatalf("write csv: %v", err)
+	}
+	code, stdout, _ := execDataIngest(t, []string{
+		csv,
+		"--name=churn",
+		"--task=tabular_classification",
+		"--intent=train",
+		"--label-column=churned",
+	})
+	if code != 3 {
+		t.Fatalf("expected exit 3 (bare .csv accepted, then bad kubeconfig), got %d", code)
+	}
+	if !strings.Contains(stdout, "Inferred schema") {
+		t.Errorf("want the schema-inference line proving the bare .csv passed the walk; stdout:\n%s", stdout)
+	}
+}
+
+// TestDataIngest_ImageBareFile_ExitsThree: the image family is directory-only.
+// A bare .csv passed as image_classification is rejected at the walk (exit 3)
+// and never reaches schema inference (that's tabular-only).
+func TestDataIngest_ImageBareFile_ExitsThree(t *testing.T) {
+	dir := t.TempDir()
+	csv := filepath.Join(dir, "labels.csv")
+	if err := os.WriteFile(csv, []byte("image_id,label\n1.jpg,c\n"), 0o644); err != nil {
+		t.Fatalf("write csv: %v", err)
+	}
+	code, stdout, _ := execDataIngest(t, []string{
+		csv,
+		"--name=imgs",
+		"--task=image_classification",
+		"--intent=train",
+		"--label-column=label",
+	})
+	if code != 3 {
+		t.Fatalf("expected exit 3 for a bare file passed as image, got %d", code)
+	}
+	if strings.Contains(stdout, "Inferred schema") {
+		t.Errorf("image walk must not run tabular schema inference on a bare file; stdout:\n%s", stdout)
+	}
+}
+
+// TestDataIngestCmd_UsesDatasetArgName: the positional arg is <dataset>
+// (renamed from <local-path>, #181) in the command's Use string and help.
+func TestDataIngestCmd_UsesDatasetArgName(t *testing.T) {
+	cmd := newDataIngestCmd()
+	if !strings.Contains(cmd.Use, "<dataset>") {
+		t.Errorf("Use = %q, want it to name the arg <dataset>", cmd.Use)
+	}
+	if strings.Contains(cmd.Use, "<local-path>") {
+		t.Errorf("Use = %q still uses the old <local-path> name", cmd.Use)
+	}
+}
+
 // TestDataIngest_MissingLabelsCSV_ExitsThree: most likely "real
 // world" wrong-layout case — customer has images but forgot
 // labels.csv. Pins the exit-code contract for the common failure

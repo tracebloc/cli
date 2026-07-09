@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -173,7 +174,10 @@ func TestClassifyPushOutcome(t *testing.T) {
 func TestRunDatasetPush_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
 	var jsonBuf, human bytes.Buffer
 	a := runDataIngestArgs{
-		LocalPath:  "./x",
+		// A real path so the failure is the invalid table name (exit 2), not
+		// the earlier path-existence check (exit 3, #181) — this test pins the
+		// stdout-always-JSON contract on the table-validation failure.
+		LocalPath:  t.TempDir(),
 		Spec:       push.SpecArgs{Table: "../bad", Category: "image_classification", Intent: "train"},
 		Printer:    ui.New(&human, ui.WithColor(false)),
 		OutputJSON: true,
@@ -216,6 +220,44 @@ func TestExpandHome(t *testing.T) {
 		if got := expandHome(c.in); got != c.want {
 			t.Errorf("expandHome(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestExpandHome_NamedUser covers the #181 ~user form: "~user" and
+// "~user/…" resolve under that user's home. We look up the CURRENT user by
+// name so the test doesn't depend on a fixed account existing, and compare
+// against os.UserHomeDir. An unknown ~user is left literal (the path-
+// existence check surfaces it), which we also pin.
+func TestExpandHome_NamedUser(t *testing.T) {
+	u, err := user.Current()
+	if err != nil || u.Username == "" {
+		t.Skipf("no current user: %v", err)
+	}
+	// user.Lookup must resolve the same account (it can differ from
+	// UserHomeDir on some CI images); skip if it doesn't rather than assert
+	// on an environment quirk.
+	looked, err := user.Lookup(u.Username)
+	if err != nil {
+		t.Skipf("user.Lookup(%q) unsupported here: %v", u.Username, err)
+	}
+	home := looked.HomeDir
+
+	cases := []struct{ in, want string }{
+		{"~" + u.Username, home},
+		{"~" + u.Username + "/data", filepath.Join(home, "data")},
+		{"~" + u.Username + "/a/b", filepath.Join(home, "a", "b")},
+	}
+	for _, c := range cases {
+		if got := expandHome(c.in); got != c.want {
+			t.Errorf("expandHome(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// An unknown user can't be resolved: the literal is returned unchanged so
+	// the downstream path-existence check reports it plainly.
+	const unknown = "~nsuchuser-tracebloc-181/x"
+	if got := expandHome(unknown); got != unknown {
+		t.Errorf("expandHome(%q) = %q, want it left literal", unknown, got)
 	}
 }
 

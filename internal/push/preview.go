@@ -30,9 +30,9 @@ type FamilySniff struct {
 // SniffFamily previews the family of the dataset at path by looking for
 // the same layout markers Discover / DiscoverText / DiscoverTabular key
 // on — labels.csv + an images/ dir (image), labels.csv + a texts/ or
-// sequences/ dir (text), or exactly one CSV in a directory with none of
-// those (tabular). It reads directory entries only; it opens no files and
-// validates nothing.
+// sequences/ dir (text), exactly one CSV in a directory with none of
+// those (tabular), or a bare .csv file (tabular). It reads directory
+// entries only; it opens no files and validates nothing.
 //
 // It never claims more than the matching Discover* would accept: the
 // marker directories (images/, texts/, sequences/) and labels.csv are
@@ -40,18 +40,20 @@ type FamilySniff struct {
 // Lstats — a mis-cased "Images/" is not the walk's marker, so it is not
 // sniffed as confident image. Image / text are confident only when BOTH
 // labels.csv AND the subdir are present, mirroring Discover / DiscoverText.
-// Tabular is confident only on EXACTLY ONE CSV, mirroring DiscoverTabular's
-// findSingleCSV count rule — a directory with two or more CSVs is a layout
-// the tabular walk refuses, so the sniff must not confidently place it
-// either. Only the .csv extension match stays case-insensitive, mirroring
+// Tabular is confident on EXACTLY ONE CSV in a directory, mirroring
+// DiscoverTabular's findSingleCSV count rule — a directory with two or more
+// CSVs is a layout the tabular walk refuses, so the sniff must not
+// confidently place it either — OR on a bare .csv file, which
+// DiscoverTabular now stages as the one CSV under the dataset (#181). Only
+// the .csv extension match stays case-insensitive, mirroring
 // DiscoverTabular's EqualFold.
 //
-// Every family's walk requires a directory (bare-file support is
-// cli#181), so a file path is never a confident sniff. Anything we can't
-// place — a missing path, a bare file, a directory with no recognizable
-// marker, an image+text mix, an image/text dir without labels.csv, a
-// multi-CSV directory the tabular walk would reject — comes back
-// Confident=false so the caller asks the family plainly.
+// The media/label families (image, text) require a directory, so a bare
+// file that is not a .csv is never a confident sniff. Anything we can't
+// place — a missing path, a non-.csv bare file, a directory with no
+// recognizable marker, an image+text mix, an image/text dir without
+// labels.csv, a multi-CSV directory the tabular walk would reject — comes
+// back Confident=false so the caller asks the family plainly.
 func SniffFamily(path string) FamilySniff {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -64,11 +66,14 @@ func SniffFamily(path string) FamilySniff {
 		return FamilySniff{}
 	}
 
-	// Every family's walk requires a directory; a bare file (even a .csv)
-	// is rejected by DiscoverTabular until cli#181 adds bare-file support.
-	// Stay ambiguous so the caller asks the family plainly rather than
-	// promising a layout the walk would refuse.
+	// A bare file: only a .csv is placeable (tabular), mirroring the
+	// bare-file shape DiscoverTabular accepts (#181). The image / text
+	// families need a directory, so any other bare file stays ambiguous.
 	if !st.IsDir() {
+		if strings.EqualFold(filepath.Ext(abs), ".csv") {
+			return FamilySniff{Family: FamilyTabular, Confident: true,
+				Echo: "Found a CSV table — this is tabular data."}
+		}
 		return FamilySniff{}
 	}
 

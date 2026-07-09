@@ -44,15 +44,29 @@ func TestSniffFamily(t *testing.T) {
 		}
 	})
 
-	t.Run("bare .csv file is ambiguous (walk requires a directory)", func(t *testing.T) {
-		// DiscoverTabular rejects a bare file (bare-file support is cli#181),
-		// so the sniff must not confidently place a lone .csv — otherwise it
-		// promises a layout the walk refuses.
+	t.Run("bare .csv file is confident tabular (walk now accepts it)", func(t *testing.T) {
+		// DiscoverTabular now stages a bare .csv as the one CSV under the
+		// dataset (cli#181), so the sniff confidently places a lone .csv as
+		// tabular — mirroring the shape the walk accepts.
 		dir := t.TempDir()
 		csv := filepath.Join(dir, "t.csv")
 		writePrev(t, csv, "a,b\n1,2\n")
-		if s := SniffFamily(csv); s.Confident {
-			t.Fatalf("a bare .csv file should be ambiguous, got %+v", s)
+		s := SniffFamily(csv)
+		if !s.Confident || s.Family != FamilyTabular {
+			t.Fatalf("a bare .csv file should sniff confident tabular, got %+v", s)
+		}
+		// And the walk it mirrors accepts the same bare file.
+		if _, err := DiscoverTabular(csv); err != nil {
+			t.Fatalf("DiscoverTabular should accept a bare .csv: %v", err)
+		}
+	})
+
+	t.Run("bare non-.csv file is ambiguous (media families need a folder)", func(t *testing.T) {
+		dir := t.TempDir()
+		txt := filepath.Join(dir, "notes.txt")
+		writePrev(t, txt, "hello")
+		if s := SniffFamily(txt); s.Confident {
+			t.Fatalf("a bare non-.csv file should be ambiguous, got %+v", s)
 		}
 	})
 

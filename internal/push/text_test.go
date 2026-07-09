@@ -3,6 +3,7 @@ package push
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -32,6 +33,21 @@ func mkTextDir(t *testing.T, sidecar string, withTokenizer bool) string {
 		writeFile(t, dir, "tokenizer.json", `{"version":"1.0"}`)
 	}
 	return dir
+}
+
+// TestDiscoverText_BareFileRejected: the text layout is directory-only.
+// A bare file (even a .csv) must be rejected with a clear "not a directory"
+// error — bare-file support is tabular-only (#181).
+func TestDiscoverText_BareFileRejected(t *testing.T) {
+	dir := t.TempDir()
+	bare := writeFile(t, dir, "labels.csv", "filename,label\na.txt,pos\n")
+	_, err := DiscoverText("text_classification", bare)
+	if err == nil {
+		t.Fatal("DiscoverText(bare file) returned nil error; text layout must require a directory")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("error = %q, want it to say the path is not a directory", err)
+	}
 }
 
 // TestDiscoverText_Classification: text_classification stages

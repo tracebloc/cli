@@ -1,6 +1,8 @@
 package push
 
 import (
+	"archive/tar"
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -35,6 +37,86 @@ func TestDiscoverTabular_SingleCSV(t *testing.T) {
 	}
 	if layout.TotalBytes == 0 {
 		t.Errorf("TotalBytes = 0, want the CSV's size")
+	}
+}
+
+// TestDiscoverTabular_BareCSVFile: a bare .csv file (not a directory) is
+// accepted for tabular (#181). It resolves to a layout whose LabelsCSV is
+// that file, Root is the file's parent directory, and Images is empty — the
+// SAME shape a single-CSV directory produces, so the tar/stream machinery
+// stages it identically (as labels.csv under the dataset).
+func TestDiscoverTabular_BareCSVFile(t *testing.T) {
+	dir := t.TempDir()
+	csv := writeFile(t, dir, "churn.csv", "age,churned\n30,yes\n40,no\n")
+
+	layout, err := DiscoverTabular(csv)
+	if err != nil {
+		t.Fatalf("DiscoverTabular(bare .csv): %v", err)
+	}
+	if layout.LabelsCSV != csv {
+		t.Errorf("LabelsCSV = %q, want %q", layout.LabelsCSV, csv)
+	}
+	if layout.Root != dir {
+		t.Errorf("Root = %q, want the file's parent dir %q", layout.Root, dir)
+	}
+	if len(layout.Images) != 0 {
+		t.Errorf("Images = %v, want empty", layout.Images)
+	}
+	if layout.TotalBytes == 0 {
+		t.Errorf("TotalBytes = 0, want the CSV's size")
+	}
+}
+
+// TestDiscoverTabular_BareFileVsDirSameStaging: a bare .csv and a directory
+// holding that same CSV must stage byte-for-identically — both land the CSV
+// as labels.csv at the dataset root — so bare-file support is a pure CLI-side
+// input convenience and never changes what the ingestor reads.
+func TestDiscoverTabular_BareFileVsDirSameStaging(t *testing.T) {
+	body := "age,churned\n30,yes\n40,no\n"
+	fileDir := t.TempDir()
+	bare := writeFile(t, fileDir, "churn.csv", body)
+	// Directory holding the same single CSV.
+	someDir := t.TempDir()
+	writeFile(t, someDir, "churn.csv", body)
+
+	fileL, err := DiscoverTabular(bare)
+	if err != nil {
+		t.Fatalf("DiscoverTabular(file): %v", err)
+	}
+	dirL, err := DiscoverTabular(someDir)
+	if err != nil {
+		t.Fatalf("DiscoverTabular(dir): %v", err)
+	}
+
+	var fileTar, dirTar bytes.Buffer
+	if err := writeLayoutTar(&fileTar, fileL); err != nil {
+		t.Fatalf("writeLayoutTar(file): %v", err)
+	}
+	if err := writeLayoutTar(&dirTar, dirL); err != nil {
+		t.Fatalf("writeLayoutTar(dir): %v", err)
+	}
+	if !bytes.Equal(fileTar.Bytes(), dirTar.Bytes()) {
+		t.Error("bare-file and single-CSV-dir produced different staged tars; they must be identical")
+	}
+	// And the one entry is labels.csv.
+	tr := tar.NewReader(&fileTar)
+	hdr, err := tr.Next()
+	if err != nil {
+		t.Fatalf("reading tar entry: %v", err)
+	}
+	if hdr.Name != "labels.csv" {
+		t.Errorf("staged entry = %q, want labels.csv", hdr.Name)
+	}
+}
+
+// TestDiscoverTabular_BareNonCSVFile: a bare file that isn't a .csv is a
+// clear error — tabular data is a single CSV, so we say so rather than
+// letting a downstream reader choke.
+func TestDiscoverTabular_BareNonCSVFile(t *testing.T) {
+	dir := t.TempDir()
+	txt := writeFile(t, dir, "notes.txt", "hello")
+	if _, err := DiscoverTabular(txt); err == nil {
+		t.Error("DiscoverTabular(bare .txt) returned nil error, want a clear .csv-required error")
 	}
 }
 

@@ -136,8 +136,8 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 
 	// (c) path — then detect the family from the layout and echo it back.
 	if a.LocalPath == "" {
-		p.PromptHint("The folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn")
-		ans, err := pr.Input("Where is your data? (the folder holding it)", "e.g. ./my-data", "", validateDatasetPath)
+		p.PromptHint("The file or folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn")
+		ans, err := pr.Input("Where is your data? (file or folder)", "e.g. ./my-data", "", validateDatasetPath)
 		if err != nil {
 			return err
 		}
