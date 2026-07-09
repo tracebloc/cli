@@ -193,6 +193,53 @@ func TestDelete_Yes_FullSequence(t *testing.T) {
 	assertRemoved(t, fn, filepath.Join(filepath.Dir(exe), "tb"))
 }
 
+// (b') A non-403 revoke failure (a 404 from a stale/wrong-account pointer or a
+// backend predating /revoke, a transient network/5xx error, …) must NOT brick the
+// offboard: local teardown is the command's real job and runs anyway. Only a 403
+// (a genuine authz denial) aborts to ask-an-admin (covered separately).
+func TestDelete_RevokeNon403_ContinuesTeardown(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusNotFound) // 404: stale pointer / backend predates /revoke
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	exe := writeBinaryWithTBAlias(t)
+	fn := &fakeNodeboot{executable: exe}
+	fn.install(t)
+
+	var out bytes.Buffer
+	if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true}); err != nil {
+		t.Fatalf("a non-403 revoke error must not abort the offboard, got: %v", err)
+	}
+	// Teardown still ran despite the failed revoke.
+	for _, want := range []string{"uninstall:gpu-box-01", "teardown:" + nodeboot.ClusterName, "prune"} {
+		found := false
+		for _, c := range fn.calls {
+			if c == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("teardown step %q must run even when revoke fails; calls: %v", want, fn.calls)
+		}
+	}
+	// Honest messaging: warn about the failed revoke, and do NOT claim success.
+	s := out.String()
+	if !strings.Contains(s, "Couldn't revoke the credential server-side") {
+		t.Errorf("want a warning about the failed revoke, got:\n%s", s)
+	}
+	if strings.Contains(s, "Revoked this machine's credential") {
+		t.Errorf("must NOT claim the credential was revoked when it wasn't:\n%s", s)
+	}
+}
+
 // (c) --keep-data spares ~/.tracebloc but still uninstalls + removes the binary.
 func TestDelete_KeepData_SparesDataDir(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {

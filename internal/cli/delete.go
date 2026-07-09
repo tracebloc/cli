@@ -193,15 +193,28 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 
 	// 1. Revoke the machine credential server-side (POST /edge-device/<id>/revoke,
 	//    §7.10 / C.6). This kills the credential without deleting the row — the
-	//    retained history in scope 2 stays intact. A 403 → ask-an-admin.
+	//    retained history in scope 2 stays intact.
 	if rerr := client.RevokeClient(ctx, id); rerr != nil {
 		var ae *api.APIError
 		if errors.As(rerr, &ae) && ae.StatusCode == http.StatusForbidden {
+			// A 403 is a genuine authorization decision — you can't revoke a
+			// client you don't manage; route to ask-an-admin (unchanged).
 			return askAnAdmin(ctx, p, client, "offboard this machine", "offboarding")
 		}
-		return &exitError{code: 1, err: fmt.Errorf("revoking the machine credential: %w", rerr)}
+		// Any OTHER revoke failure must NOT block the local teardown. Removing
+		// tracebloc from THIS machine (helm uninstall, cluster teardown, on-host
+		// data + config wipe, self-remove) is offline-capable and is the command's
+		// primary job — it can't be held hostage to a best-effort remote call. This
+		// hits on a 404 (a stale/wrong-account active-client pointer, or a backend
+		// predating the /revoke route), a transient network/5xx error, etc. Warn and
+		// continue, mirroring the online-guard above. The credential may remain live
+		// server-side, so say so: the user can revoke it from the dashboard, and the
+		// orphan reaper (backend#970) sweeps a never-torn-down record later.
+		p.Hintf("Couldn't revoke the credential server-side (%v) — continuing with local teardown. "+
+			"The credential may still be live on tracebloc; revoke it from the dashboard if needed.", rerr)
+	} else {
+		p.Successf("Revoked this machine's credential (client %q kept on tracebloc as a record).", name)
 	}
-	p.Successf("Revoked this machine's credential (client %q kept on tracebloc as a record).", name)
 
 	// The teardown steps below are best-effort (the credential is already revoked),
 	// but a step that leaves real state behind — a live release, the local cluster,
