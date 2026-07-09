@@ -464,11 +464,18 @@ func streamPodLogsAndParse(
 	// transport layer, making the output feel laggy on a fast
 	// ingestion.
 	scanner := bufio.NewScanner(tee)
-	// Default scanner buffer is 64 KB per line — fine for log
-	// lines but bump to 1 MB to handle the (rare) case where a
-	// single ingestion-error stacktrace has a multi-KB Python
-	// traceback line.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// The scanner splits the DISPLAY stream on '\n' (the parser is fed
+	// separately via the TeeReader, so this cap never affects the verdict).
+	// tqdm — a data-ingestors dep — redraws its progress bar with '\r' and NO
+	// '\n', so a whole ingestion phase's worth of redraws is a single
+	// newline-delimited "line" that grows for the life of the run. At 1 MB that
+	// overflowed on a big ingestion (ErrTooLong cut the stream mid-run, and a
+	// still-running Job then couldn't be confirmed terminal in the 30s
+	// finalJobStatus poll → a false exit 9). The watch is capped at 1h
+	// (JobWatchTimeout), which bounds the accumulation; 16 MB clears a fast
+	// (~10/s) hour of redraws with headroom. The buffer grows on demand, so
+	// ordinary log lines still cost 64 KB.
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		// Print the line + a newline (scanner strips the trailing
