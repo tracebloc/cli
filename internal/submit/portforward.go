@@ -30,8 +30,13 @@ type ForwardedConnection struct {
 	done   chan struct{}
 }
 
-// Close tears down the port-forward. Safe to call multiple times.
+// Close tears down the port-forward. Safe to call multiple times, and
+// safe on a zero-value connection that was never started (stopCh nil) —
+// e.g. a test fake handed back by an injected PortForwardJobsManager.
 func (f *ForwardedConnection) Close() {
+	if f.stopCh == nil {
+		return // never started; nothing to tear down
+	}
 	select {
 	case <-f.stopCh:
 		return // already closed
