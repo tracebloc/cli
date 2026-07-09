@@ -153,6 +153,16 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	// the real path; runDataIngest's own expandHome then no-ops.
 	a.LocalPath = expandHome(a.LocalPath)
 
+	// Path existence FIRST (#181): fail plainly on a typo'd path here, before
+	// the family sniff / label preview below touch it — otherwise the user
+	// answers the whole questionnaire (family, task, label) against a path
+	// that doesn't exist, only to hit the hard error afterward. runDataIngest
+	// re-checks for the flag-only route; this keeps the invariant on the
+	// guided route too. The exitError propagates unwrapped (see runDataIngest).
+	if err := statDatasetPath(a.LocalPath); err != nil {
+		return err
+	}
+
 	// (d) task — family-scoped. An explicit --task wins and skips both the
 	// sniff and the picker (§5.1). Otherwise the family is sniffed from the
 	// layout (and echoed), or asked plainly when the layout is ambiguous,

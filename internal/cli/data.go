@@ -8,7 +8,6 @@ import (
 	"io"
 	"k8s.io/client-go/kubernetes"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -16,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/tracebloc/cli/internal/cluster"
+	"github.com/tracebloc/cli/internal/pathutil"
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/schema"
 	"github.com/tracebloc/cli/internal/submit"
@@ -386,42 +386,32 @@ type runDataIngestArgs struct {
 	ImageDigest    string
 }
 
-// expandHome expands a leading ~ to a home directory, leaving every
-// other path (relative, absolute, empty) untouched:
-//
-//   - "~" and "~/…"        → the current user's $HOME
-//   - "~user" and "~user/…" → that named user's home (via user.Lookup)
-//
-// It mirrors cluster.expandPath's current-user handling and adds the
-// ~user form (#181). When a home can't be resolved (no $HOME, or an
-// unknown/unlookupable ~user), the literal path is returned unchanged
-// so the early path-existence check reports it plainly — a clear "no
-// such file or directory: ~bob/data" beats us silently mangling it.
+// expandHome expands a leading ~ (current user or ~user) to a home
+// directory, leaving every other path untouched. It's the CLI-local
+// name for the shared pathutil.ExpandHome; cluster.expandPath resolves
+// to the same helper, so ~-expansion is identical across subcommands
+// (a --kubeconfig ~alice/... resolves alice's home just like a data
+// ingest path does). See pathutil.ExpandHome for the full contract. (#181)
 func expandHome(path string) string {
-	if path == "" || path[0] != '~' {
-		return path
-	}
-	// "~" or "~/…" → the current user's home. path[1:] is "" for "~"
-	// (→ home) and "/x" for "~/x" (→ home/x); filepath.Join cleans it.
-	if len(path) == 1 || path[1] == '/' {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return path
+	return pathutil.ExpandHome(path)
+}
+
+// statDatasetPath is the "path existence FIRST" guard (#181): a typo'd
+// path fails plainly on the path — a clean "no such file or directory" —
+// before any family sniff, label preview, or schema work touches it.
+// Both entry points call it: the flag-only path from runDataIngest's 0b
+// step, and the guided path from runInteractive (before the family sniff),
+// so the invariant holds on every route rather than only the flag path.
+func statDatasetPath(path string) error {
+	if _, serr := os.Stat(path); serr != nil {
+		if errors.Is(serr, os.ErrNotExist) {
+			return &exitError{code: 3, err: fmt.Errorf(
+				"no such file or directory: %q — check the path to your dataset", path)}
 		}
-		return filepath.Join(home, path[1:])
+		return &exitError{code: 3, err: fmt.Errorf(
+			"can't read %q: %w", path, serr)}
 	}
-	// "~user" or "~user/…" → the named user's home. Split the username
-	// off at the first slash; the remainder (possibly empty) joins onto
-	// their home directory.
-	name, rest, _ := strings.Cut(path[1:], "/")
-	u, err := user.Lookup(name)
-	if err != nil {
-		// Unknown user, or lookup unsupported on this build (a static
-		// CGO-less binary can't read /etc/passwd for a foreign user).
-		// Leave the literal so the path-existence check surfaces it.
-		return path
-	}
-	return filepath.Join(u.HomeDir, rest)
+	return nil
 }
 
 // runDataIngest is the full Phase 3 implementation: pre-flight
@@ -482,6 +472,14 @@ collaborators can train against that table without ever seeing the raw files.`))
 				a.Printer.Infof("Cancelled — nothing was ingested.")
 				return nil
 			}
+			// A typed exitError from a guided step (e.g. the path-existence
+			// guard, which runInteractive runs before the family sniff)
+			// already carries its own code + clean message — surface it as-is
+			// rather than burying it under "interactive setup:".
+			var ee *exitError
+			if errors.As(err, &ee) {
+				return err
+			}
 			return &exitError{code: 3, err: fmt.Errorf("interactive setup: %w", err)}
 		}
 	}
@@ -509,16 +507,14 @@ collaborators can train against that table without ever seeing the raw files.`))
 	//     validation. A typo'd path should fail on the path with a plain
 	//     "no such file or directory", not surface later as a confusing
 	//     downstream error (e.g. the task gate asking which task the
-	//     non-existent data is for). The family walk below stats again for
-	//     its layout-specific diagnostics; this is only about ordering the
-	//     first failure a customer sees. (#181)
-	if _, serr := os.Stat(a.LocalPath); serr != nil {
-		if errors.Is(serr, os.ErrNotExist) {
-			return &exitError{code: 3, err: fmt.Errorf(
-				"no such file or directory: %q — check the path to your dataset", a.LocalPath)}
-		}
-		return &exitError{code: 3, err: fmt.Errorf(
-			"can't read %q: %w", a.LocalPath, serr)}
+	//     non-existent data is for). runInteractive runs this same guard
+	//     before its family sniff / label preview, so the invariant holds on
+	//     the guided route too; this re-check covers the flag-only path and
+	//     is cheap (one stat). The family walk below stats again for its
+	//     layout-specific diagnostics; this is only about ordering the first
+	//     failure a customer sees. (#181)
+	if err := statDatasetPath(a.LocalPath); err != nil {
+		return err
 	}
 
 	// 1. Validate the table name BEFORE anything else. It's both
