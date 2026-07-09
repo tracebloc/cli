@@ -283,7 +283,7 @@ func TestClientCreate_R7_CrossAccountRefuse(t *testing.T) {
 
 	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
 		clientCreateOpts{name: "box", location: "DE", yes: true})
-	if err == nil || !strings.Contains(err.Error(), "different tracebloc account") {
+	if err == nil || !strings.Contains(err.Error(), "registered to another tracebloc account") {
 		t.Errorf("want cross-account refusal, got %v", err)
 	}
 }
@@ -719,8 +719,54 @@ func TestClientCreate_ClusterConflict(t *testing.T) {
 	})
 	stubClusterID(t, "uid-1", nil)
 	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "c", location: "DE", yes: true})
-	if err == nil || !strings.Contains(err.Error(), "different tracebloc account") {
+	if err == nil || !strings.Contains(err.Error(), "registered to another tracebloc account") {
 		t.Errorf("want a cluster_conflict error, got %v", err)
+	}
+}
+
+// TestClientCreate_ClusterConflict_RevealsOwnerEmail: fix #2 has the backend put the
+// owning account's contact email in the cross-account 409 body; the CLI surfaces it
+// so the user knows who to ask to release the cluster.
+func TestClientCreate_ClusterConflict_RevealsOwnerEmail(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"cluster_conflict","cluster_id":"uid-1","owner_email":"owner@other.test"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "c", location: "DE", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "owner@other.test") {
+		t.Errorf("want the owner email surfaced, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "ask them to release it") {
+		t.Errorf("want contact-the-owner guidance, got %v", err)
+	}
+}
+
+// TestClientCreate_ClusterInUse: a same-account live sibling already holds the
+// anchor (fix #2's cluster_in_use). The message names the live client and points at
+// offboarding it — NOT a cross-account "different account" message.
+func TestClientCreate_ClusterInUse(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"cluster_in_use","cluster_id":"uid-1","holder_client_id":42,"holder_name":"other-box"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "c", location: "DE", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "other-box") || !strings.Contains(err.Error(), "cluster_in_use") {
+		t.Errorf("want a cluster_in_use message naming the live client, got %v", err)
+	}
+	if strings.Contains(err.Error(), "another tracebloc account") {
+		t.Errorf("cluster_in_use must NOT read as a cross-account conflict, got %v", err)
 	}
 }
 
