@@ -81,6 +81,14 @@ func SniffFamily(path string) FamilySniff {
 	// "labels.csv"). The .csv extension check is case-insensitive to mirror
 	// DiscoverTabular's EqualFold.
 	var hasImages, hasTexts, hasSequences, hasLabels bool
+	// miscasedMarker flags a subdir that matches a marker name only
+	// case-insensitively (e.g. "Images", "Texts") — a likely mis-cased
+	// media folder. The walk keys on the literal lowercase name, so such a
+	// dir is NOT a marker to it; but its lone labels.csv would otherwise
+	// fall through to the confident-tabular branch and get silently
+	// ingested as a table, images/texts dropped. When we see one, stay
+	// ambiguous and ask the family plainly.
+	miscasedMarker := false
 	csvCount := 0
 	for _, e := range entries {
 		name := e.Name()
@@ -92,6 +100,10 @@ func SniffFamily(path string) FamilySniff {
 				hasTexts = true
 			case "sequences":
 				hasSequences = true
+			default:
+				if isMarkerFold(name) {
+					miscasedMarker = true
+				}
 			}
 			continue
 		}
@@ -126,15 +138,31 @@ func SniffFamily(path string) FamilySniff {
 		// chosen task disagree.
 		return FamilySniff{Family: FamilyText, Confident: true,
 			Echo: fmt.Sprintf("Found labels.csv and a %s folder — this looks like text data.", dir)}
-	case !hasImages && !hasText && csvCount == 1:
+	case !hasImages && !hasText && !miscasedMarker && csvCount == 1:
 		// Exactly one CSV, mirroring DiscoverTabular's findSingleCSV rule.
 		// Two or more CSVs is a directory the tabular walk rejects, so stay
 		// ambiguous rather than confidently promise a layout it refuses.
+		// A mis-cased marker dir alongside the CSV (miscasedMarker) also
+		// bails to ambiguous: the lone labels.csv of an image/text layout
+		// whose media folder was mis-cased must not masquerade as a table.
 		return FamilySniff{Family: FamilyTabular, Confident: true,
 			Echo: "Found a CSV table — this is tabular data."}
 	default:
 		return FamilySniff{}
 	}
+}
+
+// isMarkerFold reports whether name is one of the media-folder markers
+// (images / texts / sequences) ignoring case. Used only to detect a
+// mis-cased marker dir; the confident image/text branches still require an
+// EXACT match, mirroring the walk's literal os.Lstat.
+func isMarkerFold(name string) bool {
+	for _, m := range []string{"images", "texts", "sequences"} {
+		if strings.EqualFold(name, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // PreviewLabelHeaders returns the column names of the CSV a label column

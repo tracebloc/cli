@@ -56,28 +56,45 @@ func TestSniffFamily(t *testing.T) {
 		}
 	})
 
-	t.Run("mis-cased Images/ is not confident image", func(t *testing.T) {
+	t.Run("mis-cased Images/ + labels.csv is ambiguous, NOT confident tabular", func(t *testing.T) {
 		// Discover Lstats the literal "images"; a mis-cased "Images/" is not
-		// its marker, so the sniff must not claim confident image (the walk
-		// would reject the image layout). Mirrors the walk's case-sensitivity.
+		// its marker. The sniff must not claim confident image — but it must
+		// ALSO not fall through to confident tabular, or the lone labels.csv
+		// of a mis-cased image layout would be silently ingested as a table
+		// (cli#203). It stays ambiguous so the flow asks the family plainly.
 		dir := t.TempDir()
 		writePrev(t, filepath.Join(dir, "labels.csv"), "image_id,label\n1.jpg,c\n")
 		if err := os.Mkdir(filepath.Join(dir, "Images"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if s := SniffFamily(dir); s.Confident && s.Family == FamilyImage {
-			t.Fatalf("mis-cased Images/ must not sniff as confident image, got %+v", s)
+		if s := SniffFamily(dir); s.Confident {
+			t.Fatalf("mis-cased Images/ + labels.csv must be ambiguous, got %+v", s)
 		}
 	})
 
-	t.Run("mis-cased Texts/ is not confident text", func(t *testing.T) {
+	t.Run("mis-cased Texts/ + labels.csv is ambiguous, NOT confident tabular", func(t *testing.T) {
 		dir := t.TempDir()
 		writePrev(t, filepath.Join(dir, "labels.csv"), "text_id,label\n1.txt,c\n")
 		if err := os.Mkdir(filepath.Join(dir, "Texts"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if s := SniffFamily(dir); s.Confident && s.Family == FamilyText {
-			t.Fatalf("mis-cased Texts/ must not sniff as confident text, got %+v", s)
+		if s := SniffFamily(dir); s.Confident {
+			t.Fatalf("mis-cased Texts/ + labels.csv must be ambiguous, got %+v", s)
+		}
+	})
+
+	t.Run("single csv + unrelated subdir stays confident tabular", func(t *testing.T) {
+		// The mis-cased guard must be narrow: a subdir that is NOT a marker
+		// name (case-insensitively) — a stray backup/ etc. — must not derail
+		// the confident-tabular sniff, since DiscoverTabular ignores it too.
+		dir := t.TempDir()
+		writePrev(t, filepath.Join(dir, "data.csv"), "a,b\n1,2\n")
+		if err := os.Mkdir(filepath.Join(dir, "backup"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		s := SniffFamily(dir)
+		if !s.Confident || s.Family != FamilyTabular {
+			t.Fatalf("single csv + unrelated subdir should stay confident tabular, got %+v", s)
 		}
 	})
 
