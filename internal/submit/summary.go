@@ -358,8 +358,15 @@ func RenderSummary(p *ui.Printer, s *Summary) {
 	case s.HasFailures():
 		// No hard failure, but not clean: rows skipped, or fewer inserted/
 		// synced than the ingestor saw. Exit-coded as not-clean (HasFailures),
-		// but colored distinctly from a hard failure.
-		p.Warnf("Ingestion completed with skips — %s", headline)
+		// but colored distinctly from a hard failure. Word it by which soft
+		// shortfall actually occurred — "skips" only when rows were skipped;
+		// an insert/API shortfall with zero skips is a partial result, not a
+		// skip, and mislabeling it reads as a validator drop.
+		if s.SkippedRecords > 0 {
+			p.Warnf("Ingestion completed with skips — %s", headline)
+		} else {
+			p.Warnf("Ingestion completed partially — %s", headline)
+		}
 	default:
 		p.Successf("Ingestion complete — %s", headline)
 	}

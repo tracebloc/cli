@@ -243,6 +243,10 @@ func TestRenderSummary_OutcomeHeadline(t *testing.T) {
 	}{
 		{"clean", &Summary{TotalRecords: 10, ProcessedRecords: 10, InsertedRecords: 10, APISentRecords: 10}, "complete —"},
 		{"skips", &Summary{TotalRecords: 10, ProcessedRecords: 8, InsertedRecords: 8, APISentRecords: 8, SkippedRecords: 2}, "skips"},
+		// Soft shortfall with ZERO skips: inserted < total (and api_sent <
+		// inserted) but nothing was skipped. Must NOT be labeled "skips" — it's
+		// a partial result, not a validator drop. (Bugbot #193.)
+		{"partial, no skips", &Summary{TotalRecords: 10, ProcessedRecords: 10, InsertedRecords: 9, APISentRecords: 8}, "partially"},
 		{"failures", &Summary{TotalRecords: 10, ProcessedRecords: 7, InsertedRecords: 7, APISentRecords: 7, FailedRecords: 3}, "failures"},
 	}
 	for _, c := range cases {
