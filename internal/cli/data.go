@@ -1049,9 +1049,6 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 		dir := push.TextSidecarDir(cat)
 		p.Field("labels.csv", layout.LabelsCSV)
 		p.Field(dir, fmt.Sprintf("%d files", len(layout.Sidecars[dir])))
-		if _, ok := layout.ExtraFiles["tokenizer.json"]; ok {
-			p.Field("tokenizer", "tokenizer.json")
-		}
 	default:
 		p.Field("labels.csv", layout.LabelsCSV)
 		imagesVal := fmt.Sprintf("%d files", len(layout.Images))
