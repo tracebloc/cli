@@ -82,7 +82,7 @@ func TestStage_HappyPath(t *testing.T) {
 	// Diagnostic output: customer should see the lifecycle
 	// breadcrumbs. Pin a few key phrases so a regression that
 	// silences them is caught.
-	for _, want := range []string{"Opened a secure upload channel", "Preparing the upload channel", "Uploading", "Uploaded"} {
+	for _, want := range []string{"Opened a secure channel", "Preparing the copy", "Copying", "Copied"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}

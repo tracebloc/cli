@@ -48,8 +48,10 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 		"label":    "label",
 	}
 
+	// Verbose so the cluster block renders too — it's --verbose-only now (see
+	// TestPrintClusterSummary_VerboseOnly). The local summary shows regardless.
 	var buf bytes.Buffer
-	p := ui.New(&buf, ui.WithColor(false))
+	p := ui.New(&buf, ui.WithColor(false), ui.WithVerbose(true))
 	printLocalSummary(p, layout, spec)
 	printClusterSummary(p, release, pvc)
 	out := buf.String()
@@ -60,6 +62,41 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("pre-flight output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintClusterSummary_VerboseOnly pins that the Kubernetes cluster detail
+// (release / jobs-manager / shared PVC) is hidden on the default happy path and
+// surfaces only under --verbose — the RFC-0002 §6 ceremony-hiding contract.
+func TestPrintClusterSummary_VerboseOnly(t *testing.T) {
+	release := &cluster.ParentRelease{
+		ReleaseName:        "ingdemo",
+		ChartVersion:       "1.4.2",
+		JobsManagerService: "http://jobs-manager.ingdemo.svc.cluster.local:8080",
+	}
+	pvc := &cluster.SharedPVC{
+		ClaimName:   "client-pvc",
+		MountPath:   "/data/shared",
+		Phase:       corev1.ClaimBound,
+		AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+	}
+
+	// Default (non-verbose): none of the cluster plumbing leaks.
+	var quiet bytes.Buffer
+	printClusterSummary(ui.New(&quiet, ui.WithColor(false)), release, pvc)
+	for _, hidden := range []string{"ingdemo", "1.4.2", "client-pvc", "jobs-manager", "Target cluster"} {
+		if strings.Contains(quiet.String(), hidden) {
+			t.Errorf("non-verbose output leaked cluster detail %q:\n%s", hidden, quiet.String())
+		}
+	}
+
+	// --verbose: the same facts are shown.
+	var loud bytes.Buffer
+	printClusterSummary(ui.New(&loud, ui.WithColor(false), ui.WithVerbose(true)), release, pvc)
+	for _, want := range []string{"ingdemo", "1.4.2", "client-pvc"} {
+		if !strings.Contains(loud.String(), want) {
+			t.Errorf("verbose output missing cluster detail %q:\n%s", want, loud.String())
 		}
 	}
 }
