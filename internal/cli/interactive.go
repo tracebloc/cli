@@ -198,26 +198,14 @@ func resolveFamily(p *ui.Printer, pr prompter, path string) (push.Family, error)
 		return s.Family, nil
 	}
 	p.PromptHint("We couldn't tell the data type from what's there — which is it?")
+	opts := push.FamilyNouns()
 	ans, err := pr.Select("What kind of data is this?",
 		"tabular = a CSV table; image = labels.csv + images/; text = labels.csv + texts/",
-		[]string{"tabular", "image", "text"}, "tabular")
+		opts, opts[0])
 	if err != nil {
 		return 0, err
 	}
-	return familyFromNoun(ans), nil
-}
-
-// familyFromNoun maps the plain family words the picker offers back to the
-// push.Family enum.
-func familyFromNoun(s string) push.Family {
-	switch s {
-	case "image":
-		return push.FamilyImage
-	case "text":
-		return push.FamilyText
-	default:
-		return push.FamilyTabular
-	}
+	return push.FamilyFromNoun(ans), nil
 }
 
 // pickTask renders the family's tasks — "Display name — one-liner ·

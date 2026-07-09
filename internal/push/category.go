@@ -146,17 +146,56 @@ func CategoriesByFamily(fam Family) []CategorySpec {
 	return out
 }
 
+// familyNounTable is the single source of truth pairing each Family with the
+// plain word shown in prompts, echoes, and the interactive family picker. The
+// slice order is the picker's display order — tabular first, since it's the
+// most common family and the default when the layout sniff is ambiguous. That
+// order is deliberately NOT the Family iota order (which is layout-internal).
+// FamilyNoun (forward), FamilyFromNoun (reverse), and FamilyNouns (picker
+// options + default) all derive from this one table, so they can't drift apart.
+var familyNounTable = []struct {
+	family Family
+	noun   string
+}{
+	{FamilyTabular, "tabular"},
+	{FamilyImage, "image"},
+	{FamilyText, "text"},
+}
+
 // FamilyNoun is the plain word for a family, used in prompts and echoes
-// ("tasks for tabular data", "this is image data").
+// ("tasks for tabular data", "this is image data"). Falls back to the picker
+// default ("tabular") for an unrecognized family.
 func FamilyNoun(fam Family) string {
-	switch fam {
-	case FamilyImage:
-		return "image"
-	case FamilyText:
-		return "text"
-	default:
-		return "tabular"
+	for _, e := range familyNounTable {
+		if e.family == fam {
+			return e.noun
+		}
 	}
+	return "tabular"
+}
+
+// FamilyFromNoun maps a family noun ("image"/"text"/"tabular") back to its
+// Family — the reverse of FamilyNoun. Unrecognized input falls back to
+// FamilyTabular, matching the picker default so a stray answer degrades to the
+// safe common case.
+func FamilyFromNoun(noun string) Family {
+	for _, e := range familyNounTable {
+		if e.noun == noun {
+			return e.family
+		}
+	}
+	return FamilyTabular
+}
+
+// FamilyNouns returns the family nouns in picker/display order; the first
+// element is the choice the picker pre-selects. The interactive family
+// prompt derives both its options and its default from here.
+func FamilyNouns() []string {
+	nouns := make([]string, len(familyNounTable))
+	for i, e := range familyNounTable {
+		nouns[i] = e.noun
+	}
+	return nouns
 }
 
 // SelfSupervisedText reports whether a text category trains without an
