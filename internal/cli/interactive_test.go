@@ -83,6 +83,30 @@ func TestRunInteractive_FillsAllWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestRunInteractive_PickerSeedsFirstTaskWhenUnset: with the task unset
+// (taskSet=false) and no category on a, the picker must seed a valid
+// option as its default. Dropping --task's old image_classification
+// default (#180a) left an empty seed, which real survey.Select rejects
+// ("default value \"\" not found in options"), crashing the headline
+// "omit --task to pick interactively" flow. Omitting the "Task" answer
+// makes the fake return the seeded default verbatim, so asserting the
+// category landed on promptCategories[0] locks the seed in — a reseed
+// to "" would fail this even though the fake itself doesn't validate.
+func TestRunInteractive_PickerSeedsFirstTaskWhenUnset(t *testing.T) {
+	f := &fakePrompter{answers: map[string]string{
+		"Dataset name": "churn_train",
+	}}
+	a := &runDataIngestArgs{LocalPath: "./data"} // Category deliberately left ""
+
+	if err := runInteractive(discardPrinter(), f, a, false /*taskSet*/); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.Spec.Category != promptCategories[0] {
+		t.Errorf("Category = %q, want the seeded first task %q",
+			a.Spec.Category, promptCategories[0])
+	}
+}
+
 // TestRunInteractive_ShowsExampleHints: each input prompt is preceded
 // by a visible hint with an example, so the guided flow teaches as it
 // goes. Drives runInteractive with a real (buffer-backed) Printer and
