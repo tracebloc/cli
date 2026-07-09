@@ -103,7 +103,7 @@ func TestDataIngest_UnsupportedCategory_ExitsTwo(t *testing.T) {
 				root,
 				"--name=t1",
 				"--task=" + badCategory,
-				"--split=train",
+				"--intent=train",
 				"--label-column=label",
 			})
 			if code != 2 {
@@ -127,7 +127,7 @@ func TestDataIngest_KnownUnsupportedCategory_PendingNote(t *testing.T) {
 	rootCmd.SetArgs([]string{"data", "ingest",
 		"--kubeconfig=/tmp/tracebloc-cli-test-nonexistent-" + t.Name(),
 		root, "--name=t1", "--task=causal_language_modeling",
-		"--split=train", "--label-column=label"})
+		"--intent=train", "--label-column=label"})
 	err := rootCmd.Execute()
 	if err == nil {
 		t.Fatal("expected an error for a known-but-unsupported task")
@@ -158,7 +158,7 @@ func TestDataIngest_TraversalTableName_ExitsTwo(t *testing.T) {
 				root,
 				"--name=" + bad,
 				"--task=image_classification",
-				"--split=train",
+				"--intent=train",
 				"--label-column=label",
 			})
 			if code != 2 {
@@ -168,24 +168,23 @@ func TestDataIngest_TraversalTableName_ExitsTwo(t *testing.T) {
 	}
 }
 
-// TestDataIngest_OmittedSplit_DefaultsToTrain: --split defaults to
-// "train" (renamed from the old required --intent), so omitting it no
-// longer fails schema validation (exit 2). The run gets past the spec
-// checks and stops at the injected bad kubeconfig (exit 3) — the same
-// fall-through point as TestDataIngest_BadKubeconfig_ExitsThree, which
-// proves the default was applied rather than the value being rejected
-// as missing.
-func TestDataIngest_OmittedSplit_DefaultsToTrain(t *testing.T) {
+// TestDataIngest_OmittedIntent_DefaultsToTrain: --intent defaults to
+// "train", so omitting it no longer fails schema validation (exit 2).
+// The run gets past the spec checks and stops at the injected bad
+// kubeconfig (exit 3) — the same fall-through point as
+// TestDataIngest_BadKubeconfig_ExitsThree, which proves the default was
+// applied rather than the value being rejected as missing.
+func TestDataIngest_OmittedIntent_DefaultsToTrain(t *testing.T) {
 	root := imgcLayout(t)
 	code, _, _ := execDataIngest(t, []string{
 		root,
 		"--name=t1",
 		"--task=image_classification",
-		// split omitted → defaults to train
+		// intent omitted → defaults to train
 		"--label-column=label",
 	})
 	if code != 3 {
-		t.Fatalf("expected exit 3 (default split applied, then bad kubeconfig), got %d", code)
+		t.Fatalf("expected exit 3 (default intent applied, then bad kubeconfig), got %d", code)
 	}
 }
 
@@ -205,7 +204,7 @@ func TestDataIngest_NonexistentLocalPath_ExitsThree(t *testing.T) {
 		"/tmp/tracebloc-cli-test-no-such-dir-" + t.Name(),
 		"--name=t1",
 		"--task=image_classification",
-		"--split=train",
+		"--intent=train",
 		"--label-column=label",
 	})
 	if code != 3 {
@@ -233,7 +232,7 @@ func TestDataIngest_MissingLabelsCSV_ExitsThree(t *testing.T) {
 		root,
 		"--name=t1",
 		"--task=image_classification",
-		"--split=train",
+		"--intent=train",
 		"--label-column=label",
 	})
 	if code != 3 {
@@ -252,7 +251,7 @@ func TestDataIngest_BadKubeconfig_ExitsThree(t *testing.T) {
 		root,
 		"--name=t1",
 		"--task=image_classification",
-		"--split=train",
+		"--intent=train",
 		"--label-column=label",
 	})
 	if code != 3 {
@@ -272,7 +271,7 @@ func TestDataIngest_RequiresExactlyOneArg(t *testing.T) {
 			name: "no positional",
 			args: []string{
 				"--name=t1", "--task=image_classification",
-				"--split=train", "--label-column=label",
+				"--intent=train", "--label-column=label",
 			},
 		},
 		{
@@ -280,7 +279,7 @@ func TestDataIngest_RequiresExactlyOneArg(t *testing.T) {
 			args: []string{
 				"./a", "./b",
 				"--name=t1", "--task=image_classification",
-				"--split=train", "--label-column=label",
+				"--intent=train", "--label-column=label",
 			},
 		},
 	}
@@ -296,7 +295,7 @@ func TestDataIngest_RequiresExactlyOneArg(t *testing.T) {
 
 // TestDataIngest_DeprecatedFlagAliases pins that the pre-#180 flag names
 // still resolve through their hidden aliases so existing scripts don't
-// break: --table→--name, --category→--task, --intent→--split. A valid
+// break: --table→--name and --category→--task. A valid
 // spec via the old names must fall through the local checks to the
 // injected bad kubeconfig (exit 3) exactly as the canonical names do; a
 // bad value via --category must still reach the task gate (exit 2),
@@ -344,7 +343,7 @@ func TestDataIngest_OmitTask_NonInteractive_Errors(t *testing.T) {
 	rootCmd.SetErr(&bytes.Buffer{})
 	rootCmd.SetArgs([]string{"data", "ingest",
 		"--kubeconfig=/tmp/tracebloc-cli-test-nonexistent-" + t.Name(),
-		root, "--name=t1", "--split=train", "--label-column=label"})
+		root, "--name=t1", "--intent=train", "--label-column=label"})
 	err := rootCmd.Execute()
 	if err == nil {
 		t.Fatal("expected an error when --task is omitted non-interactively")

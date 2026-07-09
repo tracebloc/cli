@@ -264,7 +264,7 @@ func renderReview(p *ui.Printer, a *runDataIngestArgs) {
 	p.Field("path", a.LocalPath)
 	p.Field("task", a.Spec.Category)
 	p.Field("name", a.Spec.Table)
-	p.Field("split", a.Spec.Intent)
+	p.Field("intent", a.Spec.Intent)
 	if a.Spec.LabelColumn != "" {
 		p.Field("label column", a.Spec.LabelColumn)
 	}

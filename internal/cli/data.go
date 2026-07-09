@@ -92,16 +92,15 @@ func newDataIngestCmd() *cobra.Command {
 		// time-series family are supported today; text + detection +
 		// segmentation land in later increments.
 		//
-		// --name/--task/--split are the canonical flags (#180);
-		// --table/--category/--intent stay on as hidden deprecated
-		// aliases so existing scripts keep working. The wire/spec field
-		// names don't change — this is a CLI-surface rename only.
+		// --name/--task are the canonical flags (#180); --table/--category
+		// stay on as hidden deprecated aliases so existing scripts keep
+		// working. --intent is unchanged. The wire/spec field names don't
+		// change — this is a CLI-surface rename only.
 		name              string
 		tableAlias        string
 		task              string
 		categoryAlias     string
-		split             string
-		intentAlias       string
+		intent            string
 		labelColumn       string
 		targetSize        string
 		schemaFlag        string
@@ -195,10 +194,6 @@ Exit codes:
 			if cmd.Flags().Changed("category") && !cmd.Flags().Changed("task") {
 				taskVal = categoryAlias
 			}
-			splitVal := split
-			if cmd.Flags().Changed("intent") && !cmd.Flags().Changed("split") {
-				splitVal = intentAlias
-			}
 			// Whether the task was chosen at all (via either spelling).
 			// Dropping --task's old image_classification default means an
 			// unset task now drives the picker (TTY) or a clear error
@@ -230,7 +225,7 @@ Exit codes:
 					Context:    contextOverride,
 					Namespace:  nsOverride,
 					Spec: push.SpecArgs{
-						Table: nameVal, Category: taskVal, Intent: splitVal,
+						Table: nameVal, Category: taskVal, Intent: intent,
 						LabelColumn: labelColumn, LabelPolicy: labelPolicy, TimeColumn: timeColumn,
 						NumberOfKeypoints: numberOfKeypoints,
 					},
@@ -275,11 +270,8 @@ Exit codes:
 	cmd.Flags().StringVar(&categoryAlias, "category", "",
 		"deprecated alias for --task")
 	_ = cmd.Flags().MarkHidden("category")
-	cmd.Flags().StringVar(&split, "split", "",
+	cmd.Flags().StringVar(&intent, "intent", "",
 		"is this training or test data? train|test (default train)")
-	cmd.Flags().StringVar(&intentAlias, "intent", "",
-		"deprecated alias for --split")
-	_ = cmd.Flags().MarkHidden("intent")
 	cmd.Flags().StringVar(&labelColumn, "label-column", "",
 		"name of the label/target column (in labels.csv for image tasks, in the data CSV for tabular)")
 	cmd.Flags().StringVar(&targetSize, "target-size", "",
@@ -447,9 +439,9 @@ collaborators can train against that table without ever seeing the raw files.`))
 			return &exitError{code: 3, err: fmt.Errorf("interactive setup: %w", err)}
 		}
 	}
-	// --split defaults to train. Applied after the interactive block so
+	// --intent defaults to train. Applied after the interactive block so
 	// the guided flow still asks "training or test?" (it prompts on an
-	// empty value); a non-interactive run that omits --split gets train
+	// empty value); a non-interactive run that omits --intent gets train
 	// without erroring (RFC-0002 §5). The wire field stays "intent".
 	if a.Spec.Intent == "" {
 		a.Spec.Intent = "train"
@@ -1080,7 +1072,7 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 	p.Section("Ingest settings")
 	p.Field("name", fmt.Sprintf("%v", spec["table"]))
 	p.Field("task", fmt.Sprintf("%v", spec["category"]))
-	p.Field("split", fmt.Sprintf("%v", spec["intent"]))
+	p.Field("intent", fmt.Sprintf("%v", spec["intent"]))
 	switch lbl := spec["label"].(type) {
 	case string:
 		p.Field("label column", lbl)

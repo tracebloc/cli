@@ -30,15 +30,22 @@ import (
 //  2. A safe single path segment — the name becomes the
 //     /data/shared/<table>/ subdirectory on the PVC.
 //
-// The intersection of "MySQL identifier" and "single safe path
-// component" is [A-Za-z0-9_]: letters, digits, underscore. No
-// slashes, no dots — which is what closes the path-traversal hole
-// (see ValidateTableName).
+// The name must START with a letter or underscore, then letters,
+// digits, and underscores: [A-Za-z_][A-Za-z0-9_]*. No slashes, no
+// dots — which is what closes the path-traversal hole (see
+// ValidateTableName) — and no leading digit.
+//
+// This mirrors the ingestor's own check (the source of truth):
+// tracebloc/data-ingestors' validators/table_name_validator.py
+// requires ^[a-zA-Z_][a-zA-Z0-9_]*$. Any name accepted here is
+// therefore accepted in-cluster; the looser old pattern let
+// leading-digit / all-digit names ("123", "1data") through the CLI
+// only for the cluster to reject them post-upload.
 //
 // All the real-world example tables (chest_xrays_train,
 // cats_dogs_train) match this; it's the conventional snake_case
 // table-naming style anyway.
-var tableNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+var tableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // MaxTableNameLength caps `--table` at 63 chars. Two hard limits
 // agree on this:
@@ -86,12 +93,13 @@ func ValidateTableName(table string) error {
 	}
 	if !tableNamePattern.MatchString(table) {
 		return fmt.Errorf(
-			"table name %q is invalid: must match [A-Za-z0-9_]+ "+
-				"(letters, digits, underscore only). The table name is "+
+			"table name %q is invalid: must start with a letter or "+
+				"underscore, then letters, digits, and underscores only "+
+				"(matches [A-Za-z_][A-Za-z0-9_]*). The table name is "+
 				"used both as the MySQL table identifier and as the "+
 				"/data/shared/<table>/ subdirectory on the cluster PVC, "+
-				"so slashes, dots, and path-traversal sequences are "+
-				"rejected.",
+				"so a leading digit, slashes, dots, and path-traversal "+
+				"sequences are rejected.",
 			table)
 	}
 	return nil
