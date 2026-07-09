@@ -797,14 +797,28 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if err := CheckDuplicateHeaders(header, "labels.csv"); err != nil {
 			return nil, dataProblem(err)
 		}
-		if spec.Category == "text_classification" {
+		// Every SUPERVISED text task carries a label column the ingestor
+		// requires present — text_classification & sentence_pair_classification
+		// via LabelColumnValidator, token_classification via BIOLabelValidator —
+		// so preview the header for all of them. Gating on !SelfSupervisedText
+		// mirrors buildText's label emission, so a typo'd --label-column fails
+		// locally (exit 2) instead of after the full upload. The self-supervised
+		// tasks (MLM, CLM, seq2seq, embeddings) carry no label.
+		if !SelfSupervisedText(spec.Category) {
 			if err := CheckLabelColumn(header, spec.LabelColumn, "labels.csv"); err != nil {
 				return nil, &PreflightProblem{Err: err, BadFlag: true}
 			}
-			// Text labels are read untyped (like image), so no NA drop and
-			// no numeric collapse.
-			if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
-				return nil, dataProblem(err)
+			// LabelDiversityValidator is wired only for the is_classification
+			// text tasks (text_classification, sentence_pair_classification), NOT
+			// token_classification — its BIO tag sequences aren't class labels,
+			// so the ingestor runs BIOLabelValidator instead and never checks
+			// label diversity. Mirror that exactly (Principle 6): gate on
+			// IsClassification. Text labels are read untyped (like image), so no
+			// NA drop and no numeric collapse.
+			if IsClassification(spec.Category) {
+				if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
+					return nil, dataProblem(err)
+				}
 			}
 		}
 	}

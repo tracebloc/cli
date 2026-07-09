@@ -80,6 +80,23 @@ if [[ "${1:-}" == "--check" ]]; then
   CHECK_MODE=true
 fi
 
+# Track every temp file we stage so a single top-level trap can clean them all
+# up — on normal exit AND on a signal-driven one (SIGINT/SIGTERM during the curl
+# fetch or json.tool validation). The pre-refactor code used a top-level EXIT
+# trap; a per-function RETURN trap alone would leak the temp file when the run
+# is killed mid-fetch, so keep cleanup at the top level.
+_tmpfiles=()
+cleanup_tmpfiles() {
+  # Guard the expansion: under `set -u`, "${arr[@]}" on an empty array is an
+  # unbound-variable error in bash < 4.4 (macOS ships 3.2).
+  [[ ${#_tmpfiles[@]} -eq 0 ]] && return 0
+  local f
+  for f in "${_tmpfiles[@]}"; do
+    rm -f "$f"
+  done
+}
+trap cleanup_tmpfiles EXIT INT TERM
+
 # sync_one fetches one upstream file and either checks it against the in-tree
 # copy (--check) or writes it. Returns non-zero on drift / missing file in
 # check mode. Each fetch is staged in its own temp file so a half-failed curl
@@ -88,7 +105,7 @@ sync_one() {
   local url="$1" out="$2"
   local tmp
   tmp=$(mktemp)
-  trap 'rm -f "$tmp"' RETURN
+  _tmpfiles+=("$tmp")
 
   echo "==> fetching $url"
   curl -fsSL "$url" -o "$tmp"
@@ -128,7 +145,14 @@ sync_one() {
     return 0
   fi
 
-  cp "$tmp" "$out"
+  # Check the write explicitly: sync_one is called as `if ! sync_one ...`, which
+  # suspends `set -e` for the whole function body, so a failed cp (unwritable
+  # dir, full disk) would otherwise fall through to the "wrote" line and return
+  # 0 — a false success that lets a stale vendored file get committed.
+  if ! cp "$tmp" "$out"; then
+    echo "error: failed to write $out (check directory permissions / disk space)" >&2
+    return 1
+  fi
   echo "==> wrote $out ($(wc -c < "$out" | tr -d ' ') bytes)"
   return 0
 }

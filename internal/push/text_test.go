@@ -205,6 +205,32 @@ func TestDiscoverText_EnforcedRecordFormat_Reject(t *testing.T) {
 	}
 }
 
+// TestDiscoverText_EnforcedRecordFormat_IgnoresUnreferenced: the enforced
+// record-format check runs only over the files labels.csv references, mirroring
+// the ingestor's manifest walk (TabSeparatedRecordValidator iterates the CSV
+// rows, not the directory). A stray unreferenced .txt in texts/ — a README, a
+// scratch draft with no tab — must NOT fail discovery: the ingestor never opens
+// a file no row names, so rejecting it would block a layout the cluster accepts
+// (RFC-0002 Principle 6).
+func TestDiscoverText_EnforcedRecordFormat_IgnoresUnreferenced(t *testing.T) {
+	for _, category := range []string{"sentence_pair_classification", "embeddings"} {
+		t.Run(category, func(t *testing.T) {
+			hasLabel := !SelfSupervisedText(category)
+			// a.txt is a well-formed 2-field record AND is referenced by
+			// labels.csv; notes.txt is prose with no tab and is NOT referenced.
+			dir := mkStructuredTextDir(t, hasLabel, map[string]string{"a.txt": "left side\tright side"})
+			stray := filepath.Join(dir, "texts", "notes.txt")
+			if err := os.WriteFile(stray, []byte("just some prose with no tab"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DiscoverText(category, dir); err != nil {
+				t.Errorf("DiscoverText(%s) rejected a dataset with an unreferenced stray .txt "+
+					"the ingestor would accept: %v", category, err)
+			}
+		})
+	}
+}
+
 // TestDiscoverText_SentencePair_WrongFieldCount: sentence_pair requires exactly
 // 2 fields — a 3-field record is rejected, whereas embeddings accepts 2 or 3.
 func TestDiscoverText_SentencePair_WrongFieldCount(t *testing.T) {

@@ -1,8 +1,12 @@
 package push
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,8 +96,18 @@ func DiscoverText(category, rootDir string) (*LocalLayout, error) {
 	// layout contract, not hardcoded — the CLI mirrors the ingestor's
 	// TabSeparatedRecordValidator (RFC-0002 Principle 6). Unenforced formats
 	// (seq2seq, causal LM) accept raw text and are not checked.
+	//
+	// The check is scoped to the files the manifest actually references, NOT
+	// every .txt in the dir: the ingestor's validator walks labels.csv rows and
+	// only opens the file each row names, so an unreferenced stray .txt (a
+	// README, a scratch draft) must not fail discovery — the ingestor would
+	// accept the dataset.
 	if rf, ok := RecordFormatFor(category); ok && rf.Enforced {
-		if err := validateTextRecords(dirName, files, rf); err != nil {
+		referenced, rerr := manifestReferencedTextNames(labelsPath)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if err := validateTextRecords(dirName, files, referenced, rf); err != nil {
 			return nil, err
 		}
 	}
@@ -107,13 +121,20 @@ func DiscoverText(category, rootDir string) (*LocalLayout, error) {
 	return layout, nil
 }
 
-// validateTextRecords runs the enforced record-format check over every
-// discovered .txt in dirName, mirroring the ingestor's per-file
-// TabSeparatedRecordValidator. The first malformed file fails discovery with a
-// message naming the offending file (relative to the dataset root, e.g.
-// "texts/bad.txt"), so the fix is obvious without reaching the cluster.
-func validateTextRecords(dirName string, files []string, rf RecordFormat) error {
+// validateTextRecords runs the enforced record-format check over the
+// manifest-referenced .txt files in dirName, mirroring the ingestor's per-file
+// TabSeparatedRecordValidator. Only files whose basename is in referenced (the
+// set the manifest walk names) are checked — the ingestor never opens a file no
+// row references, so validating a stray unreferenced .txt would reject a layout
+// the ingestor accepts (RFC-0002 Principle 6). The first malformed file fails
+// discovery with a message naming the offending file (relative to the dataset
+// root, e.g. "texts/bad.txt"), so the fix is obvious without reaching the
+// cluster.
+func validateTextRecords(dirName string, files []string, referenced map[string]struct{}, rf RecordFormat) error {
 	for _, f := range files {
+		if _, ok := referenced[filepath.Base(f)]; !ok {
+			continue
+		}
 		content, err := os.ReadFile(f)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", filepath.Join(dirName, filepath.Base(f)), err)
@@ -123,6 +144,87 @@ func validateTextRecords(dirName string, files []string, rf RecordFormat) error 
 		}
 	}
 	return nil
+}
+
+// manifestReferencedTextNames returns the set of text-file basenames the
+// manifest (labels.csv) references, mirroring the ingestor's
+// TabSeparatedRecordValidator manifest walk: it reads the "filename" column
+// (matched exactly, then case-insensitively with surrounding whitespace
+// stripped — the ingestor's resolve rule) and resolves each value to a filename
+// exactly as file_transfer does, appending ".txt" only when the value carries
+// no known extension (hasKnownExtension mirrors _has_extension). The enforced
+// record-format check runs over exactly these files.
+//
+// A missing "filename" column (or an empty CSV) yields an empty set: the CLI
+// then validates nothing rather than a superset. A genuinely absent filename
+// column is the ingestor's own separate failure (its validator errors "Missing
+// required column: filename"), not a record-format one, so over-strictly
+// rejecting text files here would diverge.
+func manifestReferencedTextNames(csvPath string) (map[string]struct{}, error) {
+	f, err := os.Open(csvPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading labels.csv: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	br := bufio.NewReader(f)
+	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
+		_, _ = br.Discard(3)
+	}
+	r := csv.NewReader(br)
+	r.FieldsPerRecord = -1
+
+	header, err := r.Read()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return map[string]struct{}{}, nil // empty CSV — another check's diagnostic
+		}
+		return nil, fmt.Errorf("reading labels.csv: %w", err)
+	}
+	col := filenameColumnIndex(header)
+	referenced := map[string]struct{}{}
+	if col < 0 {
+		return referenced, nil // no filename column — the ingestor's own failure
+	}
+	for {
+		rec, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			continue // a malformed row is another check's diagnostic
+		}
+		if col >= len(rec) {
+			continue
+		}
+		name := strings.TrimSpace(rec[col])
+		if name == "" {
+			continue
+		}
+		if !hasKnownExtension(name) {
+			name += ".txt"
+		}
+		referenced[name] = struct{}{}
+	}
+	return referenced, nil
+}
+
+// filenameColumnIndex finds the manifest's filename column: an exact "filename"
+// match first, then case-insensitively with surrounding whitespace stripped —
+// the ingestor's resolve_column rule (default column name "filename"). Returns
+// -1 when absent.
+func filenameColumnIndex(header []string) int {
+	for i, c := range header {
+		if c == "filename" {
+			return i
+		}
+	}
+	for i, c := range header {
+		if strings.ToLower(strings.TrimSpace(c)) == "filename" {
+			return i
+		}
+	}
+	return -1
 }
 
 // discoverSidecarFiles walks <root>/<dirName> (non-recursive) for files

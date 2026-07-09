@@ -724,9 +724,13 @@ collaborators can train against that table without ever seeing the raw files.`))
 		}
 		a.Spec.Extension = ext
 	default:
-		// Text family: no extra per-category resolution. The label (for
-		// text_classification) comes straight from --label-column;
-		// masked_language_modeling needs neither a label nor a schema.
+		// Text family: no extra per-category resolution. The supervised text
+		// tasks (text_classification, token_classification,
+		// sentence_pair_classification) carry a label straight from
+		// --label-column; the self-supervised ones (masked/causal language
+		// modeling, seq2seq, embeddings) need neither a label nor a schema.
+		// buildText emits the label for exactly the supervised set, keyed on
+		// the registry's SelfSupervised flag (not a hardcoded id).
 	}
 
 	// 4. Synthesize the spec from flags + validate against schema.

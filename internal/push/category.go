@@ -36,12 +36,26 @@ type CategorySpec struct {
 	// never ships to the central backend by default.
 	RegressionClass bool
 	// SelfSupervised marks text categories that train without an explicit
-	// label column — the target is derived from the text itself (MLM masks
-	// tokens; CLM predicts the next token), so the interactive flow skips
-	// the "which column is the label?" question. A registry fact rather
-	// than a hardcoded id list so a new self-supervised task can't be added
-	// without deciding this (SelfSupervisedText reads it).
+	// label column — no `label` travels in labels.csv. For MLM/CLM the target
+	// is derived from the text itself (mask a token; predict the next one); for
+	// seq2seq and embeddings it comes from the record's own paired fields
+	// (source→target, anchor/positive/negative). Either way there's no label
+	// column, so the interactive flow skips the "which column is the label?"
+	// question. A registry fact rather than a hardcoded id list so a new
+	// self-supervised task can't be added without deciding this
+	// (SelfSupervisedText reads it). Mirrors the ingestor registry's
+	// is_self_supervised (data-ingestors modalities/registry.py).
 	SelfSupervised bool
+	// IsClassification marks categories the ingestor treats as classification
+	// (registry ModalitySpec.is_classification) — the ones whose validator
+	// chain gets a LabelDiversityValidator, so the dataset needs >= 2 distinct
+	// labels. Mirrors the ingestor exactly: the image family +
+	// text_classification + sentence_pair_classification + tabular_classification
+	// are true; token_classification is NOT (its labels are BIO tag sequences,
+	// checked by BIOLabelValidator, not class labels), nor are the regression /
+	// self-supervised tasks. The label-diversity preflight reads it so it can't
+	// drift from the ingestor's wiring.
+	IsClassification bool
 	// CLISupported reports whether `dataset push` implements the category
 	// today. semantic_segmentation is known (the schema defines it) but
 	// not yet pushable.
@@ -76,17 +90,17 @@ const (
 // nor carry an extra the ingestor won't accept (the instance_segmentation
 // half-ingest class — data-ingestors #240/#99, #1005).
 var categoryRegistry = []CategorySpec{
-	{ID: "image_classification", Family: FamilyImage, Label: "Image classification", CLISupported: true,
+	{ID: "image_classification", Family: FamilyImage, Label: "Image classification", CLISupported: true, IsClassification: true,
 		Blurb: "sort images into classes"},
-	{ID: "object_detection", Family: FamilyImage, Label: "Object detection", CLISupported: true,
+	{ID: "object_detection", Family: FamilyImage, Label: "Object detection", CLISupported: true, IsClassification: true,
 		Blurb: "draw boxes around objects in an image"},
-	{ID: "keypoint_detection", Family: FamilyImage, Label: "Keypoint detection", CLISupported: true,
+	{ID: "keypoint_detection", Family: FamilyImage, Label: "Keypoint detection", CLISupported: true, IsClassification: true,
 		Blurb: "locate landmark points on an image (e.g. pose)"},
-	{ID: "text_classification", Family: FamilyText, Label: "Text classification", CLISupported: true,
+	{ID: "text_classification", Family: FamilyText, Label: "Text classification", CLISupported: true, IsClassification: true,
 		Blurb: "sort text snippets into classes"},
 	{ID: "masked_language_modeling", Family: FamilyText, Label: "Masked language modeling", Gloss: "fill-mask", CLISupported: true, SelfSupervised: true,
 		Blurb: "predict masked-out words — no labels needed"},
-	{ID: "tabular_classification", Family: FamilyTabular, Label: "Tabular classification", CLISupported: true,
+	{ID: "tabular_classification", Family: FamilyTabular, Label: "Tabular classification", CLISupported: true, IsClassification: true,
 		Blurb: "predict a class from table columns"},
 	{ID: "tabular_regression", Family: FamilyTabular, Label: "Tabular regression", RegressionClass: true, CLISupported: true,
 		Blurb: "predict a number from table columns"},
@@ -100,7 +114,7 @@ var categoryRegistry = []CategorySpec{
 		Blurb: "map an input sequence to an output one"},
 	{ID: "token_classification", Family: FamilyText, Label: "Token classification", CLISupported: true,
 		Blurb: "label each word in a sequence"},
-	{ID: "sentence_pair_classification", Family: FamilyText, Label: "Sentence-pair classification", CLISupported: true,
+	{ID: "sentence_pair_classification", Family: FamilyText, Label: "Sentence-pair classification", CLISupported: true, IsClassification: true,
 		Blurb: "label how two texts relate"},
 	{ID: "embeddings", Family: FamilyText, Label: "Embeddings", CLISupported: true, SelfSupervised: true,
 		Blurb: "learn vector representations from text pairs"},
@@ -108,7 +122,7 @@ var categoryRegistry = []CategorySpec{
 	// but the ingestor doesn't yet populate the mask_id link column the
 	// contract requires, and the training-side sign-off is tracked in
 	// backend#816. Wire it once those land (RFC-0002 phase 4 follow-up).
-	{ID: "semantic_segmentation", Family: FamilyImage, Label: "Semantic segmentation", CLISupported: false,
+	{ID: "semantic_segmentation", Family: FamilyImage, Label: "Semantic segmentation", CLISupported: false, IsClassification: true,
 		Blurb:           "label every pixel in an image",
 		UnsupportedNote: "schema-recognized; awaiting the ingestor's mask_id link column + training sign-off (backend#816)"},
 }
@@ -205,12 +219,13 @@ func FamilyNouns() []string {
 }
 
 // SelfSupervisedText reports whether a text category trains without an
-// explicit label column — the target is derived from the text itself, so
-// the CLI skips the "which column is the label?" question. MLM masks
-// tokens; CLM predicts the next token; neither reads a labels column. The
-// answer is the registry's SelfSupervised flag, so a new self-supervised
-// task is handled the moment it's added to the registry — not when someone
-// remembers to edit this function.
+// explicit label column, so the CLI skips the "which column is the label?"
+// question. MLM/CLM derive the target from the text itself (mask a token;
+// predict the next one); seq2seq and embeddings derive it from the record's
+// own paired fields (source→target, anchor/positive/negative) — none reads a
+// labels column. The answer is the registry's SelfSupervised flag, so a new
+// self-supervised task is handled the moment it's added to the registry — not
+// when someone remembers to edit this function.
 func SelfSupervisedText(category string) bool {
 	c, ok := categoryByID[category]
 	return ok && c.SelfSupervised
@@ -248,6 +263,14 @@ func IsText(category string) bool {
 // therefore needs label.policy (object label form).
 func IsRegressionClass(category string) bool { return categoryByID[category].RegressionClass }
 
+// IsClassification reports whether the ingestor treats category as a
+// classification task (registry ModalitySpec.is_classification) — i.e. its
+// validator chain includes LabelDiversityValidator. The label-diversity
+// preflight gates on this so the CLI mirrors the ingestor's wiring rather than
+// hardcoding a category id (which is exactly how the text-family preflight
+// drifted when it only knew text_classification).
+func IsClassification(category string) bool { return categoryByID[category].IsClassification }
+
 // SupportedCategoryIDs returns the ids `dataset push` supports, in display
 // order. Used to build the --task help, the interactive picker, and
 // the accept-gate's "Supported:" lists from one place.
@@ -274,13 +297,19 @@ func AllCategoryIDs() []string {
 // and gate error messages.
 func SupportedCategoriesList() string { return strings.Join(SupportedCategoryIDs(), ", ") }
 
-// TextSidecarDir returns the sidecar directory name a text category
-// expects: "sequences" for masked_language_modeling, "texts" for
-// text_classification. (Used both as the local subdir to stage and the
-// spec field to emit.)
+// TextSidecarDir returns the sidecar directory name a text category expects
+// ("sequences" for masked_language_modeling, "texts" for every other text
+// task). Used both as the local subdir to stage and the spec field to emit.
+//
+// The value is READ from the vendored layout contract's primary_subdir — the
+// ingestor owns this fact (data-ingestors registry ModalitySpec.file_subdir),
+// so the CLI mirrors it rather than keeping a Go fork of the same rule
+// (RFC-0002 Principle 6). Falls back to "texts" for a category the contract
+// doesn't pin — defensive only; the contract covers every text task and
+// TestTextSidecarDirMirrorsContract enforces the two agree.
 func TextSidecarDir(category string) string {
-	if category == "masked_language_modeling" {
-		return "sequences"
+	if layout, ok := LayoutFor(category); ok && layout.PrimarySubdir != nil {
+		return *layout.PrimarySubdir
 	}
 	return "texts"
 }
