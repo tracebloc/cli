@@ -163,8 +163,10 @@ func TestCrossCheckLabels(t *testing.T) {
 	// One row exact, one extensionless (the ingestor appends the dataset
 	// extension — the check must mirror that), one missing.
 	csvPath := filepath.Join(dir, "labels.csv")
+	// Realistic image_classification labels.csv: the ingestor reads the image name
+	// from the column NAMED "filename" (record.get("filename")).
 	if err := os.WriteFile(csvPath,
-		[]byte("image_id,label\na.jpg,cat\nb,dog\nghost.jpg,cat\n"), 0o644); err != nil {
+		[]byte("filename,label\na.jpg,cat\nb,dog\nghost.jpg,cat\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	images := []string{filepath.Join(imgs, "a.jpg"), filepath.Join(imgs, "b.jpg"), filepath.Join(imgs, "extra.jpg")}
@@ -177,6 +179,57 @@ func TestCrossCheckLabels(t *testing.T) {
 	}
 	if len(orphans) != 1 || orphans[0] != "extra.jpg" {
 		t.Errorf("orphans = %v, want [extra.jpg]", orphans)
+	}
+}
+
+// The image filename is resolved by the "filename" COLUMN NAME, not positionally —
+// so a `label,filename` header (filename not first, a layout the ingestor accepts
+// via record.get("filename")) must not false-reject. Reading rec[0] would treat the
+// label value ("cat"/"dog") as the filename and flag every row missing (exit 3).
+func TestCrossCheckLabels_FilenameColumnNotFirst(t *testing.T) {
+	dir := t.TempDir()
+	imgs := filepath.Join(dir, "images")
+	if err := os.MkdirAll(imgs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a.jpg", "b.jpg", "extra.jpg"} {
+		if err := os.WriteFile(filepath.Join(imgs, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	csvPath := filepath.Join(dir, "labels.csv")
+	// filename is the SECOND column, and mixed-case to exercise the ci match.
+	if err := os.WriteFile(csvPath,
+		[]byte("label,Filename\ncat,a.jpg\ndog,b\ncat,ghost.jpg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	images := []string{filepath.Join(imgs, "a.jpg"), filepath.Join(imgs, "b.jpg"), filepath.Join(imgs, "extra.jpg")}
+	missing, orphans, err := CrossCheckLabels(csvPath, images, ".jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 1 || missing[0] != "ghost.jpg" {
+		t.Errorf("missing = %v, want [ghost.jpg] — the label values must NOT be read as filenames", missing)
+	}
+	if len(orphans) != 1 || orphans[0] != "extra.jpg" {
+		t.Errorf("orphans = %v, want [extra.jpg]", orphans)
+	}
+}
+
+func TestFilenameColIndex(t *testing.T) {
+	cases := []struct {
+		header []string
+		want   int
+	}{
+		{[]string{"filename", "label"}, 0},   // by name, first
+		{[]string{"label", "filename"}, 1},   // by name, not first (the bug)
+		{[]string{"label", " Filename "}, 1}, // case + whitespace insensitive
+		{[]string{"image_id", "label"}, 0},   // no filename-ish column → fallback to 0
+	}
+	for _, c := range cases {
+		if got := filenameColIndex(c.header); got != c.want {
+			t.Errorf("filenameColIndex(%v) = %d, want %d", c.header, got, c.want)
+		}
 	}
 }
 

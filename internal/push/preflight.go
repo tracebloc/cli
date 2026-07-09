@@ -247,8 +247,11 @@ func ValidateImages(images []string, expectedW, expectedH int) error {
 // direction for image_classification) — the caller may surface them as a
 // note.
 //
-// filenameColumn is the CSV's first column (the ingestor reads filenames
-// positionally from the id column of labels.csv).
+// The image filename is read from the column NAMED "filename", not positionally:
+// the ingestor does record.get("filename") over the header-keyed record
+// (file_transfer.py / record_processor.py), so a `label,filename` header (filename
+// not first) resolves to that column — reading rec[0] would treat the LABEL value
+// as the filename and false-reject a layout the cluster ingests cleanly.
 func CrossCheckLabels(csvPath string, images []string, extension string) (missing []string, orphans []string, err error) {
 	f, err := os.Open(csvPath)
 	if err != nil {
@@ -268,12 +271,14 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 	}
 	referenced := make(map[string]bool)
 
-	if _, err := r.Read(); err != nil { // header
+	header, err := r.Read()
+	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, nil, nil // emptiness is CheckHasDataRows' diagnostic
 		}
 		return nil, nil, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
 	}
+	fnIdx := filenameColIndex(header)
 	for {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
@@ -282,10 +287,10 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
 		}
-		if len(rec) == 0 {
-			continue
+		if fnIdx >= len(rec) {
+			continue // short/ragged row — no filename cell to check
 		}
-		name := strings.TrimSpace(rec[0])
+		name := strings.TrimSpace(rec[fnIdx])
 		if name == "" {
 			continue
 		}
@@ -309,6 +314,27 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 	sort.Strings(missing)
 	sort.Strings(orphans)
 	return missing, orphans, nil
+}
+
+// filenameColIndex returns the header index of the "filename" column — the one the
+// ingestor reads each image's filename from (record.get("filename"), order-
+// independent). Matches "filename" exactly first, then case-insensitively with
+// surrounding whitespace stripped (the ingestor's _match_column rule that
+// IngestableRecordsValidator applies to the filename column). Falls back to 0 when
+// there's no filename-ish column — a malformed image_classification labels.csv the
+// ingestor fails on regardless, which is not this check's job to diagnose.
+func filenameColIndex(header []string) int {
+	for i, h := range header {
+		if strings.TrimSpace(h) == "filename" {
+			return i
+		}
+	}
+	for i, h := range header {
+		if strings.EqualFold(strings.TrimSpace(h), "filename") {
+			return i
+		}
+	}
+	return 0
 }
 
 // CheckAnnotationPairing previews the ingestor's FilePairingValidator
