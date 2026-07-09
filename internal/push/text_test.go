@@ -11,8 +11,9 @@ import (
 )
 
 // mkTextDir builds a text-family dataset dir: labels.csv + a sidecar
-// directory (texts/ or sequences/) with two .txt files, optionally
-// plus a tokenizer.json at the root (for MLM).
+// directory (texts/ or sequences/) with two .txt files. withTokenizer
+// drops a stray tokenizer.json at the root — DiscoverText must ignore
+// it (MLM no longer requires or stages one; see #184 / #805).
 func mkTextDir(t *testing.T, sidecar string, withTokenizer bool) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -47,34 +48,36 @@ func TestDiscoverText_Classification(t *testing.T) {
 	if len(layout.Images) != 0 {
 		t.Errorf("Images should be empty for text, got %v", layout.Images)
 	}
-	if len(layout.ExtraFiles) != 0 {
-		t.Errorf("ExtraFiles should be empty for text_classification, got %v", layout.ExtraFiles)
-	}
 	if got := layout.FileCount(); got != 3 { // labels.csv + 2 texts
 		t.Errorf("FileCount = %d, want 3", got)
 	}
 }
 
-// TestDiscoverText_MLM_RequiresTokenizer: masked_language_modeling
-// errors without tokenizer.json, and stages it as an ExtraFile when
-// present (the ingestor reads SRC_PATH/tokenizer.json).
-func TestDiscoverText_MLM_RequiresTokenizer(t *testing.T) {
-	if _, err := DiscoverText("masked_language_modeling", mkTextDir(t, "sequences", false)); err == nil {
-		t.Error("DiscoverText(MLM) without tokenizer.json returned nil error")
-	}
-
-	layout, err := DiscoverText("masked_language_modeling", mkTextDir(t, "sequences", true))
+// TestDiscoverText_MLM_NoTokenizer: masked_language_modeling no longer
+// requires a tokenizer.json — the ingestor never read one and #805
+// removed the dataset-staged tokenizer. A dataset with just the text
+// layout is accepted, and a stray tokenizer.json is ignored (not staged,
+// not counted), never an error.
+func TestDiscoverText_MLM_NoTokenizer(t *testing.T) {
+	layout, err := DiscoverText("masked_language_modeling", mkTextDir(t, "sequences", false))
 	if err != nil {
-		t.Fatalf("DiscoverText(MLM): %v", err)
+		t.Fatalf("DiscoverText(MLM) without tokenizer.json: %v", err)
 	}
 	if len(layout.Sidecars["sequences"]) != 2 {
 		t.Errorf("sequences files = %d, want 2", len(layout.Sidecars["sequences"]))
 	}
-	if layout.ExtraFiles["tokenizer.json"] == "" {
-		t.Errorf("tokenizer.json not staged as an ExtraFile: %v", layout.ExtraFiles)
+	if got := layout.FileCount(); got != 3 { // labels.csv + 2 sequences
+		t.Errorf("FileCount = %d, want 3", got)
 	}
-	if got := layout.FileCount(); got != 4 { // labels.csv + 2 sequences + tokenizer
-		t.Errorf("FileCount = %d, want 4", got)
+
+	// A tokenizer.json left in the directory must be ignored, not staged
+	// (and not an error).
+	withTok, err := DiscoverText("masked_language_modeling", mkTextDir(t, "sequences", true))
+	if err != nil {
+		t.Fatalf("DiscoverText(MLM) with a stray tokenizer.json: %v", err)
+	}
+	if got := withTok.FileCount(); got != 3 { // tokenizer.json ignored
+		t.Errorf("FileCount with stray tokenizer.json = %d, want 3 (must be ignored)", got)
 	}
 }
 

@@ -20,11 +20,13 @@ var textExtensions = map[string]struct{}{
 //
 //   - <root>/labels.csv          (required)
 //   - <root>/<sidecar>/*.txt     (required; sidecar = texts | sequences)
-//   - <root>/tokenizer.json      (required for masked_language_modeling)
 //
-// The returned layout stages the CSV (as labels.csv), the text files
-// under "<sidecar>/", and — for MLM — tokenizer.json at the table root
-// (the ingestor reads it from SRC_PATH/tokenizer.json for [MASK]/[PAD]).
+// The returned layout stages the CSV (as labels.csv) and the text files
+// under "<sidecar>/". masked_language_modeling needs no tokenizer.json —
+// the ingestor never read one, and #805 removed the dataset-staged
+// tokenizer (it diverged the vocab and broke weight averaging); the
+// collaborator's tokenizer ships at model upload. A tokenizer.json left
+// in the directory is simply ignored, not an error.
 func DiscoverText(category, rootDir string) (*LocalLayout, error) {
 	abs, err := filepath.Abs(rootDir)
 	if err != nil {
@@ -40,9 +42,8 @@ func DiscoverText(category, rootDir string) (*LocalLayout, error) {
 	}
 
 	layout := &LocalLayout{
-		Root:       abs,
-		Sidecars:   map[string][]string{},
-		ExtraFiles: map[string]string{},
+		Root:     abs,
+		Sidecars: map[string][]string{},
 	}
 	dirName := TextSidecarDir(category)
 
@@ -82,32 +83,6 @@ func DiscoverText(category, rootDir string) (*LocalLayout, error) {
 	}
 	layout.Sidecars[dirName] = files
 	layout.TotalBytes += sidecarBytes
-
-	// masked_language_modeling needs a tokenizer.json at the root.
-	if category == "masked_language_modeling" {
-		tokPath := filepath.Join(abs, "tokenizer.json")
-		tokStat, terr := os.Lstat(tokPath)
-		if terr != nil {
-			if errors.Is(terr, os.ErrNotExist) {
-				return nil, fmt.Errorf(
-					"missing tokenizer.json in %q. masked_language_modeling requires a "+
-						"tokenizer.json (HuggingFace tokenizers format) at the dataset root; "+
-						"the ingestor reads it for the [MASK]/[PAD] tokens.", abs)
-			}
-			return nil, fmt.Errorf("stat tokenizer.json: %w", terr)
-		}
-		if err := rejectSymlink(tokStat, "tokenizer.json"); err != nil {
-			return nil, err
-		}
-		if tokStat.IsDir() {
-			return nil, fmt.Errorf("%q is a directory, not a file", tokPath)
-		}
-		if tokStat.Size() > MaxSingleFileBytes {
-			return nil, sizeError("tokenizer.json", tokStat.Size(), MaxSingleFileBytes)
-		}
-		layout.ExtraFiles["tokenizer.json"] = tokPath
-		layout.TotalBytes += tokStat.Size()
-	}
 
 	if layout.TotalBytes > MaxTotalBytes {
 		return nil, fmt.Errorf(

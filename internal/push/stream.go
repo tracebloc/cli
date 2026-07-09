@@ -390,22 +390,6 @@ func writeLayoutTar(w io.Writer, layout *LocalLayout) (err error) {
 		}
 	}
 
-	// Extra root-level files (e.g. masked_language_modeling's
-	// tokenizer.json), staged at the table root under their dest name.
-	// Sorted for deterministic stream order.
-	for _, dest := range sortedKeys(layout.ExtraFiles) {
-		n, err := writeTarFile(tw, layout.ExtraFiles[dest], dest)
-		if err != nil {
-			return fmt.Errorf("packaging %s: %w", dest, err)
-		}
-		totalBytes += n
-		if totalBytes > MaxTotalBytes {
-			return fmt.Errorf(
-				"dataset exceeded v0.1 total cap of %s after streaming %s (reached %s)",
-				HumanBytes(MaxTotalBytes), dest, HumanBytes(totalBytes))
-		}
-	}
-
 	// Generic sidecar directories (texts/, sequences/, and — later —
 	// annotations/, masks/), each staged under "<name>/<basename>".
 	// Sorted by dir name for deterministic stream order.
@@ -432,7 +416,7 @@ func writeLayoutTar(w io.Writer, layout *LocalLayout) (err error) {
 }
 
 // sortedKeys returns a map's string keys in sorted order, for
-// deterministic iteration when packaging ExtraFiles / Sidecars.
+// deterministic iteration when packaging Sidecars.
 func sortedKeys[V any](m map[string]V) []string {
 	ks := make([]string, 0, len(m))
 	for k := range m {
