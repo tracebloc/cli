@@ -127,16 +127,12 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 
 	if !taskSet {
 		p.PromptHint("What kind of task your data is for — this drives how it's validated and loaded.")
-		// The --task default was dropped (#180a), so a.Spec.Category is "" here.
-		// survey.Select rejects a default that isn't one of the options, so fall
-		// back to the first task rather than passing "" (which errors out the
-		// whole "omit --task to pick interactively" flow).
-		def := a.Spec.Category
-		if def == "" && len(promptCategories) > 0 {
-			def = promptCategories[0]
-		}
+		// The --task default was dropped (#180a), so the task is always
+		// unset in this branch. survey.Select rejects a default that isn't
+		// one of the options, so seed the first task rather than "" (which
+		// errors out the whole "omit --task to pick interactively" flow).
 		ans, err := pr.Select("Task", "what kind of data this is",
-			promptCategories, def)
+			promptCategories, promptCategories[0])
 		if err != nil {
 			return err
 		}
@@ -145,7 +141,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	}
 
 	if a.Spec.Table == "" {
-		p.PromptHint("Names the table created on the cluster (and its folder on the shared storage). Letters, digits, underscores only.  e.g. churn_train")
+		p.PromptHint("A name for this dataset — start with a letter or underscore, then letters, digits, underscores.  e.g. churn_train")
 		ans, err := pr.Input("Dataset name",
 			"MySQL identifier + PVC subdir; start with a letter or underscore, then letters, digits, underscore", "",
 			push.ValidateTableName)
