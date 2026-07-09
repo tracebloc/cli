@@ -28,3 +28,18 @@ import _ "embed"
 //
 //go:embed ingest.v1.json
 var V1Bytes []byte
+
+// LayoutV1Bytes is the raw JSON of the per-task dataset-layout contract
+// (layout.v1.json), vendored from tracebloc/data-ingestors at build time via
+// scripts/sync-schema.sh (data-ingestors#347/#353).
+//
+// The ingestor is the source of truth for what a task's local dataset looks
+// like on disk — the manifest CSV, whether it carries a label column, the
+// primary file subdir, extra sidecar dirs, and the in-.txt record format for
+// the structured text tasks. Embedding it here lets the CLI's discovery +
+// staging be a VERIFIED MIRROR of that contract (RFC-0002 Principle 6) rather
+// than re-implementing the layout rules in Go — drift is caught at build time
+// by the same sync-schema.sh --check the ingest schema uses.
+//
+//go:embed layout.v1.json
+var LayoutV1Bytes []byte

@@ -94,7 +94,7 @@ func execDataIngest(t *testing.T, args []string) (exitCode int, stdout, stderr s
 func TestDataIngest_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	root := imgcLayout(t)
 	for _, badCategory := range []string{
-		"semantic_segmentation",     // known but blocked on the ingestor (data-ingestors#136)
+		"semantic_segmentation",     // known but pending (awaiting mask_id + training sign-off, backend#816)
 		"instance_segmentation",     // dead — removed from the registry (#1005), now unrecognized
 		"definitely-not-a-category", // nonsense; gate catches this too
 	} {
@@ -114,11 +114,11 @@ func TestDataIngest_UnsupportedCategory_ExitsTwo(t *testing.T) {
 }
 
 // TestDataIngest_KnownUnsupportedCategory_PendingNote pins the Bugbot fix
-// (v0.4.0 RC): a registry-known but CLI-unsupported NON-image category
-// (causal_language_modeling) must get the registry's pending-support note, not
-// the misleading "isn't a recognized task category" message. execDataIngest
-// discards the error and SilenceErrors swallows it, so run the command here and
-// inspect the returned error directly.
+// (v0.4.0 RC): a registry-known but CLI-unsupported category
+// (semantic_segmentation — the sole remaining one after phase 4) must get the
+// registry's pending-support note, not the misleading "isn't a recognized task
+// category" message. execDataIngest discards the error and SilenceErrors
+// swallows it, so run the command here and inspect the returned error directly.
 func TestDataIngest_KnownUnsupportedCategory_PendingNote(t *testing.T) {
 	root := imgcLayout(t)
 	rootCmd := NewRootCmd(BuildInfo{Version: "test"})
@@ -126,7 +126,7 @@ func TestDataIngest_KnownUnsupportedCategory_PendingNote(t *testing.T) {
 	rootCmd.SetErr(&bytes.Buffer{})
 	rootCmd.SetArgs([]string{"data", "ingest",
 		"--kubeconfig=/tmp/tracebloc-cli-test-nonexistent-" + t.Name(),
-		root, "--name=t1", "--task=causal_language_modeling",
+		root, "--name=t1", "--task=semantic_segmentation",
 		"--intent=train", "--label-column=label"})
 	err := rootCmd.Execute()
 	if err == nil {

@@ -84,6 +84,20 @@ func DiscoverText(category, rootDir string) (*LocalLayout, error) {
 	layout.Sidecars[dirName] = files
 	layout.TotalBytes += sidecarBytes
 
+	// Structured-text tasks whose .txt shape the ingestor ENFORCES
+	// (sentence_pair_classification: text_a<TAB>text_b; embeddings:
+	// anchor<TAB>positive[<TAB>negative]) get the same per-file structural
+	// check here, so a malformed layout fails locally with a clear message
+	// instead of after the full stage. The rule comes from the vendored
+	// layout contract, not hardcoded — the CLI mirrors the ingestor's
+	// TabSeparatedRecordValidator (RFC-0002 Principle 6). Unenforced formats
+	// (seq2seq, causal LM) accept raw text and are not checked.
+	if rf, ok := RecordFormatFor(category); ok && rf.Enforced {
+		if err := validateTextRecords(dirName, files, rf); err != nil {
+			return nil, err
+		}
+	}
+
 	if layout.TotalBytes > MaxTotalBytes {
 		return nil, fmt.Errorf(
 			"dataset is %s, exceeds v0.1 cap of %s. For larger datasets, the "+
@@ -91,6 +105,24 @@ func DiscoverText(category, rootDir string) (*LocalLayout, error) {
 			HumanBytes(layout.TotalBytes), HumanBytes(MaxTotalBytes))
 	}
 	return layout, nil
+}
+
+// validateTextRecords runs the enforced record-format check over every
+// discovered .txt in dirName, mirroring the ingestor's per-file
+// TabSeparatedRecordValidator. The first malformed file fails discovery with a
+// message naming the offending file (relative to the dataset root, e.g.
+// "texts/bad.txt"), so the fix is obvious without reaching the cluster.
+func validateTextRecords(dirName string, files []string, rf RecordFormat) error {
+	for _, f := range files {
+		content, err := os.ReadFile(f)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", filepath.Join(dirName, filepath.Base(f)), err)
+		}
+		if verr := ValidateTextRecord(rf, string(content)); verr != nil {
+			return fmt.Errorf("%s: %w", filepath.Join(dirName, filepath.Base(f)), verr)
+		}
+	}
+	return nil
 }
 
 // discoverSidecarFiles walks <root>/<dirName> (non-recursive) for files

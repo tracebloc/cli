@@ -559,12 +559,12 @@ collaborators can train against that table without ever seeing the raw files.`))
 	case push.IsCLISupported(a.Spec.Category):
 		// supported
 	case push.IsKnown(a.Spec.Category):
-		// A recognized category data ingest doesn't implement yet — image
-		// (semantic_segmentation) or text (causal_language_modeling, seq2seq,
-		// …). Routed here (not the default branch) so the
-		// user gets the registry's per-category pending-support reason, not a
-		// misleading "unrecognized category". Supported categories were already
-		// caught above, so IsKnown here means known-but-unsupported.
+		// A recognized category data ingest doesn't implement yet — today just
+		// semantic_segmentation (awaiting the ingestor's mask_id link column +
+		// training sign-off, backend#816). Routed here (not the default branch)
+		// so the user gets the registry's per-category pending-support reason,
+		// not a misleading "unrecognized category". Supported categories were
+		// already caught above, so IsKnown here means known-but-unsupported.
 		spec, _ := push.Lookup(a.Spec.Category)
 		return &exitError{code: 2, err: fmt.Errorf(
 			"task %q isn't supported by the CLI yet (%s). Supported tasks: %s.",
