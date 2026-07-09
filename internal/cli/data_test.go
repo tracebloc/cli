@@ -379,12 +379,12 @@ func TestAliasResolution(t *testing.T) {
 		{
 			name: "dataset push alias resolves",
 			args: []string{"dataset", "push", "--help"},
-			want: "Stages a local dataset",
+			want: "Ingests a local dataset",
 		},
 		{
 			name: "data ingest canonical",
 			args: []string{"data", "ingest", "--help"},
-			want: "Stages a local dataset",
+			want: "Ingests a local dataset",
 		},
 		{
 			name: "dataset rm alias resolves",
@@ -460,6 +460,69 @@ func TestDestTableExists(t *testing.T) {
 	if !strings.Contains(note, "couldn't check") || !strings.Contains(note, "mysql pod not found") {
 		t.Errorf("fail-open note = %q, want it to say the check didn't run and why", note)
 	}
+}
+
+// existingTableAction is the folded promptable-overwrite decision: a
+// pre-existing table hard-fails exit 6 non-interactively, but becomes a
+// y/N prompt on a terminal (yes → replace, no → clean cancel).
+func TestExistingTableAction(t *testing.T) {
+	t.Run("non-interactive refuses with exit 6", func(t *testing.T) {
+		a := &runDataIngestArgs{Interactive: false, Printer: ui.New(&bytes.Buffer{})}
+		proceed, err := existingTableAction(a, "churn")
+		if proceed {
+			t.Error("non-interactive must not proceed without --overwrite")
+		}
+		if ExitCodeFromError(err) != 6 {
+			t.Errorf("exit code = %d, want 6", ExitCodeFromError(err))
+		}
+	})
+
+	t.Run("interactive yes → replace", func(t *testing.T) {
+		yes := true
+		a := &runDataIngestArgs{
+			Interactive: true,
+			Prompter:    &fakePrompter{confirm: &yes},
+			Printer:     ui.New(&bytes.Buffer{}),
+		}
+		proceed, err := existingTableAction(a, "churn")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !proceed {
+			t.Error("a yes to the replace prompt must proceed (overwrite)")
+		}
+	})
+
+	t.Run("interactive no → clean cancel", func(t *testing.T) {
+		no := false
+		a := &runDataIngestArgs{
+			Interactive: true,
+			Prompter:    &fakePrompter{confirm: &no},
+			Printer:     ui.New(&bytes.Buffer{}),
+		}
+		proceed, err := existingTableAction(a, "churn")
+		if err != nil {
+			t.Fatalf("a declined prompt is a clean cancel, not an error: %v", err)
+		}
+		if proceed {
+			t.Error("a no to the replace prompt must not proceed")
+		}
+	})
+
+	t.Run("reused idempotency key falls through to exit 6", func(t *testing.T) {
+		yes := true
+		a := &runDataIngestArgs{
+			Interactive:    true,
+			Prompter:       &fakePrompter{confirm: &yes},
+			IdempotencyKey: "abc",
+			Printer:        ui.New(&bytes.Buffer{}),
+		}
+		proceed, err := existingTableAction(a, "churn")
+		if proceed || ExitCodeFromError(err) != 6 {
+			t.Errorf("a reused --idempotency-key must not be offered a replace prompt: proceed=%v code=%d",
+				proceed, ExitCodeFromError(err))
+		}
+	})
 }
 
 // The images summary line surfaces the detected extension — the visible
