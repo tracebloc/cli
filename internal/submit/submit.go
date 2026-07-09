@@ -96,17 +96,25 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("building submit request: %w", err)
 	}
 
-	resp, err := opts.Submitter.Submit(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
 	// A Printer for the human-facing status lines (spinner, detach
 	// notes, summary). nil-safe fallback so callers that didn't thread
 	// the --plain decision still get sensible auto-detected rendering.
 	p := opts.Printer
 	if p == nil {
 		p = ui.New(opts.Out)
+	}
+
+	// The POST validates synchronously server-side (schema re-check,
+	// idempotency lookup, Job creation) up to SubmitTimeout (30s) — the
+	// single longest blocking wait on the submit path. It lives here rather
+	// than in the caller, so its progress does too: a spinner keeps the wait
+	// from sitting silent. Stopped before the announcement below so the two
+	// don't fight over the line.
+	submitSpin := p.Spinner("Submitting the run", "")
+	resp, err := opts.Submitter.Submit(ctx, req)
+	submitSpin.Stop()
+	if err != nil {
+		return nil, err
 	}
 
 	// Submission announcement. Customers see this whether or not

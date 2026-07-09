@@ -388,11 +388,10 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 
 	a.Printer.Banner("tracebloc", "data ingest")
 	a.Printer.Para(strings.TrimSpace(`
-This uploads a dataset from your machine into your tracebloc workspace so models
-can be trained on it. Your files are sent to the Kubernetes cluster your
-workspace was installed on — tracebloc checks them and loads them into a table
-your training runs read from. Your data stays on that cluster the whole time;
-other collaborators train against it without ever seeing the raw files.`))
+This ingests a dataset so models can train on it. Your files never leave your
+own infrastructure — tracebloc copies them into your workspace's storage,
+checks them, and loads them into a table your training runs read from. Other
+collaborators can train against that table without ever seeing the raw files.`))
 	a.Printer.Hintf("Learn more: https://docs.tracebloc.io")
 
 	// 0. Guided mode: prompt for any missing core inputs before
@@ -471,8 +470,10 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    resolution below needs (the image list for target-size, the
 	//    CSV for schema inference).
 	// err is the function's named return (see the --output-json defer
-	// at the top), so it's not redeclared here.
+	// at the top), so it's not redeclared here. The walk can take a moment
+	// on a large tree, so it gets a spinner — no blocking wait stays silent.
 	var layout *push.LocalLayout
+	walkSpin := a.Printer.Spinner("Reading your files", "")
 	switch {
 	case push.IsTabular(a.Spec.Category):
 		layout, err = push.DiscoverTabular(a.LocalPath)
@@ -484,12 +485,13 @@ other collaborators train against it without ever seeing the raw files.`))
 		// image_classification + keypoint_detection: labels.csv + images/.
 		layout, err = push.Discover(a.LocalPath)
 	}
+	walkSpin.Stop()
 	if err != nil {
 		return &exitError{code: 3, err: err}
 	}
 
-	a.Printer.Step(1, 4, "Check your dataset")
-	a.Printer.Hintf("Reading your files locally first — nothing has touched the cluster yet — so a layout or settings problem shows up right away.")
+	a.Printer.Step(1, 3, "Check your data")
+	a.Printer.Hintf("Reading your files locally first — nothing has touched your workspace yet — so a layout or settings problem shows up right away.")
 
 	// 3a. Per-category spec resolution from the local data, so the
 	//     synthesized spec carries the right fields before validation.
@@ -634,8 +636,18 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    Errors mirror that command's exit-code contract (3 for
 	//    kubeconfig, 4 for missing release) so behaviour is
 	//    consistent across pre-flight commands.
-	a.Printer.Step(2, 4, "Connect to your workspace")
-	a.Printer.Hintf("Finding your tracebloc workspace and the shared storage your dataset will live on.")
+	// Connecting to the workspace + discovering its shared storage is
+	// Kubernetes plumbing (release / PVC / jobs-manager) the happy path keeps
+	// quiet — it's no longer a numbered step (RFC-0002 §6), and --verbose adds
+	// the release/PVC detail below. But the discovery itself is several blocking
+	// apiserver round-trips (kubeconfig load, release + PVC discovery, then the
+	// destination-exists check), so it still needs a visible status line — no
+	// silent wait on the happy path (RFC-0002 "progress on every wait").
+	// A plain line, not a spinner: discoverRelease can print its own
+	// namespace-fallback note mid-call, and a spinner's \r redraw would clobber
+	// it. ALL the logic below (discovery + the exit-6 destination guard) is
+	// unchanged; only the presentation moved.
+	a.Printer.Infof("Connecting to your workspace…")
 	// 6. PVC discovery (needPVC) confirms the chart's shared-data PVC is
 	//    Bound before we waste time provisioning a Pod that can't mount it.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
@@ -649,8 +661,9 @@ other collaborators train against it without ever seeing the raw files.`))
 	// DiscoverParentRelease (#7) and flows into the stage/teardown pods + the
 	// jobs-manager token mint below — no --ingestor-sa override.
 
-	// 7. Show what we found on the cluster — the customer's last look
-	//    before any bytes move.
+	// 7. Under --verbose, show what we found on the cluster; the happy path
+	//    keeps this Kubernetes detail hidden (printClusterSummary is a no-op
+	//    without --verbose).
 	printClusterSummary(a.Printer, release, pvc)
 
 	// 8a. Destination guard (cli#70, P4-lite): re-ingesting an existing
@@ -679,8 +692,8 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    live-only steps (stage + ingest) the customer just skipped.
 	if a.DryRun {
 		a.Printer.Newline()
-		a.Printer.Successf("Dry-run complete — your dataset and cluster check out; nothing was created.")
-		a.Printer.Hintf("A real run continues with step 3 (stage your files) and step 4 (run the ingestion).")
+		a.Printer.Successf("Dry-run complete — your data and workspace check out; nothing was created.")
+		a.Printer.Hintf("A real run continues with step 2 (copy into your workspace) and step 3 (validate and load).")
 		if a.OutputJSON {
 			writePushJSON(a.JSONOut, "dry-run", spec, nil, "", "")
 			jsonEmitted = true
@@ -695,16 +708,18 @@ other collaborators train against it without ever seeing the raw files.`))
 		// are case-sensitive on Linux MySQL and PVC paths always are, so
 		// acting on a differently-cased --table would silently no-op the
 		// DROP/rm and then "succeed".
-		a.Printer.Infof("Removing the existing %q first…", existingTable)
 		plan := push.PlanTeardown(existingTable)
-		if _, terr := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
+		rmSpin := a.Printer.Spinner(fmt.Sprintf("Removing the existing %q first", existingTable), "")
+		_, terr := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
 			Namespace:          resolved.Namespace,
 			PVCClaimName:       pvc.ClaimName,
 			PVCMountPath:       pvc.MountPath,
 			Table:              existingTable,
 			ServiceAccountName: release.IngestorSAName,
 			Image:              a.StagePodImage,
-		}); terr != nil {
+		})
+		rmSpin.Stop()
+		if terr != nil {
 			// The teardown drops the table before removing files, so a
 			// partial failure can leave files the DB-backed guard can no
 			// longer see — a plain re-run would upload everything and then
@@ -726,10 +741,10 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    Exit code 7 ("staging failed") is distinct from the
 	//    pre-flight codes so customers can branch on whether the
 	//    failure was their environment vs the actual data transfer.
-	a.Printer.Step(3, 4, "Stage your files")
-	a.Printer.Hintf("Your files upload securely into your workspace's storage — set up and cleaned up for you.")
+	a.Printer.Step(2, 3, "Copy into your workspace")
+	a.Printer.Hintf("Your files are copied securely into your workspace's storage — set up and cleaned up for you.")
 	progress := push.NewProgress(out, layout.TotalBytes,
-		fmt.Sprintf("Staging %s", a.Spec.Table))
+		fmt.Sprintf("Copying %s", a.Spec.Table))
 	// Defer Finish so a failure path that returns BEFORE
 	// StreamLayout (e.g. CreateStagePod fails on PSA rejection,
 	// WaitForStagePodReady times out) still clears the TTY
@@ -794,7 +809,7 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 	//     min) because the full Phase 4 lifecycle — submit + watch
 	//     + log stream — can run that long for large ingestions.
 	//     The chart's helm flow uses the same token-mint code path.
-	a.Printer.Step(4, 4, "Run the ingestion")
+	a.Printer.Step(3, 3, "Validate and load")
 	if a.Detach {
 		a.Printer.Hintf("Submitting the run — with --detach it keeps running on your workspace after this command returns; the reconnect command is shown below.")
 	} else {
@@ -814,9 +829,15 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 	//     through the kubeconfig-authenticated apiserver, same as
 	//     `kubectl port-forward`. Bugbot PR #10 r3 caught the
 	//     original broken-by-design direct-URL POST.
-	a.Printer.Infof("Connecting to your workspace to submit the run…")
+	// Opening the port-forward is a blocking wait (tunnel setup through the
+	// apiserver), so it runs under a spinner — no wait on the happy path stays
+	// silent (RFC-0002 "progress on every wait"). The submit POST itself is a
+	// separate ~30s synchronous wait; its spinner lives in submit.Run, next to
+	// the POST it covers.
+	connectSpin := a.Printer.Spinner("Connecting to your workspace to submit the run", "")
 	pf, err := portForwardJobsManagerFn(ctx, cs, resolved.RestConfig,
 		resolved.Namespace, release.JobsManagerServiceName, release.JobsManagerPort)
+	connectSpin.Stop()
 	if err != nil {
 		return false, &exitError{code: 8, err: fmt.Errorf("setting up jobs-manager port-forward: %w", err)}
 	}
@@ -881,8 +902,8 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 	// (push.StagingCleanupTimeout): a failed or slow reclaim must not
 	// fail — or noticeably delay — a successful ingest.
 	if shouldReclaimStaging(status) {
-		a.Printer.Infof("Reclaiming the temporary staging copy on the cluster…")
-		if cerr := cleanStagingFn(ctx, cs,
+		reclaimSpin := a.Printer.Spinner("Reclaiming the temporary copy", "")
+		cerr := cleanStagingFn(ctx, cs,
 			&push.SPDYExecutor{Config: resolved.RestConfig, Client: cs},
 			resolved.Namespace, a.Spec.Table, push.PodSpecOptions{
 				Namespace:          resolved.Namespace,
@@ -891,8 +912,10 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 				Table:              a.Spec.Table,
 				ServiceAccountName: release.IngestorSAName,
 				Image:              a.StagePodImage,
-			}); cerr != nil {
-			a.Printer.Warnf("Couldn't reclaim the temporary staging copy (%v). It's harmless — the next re-ingest of %q or a `tracebloc data delete %s` will clear it.",
+			})
+		reclaimSpin.Stop()
+		if cerr != nil {
+			a.Printer.Warnf("Couldn't reclaim the temporary copy (%v). It's harmless — the next re-ingest of %q or a `tracebloc data delete %s` will clear it.",
 				cerr, a.Spec.Table, a.Spec.Table)
 		}
 	}
@@ -963,9 +986,8 @@ func classifyPushOutcome(res *submit.Result, err error) (string, *exitError) {
 }
 
 // printLocalSummary shows what the CLI found on disk plus the ingest
-// settings it assembled — the detail under step 1 ("Check your
-// dataset"). Split from the cluster summary so each sits under its own
-// numbered step. Mirrors `cluster info`'s section/Field layout.
+// settings it assembled — the detail under step 1 ("Check your data").
+// Mirrors `cluster info`'s section/Field layout.
 func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]any) {
 	cat, _ := spec["category"].(string)
 
@@ -1017,17 +1039,23 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 	p.Field("destination", push.FinalDestPrefix(spec["table"].(string)))
 }
 
-// printClusterSummary shows the discovered workspace cluster target —
-// the detail under step 2 ("Connect to your workspace").
+// printClusterSummary shows the discovered workspace target. It's Kubernetes
+// plumbing (release / jobs-manager / shared PVC) the happy path hides, so the
+// whole block — header, fields, and the RWO-PVC note — prints only under
+// --verbose (RFC-0002 §6). Discovery + guards are unchanged; this is
+// presentation only.
 func printClusterSummary(p *ui.Printer, release *cluster.ParentRelease, pvc *cluster.SharedPVC) {
+	if !p.Verbose() {
+		return
+	}
 	p.Section("Target cluster")
-	p.Field("release", fmt.Sprintf("%s (chart %s)", release.ReleaseName, release.ChartVersion))
-	p.Field("jobs-manager", release.JobsManagerService)
-	p.Field("shared PVC", fmt.Sprintf("%s (%s)", pvc.ClaimName, pvc.Phase))
+	p.Detailf("release: %s (chart %s)", release.ReleaseName, release.ChartVersion)
+	p.Detailf("jobs-manager: %s", release.JobsManagerService)
+	p.Detailf("shared PVC: %s (%s)", pvc.ClaimName, pvc.Phase)
 	if !pvc.IsReadWriteMany() {
-		// Warn but don't block — RWO clusters still work; the scheduler
+		// Note but don't block — RWO clusters still work; the scheduler
 		// co-locates the stage Pod with the existing mounter.
-		p.Warnf("PVC is %v, not ReadWriteMany — the stage Pod will co-locate with the existing mounter", pvc.AccessModes)
+		p.Detailf("PVC is %v, not ReadWriteMany — the stage Pod will co-locate with the existing mounter", pvc.AccessModes)
 	}
 }
 

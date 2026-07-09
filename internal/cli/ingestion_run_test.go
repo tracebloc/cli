@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/tracebloc/cli/internal/cluster"
@@ -157,6 +159,60 @@ func TestRunIngestionRun_Matrix(t *testing.T) {
 				t.Errorf("expected no JSON on the pre-submit failure path, got %q", jsonBuf.String())
 			}
 		})
+	}
+}
+
+// TestRunIngestionRun_SubmitConnectUsesSpinner pins the RFC-0002 "progress on
+// every wait" rule for the submit-connect step: opening the port-forward blocks
+// on a POST that can take ~30s, so it must run under a live spinner, not a
+// silent or plain line. Colour is forced on so the animated path (which emits
+// the \r redraw) renders against a buffer; the returned handle is always
+// safe to Stop (the nil-safe static path is exercised by the matrix test, which
+// runs with colour off).
+func TestRunIngestionRun_SubmitConnectUsesSpinner(t *testing.T) {
+	origMint, origPF, origRun, origClean := mintIngestorTokenFn, portForwardJobsManagerFn, submitRunFn, cleanStagingFn
+	defer func() {
+		mintIngestorTokenFn, portForwardJobsManagerFn, submitRunFn, cleanStagingFn = origMint, origPF, origRun, origClean
+	}()
+	mintIngestorTokenFn = func(context.Context, kubernetes.Interface, string, string, int64, []string) (*cluster.IngestorToken, error) {
+		return &cluster.IngestorToken{Token: "tok"}, nil
+	}
+	portForwardJobsManagerFn = func(context.Context, kubernetes.Interface, *rest.Config, string, string, int) (*submit.ForwardedConnection, error) {
+		return &submit.ForwardedConnection{LocalPort: 12345}, nil
+	}
+	submitRunFn = func(context.Context, submit.Options) (*submit.Result, error) {
+		return succeededResult(), nil
+	}
+	cleanStagingFn = func(context.Context, kubernetes.Interface, push.Executor, string, string, push.PodSpecOptions) error {
+		return nil
+	}
+
+	target := &clusterTarget{
+		Resolved: &cluster.ResolvedConfig{Namespace: "tracebloc"},
+		Release:  &cluster.ParentRelease{IngestorSAName: "ingestor", JobsManagerServiceName: "jm", JobsManagerPort: 8080},
+		PVC:      &cluster.SharedPVC{ClaimName: "pvc", MountPath: "/data/shared"},
+	}
+	spec := map[string]any{"table": "t", "category": "image_classification", "intent": "train", "label": "label"}
+
+	var buf bytes.Buffer
+	a := runDataIngestArgs{
+		Spec:    push.SpecArgs{Table: "t"},
+		Printer: ui.New(&buf, ui.WithColor(true)),
+	}
+	if _, err := runIngestionRun(context.Background(), io.Discard, a, target, []byte("yaml"), spec); err != nil {
+		t.Fatalf("runIngestionRun: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Connecting to your workspace to submit the run") {
+		t.Errorf("submit-connect wait is missing its status message:\n%q", out)
+	}
+	// A spinner redraws/clears its line with a carriage return; a plain Infof
+	// never would. This is what distinguishes "shows a spinner" from "prints a
+	// line". On Windows the spinner is deliberately a static one-liner with no
+	// \r redraw (ui.Printer.Spinner sidesteps escape garbage on legacy
+	// consoles), so the redraw is only guaranteed off Windows.
+	if runtime.GOOS != "windows" && !strings.Contains(out, "\r") {
+		t.Errorf("submit-connect wait didn't render as a spinner (no \\r redraw):\n%q", out)
 	}
 }
 
