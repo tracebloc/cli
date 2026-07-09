@@ -461,6 +461,32 @@ func TestRunInteractive_RejectsEmptyPath(t *testing.T) {
 	}
 }
 
+// TestRunInteractive_TrimsPath: a path answer with surrounding whitespace
+// (a common paste artifact) is trimmed before it's stored, so expandHome
+// and the family sniff read the real path rather than a cwd-prefixed
+// mangle. Without the trim, " <dir>" defeats expandHome and the sniff
+// would land in the wrong place.
+func TestRunInteractive_TrimsPath(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"What should we call this dataset?":           "t",
+		"Where is your data? (the folder holding it)": "  " + dir + "  ",
+		"Which column holds the class?":               "churned",
+	}}
+	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
+	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.LocalPath != dir {
+		t.Errorf("LocalPath = %q, want %q (surrounding whitespace not trimmed)", a.LocalPath, dir)
+	}
+	// The trimmed path must have sniffed cleanly as tabular (not landed in a
+	// cwd-prefixed nonexistent dir that would force the family question).
+	if a.Spec.Category != "tabular_classification" {
+		t.Errorf("Category = %q, want tabular_classification (sniff read the trimmed path)", a.Spec.Category)
+	}
+}
+
 // TestRunInteractive_ShowsExampleHints: the name and path prompts carry a
 // visible example, so the guided flow teaches as it goes.
 func TestRunInteractive_ShowsExampleHints(t *testing.T) {
