@@ -10,7 +10,7 @@ import "strings"
 // with what the ingestor actually resolves.
 //
 // Everything category-shaped derives from the registry below — the
-// family predicates, the `--category` help text, the interactive
+// family predicates, the `--task` help text, the interactive
 // picker, and the push accept-gate — so the enumerations can't drift
 // apart (they used to: the flag help listed 5 of 9, cli#74).
 type CategorySpec struct {
@@ -130,7 +130,7 @@ func IsText(category string) bool {
 func IsRegressionClass(category string) bool { return categoryByID[category].RegressionClass }
 
 // SupportedCategoryIDs returns the ids `dataset push` supports, in display
-// order. Used to build the --category help, the interactive picker, and
+// order. Used to build the --task help, the interactive picker, and
 // the accept-gate's "Supported:" lists from one place.
 func SupportedCategoryIDs() []string {
 	ids := make([]string, 0, len(categoryRegistry))

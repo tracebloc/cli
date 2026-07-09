@@ -74,7 +74,7 @@ const MaxTableNameLength = 63
 // both of which assume a validated name.
 func ValidateTableName(table string) error {
 	if table == "" {
-		return fmt.Errorf("table name is required (set --table)")
+		return fmt.Errorf("dataset name is required (set --name)")
 	}
 	if len(table) > MaxTableNameLength {
 		return fmt.Errorf(
