@@ -52,10 +52,14 @@ var tableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // ImageResolutionValidator.MIN_IMAGE_SIZE (data-ingestors #348, RFC-0002
 // §12.9). Images with either side below this are rejected in-cluster as
 // too small to train on, independently of the target_size uniformity
-// check; the CLI previews that same reject locally (see ValidateImages)
-// so a customer finds out before the ingest, not after. A per-model
-// override travels in spec.file_options.min_size (SpecArgs.MinSize); when
-// unset, this default applies on both sides.
+// check. A per-model override travels in spec.file_options.min_size
+// (SpecArgs.MinSize); when unset, the ingestor applies this default (on
+// develop — see below). The CLI preview does NOT default to it: it only
+// previews the floor when the customer set --min-size, because the DEPLOYED
+// ingestor (v0.5.7/v0.6.0) has no floor yet, so a default local block would
+// reject an ingest the live cluster accepts (see PreflightDataset). This
+// constant is still the mirror of the upstream default — once di#348 reaches
+// prod, PreflightDataset should default the preview floor to it.
 //
 // Keep this in lock-step with the upstream constant — it is the source of
 // truth. Do NOT invent a different floor here (Principle 6).

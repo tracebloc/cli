@@ -36,6 +36,7 @@ type parityCase struct {
 	LabelColumn     string            `json:"label_column"`
 	Extension       string            `json:"extension"`
 	TargetSize      []int             `json:"target_size"`
+	MinSize         []int             `json:"min_size"`
 	Schema          map[string]string `json:"schema"`
 	CLIVerdict      string            `json:"cli_verdict"`
 	IngestorVerdict string            `json:"ingestor_verdict"`
@@ -143,6 +144,7 @@ func runGoPreflight(t *testing.T, c parityCase) string {
 		LabelColumn: c.LabelColumn,
 		Extension:   c.Extension,
 		TargetSize:  c.TargetSize,
+		MinSize:     c.MinSize,
 	}
 	if IsTabular(c.Category) {
 		// Mirror runDataIngest: an explicit schema (the --schema flow) wins,

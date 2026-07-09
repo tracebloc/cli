@@ -280,10 +280,11 @@ Exit codes:
 	cmd.Flags().StringVar(&targetSize, "target-size", "",
 		"image tasks only: the resolution your images already are, as WxH (e.g. 512x512). tracebloc never "+
 			"resizes — it checks every image is exactly this size and rejects any that differ. Default: "+
-			"read from your first image. Images below the --min-size floor are rejected regardless.")
+			"read from your first image.")
 	cmd.Flags().StringVar(&minSize, "min-size", "",
-		"image tasks only: reject images smaller than WxH (e.g. 64x64). Default: 32x32, the smallest "+
-			"tracebloc will ingest. Raise it to match the input size your model needs.")
+		"image tasks only: reject images smaller than WxH before the ingest (e.g. 64x64). Set it to the "+
+			"smallest size your model can train on — raise or lower it freely. Default: unset (no local "+
+			"size check).")
 	cmd.Flags().StringVar(&schemaFlag, "schema", "",
 		"tabular/time-series only: column types as col:TYPE,col:TYPE (e.g. age:INT,price:FLOAT). "+
 			"Default: inferred from the CSV (INT/FLOAT/VARCHAR).")
@@ -623,11 +624,14 @@ collaborators can train against that table without ever seeing the raw files.`))
 						"resolution mismatch.\n", derr)
 			}
 		}
-		// Minimum-size floor override (#348): an explicit --min-size wins;
-		// otherwise the preview and the ingestor both fall back to the
-		// 32x32 default, so no spec field is emitted. This just plumbs the
-		// override to spec.file_options.min_size — the actual below-floor
-		// reject is previewed in runLocalPreflight (ValidateImages).
+		// Minimum-size floor override (#348): plumb an explicit --min-size to
+		// spec.file_options.min_size. When unset, no spec field is emitted, so
+		// the ingestor applies its own default (none on the deployed
+		// v0.5.7/v0.6.0; 32x32 on develop post-#348) — and the local preview
+		// applies NO floor either (PreflightDataset only previews the floor
+		// when --min-size is set, so it never rejects an ingest the live
+		// cluster accepts). The below-floor reject is previewed in
+		// runLocalPreflight (ValidateImages).
 		if a.MinSizeFlag != "" {
 			w, h, perr := push.ParseMinSize(a.MinSizeFlag)
 			if perr != nil {

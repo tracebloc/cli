@@ -77,6 +77,18 @@
       ],
       "verdict": "reject"
     },
+    "imgc-min-size-override": {
+      "errors": [],
+      "values": {
+        "classes": [
+          "cat",
+          "dog"
+        ],
+        "resolved_label": "label",
+        "row_count": 2
+      },
+      "verdict": "accept"
+    },
     "imgc-missing-file": {
       "errors": [],
       "verdict": "accept"

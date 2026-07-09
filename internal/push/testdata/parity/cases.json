@@ -156,9 +156,28 @@
         16,
         16
       ],
-      "cli_verdict": "reject",
+      "cli_verdict": "accept",
       "ingestor_verdict": "reject",
-      "note": "ImageResolutionValidator minimum-size floor (data-ingestors #348, RFC-0002 §12.9): 16x16 images are below the 32x32 default floor — both sides reject as too small to train on. target_size matches the images, so the floor (not a resolution mismatch or a diversity failure) is the trigger."
+      "note": "DELIBERATE divergence (deployment parity, #348): 16x16 images are below the 32x32 default floor, so the pinned ingestor (develop, di#348/#356) rejects. But the CLI must NOT block by default — the DEPLOYED ingestor (v0.5.7/v0.6.0) has NO floor and ingests these fine, so a default local reject would block an ingest the live cluster accepts (the inverse of tabular-bom, whose reject mirrors a real deployed rejection). The CLI previews the floor ONLY when --min-size is set (see imgc-min-size-override). Flip this to reject and default the preview floor once di#348 ships to prod. Flagged for follow-up."
+    },
+    {
+      "name": "imgc-min-size-override",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        24,
+        40
+      ],
+      "min_size": [
+        16,
+        32
+      ],
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "the --min-size override, cross-checked end-to-end (#348; closes the parity gap where min_size was representable on neither side). 24x40 images (W,H) with an explicit min_size [16,32] pass on BOTH sides — but the DEFAULT 32x32 floor would reject them (W=24<32), so this proves the override is actually read (not silently the default) and its [W,H] orientation is honored (a swapped [32,16] would reject on W=24<32). target_size matches the images, so the floor override is the sole discriminator.",
+      "value_parity": true
     },
     {
       "name": "imgc-header-only",
