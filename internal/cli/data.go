@@ -35,11 +35,11 @@ func newDataCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "data",
 		Aliases: []string{"dataset"},
-		Short:   "Manage the datasets in your client",
-		Long: `Commands for staging and managing the datasets your client holds —
+		Short:   "Manage the datasets in your workspace",
+		Long: `Commands for ingesting and managing the datasets your workspace holds —
 the data models train on. It stays on your infrastructure.
 
-` + "`data ingest`" + ` stages a local dataset into your client's storage,
+` + "`data ingest`" + ` ingests a local dataset into your workspace's storage,
 submits the ingestion run, and watches it to completion (streaming
 logs + the final summary). ` + "`data validate`" + ` checks an ingest.yaml
 locally first.
@@ -135,10 +135,11 @@ func newDataIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ingest <local-path>",
 		Aliases: []string{"push"},
-		Short:   "Stage a local dataset into your client's storage",
-		Long: `Stages a local dataset into your client's shared storage,
-submits an ingestion run to jobs-manager, and watches the ingestor Job
-to completion. Supports 9 tasks (image classification,
+		Short:   "Ingest a local dataset into your workspace",
+		Long: `Ingests a local dataset into your workspace's storage,
+submits the ingestion run, and follows it to completion (streaming
+progress + the final summary). Your data never leaves your own
+infrastructure. Supports 9 tasks (image classification,
 object/keypoint detection, text classification, masked language
 modeling, and the tabular / time-series family); pick one with --task.
 
@@ -724,14 +725,22 @@ collaborators can train against that table without ever seeing the raw files.`))
 	}
 	tableExists := existingTable != ""
 	if tableExists && !a.Overwrite {
-		return &exitError{code: 6, err: fmt.Errorf(
-			"table %q already exists in this client. Re-ingesting the same table doesn't merge or replace — "+
-				"the run would fail after uploading everything. Re-run with --overwrite to replace it, "+
-				"or pick a different --name. (`tracebloc data delete %s` also removes it.)",
-			existingTable, existingTable)}
+		// Folded decision (RFC-0002): in interactive mode a pre-existing table
+		// is a question, not a wall. Prompt to replace it; a "no" cancels
+		// cleanly (exit 0). Non-interactive (or --output-json / --no-input)
+		// still hard-fails exit 6 — a script must opt in with --overwrite.
+		proceed, aerr := existingTableAction(&a, existingTable)
+		if aerr != nil {
+			return aerr
+		}
+		if !proceed {
+			a.Printer.Infof("Cancelled — %q was left as-is; nothing was ingested.", existingTable)
+			return nil
+		}
+		a.Overwrite = true
 	}
 	if tableExists && a.Overwrite {
-		a.Printer.Warnf("Table %q already exists — --overwrite replaces it (table + files).", existingTable)
+		a.Printer.Warnf("Table %q already exists — replacing it (table + files).", existingTable)
 	}
 
 	// 8. Dry-run stop. Acknowledged success, plus a reminder of the
@@ -1214,6 +1223,40 @@ func destTableExists(ctx context.Context, cs kubernetes.Interface, resolved *clu
 		}
 	}
 	return "", ""
+}
+
+// existingTableAction resolves what to do when the destination table
+// already exists and --overwrite was NOT passed on the command line.
+//
+//   - proceed=true, err=nil     → replace it: the caller sets Overwrite and
+//     runs the same teardown `data delete` does.
+//   - proceed=false, err=nil    → the user declined the replace prompt; a
+//     clean cancel (exit 0), nothing ingested.
+//   - err != nil (exit 6)       → non-interactive and no --overwrite: refuse,
+//     same hard contract scripts have always had.
+//
+// Interactive mode prompts to replace UNLESS a --idempotency-key was
+// reused: a reused key + a replace is the data-loss trap the top-of-func
+// guard forbids (the teardown removes the data, then the cluster replays
+// the old run and ingests nothing), so that combination falls through to
+// the exit-6 refusal rather than being offered as a prompt.
+func existingTableAction(a *runDataIngestArgs, existingTable string) (proceed bool, err error) {
+	if a.Interactive && a.Prompter != nil && a.IdempotencyKey == "" {
+		ok, perr := a.Prompter.Confirm(fmt.Sprintf(
+			"A dataset named %q already exists — replace it?", existingTable), false)
+		if perr != nil {
+			if errors.Is(perr, errInteractiveCancelled) {
+				return false, nil
+			}
+			return false, &exitError{code: 3, err: fmt.Errorf("overwrite prompt: %w", perr)}
+		}
+		return ok, nil
+	}
+	return false, &exitError{code: 6, err: fmt.Errorf(
+		"table %q already exists in this workspace. Re-ingesting the same table doesn't merge or replace — "+
+			"the run would fail after uploading everything. Re-run with --overwrite to replace it, "+
+			"or pick a different --name. (`tracebloc data delete %s` also removes it.)",
+		existingTable, existingTable)}
 }
 
 // runLocalPreflight maps push.PreflightDataset — THE shared preview
