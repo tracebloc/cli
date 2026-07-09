@@ -141,7 +141,12 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		if err != nil {
 			return err
 		}
-		a.LocalPath = ans
+		// Trim before storing: validateDatasetPath only trims to check for
+		// emptiness, so a pasted " ~/data" (stray leading/trailing space)
+		// would otherwise survive here and defeat expandHome (first char
+		// isn't '~') — filepath.Abs then prepends cwd and the sniff / label
+		// preview read a path that doesn't exist.
+		a.LocalPath = strings.TrimSpace(ans)
 		prompted = true
 	}
 	// Expand a leading ~ now so the family sniff + label-header preview read
@@ -371,10 +376,9 @@ func defaultLabelChoice(headers []string) string {
 			return h
 		}
 	}
-	if len(headers) > 0 {
-		return headers[0]
-	}
-	return ""
+	// The only caller (promptLabelColumn) guards len(headers) > 0 before
+	// calling, so headers is never empty here.
+	return headers[0]
 }
 
 // renderReview prints the assembled ingest inputs before the confirm

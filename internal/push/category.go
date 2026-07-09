@@ -35,6 +35,13 @@ type CategorySpec struct {
 	// therefore need label.policy (object label form) so the raw target
 	// never ships to the central backend by default.
 	RegressionClass bool
+	// SelfSupervised marks text categories that train without an explicit
+	// label column — the target is derived from the text itself (MLM masks
+	// tokens; CLM predicts the next token), so the interactive flow skips
+	// the "which column is the label?" question. A registry fact rather
+	// than a hardcoded id list so a new self-supervised task can't be added
+	// without deciding this (SelfSupervisedText reads it).
+	SelfSupervised bool
 	// CLISupported reports whether `dataset push` implements the category
 	// today. semantic_segmentation is known (the schema defines it) but
 	// not yet pushable.
@@ -77,7 +84,7 @@ var categoryRegistry = []CategorySpec{
 		Blurb: "locate landmark points on an image (e.g. pose)"},
 	{ID: "text_classification", Family: FamilyText, Label: "Text classification", CLISupported: true,
 		Blurb: "sort text snippets into classes"},
-	{ID: "masked_language_modeling", Family: FamilyText, Label: "Masked language modeling", Gloss: "fill-mask", CLISupported: true,
+	{ID: "masked_language_modeling", Family: FamilyText, Label: "Masked language modeling", Gloss: "fill-mask", CLISupported: true, SelfSupervised: true,
 		Blurb: "predict masked-out words — no labels needed"},
 	{ID: "tabular_classification", Family: FamilyTabular, Label: "Tabular classification", CLISupported: true,
 		Blurb: "predict a class from table columns"},
@@ -90,7 +97,7 @@ var categoryRegistry = []CategorySpec{
 	{ID: "semantic_segmentation", Family: FamilyImage, Label: "Semantic segmentation", CLISupported: false,
 		Blurb:           "label every pixel in an image",
 		UnsupportedNote: "blocked on the ingestor's mask-sidecar support (data-ingestors#136)"},
-	{ID: "causal_language_modeling", Family: FamilyText, Label: "Causal language modeling", CLISupported: false,
+	{ID: "causal_language_modeling", Family: FamilyText, Label: "Causal language modeling", CLISupported: false, SelfSupervised: true,
 		Blurb:           "predict the next word in a sequence",
 		UnsupportedNote: "schema-recognized (data-ingestors#805); `tracebloc ingest` discover/build for its raw-.txt / prompt\\tcompletion `texts` layout is pending"},
 	{ID: "seq2seq", Family: FamilyText, Label: "Sequence-to-sequence", Gloss: "translation / summarization", CLISupported: false,
@@ -201,9 +208,13 @@ func FamilyNouns() []string {
 // SelfSupervisedText reports whether a text category trains without an
 // explicit label column — the target is derived from the text itself, so
 // the CLI skips the "which column is the label?" question. MLM masks
-// tokens; CLM predicts the next token; neither reads a labels column.
+// tokens; CLM predicts the next token; neither reads a labels column. The
+// answer is the registry's SelfSupervised flag, so a new self-supervised
+// task is handled the moment it's added to the registry — not when someone
+// remembers to edit this function.
 func SelfSupervisedText(category string) bool {
-	return category == "masked_language_modeling" || category == "causal_language_modeling"
+	c, ok := categoryByID[category]
+	return ok && c.SelfSupervised
 }
 
 // IsKnown reports whether category is a recognized task category (in the

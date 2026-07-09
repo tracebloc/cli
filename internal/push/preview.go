@@ -117,8 +117,15 @@ func SniffFamily(path string) FamilySniff {
 		if hasSequences {
 			dir = "sequences/"
 		}
+		// "looks like", not "is": the family is confident, but texts/ and
+		// sequences/ map to DIFFERENT tasks (DiscoverText keys the sidecar
+		// dir off TextSidecarDir — texts/ for classification, sequences/ for
+		// MLM). So a confident text sniff must not imply the task the user
+		// then picks will load; the picker offers the whole text family, and
+		// the walk gives the authoritative error if the layout and the
+		// chosen task disagree.
 		return FamilySniff{Family: FamilyText, Confident: true,
-			Echo: fmt.Sprintf("Found labels.csv and a %s folder — this is text data.", dir)}
+			Echo: fmt.Sprintf("Found labels.csv and a %s folder — this looks like text data.", dir)}
 	case !hasImages && !hasText && csvCount == 1:
 		// Exactly one CSV, mirroring DiscoverTabular's findSingleCSV rule.
 		// Two or more CSVs is a directory the tabular walk rejects, so stay
