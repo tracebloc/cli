@@ -288,6 +288,67 @@ func TestClientCreate_R7_CrossAccountRefuse(t *testing.T) {
 	}
 }
 
+// TestClientCreate_R7_DiscoveryErrorReachableFailsClosed: the cluster is REACHABLE
+// (its kube-system UID read cleanly, clusterID != "") but in-cluster client discovery
+// ERRORS (RBAC/transient List failure). We can't tell whether a client is already
+// running, so minting would risk a duplicate that never deploys and strands the
+// cluster anchor (the phantom-1060 class). Must fail closed — no mint, no backfill.
+func TestClientCreate_R7_DiscoveryErrorReachableFailsClosed(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`)) // account list (fetched before adopt) is allowed
+		default:
+			t.Errorf("unexpected %s %s — must fail closed before any mint/backfill", r.Method, r.URL.Path)
+		}
+	})
+	stubClusterID(t, "uid-9", nil) // cluster reachable
+	stubInClusterClient(t, nil, errors.New("forbidden: cannot list deployments"))
+
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{name: "box", location: "DE", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "couldn't check whether a tracebloc client is already running") {
+		t.Errorf("want fail-closed error, got %v", err)
+	}
+}
+
+// TestClientCreate_DiscoveryErrorUnreachableMintsNonAnchored: when the cluster is
+// genuinely UNREACHABLE (the UID read failed too → clusterID == ""), a discovery
+// error is not proof a client is running, and a non-anchored mint stamps no anchor
+// so it can't orphan one. Provisioning must still proceed (the deliberate no-cluster
+// fallback), minting with an empty cluster_id. Guards against over-tightening the
+// fail-closed gate into the legitimate headless path.
+func TestClientCreate_DiscoveryErrorUnreachableMintsNonAnchored(t *testing.T) {
+	var body api.CreateClientRequest
+	postCalled := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			postCalled = true
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":8,"first_name":"box","username":"u-8","namespace":"box","location":"DE"}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	stubClusterID(t, "", errors.New("no cluster reachable"))
+	stubInClusterClient(t, nil, errors.New("no cluster reachable"))
+
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{name: "box", location: "DE", yes: true}); err != nil {
+		t.Fatalf("unreachable-cluster provisioning must still mint (non-anchored): %v", err)
+	}
+	if !postCalled {
+		t.Fatal("expected a non-anchored mint when the cluster is unreachable")
+	}
+	if body.ClusterID != "" {
+		t.Errorf("cluster_id = %q, want empty (non-anchored mint)", body.ClusterID)
+	}
+}
+
 func TestClientCreate_RequiresLogin(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // no config → not signed in
 	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "x", location: "DE", yes: true})

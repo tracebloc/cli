@@ -9,7 +9,9 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // jobsManagerDeployment builds the minimal Deployment the chart
@@ -135,10 +137,42 @@ func TestDiscoverInClusterClientID_NoRelease(t *testing.T) {
 }
 
 func TestDiscoverInClusterClientID_ReleaseButNoSecret(t *testing.T) {
+	// A release IS installed (jobs-manager present) but its CLIENT_ID secret is
+	// absent/unreadable: we KNOW a client is here, so this must NOT read as "nothing
+	// installed". It returns an error so the caller fails closed rather than mint a
+	// duplicate over the live client (phantom-1060 class).
 	cs := fake.NewClientset(jobsManagerDeployment("tracebloc", "tracebloc", "client-1.3.5", "1.3.5", "d"))
 	got, err := DiscoverInClusterClientID(context.Background(), cs)
-	if err != nil || got != nil {
-		t.Errorf("release but no secret: want (nil,nil), got (%+v,%v)", got, err)
+	if err == nil || got != nil {
+		t.Errorf("release but unreadable CLIENT_ID: want (nil, error), got (%+v, %v)", got, err)
+	}
+}
+
+func TestDiscoverInClusterClientID_DeploymentsListError_FailsClosed(t *testing.T) {
+	// A reachable-but-unreadable cluster (RBAC/transient List failure) must NOT be
+	// reported as (nil,nil) "nothing installed" — that ambiguity is what let a
+	// duplicate be minted over a live client. Surface an error so the caller fails
+	// closed. Regression guard for the phantom-1060 root cause.
+	cs := fake.NewClientset()
+	cs.PrependReactor("list", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("forbidden: cannot list deployments")
+	})
+	got, err := DiscoverInClusterClientID(context.Background(), cs)
+	if err == nil || got != nil {
+		t.Errorf("deployments list error: want (nil, error), got (%+v, %v)", got, err)
+	}
+}
+
+func TestDiscoverInClusterClientID_SecretsListError_FailsClosed(t *testing.T) {
+	// A release is present but the secret read fails — still "couldn't determine",
+	// so return an error (fail closed), never (nil,nil).
+	cs := fake.NewClientset(jobsManagerDeployment("tracebloc", "tracebloc", "client-1.3.5", "1.3.5", "d"))
+	cs.PrependReactor("list", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("forbidden: cannot list secrets")
+	})
+	got, err := DiscoverInClusterClientID(context.Background(), cs)
+	if err == nil || got != nil {
+		t.Errorf("secrets list error: want (nil, error), got (%+v, %v)", got, err)
 	}
 }
 
