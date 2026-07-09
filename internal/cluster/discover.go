@@ -297,15 +297,25 @@ const clientChartSelector = "app.kubernetes.io/name=client,app.kubernetes.io/man
 // carries the same CLIENT_ID under the same labels.
 //
 // This anchors R7 adopt-backfill: a live client whose backend cluster_id is null
-// must be adopted (and its anchor backfilled), never re-minted. Best-effort — it
-// returns (nil, nil) when nothing is installed or the cluster can't be read
-// (unreachable / restricted RBAC), so callers fall back to a plain create.
+// must be adopted (and its anchor backfilled), never re-minted.
+//
+// Return contract (deliberately three-valued, so callers can tell "empty" from
+// "couldn't tell" — collapsing the two is what let `client create` mint a
+// duplicate over a live client and orphan it, the phantom-1060 class):
+//   - (client, nil) — a live client was found;
+//   - (nil, nil)    — the cluster is READABLE and genuinely has no client release;
+//   - (nil, err)    — a read/RBAC error meant we could NOT determine either way.
+//
+// Callers must fail closed on the error case, never treat it as "nothing installed".
 func DiscoverInClusterClientID(ctx context.Context, cs kubernetes.Interface) (*InClusterClient, error) {
 	deps, err := cs.AppsV1().Deployments(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
 		LabelSelector: clientChartSelector,
 	})
 	if err != nil {
-		return nil, nil // best-effort: treat an unreadable cluster as "nothing installed"
+		// A reachable-but-unreadable cluster must NOT be reported as "nothing
+		// installed" — that ambiguity is exactly what let a duplicate be minted
+		// over a live client. Surface it so the caller fails closed.
+		return nil, fmt.Errorf("listing client deployments to check for an existing client: %w", err)
 	}
 	ns := ""
 	for _, d := range deps.Items {
@@ -315,20 +325,23 @@ func DiscoverInClusterClientID(ctx context.Context, cs kubernetes.Interface) (*I
 		}
 	}
 	if ns == "" {
-		return nil, nil // no client release on this cluster
+		return nil, nil // readable, no client release installed — a genuine fresh cluster
 	}
 	secrets, err := cs.CoreV1().Secrets(ns).List(ctx, metav1.ListOptions{
 		LabelSelector: clientChartSelector,
 	})
 	if err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("reading the existing client's identity in namespace %q: %w", ns, err)
 	}
 	for _, s := range secrets.Items {
 		if v, ok := s.Data["CLIENT_ID"]; ok && len(v) > 0 {
 			return &InClusterClient{ClientID: string(v), Namespace: ns}, nil
 		}
 	}
-	return nil, nil
+	// A client release IS installed here (its jobs-manager Deployment exists) but its
+	// CLIENT_ID secret wasn't readable — we know a client is present, so this is not a
+	// fresh cluster. Fail closed rather than let the caller mint over it.
+	return nil, fmt.Errorf("a tracebloc client is installed in namespace %q but its CLIENT_ID could not be read", ns)
 }
 
 // pickJobsManagerService probes for the chart's jobs-manager

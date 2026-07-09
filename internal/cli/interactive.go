@@ -19,8 +19,8 @@ import (
 // category picker. It derives from the push registry's CLI-supported
 // set — the exact categories runDataIngest's gate accepts — so the
 // picker can't drift from what `data ingest` actually supports.
-// semantic_/instance_segmentation are excluded (CLISupported=false)
-// until they're implemented.
+// semantic_segmentation is excluded (CLISupported=false) until it's
+// implemented.
 var promptCategories = push.SupportedCategoryIDs()
 
 // prompter is the narrow seam over the interactive library. Production

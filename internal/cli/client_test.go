@@ -283,8 +283,69 @@ func TestClientCreate_R7_CrossAccountRefuse(t *testing.T) {
 
 	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
 		clientCreateOpts{name: "box", location: "DE", yes: true})
-	if err == nil || !strings.Contains(err.Error(), "different tracebloc account") {
+	if err == nil || !strings.Contains(err.Error(), "registered to another tracebloc account") {
 		t.Errorf("want cross-account refusal, got %v", err)
+	}
+}
+
+// TestClientCreate_R7_DiscoveryErrorReachableFailsClosed: the cluster is REACHABLE
+// (its kube-system UID read cleanly, clusterID != "") but in-cluster client discovery
+// ERRORS (RBAC/transient List failure). We can't tell whether a client is already
+// running, so minting would risk a duplicate that never deploys and strands the
+// cluster anchor (the phantom-1060 class). Must fail closed — no mint, no backfill.
+func TestClientCreate_R7_DiscoveryErrorReachableFailsClosed(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`)) // account list (fetched before adopt) is allowed
+		default:
+			t.Errorf("unexpected %s %s — must fail closed before any mint/backfill", r.Method, r.URL.Path)
+		}
+	})
+	stubClusterID(t, "uid-9", nil) // cluster reachable
+	stubInClusterClient(t, nil, errors.New("forbidden: cannot list deployments"))
+
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{name: "box", location: "DE", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "couldn't check whether a tracebloc client is already running") {
+		t.Errorf("want fail-closed error, got %v", err)
+	}
+}
+
+// TestClientCreate_DiscoveryErrorUnreachableMintsNonAnchored: when the cluster is
+// genuinely UNREACHABLE (the UID read failed too → clusterID == ""), a discovery
+// error is not proof a client is running, and a non-anchored mint stamps no anchor
+// so it can't orphan one. Provisioning must still proceed (the deliberate no-cluster
+// fallback), minting with an empty cluster_id. Guards against over-tightening the
+// fail-closed gate into the legitimate headless path.
+func TestClientCreate_DiscoveryErrorUnreachableMintsNonAnchored(t *testing.T) {
+	var body api.CreateClientRequest
+	postCalled := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/edge-device/":
+			postCalled = true
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":8,"first_name":"box","username":"u-8","namespace":"box","location":"DE"}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	stubClusterID(t, "", errors.New("no cluster reachable"))
+	stubInClusterClient(t, nil, errors.New("no cluster reachable"))
+
+	if err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil,
+		clientCreateOpts{name: "box", location: "DE", yes: true}); err != nil {
+		t.Fatalf("unreachable-cluster provisioning must still mint (non-anchored): %v", err)
+	}
+	if !postCalled {
+		t.Fatal("expected a non-anchored mint when the cluster is unreachable")
+	}
+	if body.ClusterID != "" {
+		t.Errorf("cluster_id = %q, want empty (non-anchored mint)", body.ClusterID)
 	}
 }
 
@@ -658,8 +719,54 @@ func TestClientCreate_ClusterConflict(t *testing.T) {
 	})
 	stubClusterID(t, "uid-1", nil)
 	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "c", location: "DE", yes: true})
-	if err == nil || !strings.Contains(err.Error(), "different tracebloc account") {
+	if err == nil || !strings.Contains(err.Error(), "registered to another tracebloc account") {
 		t.Errorf("want a cluster_conflict error, got %v", err)
+	}
+}
+
+// TestClientCreate_ClusterConflict_RevealsOwnerEmail: fix #2 has the backend put the
+// owning account's contact email in the cross-account 409 body; the CLI surfaces it
+// so the user knows who to ask to release the cluster.
+func TestClientCreate_ClusterConflict_RevealsOwnerEmail(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"cluster_conflict","cluster_id":"uid-1","owner_email":"owner@other.test"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "c", location: "DE", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "owner@other.test") {
+		t.Errorf("want the owner email surfaced, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "ask them to release it") {
+		t.Errorf("want contact-the-owner guidance, got %v", err)
+	}
+}
+
+// TestClientCreate_ClusterInUse: a same-account live sibling already holds the
+// anchor (fix #2's cluster_in_use). The message names the live client and points at
+// offboarding it — NOT a cross-account "different account" message.
+func TestClientCreate_ClusterInUse(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"cluster_in_use","cluster_id":"uid-1","holder_client_id":42,"holder_name":"other-box"}`))
+		}
+	})
+	stubClusterID(t, "uid-1", nil)
+	err := runClientCreate(context.Background(), ui.New(&bytes.Buffer{}), nil, clientCreateOpts{name: "c", location: "DE", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "other-box") || !strings.Contains(err.Error(), "cluster_in_use") {
+		t.Errorf("want a cluster_in_use message naming the live client, got %v", err)
+	}
+	if strings.Contains(err.Error(), "another tracebloc account") {
+		t.Errorf("cluster_in_use must NOT read as a cross-account conflict, got %v", err)
 	}
 }
 
@@ -1336,5 +1443,31 @@ func TestClientStatus_WaitCtrlCIsSilent(t *testing.T) {
 	}
 	if !IsSilentError(err) {
 		t.Errorf("Ctrl-C should exit silently (nil-inner exitError), got: %v", err)
+	}
+}
+
+func TestClientSubcommandVisibility(t *testing.T) {
+	// `create` and `list` are installer-internal — Hidden so a user isn't invited to
+	// run them (a standalone `tracebloc client create` mints a client the installer
+	// never deploys, i.e. an orphaned phantom, backend#970). `status` stays
+	// user-visible. Hidden != disabled: all remain runnable (the installer still
+	// invokes create/list).
+	hidden := map[string]bool{}
+	runnable := map[string]bool{}
+	for _, c := range newClientCmd().Commands() {
+		hidden[c.Name()] = c.Hidden
+		runnable[c.Name()] = c.RunE != nil
+	}
+	if !hidden["create"] {
+		t.Error("client create must be Hidden (installer-internal; standalone mints a phantom)")
+	}
+	if !hidden["list"] {
+		t.Error("client list must stay Hidden")
+	}
+	if hidden["status"] {
+		t.Error("client status must stay user-visible")
+	}
+	if !runnable["create"] {
+		t.Error("hidden create must still be runnable (the installer invokes it)")
 	}
 }
