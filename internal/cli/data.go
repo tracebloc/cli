@@ -449,8 +449,8 @@ other collaborators train against it without ever seeing the raw files.`))
 		// supported
 	case push.IsKnown(a.Spec.Category):
 		// A recognized category data ingest doesn't implement yet — image
-		// (semantic_segmentation / instance_segmentation) or text
-		// (causal_language_modeling). Routed here (not the default branch) so the
+		// (semantic_segmentation) or text (causal_language_modeling, seq2seq,
+		// …). Routed here (not the default branch) so the
 		// user gets the registry's per-category pending-support reason, not a
 		// misleading "unrecognized category". Supported categories were already
 		// caught above, so IsKnown here means known-but-unsupported.

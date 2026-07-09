@@ -15,7 +15,7 @@ import (
 func TestRegistryKnownCategories(t *testing.T) {
 	want := []string{
 		"image_classification", "object_detection", "keypoint_detection",
-		"semantic_segmentation", "instance_segmentation",
+		"semantic_segmentation",
 		"text_classification", "token_classification",
 		"masked_language_modeling", "causal_language_modeling", "seq2seq",
 		"sentence_pair_classification", "embeddings",
@@ -45,9 +45,9 @@ func TestSupportedCategories(t *testing.T) {
 			t.Errorf("SupportedCategoryIDs returned %q but IsCLISupported is false", id)
 		}
 	}
-	// segmentation + the self-supervised text categories (CLM, seq2seq) +
-	// token_classification are known but not yet pushable, and must explain why.
-	for _, id := range []string{"semantic_segmentation", "instance_segmentation", "causal_language_modeling", "seq2seq", "token_classification", "sentence_pair_classification", "embeddings"} {
+	// semantic_segmentation + the self-supervised text categories (CLM, seq2seq)
+	// + token_classification are known but not yet pushable, and must explain why.
+	for _, id := range []string{"semantic_segmentation", "causal_language_modeling", "seq2seq", "token_classification", "sentence_pair_classification", "embeddings"} {
 		if !IsKnown(id) {
 			t.Errorf("%s should be known", id)
 		}
@@ -87,16 +87,12 @@ func TestPredicatesDeriveFromRegistry(t *testing.T) {
 	}
 }
 
-// TestRegistryCoversSchemaCategories pins registry⇄schema parity: every
-// category the ingest schema accepts must be known to the registry, or a
-// schema-valid `dataset push --category=X` is wrongly rejected as
-// "unrecognized" (the token_classification drift, Bugbot v0.4.0 RC). The
-// existing tests only pin the registry against a hand-written list, which
-// stays internally consistent while drifting from the schema — this closes
-// that gap. The reverse direction isn't required: the registry may carry a
-// known-but-unsupported alias the v1 schema doesn't list yet (e.g.
-// instance_segmentation), which is gated out before schema validation.
-func TestRegistryCoversSchemaCategories(t *testing.T) {
+// schemaCategoryEnum returns the category enum from the embedded ingest.v1
+// schema — the single source of truth the registry is pinned against (#1005).
+// The schema is vendored + drift-checked against data-ingestors by
+// scripts/sync-schema.sh, so this ties the registry transitively to upstream.
+func schemaCategoryEnum(t *testing.T) []string {
+	t.Helper()
 	var doc struct {
 		Properties struct {
 			Category struct {
@@ -110,10 +106,48 @@ func TestRegistryCoversSchemaCategories(t *testing.T) {
 	if len(doc.Properties.Category.Enum) == 0 {
 		t.Fatal("no category enum found in the embedded schema (parse path wrong?)")
 	}
-	for _, id := range doc.Properties.Category.Enum {
+	return doc.Properties.Category.Enum
+}
+
+// registryAliases are registry category IDs deliberately NOT in the ingest.v1
+// schema enum — declared placeholders. Empty today: instance_segmentation used
+// to sit here unchecked, but it's dead (it half-ingested with no validators or
+// file transfer — data-ingestors #240/#99) and was removed, not kept. A future
+// known-but-unschema'd placeholder must be DECLARED here, so TestRegistryWithinSchema
+// flags undeclared drift while allowing an intentional superset (#1005).
+var registryAliases = map[string]bool{}
+
+// TestRegistryCoversSchemaCategories pins schema ⊆ registry: every category the
+// ingest schema accepts must be known to the registry, or a schema-valid
+// `dataset push --category=X` is wrongly rejected as "unrecognized" (the
+// token_classification drift, Bugbot v0.4.0 RC).
+func TestRegistryCoversSchemaCategories(t *testing.T) {
+	for _, id := range schemaCategoryEnum(t) {
 		if !IsKnown(id) {
 			t.Errorf("schema category %q missing from the registry — `dataset push --category=%s` "+
 				"would be rejected as unrecognized despite passing schema validation", id, id)
+		}
+	}
+}
+
+// TestRegistryWithinSchema pins registry ⊆ schema (+ declared aliases): the
+// registry must not carry a category the ingest schema — and therefore the
+// ingestor — doesn't accept. An undeclared extra is exactly the
+// instance_segmentation half-ingest class: the backend/CLI would accept a
+// `--category` the pipeline can't handle, and the config half-ingests (DB rows
+// + API records, zero files staged; #1005, data-ingestors #240/#99). Together
+// with TestRegistryCoversSchemaCategories this pins registry == schema, modulo
+// explicitly declared placeholders in registryAliases.
+func TestRegistryWithinSchema(t *testing.T) {
+	inSchema := make(map[string]bool)
+	for _, id := range schemaCategoryEnum(t) {
+		inSchema[id] = true
+	}
+	for _, id := range AllCategoryIDs() {
+		if !inSchema[id] && !registryAliases[id] {
+			t.Errorf("registry category %q is not in the ingest.v1 schema enum and not a declared "+
+				"alias — add it to the schema (data-ingestors) if it's real, or declare it in "+
+				"registryAliases if it's an intentional placeholder", id)
 		}
 	}
 }
