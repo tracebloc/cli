@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -30,14 +29,25 @@ type FamilySniff struct {
 
 // SniffFamily previews the family of the dataset at path by looking for
 // the same layout markers Discover / DiscoverText / DiscoverTabular key
-// on — an images/ dir (image), a texts/ or sequences/ dir (text), or a
-// lone CSV with none of those (tabular). It reads directory entries only;
-// it opens no files and validates nothing.
+// on — labels.csv + an images/ dir (image), labels.csv + a texts/ or
+// sequences/ dir (text), or a CSV in a directory with none of those
+// (tabular). It reads directory entries only; it opens no files and
+// validates nothing.
 //
-// A file path is treated as tabular when it's a .csv (the "point at your
-// single table" case). Anything we can't place — a missing path, a
-// directory with no recognizable marker, an image+text mix — comes back
-// Confident=false so the caller asks the family plainly.
+// It never claims more than the matching Discover* would accept: the
+// marker directories (images/, texts/, sequences/) and labels.csv are
+// matched with the SAME literal, case-sensitive names the walk joins and
+// Lstats — a mis-cased "Images/" is not the walk's marker, so it is not
+// sniffed as confident image. Image / text are confident only when BOTH
+// labels.csv AND the subdir are present, mirroring Discover / DiscoverText.
+// Only the .csv extension match stays case-insensitive, mirroring
+// DiscoverTabular's EqualFold.
+//
+// Every family's walk requires a directory (bare-file support is
+// cli#181), so a file path is never a confident sniff. Anything we can't
+// place — a missing path, a bare file, a directory with no recognizable
+// marker, an image+text mix, an image/text dir without labels.csv — comes
+// back Confident=false so the caller asks the family plainly.
 func SniffFamily(path string) FamilySniff {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -50,13 +60,11 @@ func SniffFamily(path string) FamilySniff {
 		return FamilySniff{}
 	}
 
-	// A single file: only a .csv is placeable (tabular). Everything else is
-	// ambiguous — the families all expect a directory.
+	// Every family's walk requires a directory; a bare file (even a .csv)
+	// is rejected by DiscoverTabular until cli#181 adds bare-file support.
+	// Stay ambiguous so the caller asks the family plainly rather than
+	// promising a layout the walk would refuse.
 	if !st.IsDir() {
-		if strings.EqualFold(filepath.Ext(abs), ".csv") {
-			return FamilySniff{Family: FamilyTabular, Confident: true,
-				Echo: "Found a CSV table — this is tabular data."}
-		}
 		return FamilySniff{}
 	}
 
@@ -64,35 +72,50 @@ func SniffFamily(path string) FamilySniff {
 	if err != nil {
 		return FamilySniff{}
 	}
-	dirs := map[string]bool{}
-	var csvs []string
+	// Match the walk's markers with the literal, case-sensitive names it
+	// uses (filepath.Join + os.Lstat on "images" / "texts" / "sequences" /
+	// "labels.csv"). The .csv extension check is case-insensitive to mirror
+	// DiscoverTabular's EqualFold.
+	var hasImages, hasTexts, hasSequences, hasLabels bool
+	csvCount := 0
 	for _, e := range entries {
+		name := e.Name()
 		if e.IsDir() {
-			dirs[strings.ToLower(e.Name())] = true
+			switch name {
+			case "images":
+				hasImages = true
+			case "texts":
+				hasTexts = true
+			case "sequences":
+				hasSequences = true
+			}
 			continue
 		}
-		if strings.EqualFold(filepath.Ext(e.Name()), ".csv") {
-			csvs = append(csvs, e.Name())
+		if name == "labels.csv" {
+			hasLabels = true
+		}
+		if strings.EqualFold(filepath.Ext(name), ".csv") {
+			csvCount++
 		}
 	}
+	hasText := hasTexts || hasSequences
 
 	// An images/ directory is the image layout's tell; a texts/ or
-	// sequences/ directory is the text family's. If a tree somehow has both
+	// sequences/ directory is the text family's. Both require labels.csv
+	// (as Discover / DiscoverText do). If a tree has both marker dirs
 	// (unusual), stay ambiguous rather than guess.
-	hasImages := dirs["images"]
-	hasText := dirs["texts"] || dirs["sequences"]
 	switch {
-	case hasImages && !hasText:
+	case hasImages && !hasText && hasLabels:
 		return FamilySniff{Family: FamilyImage, Confident: true,
 			Echo: "Found labels.csv and an images/ folder — this is image data."}
-	case hasText && !hasImages:
+	case hasText && !hasImages && hasLabels:
 		dir := "texts/"
-		if dirs["sequences"] {
+		if hasSequences {
 			dir = "sequences/"
 		}
 		return FamilySniff{Family: FamilyText, Confident: true,
 			Echo: fmt.Sprintf("Found labels.csv and a %s folder — this is text data.", dir)}
-	case !hasImages && !hasText && len(csvs) > 0:
+	case !hasImages && !hasText && csvCount > 0:
 		return FamilySniff{Family: FamilyTabular, Confident: true,
 			Echo: "Found a CSV table — this is tabular data."}
 	default:
@@ -132,7 +155,11 @@ func previewLabelCSVPath(category, root string) (string, error) {
 		return filepath.Join(abs, "labels.csv"), nil
 	}
 	// Tabular: the dataset IS a single CSV. Accept a direct file path (the
-	// "point at your table" case) or the lone .csv in a directory.
+	// "point at your table" case) or resolve the lone .csv in a directory
+	// via the SAME single-CSV rule DiscoverTabular enforces — including its
+	// exactly-one requirement, so a multi-CSV directory errors here (and the
+	// caller falls back to free-text entry) instead of silently reading the
+	// alphabetically-first file's header.
 	st, err := os.Stat(abs)
 	if err != nil {
 		return "", err
@@ -140,19 +167,5 @@ func previewLabelCSVPath(category, root string) (string, error) {
 	if !st.IsDir() {
 		return abs, nil
 	}
-	entries, err := os.ReadDir(abs)
-	if err != nil {
-		return "", err
-	}
-	var csvs []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".csv") {
-			csvs = append(csvs, e.Name())
-		}
-	}
-	sort.Strings(csvs)
-	if len(csvs) == 0 {
-		return "", fmt.Errorf("no .csv found in %q", abs)
-	}
-	return filepath.Join(abs, csvs[0]), nil
+	return findSingleCSV(abs)
 }

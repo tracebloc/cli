@@ -48,6 +48,43 @@ const schemaInferenceSampleRows = 5000
 // The returned LocalLayout reuses the image layout's LabelsCSV field
 // (staged as labels.csv) with an empty Images slice, so the existing
 // tar/stream machinery handles it unchanged.
+// findSingleCSV resolves the one .csv file a tabular layout must hold in
+// dir, enforcing DiscoverTabular's exactly-one rule: zero or multiple CSVs
+// are errors with the same framing. dir must already be known to be a
+// directory. Factored out so the interactive label-header preview
+// (previewLabelCSVPath) locates the same CSV the walk would, and can never
+// drift from — or silently soften — the count rule.
+func findSingleCSV(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("reading %q: %w", dir, err)
+	}
+	var csvs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.EqualFold(filepath.Ext(e.Name()), ".csv") {
+			csvs = append(csvs, e.Name())
+		}
+	}
+	sort.Strings(csvs)
+	switch len(csvs) {
+	case 0:
+		return "", fmt.Errorf(
+			"no .csv file found in %q. Tabular / time-series categories expect a "+
+				"single CSV holding the dataset (one column per feature, plus the "+
+				"label column).", dir)
+	case 1:
+		return filepath.Join(dir, csvs[0]), nil
+	default:
+		return "", fmt.Errorf(
+			"found %d .csv files in %q (%s); the tabular layout expects exactly one. "+
+				"Put the dataset CSV in its own directory and re-run.",
+			len(csvs), dir, strings.Join(csvs, ", "))
+	}
+}
+
 func DiscoverTabular(rootDir string) (*LocalLayout, error) {
 	abs, err := filepath.Abs(rootDir)
 	if err != nil {
@@ -62,47 +99,22 @@ func DiscoverTabular(rootDir string) (*LocalLayout, error) {
 			"%q is not a directory; pass the directory containing the dataset CSV", abs)
 	}
 
-	entries, err := os.ReadDir(abs)
+	csvPath, err := findSingleCSV(abs)
 	if err != nil {
-		return nil, fmt.Errorf("reading %q: %w", abs, err)
+		return nil, err
 	}
-	var csvs []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if strings.EqualFold(filepath.Ext(e.Name()), ".csv") {
-			csvs = append(csvs, e.Name())
-		}
-	}
-	sort.Strings(csvs)
-	switch len(csvs) {
-	case 0:
-		return nil, fmt.Errorf(
-			"no .csv file found in %q. Tabular / time-series categories expect a "+
-				"single CSV holding the dataset (one column per feature, plus the "+
-				"label column).", abs)
-	case 1:
-		// happy path
-	default:
-		return nil, fmt.Errorf(
-			"found %d .csv files in %q (%s); the tabular layout expects exactly one. "+
-				"Put the dataset CSV in its own directory and re-run.",
-			len(csvs), abs, strings.Join(csvs, ", "))
-	}
-
-	csvPath := filepath.Join(abs, csvs[0])
+	csvName := filepath.Base(csvPath)
 	// Lstat (not Stat) so a symlinked CSV is rejected rather than
 	// silently followed — mirrors the image layout's symlink guard.
 	info, err := os.Lstat(csvPath)
 	if err != nil {
-		return nil, fmt.Errorf("stat %s: %w", csvs[0], err)
+		return nil, fmt.Errorf("stat %s: %w", csvName, err)
 	}
-	if err := rejectSymlink(info, csvs[0]); err != nil {
+	if err := rejectSymlink(info, csvName); err != nil {
 		return nil, err
 	}
 	if info.Size() > MaxSingleFileBytes {
-		return nil, sizeError(csvs[0], info.Size(), MaxSingleFileBytes)
+		return nil, sizeError(csvName, info.Size(), MaxSingleFileBytes)
 	}
 
 	layout := &LocalLayout{Root: abs, LabelsCSV: csvPath, TotalBytes: info.Size()}

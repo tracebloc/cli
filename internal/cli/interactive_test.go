@@ -103,11 +103,11 @@ func textDirLayout(t *testing.T) string {
 func TestRunInteractive_PromptOrder(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Is this training or test data?":       "test",
-		"What should we call this dataset?":    "churn_train",
-		"Where is your data? (file or folder)": dir,
-		"Which task?":                          "Tabular classification",
-		"Which column holds the class?":        "churned",
+		"Is this training or test data?":              "test",
+		"What should we call this dataset?":           "churn_train",
+		"Where is your data? (the folder holding it)": dir,
+		"Which task?":                   "Tabular classification",
+		"Which column holds the class?": "churned",
 	}}
 	a := &runDataIngestArgs{}
 	if err := runInteractive(discardPrinter(), f, a, false /*taskSet*/); err != nil {
@@ -119,7 +119,7 @@ func TestRunInteractive_PromptOrder(t *testing.T) {
 	want := []string{
 		"Is this training or test data?",
 		"What should we call this dataset?",
-		"Where is your data? (file or folder)",
+		"Where is your data? (the folder holding it)",
 		"Which task?",
 		"Which column holds the class?",
 	}
@@ -444,6 +444,20 @@ func TestRunInteractive_RejectsBadName(t *testing.T) {
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a, true); err == nil {
 		t.Fatal("expected an error for an invalid name, got nil")
+	}
+}
+
+// TestRunInteractive_RejectsEmptyPath: a bare Enter at the path prompt is
+// rejected by the validator rather than sniffing the current working
+// directory (empty path → Abs("") → cwd).
+func TestRunInteractive_RejectsEmptyPath(t *testing.T) {
+	f := &fakePrompter{answers: map[string]string{
+		"What should we call this dataset?":           "t",
+		"Where is your data? (the folder holding it)": "   ",
+	}}
+	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
+	if err := runInteractive(discardPrinter(), f, a, false); err == nil {
+		t.Fatal("expected an error for an empty dataset path, got nil")
 	}
 }
 

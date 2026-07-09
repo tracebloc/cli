@@ -136,8 +136,8 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 
 	// (c) path — then detect the family from the layout and echo it back.
 	if a.LocalPath == "" {
-		p.PromptHint("The file or folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn")
-		ans, err := pr.Input("Where is your data? (file or folder)", "e.g. ./my-data", "", nil)
+		p.PromptHint("The folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn")
+		ans, err := pr.Input("Where is your data? (the folder holding it)", "e.g. ./my-data", "", validateDatasetPath)
 		if err != nil {
 			return err
 		}
@@ -153,11 +153,10 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	// layout (and echoed), or asked plainly when the layout is ambiguous,
 	// and then only that family's tasks are offered.
 	if !taskSet {
-		fam, famPrompted, err := resolveFamily(p, pr, a.LocalPath)
+		fam, err := resolveFamily(p, pr, a.LocalPath)
 		if err != nil {
 			return err
 		}
-		prompted = prompted || famPrompted
 		id, err := pickTask(p, pr, fam)
 		if err != nil {
 			return err
@@ -190,20 +189,22 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 
 // resolveFamily turns the data the user pointed at into a task family. The
 // sniff is a HINT, not a lock (§5.1): a confident layout is echoed and
-// used; an ambiguous one is asked plainly. Returns whether it prompted.
-func resolveFamily(p *ui.Printer, pr prompter, path string) (push.Family, bool, error) {
+// used; an ambiguous one is asked plainly. (The caller unconditionally
+// prompts for the task afterward, so resolveFamily needn't report whether
+// it prompted the family question.)
+func resolveFamily(p *ui.Printer, pr prompter, path string) (push.Family, error) {
 	if s := push.SniffFamily(path); s.Confident {
 		p.Successf("%s", s.Echo)
-		return s.Family, false, nil
+		return s.Family, nil
 	}
 	p.PromptHint("We couldn't tell the data type from what's there — which is it?")
 	ans, err := pr.Select("What kind of data is this?",
 		"tabular = a CSV table; image = labels.csv + images/; text = labels.csv + texts/",
 		[]string{"tabular", "image", "text"}, "tabular")
 	if err != nil {
-		return 0, false, err
+		return 0, err
 	}
-	return familyFromNoun(ans), true, nil
+	return familyFromNoun(ans), nil
 }
 
 // familyFromNoun maps the plain family words the picker offers back to the
@@ -421,6 +422,17 @@ func renderReview(p *ui.Printer, a *runDataIngestArgs) {
 	if a.Spec.TimeColumn != "" {
 		p.Field("time column", a.Spec.TimeColumn)
 	}
+}
+
+// validateDatasetPath rejects an empty / whitespace-only answer. Without
+// it, a bare Enter at the path prompt yields "" — and SniffFamily(Abs(""))
+// would sniff the current working directory before any empty-path guard
+// runs, silently ingesting whatever happens to sit in the cwd.
+func validateDatasetPath(s string) error {
+	if strings.TrimSpace(s) == "" {
+		return fmt.Errorf("a dataset path is required")
+	}
+	return nil
 }
 
 // validatePositiveInt accepts a string that parses to an int > 0.

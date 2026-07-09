@@ -146,14 +146,6 @@ func CategoriesByFamily(fam Family) []CategorySpec {
 	return out
 }
 
-// FamilyOf returns the family a known category belongs to (and whether
-// the category is known). Thin accessor so callers outside the package
-// don't reach into the registry.
-func FamilyOf(category string) (Family, bool) {
-	c, ok := categoryByID[category]
-	return c.Family, ok
-}
-
 // FamilyNoun is the plain word for a family, used in prompts and echoes
 // ("tasks for tabular data", "this is image data").
 func FamilyNoun(fam Family) string {
