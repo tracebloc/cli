@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -64,7 +65,14 @@ func newClientCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Provision a tracebloc client for this machine (auto-named; no flags required)",
-		Args:  cobra.NoArgs,
+		// HIDDEN: provisioning is the installer's job — provision.sh calls this with
+		// zero flags (cli#137). It stays fully callable (including `--help`, so the
+		// installer's capability probe still works), but is kept off the user-facing
+		// surface: a human running `client create` STANDALONE mints a client the
+		// installer never deploys — an orphaned "phantom" (backend#970). Mirrors the
+		// hidden `list`; leaves `tracebloc client` showing only the user-useful `status`.
+		Hidden: true,
+		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClientCreate(cmd.Context(), printerFor(cmd), clientPrompter(),
 				clientCreateOpts{name: name, location: location, kubeconfigPath: kubeconfigPath, contextOverride: contextOverride, credentialFile: credentialFile, yes: yes})
@@ -356,9 +364,10 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 				case http.StatusForbidden:
 					return askAnAdmin(ctx, p, client, "provision a client", "provisioning")
 				case http.StatusConflict:
-					// Per RFC C.3 the only 409 on POST /edge-device/ is cluster_conflict
-					// (R6): this cluster_id is bound to another account.
-					return &exitError{code: 1, err: errors.New(crossAccountConflictMsg)}
+					// A 409 on POST /edge-device/ is a cross-account cluster_conflict
+					// (R6) or a same-account cluster_in_use; conflictMessage picks the
+					// right guidance (and names the owner when the backend supplies it).
+					return &exitError{code: 1, err: errors.New(conflictMessage(ae))}
 				}
 			}
 			return &exitError{code: 1, err: cerr}
@@ -437,10 +446,49 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 }
 
 // crossAccountConflictMsg is the guidance shown when this cluster — or the client
-// already live on it — belongs to a different tracebloc account. Shared by the
-// create 409 (R6) and the R7 not-owned / anchor-taken refusals so they read alike.
-const crossAccountConflictMsg = "this cluster is already registered to a different tracebloc account — " +
-	"sign in to that account, or ask your admin (cluster_conflict)"
+// already live on it — belongs to another tracebloc account, and we don't have the
+// owner's contact (a client-side refusal, or a backend without the owner_email in
+// its 409 body). Contact-the-owner first (never "delete the cluster" — it isn't
+// ours to wipe). conflictMessage() enriches this with the owner's email when the
+// backend supplies it.
+const crossAccountConflictMsg = "this cluster is already registered to another tracebloc account — " +
+	"ask its owner to release it, or sign in as that account (cluster_conflict)"
+
+// conflictMessage turns a provisioning 409 body into user guidance. Fix #2 has the
+// backend distinguish a genuine cross-account conflict (cluster_conflict, now
+// carrying the owner's contact email so the user knows who to ask) from a
+// same-account live sibling (cluster_in_use — two clients fighting over one
+// cluster). Degrades to the generic cross-account text when the body isn't
+// parseable (a backend predating fix #2) or carries no owner.
+func conflictMessage(ae *api.APIError) string {
+	var body struct {
+		Error      string `json:"error"`
+		OwnerEmail string `json:"owner_email"`
+		HolderName string `json:"holder_name"`
+	}
+	if ae != nil {
+		_ = json.Unmarshal([]byte(ae.Body), &body)
+	}
+	switch body.Error {
+	case "cluster_in_use":
+		who := body.HolderName
+		if who == "" {
+			who = "another of your clients"
+		}
+		return fmt.Sprintf(
+			"another tracebloc client (%s) in your account is already live on this cluster — "+
+				"offboard it first with `tracebloc delete`, or provision on a separate machine (cluster_in_use)",
+			who)
+	default: // cluster_conflict, or an unrecognized / empty body
+		if body.OwnerEmail != "" {
+			return fmt.Sprintf(
+				"this cluster is already registered to another tracebloc account (%s) — "+
+					"ask them to release it, or sign in as that account (cluster_conflict)",
+				body.OwnerEmail)
+		}
+		return crossAccountConflictMsg
+	}
+}
 
 // adoptLiveInClusterClient implements the RFC-0001 §7.2 / R7 adopt-backfill. It
 // discovers a tracebloc client already live on the target cluster and, when the
@@ -465,13 +513,28 @@ func adoptLiveInClusterClient(
 ) (*api.ProvisionedClient, bool, error) {
 	live, err := readInClusterClient(ctx, cluster.KubeconfigOptions{Path: opts.kubeconfigPath, Context: opts.contextOverride})
 	if err != nil {
-		// Best-effort: couldn't inspect the cluster for a live client. Fall through
-		// to a plain create (the backend's cluster_id get-or-create still applies).
-		ilog.Logf("in-cluster client discovery failed (non-fatal): %v", err)
+		// We couldn't inspect the cluster for an existing client. Whether that's
+		// safe to ignore depends on reachability: clusterID != "" means we DID read
+		// the cluster's kube-system UID over the same kubeconfig, so the cluster is
+		// reachable and this is an RBAC/transient read failure — NOT proof it's
+		// empty. Minting here could create a duplicate over a live client that then
+		// never deploys and permanently strands the cluster anchor (the phantom-1060
+		// class). Fail closed. Only a genuinely unreachable cluster (clusterID == "",
+		// where the UID read failed too) falls through to a plain, non-anchored
+		// create — that mint stamps no anchor, so it can't orphan one.
+		if clusterID != "" {
+			ilog.Logf("in-cluster client discovery failed on a reachable cluster (failing closed): %v", err)
+			return nil, false, &exitError{code: 1, err: fmt.Errorf(
+				"couldn't check whether a tracebloc client is already running on this cluster (%w) — "+
+					"provisioning now could mint a duplicate that never deploys and locks the cluster to it. "+
+					"Re-run (if this was transient); if it persists, ensure your kubeconfig/context can list "+
+					"deployments and secrets across namespaces. Diagnose with `tracebloc cluster doctor`", err)}
+		}
+		ilog.Logf("in-cluster client discovery skipped — cluster unreachable (non-fatal): %v", err)
 		return nil, false, nil
 	}
 	if live == nil {
-		return nil, false, nil // fresh cluster — nothing installed to adopt
+		return nil, false, nil // reachable, nothing installed to adopt — a genuine fresh cluster
 	}
 	ilog.Logf("live in-cluster client: id=%s namespace=%s", live.ClientID, live.Namespace)
 
@@ -518,8 +581,11 @@ func adoptLiveInClusterClient(
 			var ae *api.APIError
 			switch {
 			case errors.As(perr, &ae) && ae.StatusCode == http.StatusConflict:
-				// Anchor already taken (write-once / bound elsewhere — R6).
-				return nil, false, &exitError{code: 1, err: errors.New(crossAccountConflictMsg)}
+				// Anchor held by another client: cross-account (cluster_conflict, now
+				// naming the owner) or a same-account live sibling (cluster_in_use).
+				// Fix #2's same-account reclaim means this no longer fires for a stale
+				// same-account holder — that path now succeeds (200).
+				return nil, false, &exitError{code: 1, err: errors.New(conflictMessage(ae))}
 			case errors.As(perr, &ae) && ae.StatusCode == http.StatusForbidden:
 				return nil, false, askAnAdmin(ctx, p, apiClient, "provision a client", "provisioning")
 			}

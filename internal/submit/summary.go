@@ -69,26 +69,41 @@ type Summary struct {
 	FailedRecords int64
 }
 
-// HasFailures returns true if any failure-class counter is non-zero.
-// Used by the orchestrator to decide which exit code to return
-// (success: 0, ingest-with-failures: non-zero) and how to color
-// the rendered panel.
+// HasFailures returns true if any non-trivial failure occurred. It MIRRORS
+// the ingestor's IngestionSummary.has_failures EXACTLY (data-ingestors
+// ingestors/base.py) — DB insert short of total, API short of inserted, a
+// file-transfer or processing drop (skipped), or a hard failure — so the CLI's
+// exit code + staging-reclaim gate agree with the ingestor's own "completed
+// successfully" banner. The narrower prior version (only FailedRecords /
+// FileTransferFailures) reported success and reclaimed the staged source on a
+// run that silently SKIPPED rows or inserted fewer than total — silent data
+// loss that then deletes the user's only copy. Every counter this reads is
+// emitted unconditionally by the ingestor banner + parsed above, so the
+// inserted<total / api_sent<inserted clauses can't false-positive on a clean
+// run (where all counters are equal).
 func (s *Summary) HasFailures() bool {
 	if s == nil {
 		return false
 	}
-	return s.FileTransferFailures > 0 || s.FailedRecords > 0
+	return s.FailedRecords > 0 ||
+		s.FileTransferFailures > 0 ||
+		s.SkippedRecords > 0 ||
+		s.InsertedRecords < s.TotalRecords ||
+		s.APISentRecords < s.InsertedRecords
 }
 
-// SuccessRate returns a 0-100 percentage for the panel header.
-// Defined as ProcessedRecords / TotalRecords; returns 0 when
-// TotalRecords is 0 to avoid divide-by-zero in early-failure
-// banners.
+// SuccessRate returns a 0-100 percentage for the panel header. Defined as
+// InsertedRecords / TotalRecords — matching the ingestor's own banner
+// (reporting.py: inserted_records / total_records), since InsertedRecords (rows
+// that actually landed in MySQL) is the metric that matters for training, and
+// ProcessedRecords (passed validation) is a superset that OVERSTATED success
+// when rows validated but failed to insert. Returns 0 when TotalRecords is 0 to
+// avoid divide-by-zero in early-failure banners.
 func (s *Summary) SuccessRate() float64 {
 	if s == nil || s.TotalRecords == 0 {
 		return 0
 	}
-	return float64(s.ProcessedRecords) / float64(s.TotalRecords) * 100
+	return float64(s.InsertedRecords) / float64(s.TotalRecords) * 100
 }
 
 // ansiCodeRE matches the ANSI SGR (Select Graphic Rendition)
@@ -337,10 +352,21 @@ func RenderSummary(p *ui.Printer, s *Summary) {
 	headline := fmt.Sprintf("ingested %s of %s records (%.1f%%)",
 		commaSep(s.InsertedRecords), commaSep(s.TotalRecords), s.SuccessRate())
 	switch {
-	case s.HasFailures():
+	case s.FailedRecords > 0 || s.FileTransferFailures > 0:
+		// Hard failures: rows errored at DB insert or file transfer.
 		p.Errorf("Ingestion completed with failures — %s", headline)
-	case s.SkippedRecords > 0:
-		p.Warnf("Ingestion completed with skips — %s", headline)
+	case s.HasFailures():
+		// No hard failure, but not clean: rows skipped, or fewer inserted/
+		// synced than the ingestor saw. Exit-coded as not-clean (HasFailures),
+		// but colored distinctly from a hard failure. Word it by which soft
+		// shortfall actually occurred — "skips" only when rows were skipped;
+		// an insert/API shortfall with zero skips is a partial result, not a
+		// skip, and mislabeling it reads as a validator drop.
+		if s.SkippedRecords > 0 {
+			p.Warnf("Ingestion completed with skips — %s", headline)
+		} else {
+			p.Warnf("Ingestion completed partially — %s", headline)
+		}
 	default:
 		p.Successf("Ingestion complete — %s", headline)
 	}

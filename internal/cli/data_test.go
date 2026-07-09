@@ -94,8 +94,8 @@ func execDataIngest(t *testing.T, args []string) (exitCode int, stdout, stderr s
 func TestDataIngest_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	root := imgcLayout(t)
 	for _, badCategory := range []string{
-		"semantic_segmentation",     // blocked on the ingestor (data-ingestors#136)
-		"instance_segmentation",     // not implemented
+		"semantic_segmentation",     // known but blocked on the ingestor (data-ingestors#136)
+		"instance_segmentation",     // dead — removed from the registry (#1005), now unrecognized
 		"definitely-not-a-category", // nonsense; gate catches this too
 	} {
 		t.Run(badCategory, func(t *testing.T) {

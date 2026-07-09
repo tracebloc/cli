@@ -17,17 +17,21 @@ if [[ "${1:-}" == "--check" ]]; then
   cp "$GOLDENS" "$tmp/committed.json"
   "$PYTHON" scripts/gen-validator-goldens.py >/dev/null
   # Compare VERDICTS only — error text may drift harmlessly (and embeds
-  # fixture paths); verdicts may not.
+  # fixture paths); verdicts may not. VALUE-level goldens (resolved label +
+  # row count + class set) carry no paths, so compare them too — a value-only
+  # drift (the data-ingestors #340 class: verdict unchanged, stored labels
+  # change) must fail the check, not slip through.
   if ! "$PYTHON" -c "
 import json,sys
 a=json.load(open('$tmp/committed.json'))['verdicts']
 b=json.load(open('$GOLDENS'))['verdicts']
-va={k:v['verdict'] for k,v in a.items()}; vb={k:v['verdict'] for k,v in b.items()}
-sys.exit(0 if va==vb else 1)
+def view(d): return {k:(v['verdict'], v.get('values')) for k,v in d.items()}
+sys.exit(0 if view(a)==view(b) else 1)
 "; then
     cp "$tmp/committed.json" "$GOLDENS"   # restore — check must not mutate
-    echo "DRIFT: the ingestor's validator verdicts changed. Re-run the generator," >&2
-    echo "commit the new goldens, and update cases.json (+ the Go preview) consciously." >&2
+    echo "DRIFT: the ingestor's validator verdicts or read-path VALUES changed. Re-run" >&2
+    echo "the generator, commit the new goldens, and update cases.json (+ the Go preview)" >&2
+    echo "consciously." >&2
     exit 1
   fi
   cp "$tmp/committed.json" "$GOLDENS"   # keep the committed copy (paths etc. unchanged)

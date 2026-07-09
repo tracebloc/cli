@@ -26,8 +26,8 @@ type CategorySpec struct {
 	// never ships to the central backend by default.
 	RegressionClass bool
 	// CLISupported reports whether `dataset push` implements the category
-	// today. semantic_/instance_segmentation are known (the schema
-	// defines them) but not yet pushable.
+	// today. semantic_segmentation is known (the schema defines it) but
+	// not yet pushable.
 	CLISupported bool
 	// UnsupportedNote explains why a known-but-unimplemented category
 	// isn't available yet; surfaced by the push gate. Empty when supported.
@@ -49,11 +49,15 @@ const (
 	FamilyText
 )
 
-// categoryRegistry is the ordered, authoritative list of every category
-// the ingest.v1 schema defines. Order is the display order for help text
-// and the interactive picker (CLI-supported first, in workflow order;
-// the not-yet-implemented ones last). Adding a category to the schema
-// means adding it here — the parity test pins the set.
+// categoryRegistry is the ordered list of every category the ingest.v1
+// schema defines — nothing more, nothing less. Order is the display order for
+// help text and the interactive picker (CLI-supported first, in workflow
+// order; the not-yet-implemented ones last). Adding a category to the schema
+// means adding it here; TestRegistryCoversSchemaCategories +
+// TestRegistryWithinSchema pin the set equal to the schema enum both ways, so
+// it can neither fall behind (a schema category rejected as "unrecognized")
+// nor carry an extra the ingestor won't accept (the instance_segmentation
+// half-ingest class — data-ingestors #240/#99, #1005).
 var categoryRegistry = []CategorySpec{
 	{ID: "image_classification", Family: FamilyImage, Label: "Image classification", CLISupported: true},
 	{ID: "object_detection", Family: FamilyImage, Label: "Object detection", CLISupported: true},
@@ -66,8 +70,6 @@ var categoryRegistry = []CategorySpec{
 	{ID: "time_to_event_prediction", Family: FamilyTabular, Label: "Time-to-event prediction", RegressionClass: true, CLISupported: true},
 	{ID: "semantic_segmentation", Family: FamilyImage, Label: "Semantic segmentation", CLISupported: false,
 		UnsupportedNote: "blocked on the ingestor's mask-sidecar support (data-ingestors#136)"},
-	{ID: "instance_segmentation", Family: FamilyImage, Label: "Instance segmentation", CLISupported: false,
-		UnsupportedNote: "not implemented"},
 	{ID: "causal_language_modeling", Family: FamilyText, Label: "Causal language modeling", CLISupported: false,
 		UnsupportedNote: "schema-recognized (data-ingestors#805); `tracebloc ingest` discover/build for its raw-.txt / prompt\\tcompletion `texts` layout is pending"},
 	{ID: "seq2seq", Family: FamilyText, Label: "Sequence-to-sequence", CLISupported: false,

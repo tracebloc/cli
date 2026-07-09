@@ -99,11 +99,18 @@ func TestClassifyPushOutcome(t *testing.T) {
 		wantStat string
 		wantCode int
 	}{
-		{"clean", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 10}}}, nil, "succeeded", 0},
+		{"clean", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 10, APISentRecords: 10}}}, nil, "succeeded", 0},
 		{"partial", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 10, InsertedRecords: 7, FailedRecords: 3}}}, nil, "completed_with_failures", 9},
 		{"failed", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeFailed}}, nil, "failed", 9},
+		{"unknown", &submit.Result{Submit: resp, Watch: &submit.WatchResult{Outcome: submit.JobOutcomeUnknown}}, nil, "unknown", 9},
 		{"detached", &submit.Result{Submit: resp}, nil, "detached", 0},
+		{"nil result", nil, nil, "detached", 0},
 		{"watch error", &submit.Result{Submit: resp}, &submit.WatchError{Err: errors.New("stream broke")}, "watch_error", 9},
+		// The submit-side error buckets (exit 5 vs 8) the original matrix missed.
+		{"auth 401", nil, &submit.SubmitError{StatusCode: 401}, "auth_error", 5},
+		{"auth 403", nil, &submit.SubmitError{StatusCode: 403}, "auth_error", 5},
+		{"submit 500", nil, &submit.SubmitError{StatusCode: 500}, "submit_error", 8},
+		{"submit 422", nil, &submit.SubmitError{StatusCode: 422}, "submit_error", 8},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
