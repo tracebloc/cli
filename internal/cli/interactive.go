@@ -104,13 +104,13 @@ func isInteractiveTTY() bool {
 
 // runInteractive fills the gaps in a's core ingest fields by prompting,
 // then returns. It only prompts for what's still missing, so flags the
-// user already passed win. categorySet says whether --category was set
-// explicitly (vs left at its non-empty default), which would otherwise
-// hide "the user didn't actually choose a category."
+// user already passed win. taskSet says whether the task was passed
+// explicitly (via --task or the hidden --category alias); when it wasn't,
+// the picker runs rather than assuming a default.
 //
-// Mutates a through the pointer. PR-b adds category-specific prompts
+// Mutates a through the pointer. PR-b adds task-specific prompts
 // (target-size, schema, number-of-keypoints) + a confirm screen.
-func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, categorySet bool) error {
+func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bool) error {
 	p.PromptHeader("Let's set up your data ingest")
 	p.Hintf("Press Enter to accept a default; Ctrl-C to cancel.")
 	prompted := false
@@ -125,9 +125,9 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, categorySe
 		prompted = true
 	}
 
-	if !categorySet {
+	if !taskSet {
 		p.PromptHint("What kind of task your data is for — this drives how it's validated and loaded.")
-		ans, err := pr.Select("Task category", "what kind of data this is",
+		ans, err := pr.Select("Task", "what kind of data this is",
 			promptCategories, a.Spec.Category)
 		if err != nil {
 			return err
@@ -150,7 +150,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, categorySe
 
 	if a.Spec.Intent == "" {
 		p.PromptHint("Whether this split is used to train the model or to evaluate it.")
-		ans, err := pr.Select("Intent", "which split this data is",
+		ans, err := pr.Select("Is this training or test data?", "which split this data is",
 			[]string{"train", "test"}, "train")
 		if err != nil {
 			return err
@@ -262,8 +262,8 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 func renderReview(p *ui.Printer, a *runDataIngestArgs) {
 	p.Section("Review")
 	p.Field("path", a.LocalPath)
-	p.Field("category", a.Spec.Category)
-	p.Field("table", a.Spec.Table)
+	p.Field("task", a.Spec.Category)
+	p.Field("name", a.Spec.Table)
 	p.Field("intent", a.Spec.Intent)
 	if a.Spec.LabelColumn != "" {
 		p.Field("label column", a.Spec.LabelColumn)

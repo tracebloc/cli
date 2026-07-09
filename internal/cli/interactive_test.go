@@ -56,9 +56,9 @@ func discardPrinter() *ui.Printer { return ui.New(&bytes.Buffer{}) }
 func TestRunInteractive_FillsAllWhenEmpty(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{
 		"Path to your dataset directory": "./data",
-		"Task category":                  "tabular_classification",
+		"Task":                           "tabular_classification",
 		"Destination table name":         "churn_train",
-		"Intent":                         "test",
+		"Is this training or test data?": "test",
 		"Label column":                   "churned",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Category: "image_classification"}}
@@ -96,7 +96,7 @@ func TestRunInteractive_ShowsExampleHints(t *testing.T) {
 
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	if err := runInteractive(p, f, a, true /*categorySet*/); err != nil {
+	if err := runInteractive(p, f, a, true /*taskSet*/); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	out := buf.String()
@@ -113,18 +113,18 @@ func TestRunInteractive_ShowsExampleHints(t *testing.T) {
 }
 
 // TestRunInteractive_SkipsProvidedValues: flags already set (and an
-// explicit --category) mean nothing is prompted.
+// explicit --task) mean nothing is prompted.
 func TestRunInteractive_SkipsProvidedValues(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{}}
-	// text_classification has no category-specific prompts, so with all
-	// core fields set + an explicit --category, nothing is asked.
+	// text_classification has no task-specific prompts, so with all
+	// core fields set + an explicit --task, nothing is asked.
 	a := &runDataIngestArgs{
 		LocalPath: "./data",
 		Spec: push.SpecArgs{
 			Category: "text_classification", Table: "t", Intent: "train", LabelColumn: "label",
 		},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true /*categorySet*/); err != nil {
+	if err := runInteractive(discardPrinter(), f, a, true /*taskSet*/); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if len(f.asked) != 0 {
@@ -192,8 +192,8 @@ func TestRunInteractive_Cancel(t *testing.T) {
 // label column, so it must not be prompted.
 func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{
-		"Destination table name": "mlm_train",
-		"Intent":                 "train",
+		"Destination table name":         "mlm_train",
+		"Is this training or test data?": "train",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: "./data",

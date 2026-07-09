@@ -91,8 +91,15 @@ func newDataIngestCmd() *cobra.Command {
 		// Ingest-spec flags. image_classification + the tabular /
 		// time-series family are supported today; text + detection +
 		// segmentation land in later increments.
-		table             string
-		category          string
+		//
+		// --name/--task are the canonical flags (#180); --table/--category
+		// stay on as hidden deprecated aliases so existing scripts keep
+		// working. --intent is unchanged. The wire/spec field names don't
+		// change — this is a CLI-surface rename only.
+		name              string
+		tableAlias        string
+		task              string
+		categoryAlias     string
 		intent            string
 		labelColumn       string
 		targetSize        string
@@ -131,9 +138,9 @@ func newDataIngestCmd() *cobra.Command {
 		Short:   "Stage a local dataset into your client's storage",
 		Long: `Stages a local dataset into your client's shared storage,
 submits an ingestion run to jobs-manager, and watches the ingestor Job
-to completion. Supports 9 task categories (image classification,
+to completion. Supports 9 tasks (image classification,
 object/keypoint detection, text classification, masked language
-modeling, and the tabular / time-series family); pick one with --category.
+modeling, and the tabular / time-series family); pick one with --task.
 
 Expected local layout (image_classification shown):
 
@@ -155,13 +162,13 @@ see tracebloc/client#147 non-goals.
 Exit codes:
   0   files staged + ingested successfully (or --detach: just staged + submitted)
   2   schema validation failed (synthesized spec rejected) or
-      v0.1-unsupported category passed
+      v0.1-unsupported task passed
   3   local-layout or kubeconfig error
   4   cluster reachable but no tracebloc client / shared storage missing
   5   ingestor SA token couldn't be obtained, or jobs-manager
       rejected the token (401/403)
   6   destination table already exists (re-run with --overwrite to
-      replace it, or pick a different --table)
+      replace it, or pick a different --name)
   7   pre-flight succeeded but staging the files failed
       (Pod creation, image pull, exec stream, or remote tar error) —
       or, with --overwrite, removing the old table failed
@@ -174,6 +181,24 @@ Exit codes:
 			if len(args) > 0 {
 				localPath = args[0]
 			}
+			// Resolve the deprecated flag aliases (#180): the canonical
+			// flag wins; a hidden legacy alias fills in only when the new
+			// flag wasn't passed, so old scripts keep working without the
+			// new surface silently shadowing them. The wire/spec field
+			// names are unchanged — this is a CLI rename only.
+			nameVal := name
+			if cmd.Flags().Changed("table") && !cmd.Flags().Changed("name") {
+				nameVal = tableAlias
+			}
+			taskVal := task
+			if cmd.Flags().Changed("category") && !cmd.Flags().Changed("task") {
+				taskVal = categoryAlias
+			}
+			// Whether the task was chosen at all (via either spelling).
+			// Dropping --task's old image_classification default means an
+			// unset task now drives the picker (TTY) or a clear error
+			// (non-interactive), never a silent image assumption.
+			taskSet := cmd.Flags().Changed("task") || cmd.Flags().Changed("category")
 			// Guided mode: on a terminal (and unless --no-input), prompt
 			// for whatever's still missing. Off a TTY / with --no-input,
 			// prompter stays nil and runDataIngest keeps flag-only
@@ -200,7 +225,7 @@ Exit codes:
 					Context:    contextOverride,
 					Namespace:  nsOverride,
 					Spec: push.SpecArgs{
-						Table: table, Category: category, Intent: intent,
+						Table: nameVal, Category: taskVal, Intent: intent,
 						LabelColumn: labelColumn, LabelPolicy: labelPolicy, TimeColumn: timeColumn,
 						NumberOfKeypoints: numberOfKeypoints,
 					},
@@ -215,7 +240,7 @@ Exit codes:
 					Printer:        printer,
 					Interactive:    interactive,
 					Prompter:       pr,
-					CategorySet:    cmd.Flags().Changed("category"),
+					TaskSet:        taskSet,
 					OutputJSON:     outputJSON,
 					JSONOut:        jsonOut,
 				})
@@ -234,16 +259,23 @@ Exit codes:
 	// pre-empts our richer schema-driven diagnostic. Instead, the
 	// schema validator catches missing/empty values with the canonical
 	// JSON-pointer-anchored error.
-	cmd.Flags().StringVar(&table, "table", "",
-		"destination table name (MySQL identifier; matches /data/shared/<table>/ on the PVC)")
-	cmd.Flags().StringVar(&category, "category", "image_classification",
-		"task category, one of: "+push.SupportedCategoriesList())
+	cmd.Flags().StringVar(&name, "name", "",
+		"a name for this dataset (letters, digits, underscore) — you'll reference it by this name when you start a training run")
+	cmd.Flags().StringVar(&tableAlias, "table", "",
+		"deprecated alias for --name")
+	_ = cmd.Flags().MarkHidden("table")
+	cmd.Flags().StringVar(&task, "task", "",
+		"the task this data is for, one of: "+push.SupportedCategoriesList()+
+			". Omit it on a terminal to pick interactively.")
+	cmd.Flags().StringVar(&categoryAlias, "category", "",
+		"deprecated alias for --task")
+	_ = cmd.Flags().MarkHidden("category")
 	cmd.Flags().StringVar(&intent, "intent", "",
-		"intent: train|test")
+		"is this training or test data? train|test (default train)")
 	cmd.Flags().StringVar(&labelColumn, "label-column", "",
-		"name of the label/target column (in labels.csv for image categories, in the data CSV for tabular)")
+		"name of the label/target column (in labels.csv for image tasks, in the data CSV for tabular)")
 	cmd.Flags().StringVar(&targetSize, "target-size", "",
-		"image categories only: resolution as WxH (e.g. 512x512). Default: auto-detected from the first image. "+
+		"image tasks only: resolution as WxH (e.g. 512x512). Default: auto-detected from the first image. "+
 			"All images must share this resolution — the ingestor validates it, it does not resize.")
 	cmd.Flags().StringVar(&schemaFlag, "schema", "",
 		"tabular/time-series only: column types as col:TYPE,col:TYPE (e.g. age:INT,price:FLOAT). "+
@@ -304,12 +336,13 @@ type runDataIngestArgs struct {
 
 	// Interactive guided mode (#28). When Interactive is true,
 	// runDataIngest prompts (via Prompter) for any missing core inputs
-	// before validation. CategorySet records whether --category was
-	// passed explicitly (its non-empty default would otherwise look
-	// like a deliberate choice). Prompter is nil off a TTY / --no-input.
+	// before validation. TaskSet records whether the task was passed
+	// explicitly (via --task or the hidden --category alias); an unset
+	// task drives the picker rather than assuming a default. Prompter is
+	// nil off a TTY / --no-input.
 	Interactive bool
 	Prompter    prompter
-	CategorySet bool
+	TaskSet     bool
 
 	// OutputJSON routes human output to stderr and emits a JSON result
 	// to JSONOut (stdout); set together by the RunE in --output-json
@@ -398,13 +431,20 @@ collaborators can train against that table without ever seeing the raw files.`))
 	//    validation. Flags already provided win; non-TTY / --no-input
 	//    leaves Prompter nil and skips straight to the flag-only path.
 	if a.Interactive && a.Prompter != nil {
-		if err := runInteractive(a.Printer, a.Prompter, &a, a.CategorySet); err != nil {
+		if err := runInteractive(a.Printer, a.Prompter, &a, a.TaskSet); err != nil {
 			if errors.Is(err, errInteractiveCancelled) {
 				a.Printer.Infof("Cancelled — nothing was ingested.")
 				return nil
 			}
 			return &exitError{code: 3, err: fmt.Errorf("interactive setup: %w", err)}
 		}
+	}
+	// --intent defaults to train. Applied after the interactive block so
+	// the guided flow still asks "training or test?" (it prompts on an
+	// empty value); a non-interactive run that omits --intent gets train
+	// without erroring (RFC-0002 §5). The wire field stays "intent".
+	if a.Spec.Intent == "" {
+		a.Spec.Intent = "train"
 	}
 	if a.LocalPath == "" {
 		return &exitError{code: 3, err: errors.New(
@@ -442,8 +482,14 @@ collaborators can train against that table without ever seeing the raw files.`))
 	//    list rather than the schema's 11-option enum dump.
 	switch {
 	case a.Spec.Category == "":
-		// Left empty by a caller; let the schema produce the canonical
-		// "category is required" error downstream.
+		// No task chosen. In guided mode the picker already filled this;
+		// reaching here means a non-interactive run (or --no-input /
+		// --output-json) that omitted --task. Give a clear, actionable
+		// error instead of silently assuming images (the old default).
+		return &exitError{code: 2, err: fmt.Errorf(
+			"which task is this data for? pass --task — one of: %s. "+
+				"(On a terminal without --no-input, tracebloc asks you to pick.)",
+			push.SupportedCategoriesList())}
 	case push.IsCLISupported(a.Spec.Category):
 		// supported
 	case push.IsKnown(a.Spec.Category):
@@ -455,11 +501,11 @@ collaborators can train against that table without ever seeing the raw files.`))
 		// caught above, so IsKnown here means known-but-unsupported.
 		spec, _ := push.Lookup(a.Spec.Category)
 		return &exitError{code: 2, err: fmt.Errorf(
-			"category %q isn't supported by the CLI yet (%s). Supported categories: %s.",
+			"task %q isn't supported by the CLI yet (%s). Supported tasks: %s.",
 			a.Spec.Category, spec.UnsupportedNote, push.SupportedCategoriesList())}
 	default:
 		return &exitError{code: 2, err: fmt.Errorf(
-			"category %q isn't a recognized task category. Supported categories: %s.",
+			"task %q isn't a recognized task. Supported tasks: %s.",
 			a.Spec.Category, push.SupportedCategoriesList())}
 	}
 
@@ -681,7 +727,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 		return &exitError{code: 6, err: fmt.Errorf(
 			"table %q already exists in this client. Re-ingesting the same table doesn't merge or replace — "+
 				"the run would fail after uploading everything. Re-run with --overwrite to replace it, "+
-				"or pick a different --table. (`tracebloc data delete %s` also removes it.)",
+				"or pick a different --name. (`tracebloc data delete %s` also removes it.)",
 			existingTable, existingTable)}
 	}
 	if tableExists && a.Overwrite {
@@ -1024,8 +1070,8 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 	p.Field("total size", push.HumanBytes(layout.TotalBytes))
 
 	p.Section("Ingest settings")
-	p.Field("table", fmt.Sprintf("%v", spec["table"]))
-	p.Field("category", fmt.Sprintf("%v", spec["category"]))
+	p.Field("name", fmt.Sprintf("%v", spec["table"]))
+	p.Field("task", fmt.Sprintf("%v", spec["category"]))
 	p.Field("intent", fmt.Sprintf("%v", spec["intent"]))
 	switch lbl := spec["label"].(type) {
 	case string:

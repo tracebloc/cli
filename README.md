@@ -54,9 +54,9 @@ irm https://github.com/tracebloc/cli/releases/latest/download/install.ps1 | iex
 
 # Per dataset
 tracebloc data ingest ./my-data \
-  --table cats_dogs_train \
-  --category image_classification \
-  --intent train \
+  --name cats_dogs_train \
+  --task image_classification \
+  --split train \
   --label-column label
 ```
 

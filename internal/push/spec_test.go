@@ -368,8 +368,27 @@ func TestValidateTableName_Accepts(t *testing.T) {
 		"ABC",
 		"table_123",
 		"_leading_underscore",
-		"9starts_with_digit", // valid MySQL identifier + safe path segment
 	} {
+		if err := ValidateTableName(name); err != nil {
+			t.Errorf("ValidateTableName(%q) = %v, want nil", name, err)
+		}
+	}
+}
+
+// TestValidateTableName_LeadingDigit mirrors the ingestor's table-name
+// rule (tracebloc/data-ingestors' validators/table_name_validator.py,
+// ^[a-zA-Z_][a-zA-Z0-9_]*$, the source of truth): a name must start
+// with a letter or underscore. The old CLI pattern was looser and let
+// leading-digit / all-digit names through only for the cluster to
+// reject them post-upload — this pins the CLI to the ingestor so any
+// name accepted here is accepted in-cluster.
+func TestValidateTableName_LeadingDigit(t *testing.T) {
+	for _, name := range []string{"1data", "123"} {
+		if err := ValidateTableName(name); err == nil {
+			t.Errorf("ValidateTableName(%q) = nil, want a leading-digit rejection", name)
+		}
+	}
+	for _, name := range []string{"_data", "Data1", "chest_xrays_train"} {
 		if err := ValidateTableName(name); err != nil {
 			t.Errorf("ValidateTableName(%q) = %v, want nil", name, err)
 		}
