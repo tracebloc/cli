@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -207,8 +208,10 @@ func TestRunIngestionRun_SubmitConnectUsesSpinner(t *testing.T) {
 	}
 	// A spinner redraws/clears its line with a carriage return; a plain Infof
 	// never would. This is what distinguishes "shows a spinner" from "prints a
-	// line".
-	if !strings.Contains(out, "\r") {
+	// line". On Windows the spinner is deliberately a static one-liner with no
+	// \r redraw (ui.Printer.Spinner sidesteps escape garbage on legacy
+	// consoles), so the redraw is only guaranteed off Windows.
+	if runtime.GOOS != "windows" && !strings.Contains(out, "\r") {
 		t.Errorf("submit-connect wait didn't render as a spinner (no \\r redraw):\n%q", out)
 	}
 }

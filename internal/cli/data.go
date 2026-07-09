@@ -829,9 +829,11 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 	//     through the kubeconfig-authenticated apiserver, same as
 	//     `kubectl port-forward`. Bugbot PR #10 r3 caught the
 	//     original broken-by-design direct-URL POST.
-	// Connecting means opening a port-forward and blocking on a POST that can
-	// take ~30s, so it runs under a spinner — no wait on the happy path stays
-	// silent (RFC-0002 "progress on every wait").
+	// Opening the port-forward is a blocking wait (tunnel setup through the
+	// apiserver), so it runs under a spinner — no wait on the happy path stays
+	// silent (RFC-0002 "progress on every wait"). The submit POST itself is a
+	// separate ~30s synchronous wait; its spinner lives in submit.Run, next to
+	// the POST it covers.
 	connectSpin := a.Printer.Spinner("Connecting to your workspace to submit the run", "")
 	pf, err := portForwardJobsManagerFn(ctx, cs, resolved.RestConfig,
 		resolved.Namespace, release.JobsManagerServiceName, release.JobsManagerPort)
