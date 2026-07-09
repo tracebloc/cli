@@ -29,7 +29,7 @@ func succeededResult() *submit.Result {
 		// == api_sent). APISentRecords must be set too — the ingestor-aligned
 		// HasFailures() treats api_sent < inserted as a partial, so omitting it
 		// (defaulting to 0) would misclassify this "succeeded" row as a failure.
-		Watch:  &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 2, InsertedRecords: 2, APISentRecords: 2}},
+		Watch: &submit.WatchResult{Outcome: submit.JobOutcomeSucceeded, Summary: &submit.Summary{TotalRecords: 2, InsertedRecords: 2, APISentRecords: 2}},
 	}
 }
 
