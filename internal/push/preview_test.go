@@ -70,6 +70,27 @@ func TestSniffFamily(t *testing.T) {
 		}
 	})
 
+	t.Run("symlinked .csv is ambiguous, matching the walk's symlink rejection", func(t *testing.T) {
+		// DiscoverTabular rejects a symlinked CSV (rejectSymlink), so the
+		// sniff must not confidently promise tabular for one — otherwise the
+		// guided flow locks to tabular, then hard-fails on the walk. Sniff and
+		// walk must agree: both refuse. (cli#202 review)
+		dir := t.TempDir()
+		real := filepath.Join(dir, "real.csv")
+		writePrev(t, real, "a,b\n1,2\n")
+		link := filepath.Join(dir, "link.csv")
+		if err := os.Symlink(real, link); err != nil {
+			t.Skipf("symlink unsupported on this platform: %v", err)
+		}
+		if s := SniffFamily(link); s.Confident {
+			t.Fatalf("a symlinked .csv should be ambiguous (walk rejects it), got %+v", s)
+		}
+		// And the walk it mirrors does reject the same symlinked file.
+		if _, err := DiscoverTabular(link); err == nil {
+			t.Fatalf("DiscoverTabular should reject a symlinked .csv")
+		}
+	})
+
 	t.Run("mis-cased Images/ + labels.csv is ambiguous, NOT confident tabular", func(t *testing.T) {
 		// Discover Lstats the literal "images"; a mis-cased "Images/" is not
 		// its marker. The sniff must not claim confident image — but it must

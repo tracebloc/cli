@@ -54,6 +54,15 @@ const schemaInferenceSampleRows = 5000
 // The returned LocalLayout reuses the image layout's LabelsCSV field
 // (staged as labels.csv) with an empty Images slice, so the existing
 // tar/stream machinery handles it unchanged.
+// isCSV reports whether name has a .csv extension, matched
+// case-insensitively. It's the single rule DiscoverTabular's walk, its
+// bare-file branch, and SniffFamily all key on — shared so the sniff's
+// "confident tabular" promise can never drift from what the walk actually
+// accepts (the exact lockstep the surrounding comments rely on).
+func isCSV(name string) bool {
+	return strings.EqualFold(filepath.Ext(name), ".csv")
+}
+
 // findSingleCSV resolves the one .csv file a tabular layout must hold in
 // dir, enforcing DiscoverTabular's exactly-one rule: zero or multiple CSVs
 // are errors with the same framing. dir must already be known to be a
@@ -70,7 +79,7 @@ func findSingleCSV(dir string) (string, error) {
 		if e.IsDir() {
 			continue
 		}
-		if strings.EqualFold(filepath.Ext(e.Name()), ".csv") {
+		if isCSV(e.Name()) {
 			csvs = append(csvs, e.Name())
 		}
 	}
@@ -115,7 +124,7 @@ func DiscoverTabular(rootDir string) (*LocalLayout, error) {
 			return nil, err
 		}
 	} else {
-		if !strings.EqualFold(filepath.Ext(abs), ".csv") {
+		if !isCSV(abs) {
 			return nil, fmt.Errorf(
 				"%q is not a .csv file. Tabular / time-series data is a single CSV — "+
 					"pass the .csv file itself, or a directory containing exactly one .csv.",

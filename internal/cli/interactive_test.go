@@ -499,9 +499,9 @@ func TestRunInteractive_RejectsEmptyPath(t *testing.T) {
 func TestRunInteractive_TrimsPath(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"What should we call this dataset?":           "t",
-		"Where is your data? (the folder holding it)": "  " + dir + "  ",
-		"Which column holds the class?":               "churned",
+		"What should we call this dataset?":    "t",
+		"Where is your data? (file or folder)": "  " + dir + "  ",
+		"Which column holds the class?":        "churned",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a, false); err != nil {

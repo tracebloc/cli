@@ -69,8 +69,16 @@ func SniffFamily(path string) FamilySniff {
 	// A bare file: only a .csv is placeable (tabular), mirroring the
 	// bare-file shape DiscoverTabular accepts (#181). The image / text
 	// families need a directory, so any other bare file stays ambiguous.
+	//
+	// Lstat first: os.Stat above followed a symlink, but DiscoverTabular
+	// stats the CSV with Lstat and rejectSymlinks it — so a symlinked .csv
+	// is a layout the walk REFUSES. Sniffing it as confident tabular would
+	// break this func's "never claims more than the matching Discover* would
+	// accept" contract (it'd lock the guided flow to tabular, then hard-fail
+	// on the symlink guard). Treat a symlink like any other unplaceable file.
 	if !st.IsDir() {
-		if strings.EqualFold(filepath.Ext(abs), ".csv") {
+		if li, lerr := os.Lstat(abs); lerr == nil &&
+			li.Mode()&os.ModeSymlink == 0 && isCSV(abs) {
 			return FamilySniff{Family: FamilyTabular, Confident: true,
 				Echo: "Found a CSV table — this is tabular data."}
 		}
@@ -115,7 +123,7 @@ func SniffFamily(path string) FamilySniff {
 		if name == "labels.csv" {
 			hasLabels = true
 		}
-		if strings.EqualFold(filepath.Ext(name), ".csv") {
+		if isCSV(name) {
 			csvCount++
 		}
 	}
