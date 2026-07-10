@@ -44,6 +44,21 @@ func DetectImageSize(path string) (width, height int, err error) {
 // height]. Accepts "WxH" (the documented form, e.g. "512x512") and
 // "W,H" as a convenience. Both dimensions must be positive integers.
 func ParseTargetSize(s string) (width, height int, err error) {
+	return parseWxH("target size", s)
+}
+
+// ParseMinSize parses a --min-size flag value into [width, height],
+// the same WxH grammar as --target-size (#183). It plumbs to
+// spec.file_options.min_size, the ingestor's minimum-image-size floor
+// override (data-ingestors #348).
+func ParseMinSize(s string) (width, height int, err error) {
+	return parseWxH("min size", s)
+}
+
+// parseWxH parses a "WxH" (or "W,H") dimension pair, using kind in
+// error messages so callers surface "target size …" / "min size …"
+// verbatim. Both dimensions must be positive integers.
+func parseWxH(kind, s string) (width, height int, err error) {
 	sep := "x"
 	if strings.Contains(s, ",") {
 		sep = ","
@@ -51,21 +66,21 @@ func ParseTargetSize(s string) (width, height int, err error) {
 	parts := strings.Split(s, sep)
 	if len(parts) != 2 {
 		return 0, 0, fmt.Errorf(
-			"target size %q must be WxH (e.g. 512x512)", s)
+			"%s %q must be WxH (e.g. 512x512)", kind, s)
 	}
 	width, err = strconv.Atoi(strings.TrimSpace(parts[0]))
 	if err != nil {
 		return 0, 0, fmt.Errorf(
-			"target size %q: width is not an integer: %w", s, err)
+			"%s %q: width is not an integer: %w", kind, s, err)
 	}
 	height, err = strconv.Atoi(strings.TrimSpace(parts[1]))
 	if err != nil {
 		return 0, 0, fmt.Errorf(
-			"target size %q: height is not an integer: %w", s, err)
+			"%s %q: height is not an integer: %w", kind, s, err)
 	}
 	if width <= 0 || height <= 0 {
 		return 0, 0, fmt.Errorf(
-			"target size %q: width and height must both be positive", s)
+			"%s %q: width and height must both be positive", kind, s)
 	}
 	return width, height, nil
 }

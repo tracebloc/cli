@@ -12,12 +12,12 @@ package cluster
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/tracebloc/cli/internal/pathutil"
 )
 
 // KubeconfigOptions captures every knob the customer can turn when
@@ -142,23 +142,13 @@ func NewClientset(rc *ResolvedConfig) (kubernetes.Interface, error) {
 }
 
 // expandPath handles `~/.kube/config` → `/home/user/.kube/config`
-// since clientcmd's ExplicitPath wants an absolute path. Empty
-// strings pass through unchanged (they signal "use defaults" to
-// clientcmd).
+// (and `~alice/.kube/config` → alice's home) since clientcmd's
+// ExplicitPath wants an absolute path. Empty strings pass through
+// unchanged (they signal "use defaults" to clientcmd). It delegates to
+// the shared pathutil.ExpandHome so ~-expansion is identical to the
+// data-ingest path helper — same ~user syntax, same result, every
+// subcommand. An unresolvable home is returned unexpanded so clientcmd's
+// own "tried to read ~/.kube/config and got X" error still surfaces.
 func expandPath(p string) string {
-	if p == "" {
-		return ""
-	}
-	if p[0] != '~' {
-		return p
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		// Best-effort: return the unexpanded path and let
-		// clientcmd's error surface mention it. Failing here would
-		// hide the more useful "tried to read ~/.kube/config and
-		// got X" error downstream.
-		return p
-	}
-	return filepath.Join(home, p[1:])
+	return pathutil.ExpandHome(p)
 }

@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/tracebloc/cli/internal/cluster"
+	"github.com/tracebloc/cli/internal/pathutil"
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/schema"
 	"github.com/tracebloc/cli/internal/submit"
@@ -35,14 +36,19 @@ func newDataCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "data",
 		Aliases: []string{"dataset"},
-		Short:   "Manage the datasets in your client",
-		Long: `Commands for staging and managing the datasets your client holds —
+		Short:   "Manage the datasets in your workspace",
+		Long: `Commands for ingesting and managing the datasets your workspace holds —
 the data models train on. It stays on your infrastructure.
 
-` + "`data ingest`" + ` stages a local dataset into your client's storage,
+` + "`data ingest`" + ` ingests a local dataset into your workspace's storage,
 submits the ingestion run, and watches it to completion (streaming
 logs + the final summary). ` + "`data validate`" + ` checks an ingest.yaml
 locally first.
+
+What a dataset looks like depends on the task:
+  tabular / time-series — a .csv file, or a folder with one .csv
+  image                  — a folder with labels.csv + images/
+  text                   — a folder with labels.csv + texts/
 
 ` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run
 before the first ingest.`,
@@ -58,7 +64,7 @@ before the first ingest.`,
 	return cmd
 }
 
-// newDataIngestCmd implements `tracebloc data ingest <local-path>`.
+// newDataIngestCmd implements `tracebloc data ingest <dataset>`.
 //
 // Phase 3 scope (now complete across PR-a + PR-b):
 //
@@ -91,11 +97,19 @@ func newDataIngestCmd() *cobra.Command {
 		// Ingest-spec flags. image_classification + the tabular /
 		// time-series family are supported today; text + detection +
 		// segmentation land in later increments.
-		table             string
-		category          string
+		//
+		// --name/--task are the canonical flags (#180); --table/--category
+		// stay on as hidden deprecated aliases so existing scripts keep
+		// working. --intent is unchanged. The wire/spec field names don't
+		// change — this is a CLI-surface rename only.
+		name              string
+		tableAlias        string
+		task              string
+		categoryAlias     string
 		intent            string
 		labelColumn       string
 		targetSize        string
+		minSize           string
 		schemaFlag        string
 		labelPolicy       string
 		timeColumn        string
@@ -126,23 +140,46 @@ func newDataIngestCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:     "ingest <local-path>",
+		Use:     "ingest <dataset>",
 		Aliases: []string{"push"},
-		Short:   "Stage a local dataset into your client's storage",
-		Long: `Stages a local dataset into your client's shared storage,
-submits an ingestion run to jobs-manager, and watches the ingestor Job
-to completion. Supports 9 task categories (image classification,
+		Short:   "Ingest a local dataset into your workspace",
+		Long: `Ingests a local dataset into your workspace's storage,
+submits the ingestion run, and follows it to completion (streaming
+progress + the final summary). Your data never leaves your own
+infrastructure. Supports 9 tasks (image classification,
 object/keypoint detection, text classification, masked language
-modeling, and the tabular / time-series family); pick one with --category.
+modeling, and the tabular / time-series family); pick one with --task.
 
-Expected local layout (image_classification shown):
+<dataset> is the data itself. What it looks like depends on the task:
 
-    <local-path>/
-      labels.csv             (required)
-      images/                (required)
-        001.jpg
-        002.jpg
-        ...
+  tabular / time-series — the dataset is a single CSV. Pass the .csv
+  file directly, or a folder holding exactly one .csv:
+
+      churn.csv                (the .csv file itself)
+    or
+      churn/
+        data.csv               (the one .csv in the folder)
+
+  image (classification, object/keypoint detection) — a folder with
+  labels.csv + an images/ subfolder:
+
+      cats_dogs/
+        labels.csv             (required)
+        images/                (required)
+          001.jpg
+          ...
+
+  text (classification, masked language modeling) — a folder with
+  labels.csv + a texts/ subfolder:
+
+      reviews/
+        labels.csv             (required)
+        texts/                 (required)
+          001.txt
+          ...
+
+A bare .csv file is accepted only for the tabular / time-series family;
+image and text datasets must be a folder.
 
 Accepted image extensions: .jpg, .jpeg, or .png (case-insensitive).
 All images in one dataset must share a single type — the cluster
@@ -155,13 +192,13 @@ see tracebloc/client#147 non-goals.
 Exit codes:
   0   files staged + ingested successfully (or --detach: just staged + submitted)
   2   schema validation failed (synthesized spec rejected) or
-      v0.1-unsupported category passed
+      v0.1-unsupported task passed
   3   local-layout or kubeconfig error
   4   cluster reachable but no tracebloc client / shared storage missing
   5   ingestor SA token couldn't be obtained, or jobs-manager
       rejected the token (401/403)
   6   destination table already exists (re-run with --overwrite to
-      replace it, or pick a different --table)
+      replace it, or pick a different --name)
   7   pre-flight succeeded but staging the files failed
       (Pod creation, image pull, exec stream, or remote tar error) —
       or, with --overwrite, removing the old table failed
@@ -174,6 +211,24 @@ Exit codes:
 			if len(args) > 0 {
 				localPath = args[0]
 			}
+			// Resolve the deprecated flag aliases (#180): the canonical
+			// flag wins; a hidden legacy alias fills in only when the new
+			// flag wasn't passed, so old scripts keep working without the
+			// new surface silently shadowing them. The wire/spec field
+			// names are unchanged — this is a CLI rename only.
+			nameVal := name
+			if cmd.Flags().Changed("table") && !cmd.Flags().Changed("name") {
+				nameVal = tableAlias
+			}
+			taskVal := task
+			if cmd.Flags().Changed("category") && !cmd.Flags().Changed("task") {
+				taskVal = categoryAlias
+			}
+			// Whether the task was chosen at all (via either spelling).
+			// Dropping --task's old image_classification default means an
+			// unset task now drives the picker (TTY) or a clear error
+			// (non-interactive), never a silent image assumption.
+			taskSet := cmd.Flags().Changed("task") || cmd.Flags().Changed("category")
 			// Guided mode: on a terminal (and unless --no-input), prompt
 			// for whatever's still missing. Off a TTY / with --no-input,
 			// prompter stays nil and runDataIngest keeps flag-only
@@ -200,11 +255,12 @@ Exit codes:
 					Context:    contextOverride,
 					Namespace:  nsOverride,
 					Spec: push.SpecArgs{
-						Table: table, Category: category, Intent: intent,
+						Table: nameVal, Category: taskVal, Intent: intent,
 						LabelColumn: labelColumn, LabelPolicy: labelPolicy, TimeColumn: timeColumn,
 						NumberOfKeypoints: numberOfKeypoints,
 					},
 					TargetSizeFlag: targetSize,
+					MinSizeFlag:    minSize,
 					SchemaFlag:     schemaFlag,
 					DryRun:         dryRun,
 					Overwrite:      overwrite,
@@ -215,7 +271,7 @@ Exit codes:
 					Printer:        printer,
 					Interactive:    interactive,
 					Prompter:       pr,
-					CategorySet:    cmd.Flags().Changed("category"),
+					TaskSet:        taskSet,
 					OutputJSON:     outputJSON,
 					JSONOut:        jsonOut,
 				})
@@ -234,20 +290,32 @@ Exit codes:
 	// pre-empts our richer schema-driven diagnostic. Instead, the
 	// schema validator catches missing/empty values with the canonical
 	// JSON-pointer-anchored error.
-	cmd.Flags().StringVar(&table, "table", "",
-		"destination table name (MySQL identifier; matches /data/shared/<table>/ on the PVC)")
-	cmd.Flags().StringVar(&category, "category", "image_classification",
-		"task category, one of: "+push.SupportedCategoriesList())
+	cmd.Flags().StringVar(&name, "name", "",
+		"a name for this dataset — start with a letter or underscore, then letters/digits/underscores — you'll reference it by this name when you start a training run")
+	cmd.Flags().StringVar(&tableAlias, "table", "",
+		"deprecated alias for --name")
+	_ = cmd.Flags().MarkHidden("table")
+	cmd.Flags().StringVar(&task, "task", "",
+		"the task this data is for, one of: "+push.SupportedCategoriesList()+
+			". Omit it on a terminal to pick interactively.")
+	cmd.Flags().StringVar(&categoryAlias, "category", "",
+		"deprecated alias for --task")
+	_ = cmd.Flags().MarkHidden("category")
 	cmd.Flags().StringVar(&intent, "intent", "",
-		"intent: train|test")
+		"is this training or test data? train|test (default train)")
 	cmd.Flags().StringVar(&labelColumn, "label-column", "",
-		"name of the label/target column (in labels.csv for image categories, in the data CSV for tabular)")
+		"name of the label/target column (in labels.csv for image tasks, in the data CSV for tabular)")
 	cmd.Flags().StringVar(&targetSize, "target-size", "",
-		"image categories only: resolution as WxH (e.g. 512x512). Default: auto-detected from the first image. "+
-			"All images must share this resolution — the ingestor validates it, it does not resize.")
+		"image tasks only: the resolution your images already are, as WxH (e.g. 512x512). tracebloc never "+
+			"resizes — it checks every image is exactly this size and rejects any that differ. Default: "+
+			"read from your first image.")
+	cmd.Flags().StringVar(&minSize, "min-size", "",
+		"image tasks only: reject images smaller than WxH before the ingest (e.g. 64x64). Set it to the "+
+			"smallest size your model can train on — raise or lower it freely. Default: unset (no local "+
+			"size check).")
 	cmd.Flags().StringVar(&schemaFlag, "schema", "",
 		"tabular/time-series only: column types as col:TYPE,col:TYPE (e.g. age:INT,price:FLOAT). "+
-			"Default: inferred from the CSV (INT/FLOAT/VARCHAR).")
+			"Default: inferred from the CSV (INT/BIGINT/FLOAT/BOOLEAN/DATE/DATETIME/VARCHAR(n)).")
 	cmd.Flags().StringVar(&labelPolicy, "label-policy", "",
 		"regression-class only (tabular_regression, time_series_forecasting, time_to_event_prediction): "+
 			"passthrough|bucket (default bucket — bins the target so the raw value never leaves the cluster)")
@@ -293,6 +361,7 @@ type runDataIngestArgs struct {
 	Namespace      string
 	Spec           push.SpecArgs
 	TargetSizeFlag string // raw --target-size; resolved after Discover (image)
+	MinSizeFlag    string // raw --min-size; resolved after Discover (image) — #348 floor override
 	SchemaFlag     string // raw --schema; resolved or inferred after Discover (tabular)
 	DryRun         bool
 	Overwrite      bool
@@ -304,12 +373,13 @@ type runDataIngestArgs struct {
 
 	// Interactive guided mode (#28). When Interactive is true,
 	// runDataIngest prompts (via Prompter) for any missing core inputs
-	// before validation. CategorySet records whether --category was
-	// passed explicitly (its non-empty default would otherwise look
-	// like a deliberate choice). Prompter is nil off a TTY / --no-input.
+	// before validation. TaskSet records whether the task was passed
+	// explicitly (via --task or the hidden --category alias); an unset
+	// task drives the picker rather than assuming a default. Prompter is
+	// nil off a TTY / --no-input.
 	Interactive bool
 	Prompter    prompter
-	CategorySet bool
+	TaskSet     bool
 
 	// OutputJSON routes human output to stderr and emits a JSON result
 	// to JSONOut (stdout); set together by the RunE in --output-json
@@ -324,25 +394,32 @@ type runDataIngestArgs struct {
 	ImageDigest    string
 }
 
-// expandHome expands a leading ~ or ~/… to $HOME, leaving every other
-// path (relative, absolute, empty) untouched. It mirrors
-// cluster.expandPath — kept as a small local copy rather than coupling
-// the data path-handling to the cluster package's internals; if a
-// third caller appears, promote both to a shared pathutil.
+// expandHome expands a leading ~ (current user or ~user) to a home
+// directory, leaving every other path untouched. It's the CLI-local
+// name for the shared pathutil.ExpandHome; cluster.expandPath resolves
+// to the same helper, so ~-expansion is identical across subcommands
+// (a --kubeconfig ~alice/... resolves alice's home just like a data
+// ingest path does). See pathutil.ExpandHome for the full contract. (#181)
 func expandHome(path string) string {
-	if path == "" || path[0] != '~' {
-		return path
+	return pathutil.ExpandHome(path)
+}
+
+// statDatasetPath is the "path existence FIRST" guard (#181): a typo'd
+// path fails plainly on the path — a clean "no such file or directory" —
+// before any family sniff, label preview, or schema work touches it.
+// Both entry points call it: the flag-only path from runDataIngest's 0b
+// step, and the guided path from runInteractive (before the family sniff),
+// so the invariant holds on every route rather than only the flag path.
+func statDatasetPath(path string) error {
+	if _, serr := os.Stat(path); serr != nil {
+		if errors.Is(serr, os.ErrNotExist) {
+			return &exitError{code: 3, err: fmt.Errorf(
+				"no such file or directory: %q — check the path to your dataset", path)}
+		}
+		return &exitError{code: 3, err: fmt.Errorf(
+			"can't read %q: %w", path, serr)}
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		// Can't resolve $HOME — leave it and let the downstream
-		// Discover* error mention the literal path, which is more
-		// useful than a generic failure here.
-		return path
-	}
-	// path[1:] is "" for "~" (→ home) and "/x" for "~/x" (→ home/x);
-	// filepath.Join cleans the join either way.
-	return filepath.Join(home, path[1:])
+	return nil
 }
 
 // runDataIngest is the full Phase 3 implementation: pre-flight
@@ -388,24 +465,38 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 
 	a.Printer.Banner("tracebloc", "data ingest")
 	a.Printer.Para(strings.TrimSpace(`
-This uploads a dataset from your machine into your tracebloc workspace so models
-can be trained on it. Your files are sent to the Kubernetes cluster your
-workspace was installed on — tracebloc checks them and loads them into a table
-your training runs read from. Your data stays on that cluster the whole time;
-other collaborators train against it without ever seeing the raw files.`))
+This ingests a dataset so models can train on it. Your files never leave your
+own infrastructure — tracebloc copies them into your workspace's storage,
+checks them, and loads them into a table your training runs read from. Other
+collaborators can train against that table without ever seeing the raw files.`))
 	a.Printer.Hintf("Learn more: https://docs.tracebloc.io")
 
 	// 0. Guided mode: prompt for any missing core inputs before
 	//    validation. Flags already provided win; non-TTY / --no-input
 	//    leaves Prompter nil and skips straight to the flag-only path.
 	if a.Interactive && a.Prompter != nil {
-		if err := runInteractive(a.Printer, a.Prompter, &a, a.CategorySet); err != nil {
+		if err := runInteractive(a.Printer, a.Prompter, &a, a.TaskSet); err != nil {
 			if errors.Is(err, errInteractiveCancelled) {
 				a.Printer.Infof("Cancelled — nothing was ingested.")
 				return nil
 			}
+			// A typed exitError from a guided step (e.g. the path-existence
+			// guard, which runInteractive runs before the family sniff)
+			// already carries its own code + clean message — surface it as-is
+			// rather than burying it under "interactive setup:".
+			var ee *exitError
+			if errors.As(err, &ee) {
+				return err
+			}
 			return &exitError{code: 3, err: fmt.Errorf("interactive setup: %w", err)}
 		}
+	}
+	// --intent defaults to train. Applied after the interactive block so
+	// the guided flow still asks "training or test?" (it prompts on an
+	// empty value); a non-interactive run that omits --intent gets train
+	// without erroring (RFC-0002 §5). The wire field stays "intent".
+	if a.Spec.Intent == "" {
+		a.Spec.Intent = "train"
 	}
 	if a.LocalPath == "" {
 		return &exitError{code: 3, err: errors.New(
@@ -419,6 +510,20 @@ other collaborators train against it without ever seeing the raw files.`))
 	// cluster.expandPath; done here so it covers both entry points
 	// before any push.Discover* call. (#37)
 	a.LocalPath = expandHome(a.LocalPath)
+
+	// 0b. Path existence FIRST — before any spec / schema / family
+	//     validation. A typo'd path should fail on the path with a plain
+	//     "no such file or directory", not surface later as a confusing
+	//     downstream error (e.g. the task gate asking which task the
+	//     non-existent data is for). runInteractive runs this same guard
+	//     before its family sniff / label preview, so the invariant holds on
+	//     the guided route too; this re-check covers the flag-only path and
+	//     is cheap (one stat). The family walk below stats again for its
+	//     layout-specific diagnostics; this is only about ordering the first
+	//     failure a customer sees. (#181)
+	if err := statDatasetPath(a.LocalPath); err != nil {
+		return err
+	}
 
 	// 1. Validate the table name BEFORE anything else. It's both
 	//    the MySQL identifier and the /data/shared/<table>/ PVC
@@ -443,25 +548,82 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    list rather than the schema's 11-option enum dump.
 	switch {
 	case a.Spec.Category == "":
-		// Left empty by a caller; let the schema produce the canonical
-		// "category is required" error downstream.
+		// No task chosen. In guided mode the picker already filled this;
+		// reaching here means a non-interactive run (or --no-input /
+		// --output-json) that omitted --task. Give a clear, actionable
+		// error instead of silently assuming images (the old default).
+		return &exitError{code: 2, err: fmt.Errorf(
+			"which task is this data for? pass --task — one of: %s. "+
+				"(On a terminal without --no-input, tracebloc asks you to pick.)",
+			push.SupportedCategoriesList())}
 	case push.IsCLISupported(a.Spec.Category):
 		// supported
 	case push.IsKnown(a.Spec.Category):
-		// A recognized category data ingest doesn't implement yet — image
-		// (semantic_segmentation) or text (causal_language_modeling, seq2seq,
-		// …). Routed here (not the default branch) so the
-		// user gets the registry's per-category pending-support reason, not a
-		// misleading "unrecognized category". Supported categories were already
-		// caught above, so IsKnown here means known-but-unsupported.
+		// A recognized category data ingest doesn't implement yet — today just
+		// semantic_segmentation (awaiting the ingestor's mask_id link column +
+		// training sign-off, backend#816). Routed here (not the default branch)
+		// so the user gets the registry's per-category pending-support reason,
+		// not a misleading "unrecognized category". Supported categories were
+		// already caught above, so IsKnown here means known-but-unsupported.
 		spec, _ := push.Lookup(a.Spec.Category)
 		return &exitError{code: 2, err: fmt.Errorf(
-			"category %q isn't supported by the CLI yet (%s). Supported categories: %s.",
+			"task %q isn't supported by the CLI yet (%s). Supported tasks: %s.",
 			a.Spec.Category, spec.UnsupportedNote, push.SupportedCategoriesList())}
 	default:
 		return &exitError{code: 2, err: fmt.Errorf(
-			"category %q isn't a recognized task category. Supported categories: %s.",
+			"task %q isn't a recognized task. Supported tasks: %s.",
 			a.Spec.Category, push.SupportedCategoriesList())}
+	}
+
+	// Image-only flags. --target-size / --min-size describe image
+	// resolution, so they're meaningless on a tabular / text task.
+	// Reject them explicitly here: without this guard they'd be parsed
+	// only inside the image branch below, so on a non-image task the
+	// value — even a malformed one — was silently dropped with no error.
+	if !push.IsImage(a.Spec.Category) {
+		for _, f := range []struct{ name, val string }{
+			{"--target-size", a.TargetSizeFlag},
+			{"--min-size", a.MinSizeFlag},
+		} {
+			if f.val != "" {
+				return &exitError{code: 2, err: fmt.Errorf(
+					"%s is image tasks only; it doesn't apply to task %q",
+					f.name, a.Spec.Category)}
+			}
+		}
+	}
+
+	// Task-scoped flags. Like --target-size/--min-size above, each of these is
+	// read only inside the one category branch that consumes it, so passing one
+	// on a task that doesn't use it silently dropped the value — and the user's
+	// intent — with no error, even though the help text says each is scoped.
+	// Reject a misapplied flag explicitly so it fails fast instead of being
+	// ignored (the scope mirrors spec.go's build gates exactly).
+	if a.SchemaFlag != "" && !push.IsTabular(a.Spec.Category) {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"--schema is tabular/time-series tasks only; it doesn't apply to task %q", a.Spec.Category)}
+	}
+	if a.Spec.LabelPolicy != "" && !push.IsRegressionClass(a.Spec.Category) {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"--label-policy is regression-class tasks only (tabular_regression, "+
+				"time_series_forecasting, time_to_event_prediction); it doesn't apply to task %q",
+			a.Spec.Category)}
+	}
+	if a.Spec.TimeColumn != "" && a.Spec.Category != "time_to_event_prediction" {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"--time-column is time_to_event_prediction only; it doesn't apply to task %q", a.Spec.Category)}
+	}
+	if a.Spec.NumberOfKeypoints != 0 && a.Spec.Category != "keypoint_detection" {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"--number-of-keypoints is keypoint_detection only; it doesn't apply to task %q", a.Spec.Category)}
+	}
+	// --label-column is meaningless for self-supervised text (the label is the
+	// text itself); buildText drops it, so accepting it silently discarded the
+	// user's value and the review echoed a column that never shipped.
+	if a.Spec.LabelColumn != "" && push.SelfSupervisedText(a.Spec.Category) {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"--label-column doesn't apply to task %q — it trains on the text itself, with no label column",
+			a.Spec.Category)}
 	}
 
 	// 3. Walk the local directory FIRST (local "fail fast"), dispatched
@@ -471,8 +633,10 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    resolution below needs (the image list for target-size, the
 	//    CSV for schema inference).
 	// err is the function's named return (see the --output-json defer
-	// at the top), so it's not redeclared here.
+	// at the top), so it's not redeclared here. The walk can take a moment
+	// on a large tree, so it gets a spinner — no blocking wait stays silent.
 	var layout *push.LocalLayout
+	walkSpin := a.Printer.Spinner("Reading your files", "")
 	switch {
 	case push.IsTabular(a.Spec.Category):
 		layout, err = push.DiscoverTabular(a.LocalPath)
@@ -484,12 +648,13 @@ other collaborators train against it without ever seeing the raw files.`))
 		// image_classification + keypoint_detection: labels.csv + images/.
 		layout, err = push.Discover(a.LocalPath)
 	}
+	walkSpin.Stop()
 	if err != nil {
 		return &exitError{code: 3, err: err}
 	}
 
-	a.Printer.Step(1, 4, "Check your dataset")
-	a.Printer.Hintf("Reading your files locally first — nothing has touched the cluster yet — so a layout or settings problem shows up right away.")
+	a.Printer.Step(1, 3, "Check your data")
+	a.Printer.Hintf("Reading your files locally first — nothing has touched your workspace yet — so a layout or settings problem shows up right away.")
 
 	// 3a. Per-category spec resolution from the local data, so the
 	//     synthesized spec carries the right fields before validation.
@@ -506,9 +671,14 @@ other collaborators train against it without ever seeing the raw files.`))
 			return &exitError{code: 3, err: perr}
 		}
 
-		// Column schema: an explicit --schema wins; otherwise infer
-		// INT/FLOAT/VARCHAR types from the CSV so the customer doesn't
-		// hand-write one for the common case.
+		// Column schema. An explicit --schema wins (raw flag, or the
+		// optional override the interactive prompt captures into SchemaFlag).
+		// Otherwise infer the types here — mirroring the ingestor's own rules
+		// (di#349) — and EMIT the result explicitly (below, via a.Spec.Schema
+		// → spec.schema), so the ingestor uses the CLI's answer regardless of
+		// its own version. Inference runs on both a no-schema non-interactive
+		// run and an interactive run where the user left the schema prompt
+		// blank; the risky cases below are surfaced as warnings.
 		if a.SchemaFlag != "" {
 			sch, perr := push.ParseSchema(a.SchemaFlag)
 			if perr != nil {
@@ -516,22 +686,28 @@ other collaborators train against it without ever seeing the raw files.`))
 			}
 			a.Spec.Schema = sch
 		} else {
-			sch, skipped, empty, ierr := push.InferSchema(layout.LabelsCSV)
+			res, ierr := push.InferSchema(layout.LabelsCSV)
 			if ierr != nil {
 				return &exitError{code: 3, err: fmt.Errorf("inferring schema from CSV: %w", ierr)}
 			}
-			a.Spec.Schema = sch
+			a.Spec.Schema = res.Schema
 			_, _ = fmt.Fprintf(out,
 				"Inferred schema for %d column(s) from %s (override with --schema).\n",
-				len(sch), filepath.Base(layout.LabelsCSV))
-			if len(skipped) > 0 {
+				len(res.Schema), filepath.Base(layout.LabelsCSV))
+			if len(res.Skipped) > 0 {
 				_, _ = fmt.Fprintf(out,
-					"  (skipped framework-managed column(s): %s)\n", strings.Join(skipped, ", "))
+					"  (skipped framework-managed column(s): %s)\n", strings.Join(res.Skipped, ", "))
 			}
-			if len(empty) > 0 {
+			if len(res.Empty) > 0 {
 				_, _ = fmt.Fprintf(out,
-					"  (warning: %d column(s) had no values in the sample and were typed FLOAT (nullable): %s)\n",
-					len(empty), strings.Join(empty, ", "))
+					"  (warning: %d column(s) had no values in the sample and were typed VARCHAR(1): %s)\n",
+					len(res.Empty), strings.Join(res.Empty, ", "))
+			}
+			if len(res.IDLike) > 0 {
+				_, _ = fmt.Fprintf(out,
+					"  (warning: %d column(s) look like identifiers (all-unique integers): %s — "+
+						"if any is a zero-padded code, pass --schema to type it VARCHAR)\n",
+					len(res.IDLike), strings.Join(res.IDLike, ", "))
 			}
 		}
 	case push.IsImage(a.Spec.Category):
@@ -567,6 +743,21 @@ other collaborators train against it without ever seeing the raw files.`))
 						"resolution mismatch.\n", derr)
 			}
 		}
+		// Minimum-size floor override (#348): plumb an explicit --min-size to
+		// spec.file_options.min_size. When unset, no spec field is emitted, so
+		// the ingestor applies its own default (none on the deployed
+		// v0.5.7/v0.6.0; 32x32 on develop post-#348) — and the local preview
+		// applies NO floor either (PreflightDataset only previews the floor
+		// when --min-size is set, so it never rejects an ingest the live
+		// cluster accepts). The below-floor reject is previewed in
+		// runLocalPreflight (ValidateImages).
+		if a.MinSizeFlag != "" {
+			w, h, perr := push.ParseMinSize(a.MinSizeFlag)
+			if perr != nil {
+				return &exitError{code: 2, err: perr}
+			}
+			a.Spec.MinSize = []int{w, h}
+		}
 		// Extension: every image must share one type, and the spec tells
 		// the cluster which one to validate against (file_options.extension).
 		// Without this the ingestor checked its .jpeg convention default and
@@ -577,9 +768,13 @@ other collaborators train against it without ever seeing the raw files.`))
 		}
 		a.Spec.Extension = ext
 	default:
-		// Text family: no extra per-category resolution. The label (for
-		// text_classification) comes straight from --label-column;
-		// masked_language_modeling needs neither a label nor a schema.
+		// Text family: no extra per-category resolution. The supervised text
+		// tasks (text_classification, token_classification,
+		// sentence_pair_classification) carry a label straight from
+		// --label-column; the self-supervised ones (masked/causal language
+		// modeling, seq2seq, embeddings) need neither a label nor a schema.
+		// buildText emits the label for exactly the supervised set, keyed on
+		// the registry's SelfSupervised flag (not a hardcoded id).
 	}
 
 	// 4. Synthesize the spec from flags + validate against schema.
@@ -634,8 +829,18 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    Errors mirror that command's exit-code contract (3 for
 	//    kubeconfig, 4 for missing release) so behaviour is
 	//    consistent across pre-flight commands.
-	a.Printer.Step(2, 4, "Connect to your workspace")
-	a.Printer.Hintf("Finding your tracebloc workspace and the shared storage your dataset will live on.")
+	// Connecting to the workspace + discovering its shared storage is
+	// Kubernetes plumbing (release / PVC / jobs-manager) the happy path keeps
+	// quiet — it's no longer a numbered step (RFC-0002 §6), and --verbose adds
+	// the release/PVC detail below. But the discovery itself is several blocking
+	// apiserver round-trips (kubeconfig load, release + PVC discovery, then the
+	// destination-exists check), so it still needs a visible status line — no
+	// silent wait on the happy path (RFC-0002 "progress on every wait").
+	// A plain line, not a spinner: discoverRelease can print its own
+	// namespace-fallback note mid-call, and a spinner's \r redraw would clobber
+	// it. ALL the logic below (discovery + the exit-6 destination guard) is
+	// unchanged; only the presentation moved.
+	a.Printer.Infof("Connecting to your workspace…")
 	// 6. PVC discovery (needPVC) confirms the chart's shared-data PVC is
 	//    Bound before we waste time provisioning a Pod that can't mount it.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
@@ -649,8 +854,9 @@ other collaborators train against it without ever seeing the raw files.`))
 	// DiscoverParentRelease (#7) and flows into the stage/teardown pods + the
 	// jobs-manager token mint below — no --ingestor-sa override.
 
-	// 7. Show what we found on the cluster — the customer's last look
-	//    before any bytes move.
+	// 7. Under --verbose, show what we found on the cluster; the happy path
+	//    keeps this Kubernetes detail hidden (printClusterSummary is a no-op
+	//    without --verbose).
 	printClusterSummary(a.Printer, release, pvc)
 
 	// 8a. Destination guard (cli#70, P4-lite): re-ingesting an existing
@@ -665,22 +871,30 @@ other collaborators train against it without ever seeing the raw files.`))
 	}
 	tableExists := existingTable != ""
 	if tableExists && !a.Overwrite {
-		return &exitError{code: 6, err: fmt.Errorf(
-			"table %q already exists in this client. Re-ingesting the same table doesn't merge or replace — "+
-				"the run would fail after uploading everything. Re-run with --overwrite to replace it, "+
-				"or pick a different --table. (`tracebloc data delete %s` also removes it.)",
-			existingTable, existingTable)}
+		// Folded decision (RFC-0002): in interactive mode a pre-existing table
+		// is a question, not a wall. Prompt to replace it; a "no" cancels
+		// cleanly (exit 0). Non-interactive (or --output-json / --no-input)
+		// still hard-fails exit 6 — a script must opt in with --overwrite.
+		proceed, aerr := existingTableAction(&a, existingTable)
+		if aerr != nil {
+			return aerr
+		}
+		if !proceed {
+			a.Printer.Infof("Cancelled — %q was left as-is; nothing was ingested.", existingTable)
+			return nil
+		}
+		a.Overwrite = true
 	}
 	if tableExists && a.Overwrite {
-		a.Printer.Warnf("Table %q already exists — --overwrite replaces it (table + files).", existingTable)
+		a.Printer.Warnf("Table %q already exists — replacing it (table + files).", existingTable)
 	}
 
 	// 8. Dry-run stop. Acknowledged success, plus a reminder of the
 	//    live-only steps (stage + ingest) the customer just skipped.
 	if a.DryRun {
 		a.Printer.Newline()
-		a.Printer.Successf("Dry-run complete — your dataset and cluster check out; nothing was created.")
-		a.Printer.Hintf("A real run continues with step 3 (stage your files) and step 4 (run the ingestion).")
+		a.Printer.Successf("Dry-run complete — your data and workspace check out; nothing was created.")
+		a.Printer.Hintf("A real run continues with step 2 (copy into your workspace) and step 3 (validate and load).")
 		if a.OutputJSON {
 			writePushJSON(a.JSONOut, "dry-run", spec, nil, "", "")
 			jsonEmitted = true
@@ -695,16 +909,18 @@ other collaborators train against it without ever seeing the raw files.`))
 		// are case-sensitive on Linux MySQL and PVC paths always are, so
 		// acting on a differently-cased --table would silently no-op the
 		// DROP/rm and then "succeed".
-		a.Printer.Infof("Removing the existing %q first…", existingTable)
 		plan := push.PlanTeardown(existingTable)
-		if _, terr := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
+		rmSpin := a.Printer.Spinner(fmt.Sprintf("Removing the existing %q first", existingTable), "")
+		_, terr := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
 			Namespace:          resolved.Namespace,
 			PVCClaimName:       pvc.ClaimName,
 			PVCMountPath:       pvc.MountPath,
 			Table:              existingTable,
 			ServiceAccountName: release.IngestorSAName,
 			Image:              a.StagePodImage,
-		}); terr != nil {
+		})
+		rmSpin.Stop()
+		if terr != nil {
 			// The teardown drops the table before removing files, so a
 			// partial failure can leave files the DB-backed guard can no
 			// longer see — a plain re-run would upload everything and then
@@ -726,10 +942,10 @@ other collaborators train against it without ever seeing the raw files.`))
 	//    Exit code 7 ("staging failed") is distinct from the
 	//    pre-flight codes so customers can branch on whether the
 	//    failure was their environment vs the actual data transfer.
-	a.Printer.Step(3, 4, "Stage your files")
-	a.Printer.Hintf("Your files upload securely into your workspace's storage — set up and cleaned up for you.")
+	a.Printer.Step(2, 3, "Copy into your workspace")
+	a.Printer.Hintf("Your files are copied securely into your workspace's storage — set up and cleaned up for you.")
 	progress := push.NewProgress(out, layout.TotalBytes,
-		fmt.Sprintf("Staging %s", a.Spec.Table))
+		fmt.Sprintf("Copying %s", a.Spec.Table))
 	// Defer Finish so a failure path that returns BEFORE
 	// StreamLayout (e.g. CreateStagePod fails on PSA rejection,
 	// WaitForStagePodReady times out) still clears the TTY
@@ -794,7 +1010,7 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 	//     min) because the full Phase 4 lifecycle — submit + watch
 	//     + log stream — can run that long for large ingestions.
 	//     The chart's helm flow uses the same token-mint code path.
-	a.Printer.Step(4, 4, "Run the ingestion")
+	a.Printer.Step(3, 3, "Validate and load")
 	if a.Detach {
 		a.Printer.Hintf("Submitting the run — with --detach it keeps running on your workspace after this command returns; the reconnect command is shown below.")
 	} else {
@@ -814,9 +1030,15 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 	//     through the kubeconfig-authenticated apiserver, same as
 	//     `kubectl port-forward`. Bugbot PR #10 r3 caught the
 	//     original broken-by-design direct-URL POST.
-	a.Printer.Infof("Connecting to your workspace to submit the run…")
+	// Opening the port-forward is a blocking wait (tunnel setup through the
+	// apiserver), so it runs under a spinner — no wait on the happy path stays
+	// silent (RFC-0002 "progress on every wait"). The submit POST itself is a
+	// separate ~30s synchronous wait; its spinner lives in submit.Run, next to
+	// the POST it covers.
+	connectSpin := a.Printer.Spinner("Connecting to your workspace to submit the run", "")
 	pf, err := portForwardJobsManagerFn(ctx, cs, resolved.RestConfig,
 		resolved.Namespace, release.JobsManagerServiceName, release.JobsManagerPort)
+	connectSpin.Stop()
 	if err != nil {
 		return false, &exitError{code: 8, err: fmt.Errorf("setting up jobs-manager port-forward: %w", err)}
 	}
@@ -881,8 +1103,8 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 	// (push.StagingCleanupTimeout): a failed or slow reclaim must not
 	// fail — or noticeably delay — a successful ingest.
 	if shouldReclaimStaging(status) {
-		a.Printer.Infof("Reclaiming the temporary staging copy on the cluster…")
-		if cerr := cleanStagingFn(ctx, cs,
+		reclaimSpin := a.Printer.Spinner("Reclaiming the temporary copy", "")
+		cerr := cleanStagingFn(ctx, cs,
 			&push.SPDYExecutor{Config: resolved.RestConfig, Client: cs},
 			resolved.Namespace, a.Spec.Table, push.PodSpecOptions{
 				Namespace:          resolved.Namespace,
@@ -891,8 +1113,10 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 				Table:              a.Spec.Table,
 				ServiceAccountName: release.IngestorSAName,
 				Image:              a.StagePodImage,
-			}); cerr != nil {
-			a.Printer.Warnf("Couldn't reclaim the temporary staging copy (%v). It's harmless — the next re-ingest of %q or a `tracebloc data delete %s` will clear it.",
+			})
+		reclaimSpin.Stop()
+		if cerr != nil {
+			a.Printer.Warnf("Couldn't reclaim the temporary copy (%v). It's harmless — the next re-ingest of %q or a `tracebloc data delete %s` will clear it.",
 				cerr, a.Spec.Table, a.Spec.Table)
 		}
 	}
@@ -963,9 +1187,8 @@ func classifyPushOutcome(res *submit.Result, err error) (string, *exitError) {
 }
 
 // printLocalSummary shows what the CLI found on disk plus the ingest
-// settings it assembled — the detail under step 1 ("Check your
-// dataset"). Split from the cluster summary so each sits under its own
-// numbered step. Mirrors `cluster info`'s section/Field layout.
+// settings it assembled — the detail under step 1 ("Check your data").
+// Mirrors `cluster info`'s section/Field layout.
 func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]any) {
 	cat, _ := spec["category"].(string)
 
@@ -981,9 +1204,6 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 		dir := push.TextSidecarDir(cat)
 		p.Field("labels.csv", layout.LabelsCSV)
 		p.Field(dir, fmt.Sprintf("%d files", len(layout.Sidecars[dir])))
-		if _, ok := layout.ExtraFiles["tokenizer.json"]; ok {
-			p.Field("tokenizer", "tokenizer.json")
-		}
 	default:
 		p.Field("labels.csv", layout.LabelsCSV)
 		imagesVal := fmt.Sprintf("%d files", len(layout.Images))
@@ -1002,8 +1222,8 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 	p.Field("total size", push.HumanBytes(layout.TotalBytes))
 
 	p.Section("Ingest settings")
-	p.Field("table", fmt.Sprintf("%v", spec["table"]))
-	p.Field("category", fmt.Sprintf("%v", spec["category"]))
+	p.Field("name", fmt.Sprintf("%v", spec["table"]))
+	p.Field("task", fmt.Sprintf("%v", spec["category"]))
 	p.Field("intent", fmt.Sprintf("%v", spec["intent"]))
 	switch lbl := spec["label"].(type) {
 	case string:
@@ -1017,17 +1237,23 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 	p.Field("destination", push.FinalDestPrefix(spec["table"].(string)))
 }
 
-// printClusterSummary shows the discovered workspace cluster target —
-// the detail under step 2 ("Connect to your workspace").
+// printClusterSummary shows the discovered workspace target. It's Kubernetes
+// plumbing (release / jobs-manager / shared PVC) the happy path hides, so the
+// whole block — header, fields, and the RWO-PVC note — prints only under
+// --verbose (RFC-0002 §6). Discovery + guards are unchanged; this is
+// presentation only.
 func printClusterSummary(p *ui.Printer, release *cluster.ParentRelease, pvc *cluster.SharedPVC) {
+	if !p.Verbose() {
+		return
+	}
 	p.Section("Target cluster")
-	p.Field("release", fmt.Sprintf("%s (chart %s)", release.ReleaseName, release.ChartVersion))
-	p.Field("jobs-manager", release.JobsManagerService)
-	p.Field("shared PVC", fmt.Sprintf("%s (%s)", pvc.ClaimName, pvc.Phase))
+	p.Detailf("release: %s (chart %s)", release.ReleaseName, release.ChartVersion)
+	p.Detailf("jobs-manager: %s", release.JobsManagerService)
+	p.Detailf("shared PVC: %s (%s)", pvc.ClaimName, pvc.Phase)
 	if !pvc.IsReadWriteMany() {
-		// Warn but don't block — RWO clusters still work; the scheduler
+		// Note but don't block — RWO clusters still work; the scheduler
 		// co-locates the stage Pod with the existing mounter.
-		p.Warnf("PVC is %v, not ReadWriteMany — the stage Pod will co-locate with the existing mounter", pvc.AccessModes)
+		p.Detailf("PVC is %v, not ReadWriteMany — the stage Pod will co-locate with the existing mounter", pvc.AccessModes)
 	}
 }
 
@@ -1143,6 +1369,40 @@ func destTableExists(ctx context.Context, cs kubernetes.Interface, resolved *clu
 		}
 	}
 	return "", ""
+}
+
+// existingTableAction resolves what to do when the destination table
+// already exists and --overwrite was NOT passed on the command line.
+//
+//   - proceed=true, err=nil     → replace it: the caller sets Overwrite and
+//     runs the same teardown `data delete` does.
+//   - proceed=false, err=nil    → the user declined the replace prompt; a
+//     clean cancel (exit 0), nothing ingested.
+//   - err != nil (exit 6)       → non-interactive and no --overwrite: refuse,
+//     same hard contract scripts have always had.
+//
+// Interactive mode prompts to replace UNLESS a --idempotency-key was
+// reused: a reused key + a replace is the data-loss trap the top-of-func
+// guard forbids (the teardown removes the data, then the cluster replays
+// the old run and ingests nothing), so that combination falls through to
+// the exit-6 refusal rather than being offered as a prompt.
+func existingTableAction(a *runDataIngestArgs, existingTable string) (proceed bool, err error) {
+	if a.Interactive && a.Prompter != nil && a.IdempotencyKey == "" {
+		ok, perr := a.Prompter.Confirm(fmt.Sprintf(
+			"A dataset named %q already exists — replace it?", existingTable), false)
+		if perr != nil {
+			if errors.Is(perr, errInteractiveCancelled) {
+				return false, nil
+			}
+			return false, &exitError{code: 3, err: fmt.Errorf("overwrite prompt: %w", perr)}
+		}
+		return ok, nil
+	}
+	return false, &exitError{code: 6, err: fmt.Errorf(
+		"table %q already exists in this workspace. Re-ingesting the same table doesn't merge or replace — "+
+			"the run would fail after uploading everything. Re-run with --overwrite to replace it, "+
+			"or pick a different --name. (`tracebloc data delete %s` also removes it.)",
+		existingTable, existingTable)}
 }
 
 // runLocalPreflight maps push.PreflightDataset — THE shared preview

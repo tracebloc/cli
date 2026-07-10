@@ -36,6 +36,7 @@
         "tabular_classification",
         "tabular_regression",
         "time_series_forecasting",
+        "time_series_classification",
         "time_to_event_prediction",
         "masked_language_modeling",
         "causal_language_modeling",
@@ -203,6 +204,13 @@
               "minItems": 2,
               "maxItems": 2,
               "description": "[width, height]. Image categories only. Default [512, 512]. The order matches PIL.Image.size and what ImageResolutionValidator expects."
+            },
+            "min_size": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 },
+              "minItems": 2,
+              "maxItems": 2,
+              "description": "[width, height] absolute minimum image size (#348). Images with either side below this are rejected as too small to train on. Image categories only. Defaults to [32, 32] (ImageResolutionValidator.MIN_IMAGE_SIZE) when unset; override per-model to match the model-zoo input requirement."
             },
             "extension": {
               "type": "string",
@@ -381,6 +389,7 @@
               "tabular_classification",
               "tabular_regression",
               "time_series_forecasting",
+              "time_series_classification",
               "time_to_event_prediction"
             ]
           }
@@ -388,6 +397,19 @@
         "required": ["category"]
       },
       "then": { "required": ["schema"] }
+    },
+    {
+      "description": "time_series_classification requires the fixed sequence columns: `schema` must declare both `sequence_id` (VARCHAR — groups the timestep rows of one sequence, e.g. a patient/device/session id) and `timestamp` (SQL TIMESTAMP, or a numeric step index like INT — orders the rows WITHIN each sequence). The column names are fixed by the platform; rename your columns to `sequence_id` / `timestamp` before ingest.",
+      "if": {
+        "properties": { "category": { "const": "time_series_classification" } },
+        "required": ["category"]
+      },
+      "then": {
+        "properties": {
+          "schema": { "required": ["sequence_id", "timestamp"] }
+        },
+        "required": ["schema"]
+      }
     },
     {
       "description": "Regression-class tasks require an explicit label.policy decision (must be the object form).",
@@ -434,7 +456,8 @@
               "text_classification",
               "token_classification",
               "sentence_pair_classification",
-              "tabular_classification"
+              "tabular_classification",
+              "time_series_classification"
             ]
           }
         },

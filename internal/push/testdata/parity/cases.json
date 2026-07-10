@@ -25,8 +25,8 @@
       "csv": "data.csv",
       "label_column": "label",
       "cli_verdict": "reject",
-      "ingestor_verdict": "reject",
-      "note": "the stdlib header probe does not strip the BOM \u2014 false in-cluster rejection the CLI must preview (cli#71)"
+      "ingestor_verdict": "accept",
+      "note": "DELIBERATE divergence (surfaced by the #348 schema re-sync, which pinned the ref past data-ingestors #338): at THIS pinned ref the in-cluster tabular schema probe now strips the BOM, so the ingestor accepts. But the DEPLOYED ingestor (v0.5.7) predates #338 and still falsely rejects a BOM'd tabular CSV post-upload, so the CLI keeps previewing that rejection (CheckTabularBOM, cli#71). Drop this divergence once #338 ships to prod. Flagged for follow-up."
     },
     {
       "name": "tabular-header-only",
@@ -53,8 +53,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
@@ -67,8 +67,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
@@ -82,8 +82,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
@@ -96,8 +96,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
@@ -111,8 +111,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
@@ -125,8 +125,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
@@ -139,12 +139,45 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
       "note": "ImageResolutionValidator: exact equality, no resize (cli#72c)"
+    },
+    {
+      "name": "imgc-too-small",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        16,
+        16
+      ],
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DELIBERATE divergence (deployment parity, #348): 16x16 images are below the 32x32 default floor, so the pinned ingestor (develop, di#348/#356) rejects. But the CLI must NOT block by default — the DEPLOYED ingestor (v0.5.7/v0.6.0) has NO floor and ingests these fine, so a default local reject would block an ingest the live cluster accepts (the inverse of tabular-bom, whose reject mirrors a real deployed rejection). The CLI previews the floor ONLY when --min-size is set (see imgc-min-size-override). Flip this to reject and default the preview floor once di#348 ships to prod. Flagged for follow-up."
+    },
+    {
+      "name": "imgc-min-size-override",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        24,
+        40
+      ],
+      "min_size": [
+        16,
+        32
+      ],
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "the --min-size override, cross-checked end-to-end (#348; closes the parity gap where min_size was representable on neither side). 24x40 images (W,H) with an explicit min_size [16,32] pass on BOTH sides — but the DEFAULT 32x32 floor would reject them (W=24<32), so this proves the override is actually read (not silently the default) and its [W,H] orientation is honored (a swapped [32,16] would reject on W=24<32). target_size matches the images, so the floor override is the sole discriminator.",
+      "value_parity": true
     },
     {
       "name": "imgc-header-only",
@@ -153,8 +186,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
@@ -167,8 +200,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "reject",
       "ingestor_verdict": "accept",
@@ -181,8 +214,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
@@ -195,12 +228,12 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        4
+        64,
+        32
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "non-square [W,H]=[8,4]: pins the target_size ORIENTATION end-to-end \u2014 an [H,W] swap on emit (the pre-P3 bug) flips this to reject in-cluster",
+      "note": "non-square [W,H]=[64,32] (both sides >= the 32x32 floor): pins the target_size ORIENTATION end-to-end \u2014 an [H,W] swap on emit (the pre-P3 bug) flips this to reject in-cluster",
       "value_parity": true
     },
     {
@@ -210,12 +243,12 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        4,
-        8
+        32,
+        64
       ],
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
-      "note": "the same 8\u00d74 images with target [4,8]: both sides must reject \u2014 proves the comparison is orientation-sensitive, not shape-normalized"
+      "note": "the same 64\u00d732 images with target [32,64]: both sides must reject \u2014 proves the comparison is orientation-sensitive, not shape-normalized"
     },
     {
       "name": "imgc-dup-header",
@@ -224,8 +257,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "reject",
       "ingestor_verdict": "accept",
@@ -238,8 +271,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
@@ -253,8 +286,8 @@
       "label_column": "label",
       "extension": ".jpg",
       "target_size": [
-        8,
-        8
+        32,
+        32
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
@@ -316,6 +349,101 @@
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
       "note": "same values under a FLOAT label: numeric read collapses 1/1.0 into one class \u2014 both sides reject (the counterpart pin)"
+    },
+    {
+      "name": "tsc-ok",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "3 sequences (T=3/2/2), 2 classes, per-group monotonic INT step index \u2014 the WS1 done-contract shape (backend#1054)"
+    },
+    {
+      "name": "tsc-missing-sequence-col",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "no sequence_id anywhere: SequenceGroupValidator rejects in-cluster; the CLI previews the fixed-column requirement (ingest.v1 conditional, Decision-2)"
+    },
+    {
+      "name": "tsc-null-sequence-id",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "empty + 'NA' sequence ids: unassignable timestep rows \u2014 SequenceGroupValidator's null-id rule, previewed by CheckSequenceRows (both null forms via pandas NA parsing)"
+    },
+    {
+      "name": "tsc-label-uniform",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "single-class dataset: LabelDiversityValidator (is_classification=True composes it for TSC), previewed via the registry's IsClassification gate \u2014 not a hardcoded tabular_classification id"
+    },
+    {
+      "name": "tsc-label-flip",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DELIBERATE divergence (documented gap): p1 flips label mid-sequence \u2014 LabelConstantWithinGroupValidator rejects in-cluster, the CLI has no whole-group label-constancy preview yet (needs a per-group scan; candidate follow-up if burned uploads show up)"
+    },
+    {
+      "name": "tsc-unsorted-timestamp",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DELIBERATE divergence (documented gap): p1's step index is out of order \u2014 PerGroupTimeOrderedValidator rejects in-cluster (monotonic non-decreasing PER GROUP), the CLI has no per-group order preview yet (same follow-up as tsc-label-flip)"
     }
   ]
 }

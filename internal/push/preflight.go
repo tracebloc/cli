@@ -31,6 +31,51 @@ import (
 // utf8BOM is the byte-order mark Excel's "CSV UTF-8" export prepends.
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
+// openCSVReader opens path for row-walking with any UTF-8 BOM stripped, the one
+// idiom the pandas-backed checks share (cli#71): pandas strips the BOM even
+// under encoding="utf-8", so a BOM'd file must read as if it had none or the
+// CLI would reject what the cluster accepts. FieldsPerRecord is -1 so a ragged
+// row is a per-row concern, not an abort, and LazyQuotes is on so a row pandas
+// tolerates (an unescaped/bare quote) is read here too rather than turned into
+// a parse error — otherwise these mirror-checks would reject a layout the
+// ingestor ingests cleanly (the inverse fail direction). With both set, a
+// non-EOF Read error is only ever a genuine I/O failure, so callers can treat
+// it as fail-closed. The caller closes the returned Closer.
+func openCSVReader(path string) (*csv.Reader, io.Closer, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	br := bufio.NewReader(f)
+	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
+		_, _ = br.Discard(3)
+	}
+	r := csv.NewReader(br)
+	r.FieldsPerRecord = -1
+	r.LazyQuotes = true // read the rows pandas would, don't drop or error on them
+	return r, f, nil
+}
+
+// matchColumnIndex returns the index of the header column matching want — an
+// exact match first, then case-insensitively with surrounding whitespace
+// stripped (the ingestor's resolve_column / _match_column rule). Returns -1
+// when absent. Shared by the label-column and filename-column checks so the
+// ingestor's single resolve rule has a single Go copy.
+func matchColumnIndex(header []string, want string) int {
+	for i, c := range header {
+		if c == want {
+			return i
+		}
+	}
+	wl := strings.ToLower(strings.TrimSpace(want))
+	for i, c := range header {
+		if strings.ToLower(strings.TrimSpace(c)) == wl {
+			return i
+		}
+	}
+	return -1
+}
+
 // HasBOM reports whether the file starts with a UTF-8 BOM.
 func HasBOM(path string) (bool, error) {
 	f, err := os.Open(path)
@@ -56,16 +101,11 @@ func HasBOM(path string) (bool, error) {
 // accepts. The one in-cluster path that does NOT strip it is the tabular
 // schema probe — see CheckTabularBOM.
 func ReadCSVHeader(path string) ([]string, error) {
-	f, err := os.Open(path)
+	r, closer, err := openCSVReader(path)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-	br := bufio.NewReader(f)
-	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
-		_, _ = br.Discard(3)
-	}
-	r := csv.NewReader(br)
+	defer func() { _ = closer.Close() }()
 	header, err := r.Read()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
@@ -110,16 +150,8 @@ func CheckTabularBOM(path string) error {
 // must stay this loose or the CLI would reject datasets the cluster
 // accepts).
 func CheckLabelColumn(header []string, labelColumn, csvName string) error {
-	for _, c := range header {
-		if c == labelColumn {
-			return nil
-		}
-	}
-	want := strings.ToLower(strings.TrimSpace(labelColumn))
-	for _, c := range header {
-		if strings.ToLower(strings.TrimSpace(c)) == want {
-			return nil
-		}
+	if matchColumnIndex(header, labelColumn) >= 0 {
+		return nil
 	}
 	return fmt.Errorf(
 		"label column %q isn't in %s's header (columns: %s). Pass --label-column with one of "+
@@ -158,17 +190,11 @@ func CheckDuplicateHeaders(header []string, csvName string) error {
 // category): a header-only CSV has zero ingestable records and is
 // rejected in-cluster before any table is created.
 func CheckHasDataRows(path string) error {
-	f, err := os.Open(path)
+	r, closer, err := openCSVReader(path)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", filepath.Base(path), err)
 	}
-	defer func() { _ = f.Close() }()
-	br := bufio.NewReader(f)
-	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
-		_, _ = br.Discard(3)
-	}
-	r := csv.NewReader(br)
-	r.FieldsPerRecord = -1 // row-shape problems are someone else's diagnostic
+	defer func() { _ = closer.Close() }()
 	if _, err := r.Read(); err != nil {
 		if errors.Is(err, io.EOF) {
 			return fmt.Errorf("%s is empty — add a header and at least one data row, then re-run", filepath.Base(path))
@@ -188,18 +214,30 @@ func CheckHasDataRows(path string) error {
 
 // ValidateImages previews the ingestor's ImageResolutionValidator
 // (image_validator.py): it opens EVERY image (header-only decode — cheap)
-// and rejects zero-byte files, undecodable files, and any image whose
-// resolution differs from the expected size (exact equality, zero
-// tolerance — the ingestor validates, it does not resize). Previously the
-// CLI decoded only the first image, so a single odd-sized or corrupt file
-// failed in-cluster after the full upload (cli#72b/c).
+// and rejects zero-byte files, undecodable files, images below the
+// minimum-size floor, and any image whose resolution differs from the
+// expected size (exact equality, zero tolerance — the ingestor validates,
+// it does not resize). Previously the CLI decoded only the first image, so
+// a single odd-sized or corrupt file failed in-cluster after the full
+// upload (cli#72b/c).
 //
 // expectedW/expectedH of 0 skips the resolution comparison (the caller
 // couldn't establish a target size — the ingestor would then auto-detect
 // from its first file, which the CLI's detection already mirrors).
-func ValidateImages(images []string, expectedW, expectedH int) error {
+//
+// minW/minH is the minimum-size floor (#348), mirroring the ingestor's
+// _meets_min_size: an image is too small when EITHER side is below the
+// floor; an image exactly at the floor passes. 0/0 disables the floor.
+// PreflightDataset passes a non-zero floor ONLY when the customer set
+// --min-size — it does NOT default to MinImageSize, because the deployed
+// ingestor has no floor yet (see the PreflightDataset image branch), so a
+// default block would reject an ingest the live cluster accepts. The
+// too-small check takes precedence over the resolution mismatch, exactly
+// as data-ingestors #348 returns the too_small error before the
+// target_size uniformity error.
+func ValidateImages(images []string, expectedW, expectedH, minW, minH int) error {
 	const maxListed = 5
-	var broken, mismatched []string
+	var broken, tooSmall, mismatched []string
 	for _, path := range images {
 		name := filepath.Base(path)
 		f, err := os.Open(path)
@@ -217,10 +255,23 @@ func ValidateImages(images []string, expectedW, expectedH int) error {
 			}
 			continue
 		}
+		if minW > 0 && minH > 0 && (cfg.Width < minW || cfg.Height < minH) {
+			tooSmall = append(tooSmall,
+				fmt.Sprintf("%s (%dx%d)", name, cfg.Width, cfg.Height))
+		}
 		if expectedW > 0 && expectedH > 0 && (cfg.Width != expectedW || cfg.Height != expectedH) {
 			mismatched = append(mismatched,
 				fmt.Sprintf("%s (%dx%d)", name, cfg.Width, cfg.Height))
 		}
+	}
+	// Floor first: an image below the minimum size simply can't be trained
+	// on, so it's the most fundamental, actionable failure — data-ingestors
+	// #348 returns it ahead of the uniformity / target_size mismatch.
+	if len(tooSmall) > 0 {
+		return fmt.Errorf(
+			"%d image(s) are smaller than the %dx%d minimum you set with --min-size: %s. "+
+				"Provide larger images, or lower the floor with --min-size, then re-run.",
+			len(tooSmall), minW, minH, TruncateList(tooSmall, maxListed))
 	}
 	if len(broken) > 0 {
 		return fmt.Errorf(
@@ -247,20 +298,17 @@ func ValidateImages(images []string, expectedW, expectedH int) error {
 // direction for image_classification) — the caller may surface them as a
 // note.
 //
-// filenameColumn is the CSV's first column (the ingestor reads filenames
-// positionally from the id column of labels.csv).
+// The image filename is read from the column NAMED "filename", not positionally:
+// the ingestor does record.get("filename") over the header-keyed record
+// (file_transfer.py / record_processor.py), so a `label,filename` header (filename
+// not first) resolves to that column — reading rec[0] would treat the LABEL value
+// as the filename and false-reject a layout the cluster ingests cleanly.
 func CrossCheckLabels(csvPath string, images []string, extension string) (missing []string, orphans []string, err error) {
-	f, err := os.Open(csvPath)
+	r, closer, err := openCSVReader(csvPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
 	}
-	defer func() { _ = f.Close() }()
-	br := bufio.NewReader(f)
-	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
-		_, _ = br.Discard(3)
-	}
-	r := csv.NewReader(br)
-	r.FieldsPerRecord = -1
+	defer func() { _ = closer.Close() }()
 
 	present := make(map[string]bool, len(images))
 	for _, img := range images {
@@ -268,12 +316,14 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 	}
 	referenced := make(map[string]bool)
 
-	if _, err := r.Read(); err != nil { // header
+	header, err := r.Read()
+	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, nil, nil // emptiness is CheckHasDataRows' diagnostic
 		}
 		return nil, nil, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
 	}
+	fnIdx := imageFileColIndex(header)
 	for {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
@@ -282,10 +332,10 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
 		}
-		if len(rec) == 0 {
-			continue
+		if fnIdx >= len(rec) {
+			continue // short/ragged row — no filename cell to check
 		}
-		name := strings.TrimSpace(rec[0])
+		name := strings.TrimSpace(rec[fnIdx])
 		if name == "" {
 			continue
 		}
@@ -309,6 +359,34 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 	sort.Strings(missing)
 	sort.Strings(orphans)
 	return missing, orphans, nil
+}
+
+// imageFileColIndex returns the header index of the column the ingestor reads each
+// image's file key from: "filename" if present, else "data_id" — the ingestor's own
+// precedence (image_paths.prepare_classification_pytorch_image_df / image_loader),
+// position-independent for both. A label,data_id CSV (no filename column) is ingested
+// cleanly by the cluster, so matching only "filename" and falling back to index 0
+// would read the label column as filenames and false-reject it (exit 3).
+//
+// Each name is matched exactly first, then case-insensitively with surrounding
+// whitespace stripped (the ingestor's _match_column rule). "filename" wins over
+// "data_id" when both resolve. Falls back to 0 only when NEITHER column exists — a
+// labels.csv the ingestor rejects at validate_data regardless, not this check's job
+// to diagnose.
+func imageFileColIndex(header []string) int {
+	for _, want := range []string{"filename", "data_id"} {
+		for i, h := range header {
+			if strings.TrimSpace(h) == want {
+				return i
+			}
+		}
+		for i, h := range header {
+			if strings.EqualFold(strings.TrimSpace(h), want) {
+				return i
+			}
+		}
+	}
+	return 0
 }
 
 // CheckAnnotationPairing previews the ingestor's FilePairingValidator
@@ -383,7 +461,13 @@ func TruncateList(items []string, max int) string {
 // even an empty string is a real class and every distinct trimmed string
 // counts. The caller derives the two flags from the label's schema type.
 func CheckLabelDiversity(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) error {
-	v := readLabelColumnValues(csvPath, labelColumn, dropNASentinels, collapseNumeric)
+	v, err := readLabelColumnValues(csvPath, labelColumn, dropNASentinels, collapseNumeric)
+	if err != nil {
+		// A mid-read failure leaves a PARTIAL column — trusting its class count
+		// would false-reject good data (under-counted classes) or pass a bad
+		// file. Fail closed, like the text preflight (#221) and CrossCheckLabels.
+		return err
+	}
 	// Benign-skip when the column is absent (that's CheckLabelColumn's
 	// diagnostic) or an unreadable file (another check's) — both leave Found
 	// false. Two or more classes is diverse enough.
@@ -416,7 +500,11 @@ type LabelReadValues struct {
 // readLabelColumnValues, so the value preview and the diversity verdict cannot
 // drift from each other.
 func ReadLabelValues(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) LabelReadValues {
-	return readLabelColumnValues(csvPath, labelColumn, dropNASentinels, collapseNumeric)
+	// The preview path tolerates a mid-read failure as "not found" (the
+	// diversity GATE, CheckLabelDiversity, is the one that fails closed on it);
+	// a partial preview simply reports nothing rather than a wrong count.
+	v, _ := readLabelColumnValues(csvPath, labelColumn, dropNASentinels, collapseNumeric)
+	return v
 }
 
 // readLabelColumnValues reads csvPath's label column once and returns its
@@ -427,21 +515,29 @@ func ReadLabelValues(csvPath, labelColumn string, dropNASentinels, collapseNumer
 // the ingestor's per-column read). Unlike the previous early-exit diversity
 // scan, this reads the whole column to build the full class set + row count —
 // one scan now backs both the diversity verdict and the value-level preview.
-func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) LabelReadValues {
-	f, err := os.Open(csvPath)
+func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) (LabelReadValues, error) {
+	r, closer, err := openCSVReader(csvPath)
 	if err != nil {
-		return LabelReadValues{} // Found=false: unreadable file is another check's diagnostic
+		return LabelReadValues{}, nil // Found=false: unreadable file is another check's diagnostic
 	}
-	defer func() { _ = f.Close() }()
-	br := bufio.NewReader(f)
-	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
-		_, _ = br.Discard(3)
+	defer func() { _ = closer.Close() }()
+	v, err := labelColumnValuesFrom(r, labelColumn, dropNASentinels, collapseNumeric)
+	if err != nil {
+		// Mid-read failure: the column is now partial. Fail closed rather than
+		// count a truncated class set (matches CrossCheckLabels / #221).
+		return LabelReadValues{}, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
 	}
-	r := csv.NewReader(br)
-	r.FieldsPerRecord = -1
+	return v, nil
+}
+
+// labelColumnValuesFrom is the label scan over an already-opened reader — split
+// out so the mid-stream read-error path can be exercised with an injected
+// failing reader. A benign miss (no header, or the column absent) returns
+// Found=false with a nil error; only a mid-scan read failure is a non-nil error.
+func labelColumnValuesFrom(r *csv.Reader, labelColumn string, dropNASentinels, collapseNumeric bool) (LabelReadValues, error) {
 	header, err := r.Read()
 	if err != nil {
-		return LabelReadValues{}
+		return LabelReadValues{}, nil // no header (empty/unreadable) — another check's diagnostic
 	}
 	col, resolved := -1, ""
 	for i, c := range header {
@@ -460,7 +556,7 @@ func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collaps
 		}
 	}
 	if col == -1 {
-		return LabelReadValues{} // Found=false — benign skip, like the ingestor
+		return LabelReadValues{}, nil // Found=false — benign skip, like the ingestor
 	}
 	distinct := map[string]bool{}
 	rowCount := 0
@@ -470,7 +566,7 @@ func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collaps
 			break
 		}
 		if err != nil {
-			continue
+			return LabelReadValues{}, err // caller wraps with the filename and fails closed
 		}
 		rowCount++
 		if len(rec) <= col {
@@ -496,7 +592,7 @@ func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collaps
 		classes = append(classes, k)
 	}
 	sort.Strings(classes)
-	return LabelReadValues{Resolved: resolved, Classes: classes, RowCount: rowCount, Found: true}
+	return LabelReadValues{Resolved: resolved, Classes: classes, RowCount: rowCount, Found: true}, nil
 }
 
 // knownMediaExtensions mirrors the ingestor's FileExtension.get_all_extensions
@@ -610,6 +706,117 @@ func CheckSchemaColumns(header []string, schema map[string]string, csvName strin
 		csvName, strings.Join(missing, ", "))
 }
 
+// CheckSequenceSchemaColumns previews the ingest.v1 schema's sequence-grouped
+// conditional (the time_series_classification if/then) plus the presence
+// probes of SequenceGroupValidator / PerGroupTimeOrderedValidator: a grouped
+// task's schema must declare BOTH fixed sequence columns — the group key
+// (sequence_id) and the time column (timestamp). The names are FIXED by the
+// platform (backend#1054 Decision-2); there is no flag to rename them, so the
+// fix is always renaming the CSV columns (or extending an explicit --schema).
+// Compared as exact schema-map keys, matching the JSON-schema `required`
+// semantics — the vendored-schema validation would reject the same YAML, this
+// check just fails earlier with a friendlier message.
+func CheckSequenceSchemaColumns(schema map[string]string, g GroupingSpec) error {
+	var missing []string
+	for _, col := range []string{g.GroupColumn, g.TimeColumn} {
+		if _, ok := schema[col]; !ok {
+			missing = append(missing, col)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"this task's data is sequence-grouped: the schema must declare %q (groups the timestep "+
+			"rows of one sequence — e.g. a patient/device/session id) and %q (orders the rows "+
+			"within each sequence). Missing: %s. The column names are fixed by the platform — "+
+			"rename your CSV columns to match and re-run.",
+		g.GroupColumn, g.TimeColumn, strings.Join(missing, ", "))
+}
+
+// CheckSequenceRows previews the SequenceGroupValidator's null-id rule
+// (sequence_group_validator.py): every timestep row must carry a non-empty
+// sequence id — a row whose group key is null/empty belongs to NO sequence,
+// so it can't contribute to any per-sequence sample and the in-cluster
+// rejection otherwise lands after the full upload. Together with
+// CheckHasDataRows this guarantees every sequence has >= 1 real row and at
+// least one sequence exists at all.
+//
+// NA sentinels count as null: the ingestor loads the column with pandas,
+// whose NA parsing turns "NA"/"null"/… into NaN before the validator's
+// isna() probe — mirrored here via naSentinels (the ingestor's
+// coercion.NA_SENTINELS). The column is resolved with the shared
+// case-/whitespace-insensitive rule (#340). An absent column benign-skips
+// (returns 0, nil): that is CheckSequenceSchemaColumns' /
+// CheckSchemaColumns' diagnostic, not this one's.
+//
+// sequences is the count of distinct non-null ids — the dataset's SAMPLE
+// count, since the platform counts sequence-grouped data in sequences, not
+// rows (backend#1054 Decision-3); the caller echoes it as a note.
+func CheckSequenceRows(csvPath, groupColumn string) (sequences int, err error) {
+	r, closer, err := openCSVReader(csvPath)
+	if err != nil {
+		return 0, nil // unreadable file is another check's diagnostic
+	}
+	defer func() { _ = closer.Close() }()
+	seqs, nullErr, readErr := sequenceScanFrom(r, groupColumn)
+	if readErr != nil {
+		// Mid-read failure: null/missing ids in the unread tail would never
+		// surface. Fail closed rather than pass a partial scan (matches
+		// CrossCheckLabels / #221).
+		return 0, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), readErr)
+	}
+	return seqs, nullErr
+}
+
+// sequenceScanFrom scans the group column over an already-opened reader — split
+// out so the mid-stream read-error path can be exercised with an injected
+// failing reader. nullErr is the domain rejection (empty/null ids); readErr is
+// a mid-scan read failure the caller wraps with the filename. A benign miss (no
+// header, or the column absent) returns zero values.
+func sequenceScanFrom(r *csv.Reader, groupColumn string) (sequences int, nullErr, readErr error) {
+	header, err := r.Read()
+	if err != nil {
+		return 0, nil, nil // no header — benign
+	}
+	col := matchColumnIndex(header, groupColumn)
+	if col == -1 {
+		return 0, nil, nil // benign skip — the schema checks own this diagnostic
+	}
+	distinct := map[string]bool{}
+	nullCount, rowNum, firstNullRow := 0, 0, 0
+	for {
+		rec, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return 0, nil, err // caller wraps with the filename and fails closed
+		}
+		rowNum++
+		v := ""
+		if len(rec) > col {
+			v = strings.TrimSpace(rec[col])
+		}
+		if _, isNA := naSentinels[v]; isNA {
+			nullCount++
+			if firstNullRow == 0 {
+				firstNullRow = rowNum
+			}
+			continue
+		}
+		distinct[v] = true
+	}
+	if nullCount > 0 {
+		return len(distinct), fmt.Errorf(
+			"the sequence column %q has %d empty/null value(s) (first at data row %d). Every "+
+				"timestep row must carry the id of the sequence it belongs to — the cluster rejects "+
+				"this after the upload; fill in the ids and re-run.",
+			groupColumn, nullCount, firstNullRow), nil
+	}
+	return len(distinct), nil, nil
+}
+
 // PreflightProblem is a preflight rejection. BadFlag marks problems whose
 // fix is a flag value (the CLI maps those to exit 2); everything else is a
 // data problem (exit 3).
@@ -662,7 +869,35 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if err := CheckLabelColumn(header, spec.LabelColumn, "the data CSV"); err != nil {
 			return nil, &PreflightProblem{Err: err, BadFlag: true}
 		}
-		if spec.Category == "tabular_classification" {
+		// Sequence-grouped tasks (time_series_classification), gated on the
+		// vendored contract's grouping TRAIT — never the category id
+		// (backend#1054 Decision-4). Previews SequenceGroupValidator +
+		// the ingest.v1 sequence-column conditional: the fixed sequence_id /
+		// timestamp columns must be in the schema, and every timestep row
+		// must carry a sequence id. Runs before the label checks, mirroring
+		// the ingestor's factory order (SequenceGroupValidator first).
+		if g, grouped := GroupingFor(spec.Category); grouped {
+			if err := CheckSequenceSchemaColumns(spec.Schema, g); err != nil {
+				return nil, dataProblem(err)
+			}
+			seqs, err := CheckSequenceRows(layout.LabelsCSV, g.GroupColumn)
+			if err != nil {
+				return nil, dataProblem(err)
+			}
+			if seqs > 0 {
+				// The platform counts this dataset in sequences, not rows
+				// (Decision-3) — echo the sample count the customer will see.
+				notes = append(notes, fmt.Sprintf(
+					"Note: %d sequence(s) grouped by %q — the platform counts this dataset "+
+						"in sequences, not rows", seqs, g.GroupColumn))
+			}
+		}
+		// Label diversity for every tabular classification task — gated on
+		// the registry's IsClassification (the ingestor's is_classification
+		// wiring: tabular_classification + time_series_classification), not
+		// a hardcoded id, so a future classification task can't silently
+		// skip the preview.
+		if IsClassification(spec.Category) {
 			// The label is a schema-typed column: the ingestor drops NA
 			// sentinels for it, and collapses numeric-looking values ONLY
 			// for numeric types — a VARCHAR label is pinned to dtype=str,
@@ -688,7 +923,24 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if len(spec.TargetSize) == 2 {
 			expW, expH = spec.TargetSize[0], spec.TargetSize[1]
 		}
-		if err := ValidateImages(layout.Images, expW, expH); err != nil {
+		// Minimum-size floor (#348). The floor lives in data-ingestors only
+		// on develop (di#348/#356); the DEPLOYED ingestor (v0.5.7/v0.6.0) has
+		// no floor and ingests small images fine. So the preview must NOT
+		// apply the 32x32 default on its own — a default block would reject an
+		// ingest the live cluster accepts, the inverse of the tabular-BOM
+		// block (whose reject mirrors a real deployed rejection). Apply the
+		// floor ONLY when the customer explicitly set --min-size (spec.MinSize)
+		// — their own declared requirement, honored locally regardless of the
+		// cluster. Once di#348 reaches prod, default this to MinImageSize and
+		// flip the imgc-too-small parity case so the floor is previewed by
+		// default. The emit side already matches: it omits file_options.min_size
+		// when unset, letting whichever ingestor is deployed apply its own
+		// default (none today; MinImageSize post-#348).
+		minW, minH := 0, 0
+		if len(spec.MinSize) == 2 {
+			minW, minH = spec.MinSize[0], spec.MinSize[1]
+		}
+		if err := ValidateImages(layout.Images, expW, expH, minW, minH); err != nil {
 			return nil, dataProblem(err)
 		}
 		if err := CheckHasDataRows(layout.LabelsCSV); err != nil {
@@ -755,14 +1007,28 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if err := CheckDuplicateHeaders(header, "labels.csv"); err != nil {
 			return nil, dataProblem(err)
 		}
-		if spec.Category == "text_classification" {
+		// Every SUPERVISED text task carries a label column the ingestor
+		// requires present — text_classification & sentence_pair_classification
+		// via LabelColumnValidator, token_classification via BIOLabelValidator —
+		// so preview the header for all of them. Gating on !SelfSupervisedText
+		// mirrors buildText's label emission, so a typo'd --label-column fails
+		// locally (exit 2) instead of after the full upload. The self-supervised
+		// tasks (MLM, CLM, seq2seq, embeddings) carry no label.
+		if !SelfSupervisedText(spec.Category) {
 			if err := CheckLabelColumn(header, spec.LabelColumn, "labels.csv"); err != nil {
 				return nil, &PreflightProblem{Err: err, BadFlag: true}
 			}
-			// Text labels are read untyped (like image), so no NA drop and
-			// no numeric collapse.
-			if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
-				return nil, dataProblem(err)
+			// LabelDiversityValidator is wired only for the is_classification
+			// text tasks (text_classification, sentence_pair_classification), NOT
+			// token_classification — its BIO tag sequences aren't class labels,
+			// so the ingestor runs BIOLabelValidator instead and never checks
+			// label diversity. Mirror that exactly (Principle 6): gate on
+			// IsClassification. Text labels are read untyped (like image), so no
+			// NA drop and no numeric collapse.
+			if IsClassification(spec.Category) {
+				if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
+					return nil, dataProblem(err)
+				}
 			}
 		}
 	}

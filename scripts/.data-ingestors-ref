@@ -9,4 +9,10 @@
 #
 # Format: the first non-comment, non-blank line is the ref (a full commit SHA
 # preferred; a branch name works but reintroduces floating drift).
-0de1f148f9f19c8838d275ab9e5295ae224385c2
+#
+# CURRENT PIN: the data-ingestors#359 merge commit on develop —
+# time_series_classification WS1 shipped (backend#1054/#1056): schema enum +
+# sequence-column conditional, layout.v1 grouping trait (Decision-4). This
+# bump closes the T16 coupled release opened by cli#216 (which pinned the
+# PR-branch head pre-merge).
+7b4ecac21ee491998ea4252daace9a5af6a1cb4a

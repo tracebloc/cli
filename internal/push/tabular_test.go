@@ -1,6 +1,8 @@
 package push
 
 import (
+	"archive/tar"
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,6 +40,86 @@ func TestDiscoverTabular_SingleCSV(t *testing.T) {
 	}
 }
 
+// TestDiscoverTabular_BareCSVFile: a bare .csv file (not a directory) is
+// accepted for tabular (#181). It resolves to a layout whose LabelsCSV is
+// that file, Root is the file's parent directory, and Images is empty — the
+// SAME shape a single-CSV directory produces, so the tar/stream machinery
+// stages it identically (as labels.csv under the dataset).
+func TestDiscoverTabular_BareCSVFile(t *testing.T) {
+	dir := t.TempDir()
+	csv := writeFile(t, dir, "churn.csv", "age,churned\n30,yes\n40,no\n")
+
+	layout, err := DiscoverTabular(csv)
+	if err != nil {
+		t.Fatalf("DiscoverTabular(bare .csv): %v", err)
+	}
+	if layout.LabelsCSV != csv {
+		t.Errorf("LabelsCSV = %q, want %q", layout.LabelsCSV, csv)
+	}
+	if layout.Root != dir {
+		t.Errorf("Root = %q, want the file's parent dir %q", layout.Root, dir)
+	}
+	if len(layout.Images) != 0 {
+		t.Errorf("Images = %v, want empty", layout.Images)
+	}
+	if layout.TotalBytes == 0 {
+		t.Errorf("TotalBytes = 0, want the CSV's size")
+	}
+}
+
+// TestDiscoverTabular_BareFileVsDirSameStaging: a bare .csv and a directory
+// holding that same CSV must stage byte-for-identically — both land the CSV
+// as labels.csv at the dataset root — so bare-file support is a pure CLI-side
+// input convenience and never changes what the ingestor reads.
+func TestDiscoverTabular_BareFileVsDirSameStaging(t *testing.T) {
+	body := "age,churned\n30,yes\n40,no\n"
+	fileDir := t.TempDir()
+	bare := writeFile(t, fileDir, "churn.csv", body)
+	// Directory holding the same single CSV.
+	someDir := t.TempDir()
+	writeFile(t, someDir, "churn.csv", body)
+
+	fileL, err := DiscoverTabular(bare)
+	if err != nil {
+		t.Fatalf("DiscoverTabular(file): %v", err)
+	}
+	dirL, err := DiscoverTabular(someDir)
+	if err != nil {
+		t.Fatalf("DiscoverTabular(dir): %v", err)
+	}
+
+	var fileTar, dirTar bytes.Buffer
+	if err := writeLayoutTar(&fileTar, fileL); err != nil {
+		t.Fatalf("writeLayoutTar(file): %v", err)
+	}
+	if err := writeLayoutTar(&dirTar, dirL); err != nil {
+		t.Fatalf("writeLayoutTar(dir): %v", err)
+	}
+	if !bytes.Equal(fileTar.Bytes(), dirTar.Bytes()) {
+		t.Error("bare-file and single-CSV-dir produced different staged tars; they must be identical")
+	}
+	// And the one entry is labels.csv.
+	tr := tar.NewReader(&fileTar)
+	hdr, err := tr.Next()
+	if err != nil {
+		t.Fatalf("reading tar entry: %v", err)
+	}
+	if hdr.Name != "labels.csv" {
+		t.Errorf("staged entry = %q, want labels.csv", hdr.Name)
+	}
+}
+
+// TestDiscoverTabular_BareNonCSVFile: a bare file that isn't a .csv is a
+// clear error — tabular data is a single CSV, so we say so rather than
+// letting a downstream reader choke.
+func TestDiscoverTabular_BareNonCSVFile(t *testing.T) {
+	dir := t.TempDir()
+	txt := writeFile(t, dir, "notes.txt", "hello")
+	if _, err := DiscoverTabular(txt); err == nil {
+		t.Error("DiscoverTabular(bare .txt) returned nil error, want a clear .csv-required error")
+	}
+}
+
 // TestDiscoverTabular_NoCSV and _MultipleCSV: the layout requires
 // exactly one CSV; zero or many is a clear, actionable error rather
 // than a guess.
@@ -60,48 +142,71 @@ func TestDiscoverTabular_MultipleCSV(t *testing.T) {
 
 // TestInferSchema covers the INT / FLOAT / VARCHAR inference from a
 // CSV header + sample rows. Integer-only columns → INT, numeric (with
-// a decimal) → FLOAT, anything else → VARCHAR(255).
+// a decimal) → FLOAT, anything else → VARCHAR(n) sized by the longest value.
 func TestInferSchema(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeFile(t, dir, "data.csv",
 		"count,age,price,name\n1,30,9.99,alice\n2,40,19.5,bob\n")
 
-	schema, _, _, err := InferSchema(csv)
+	res, err := InferSchema(csv)
 	if err != nil {
 		t.Fatalf("InferSchema: %v", err)
 	}
+	// VARCHAR(n) is sized by the longest sampled value (rune count),
+	// mirroring di#349 — "alice" (5) is the longest name.
 	want := map[string]string{
 		"count": "INT",
 		"age":   "INT",
 		"price": "FLOAT",
-		"name":  "VARCHAR(255)",
+		"name":  "VARCHAR(5)",
 	}
 	for col, typ := range want {
-		if schema[col] != typ {
-			t.Errorf("schema[%q] = %q, want %q (full: %v)", col, schema[col], typ, schema)
+		if res.Schema[col] != typ {
+			t.Errorf("schema[%q] = %q, want %q (full: %v)", col, res.Schema[col], typ, res.Schema)
 		}
 	}
 }
 
-// TestInferSchema_EmptyColumnIsFloat: a column with no non-empty sampled
-// value can't be typed from data; it's returned as a nullable FLOAT (not
-// VARCHAR — an all-NULL VARCHAR is what the ingestor's string validator
-// rejects) and reported in the `empty` return so the caller can warn.
-func TestInferSchema_EmptyColumnIsFloat(t *testing.T) {
+// TestInferSchema_NonFiniteIsNotFloat: Go's strconv.ParseFloat accepts
+// "Inf"/"Infinity"/"NaN", but the ingestor's FLOAT cast rejects a non-finite
+// value — so a column carrying one must NOT infer FLOAT (that would hand the
+// cluster a schema it only refuses AFTER the upload). The di#349 float grammar
+// (floatRE) pre-screens the token before ParseFloat, so "inf"/"NaN" fall
+// through to VARCHAR and preflight matches what the cluster will accept. No
+// parity-fixture case covers this, so pin it here.
+func TestInferSchema_NonFiniteIsNotFloat(t *testing.T) {
 	dir := t.TempDir()
-	csv := writeFile(t, dir, "data.csv", "filled,empty\n1,\n2,\n")
-	schema, _, empty, err := InferSchema(csv)
+	csv := writeFile(t, dir, "data.csv",
+		"reading,note\n1.5,ok\ninf,spike\nNaN,dropout\n")
+	res, err := InferSchema(csv)
 	if err != nil {
 		t.Fatalf("InferSchema: %v", err)
 	}
-	if schema["empty"] != "FLOAT" {
-		t.Errorf("schema[empty] = %q, want FLOAT", schema["empty"])
+	// Longest of 1.5/inf/NaN is 3 runes → VARCHAR(3); the point is it is NOT FLOAT.
+	if got := res.Schema["reading"]; got != "VARCHAR(3)" {
+		t.Errorf("schema[reading] = %q, want VARCHAR(3) (Inf/NaN must not infer FLOAT)", got)
 	}
-	if schema["filled"] != "INT" {
-		t.Errorf("schema[filled] = %q, want INT", schema["filled"])
+}
+
+// TestInferSchema_EmptyColumnIsVarchar1: a column with no non-empty sampled
+// value can't be typed from data; it comes back as VARCHAR(1) (mirroring
+// the ingestor's all-missing rule) and is reported in the Empty list so
+// it can be surfaced as a warning that the type is a guess with no evidence.
+func TestInferSchema_EmptyColumnIsVarchar1(t *testing.T) {
+	dir := t.TempDir()
+	csv := writeFile(t, dir, "data.csv", "filled,empty\n1,\n2,\n")
+	res, err := InferSchema(csv)
+	if err != nil {
+		t.Fatalf("InferSchema: %v", err)
 	}
-	if len(empty) != 1 || empty[0] != "empty" {
-		t.Errorf("empty = %v, want [empty]", empty)
+	if res.Schema["empty"] != "VARCHAR(1)" {
+		t.Errorf("schema[empty] = %q, want VARCHAR(1)", res.Schema["empty"])
+	}
+	if res.Schema["filled"] != "INT" {
+		t.Errorf("schema[filled] = %q, want INT", res.Schema["filled"])
+	}
+	if len(res.Empty) != 1 || res.Empty[0] != "empty" {
+		t.Errorf("empty = %v, want [empty]", res.Empty)
 	}
 }
 
@@ -113,24 +218,56 @@ func TestInferSchema_SkipsReservedColumns(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeFile(t, dir, "data.csv", "id,feature_00,label\n1,1.5,0\n2,2.5,1\n")
 
-	schema, skipped, _, err := InferSchema(csv)
+	res, err := InferSchema(csv)
 	if err != nil {
 		t.Fatalf("InferSchema: %v", err)
 	}
-	if _, present := schema["id"]; present {
-		t.Errorf("schema includes reserved column id: %v", schema)
+	if _, present := res.Schema["id"]; present {
+		t.Errorf("schema includes reserved column id: %v", res.Schema)
 	}
-	if schema["feature_00"] != "FLOAT" || schema["label"] != "INT" {
-		t.Errorf("schema = %v, want feature_00:FLOAT, label:INT", schema)
+	if res.Schema["feature_00"] != "FLOAT" || res.Schema["label"] != "INT" {
+		t.Errorf("schema = %v, want feature_00:FLOAT, label:INT", res.Schema)
 	}
 	foundID := false
-	for _, s := range skipped {
+	for _, s := range res.Skipped {
 		if s == "id" {
 			foundID = true
 		}
 	}
 	if !foundID {
-		t.Errorf("skipped = %v, want it to contain id", skipped)
+		t.Errorf("skipped = %v, want it to contain id", res.Skipped)
+	}
+}
+
+// TestInferColumnType_TimezoneParity pins the datetime timezone behavior
+// against data-ingestors' schema_inference.infer_column_type (di#349,
+// verified against pandas 3.0.3). A column of tz-aware RFC3339 values is
+// DATETIME only when the tokens share ONE timezone (all-naive, all-Z, or all
+// the same offset). Mixed UTC offsets — or a mix of tz-aware and tz-naive —
+// cannot form a single-timezone column, so the ingestor's _infer_datetime
+// returns None and the column is VARCHAR; the CLI must mirror that rather than
+// emit a tz-naive DATETIME that silently drops the per-row offset. The shared
+// parity fixture is ASCII-only and carries no tz case, so this is pinned here.
+func TestInferColumnType_TimezoneParity(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []string
+		want   string
+	}{
+		{"mixed_offsets", []string{"2024-01-02T00:00:00+00:00", "2024-01-02T00:00:00+05:00"}, "VARCHAR(25)"},
+		{"uniform_offset", []string{"2024-01-02T00:00:00+05:00", "2024-01-03T00:00:00+05:00"}, "DATETIME"},
+		{"all_zulu", []string{"2024-01-02T00:00:00Z", "2024-01-03T00:00:00Z"}, "DATETIME"},
+		{"naive_datetime", []string{"2024-01-02T00:00:00", "2024-01-03T00:00:00"}, "DATETIME"},
+		{"naive_plus_aware", []string{"2024-01-02T00:00:00", "2024-01-02T00:00:00+05:00"}, "VARCHAR(25)"},
+		{"naive_plus_zulu", []string{"2024-01-02T00:00:00", "2024-01-02T00:00:00Z"}, "VARCHAR(20)"},
+		{"space_naive", []string{"2024-01-02 13:45:00", "2024-01-03 08:00:00"}, "DATETIME"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := inferColumnType(c.values); got != c.want {
+				t.Errorf("inferColumnType(%v) = %q, want %q (di#349)", c.values, got, c.want)
+			}
+		})
 	}
 }
 

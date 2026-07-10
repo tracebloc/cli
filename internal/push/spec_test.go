@@ -181,6 +181,65 @@ func TestBuild_WithTargetSize_PassesSchema(t *testing.T) {
 	}
 }
 
+// TestBuild_WithMinSize_PassesSchema pins the #183 plumbing: when the
+// customer overrides the minimum-image-size floor (--min-size →
+// SpecArgs.MinSize), Build emits spec.file_options.min_size as
+// [width, height] and the result still validates against the embedded v1
+// schema (which learned about min_size in the #348 re-sync).
+func TestBuild_WithMinSize_PassesSchema(t *testing.T) {
+	spec := SpecArgs{
+		Table:       "cats_dogs_train",
+		Category:    "image_classification",
+		Intent:      "train",
+		LabelColumn: "label",
+		MinSize:     []int{64, 48}, // non-square, to also lock the [W, H] order
+	}.Build()
+
+	fo, ok := spec["spec"].(map[string]any)["file_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec.file_options missing/wrong type: %#v", spec["spec"])
+	}
+	ms, ok := fo["min_size"].([]int)
+	if !ok || len(ms) != 2 || ms[0] != 64 || ms[1] != 48 {
+		t.Fatalf("spec.file_options.min_size = %#v, want [64 48] (width, height)", fo["min_size"])
+	}
+
+	specBytes, err := yaml.Marshal(spec)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	v, err := schema.NewV1Validator()
+	if err != nil {
+		t.Fatalf("NewV1Validator: %v", err)
+	}
+	_, errs, parseErr := v.ValidateYAML(specBytes)
+	if parseErr != nil {
+		t.Fatalf("ValidateYAML parse error on our own output: %v\n%s", parseErr, specBytes)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("spec with min_size failed schema validation: %s\nspec:\n%s",
+			schema.FormatErrors(errs), specBytes)
+	}
+}
+
+// TestBuild_NoMinSize_OmitsMinSize: with no --min-size override, Build must
+// NOT emit file_options.min_size — both the CLI preview and the ingestor
+// then fall back to the shared 32x32 default (MinImageSize / MIN_IMAGE_SIZE).
+func TestBuild_NoMinSize_OmitsMinSize(t *testing.T) {
+	spec := SpecArgs{
+		Table:       "t",
+		Category:    "image_classification",
+		Intent:      "train",
+		LabelColumn: "label",
+		TargetSize:  []int{64, 64}, // emits a spec block, but min_size must be absent
+	}.Build()
+	if fo, ok := spec["spec"].(map[string]any)["file_options"].(map[string]any); ok {
+		if _, present := fo["min_size"]; present {
+			t.Errorf("Build() with no MinSize emitted file_options.min_size; want omitted")
+		}
+	}
+}
+
 // TestBuild_NoTargetSize_OmitsSpecBlock: when no resolution is set,
 // Build must NOT emit a spec block (the ingestor's per-category
 // default applies). Asserting the omission keeps the minimal-spec
@@ -282,6 +341,49 @@ func TestBuild_Tabular_PassesSchema(t *testing.T) {
 		LabelColumn: "DEATH_EVENT", TimeColumn: "time",
 		Schema: map[string]string{"age": "INT", "time": "INT", "DEATH_EVENT": "INT"},
 	}, true)
+
+	// time_series_classification (backend#1054): classification-class, so
+	// the label takes the plain STRING form (no label.policy) even though
+	// its time-series siblings are regression-class — and the schema must
+	// carry the fixed sequence columns (Decision-2), or the vendored
+	// ingest.v1 conditional rejects it (see the negative test below).
+	check("time_series_classification", SpecArgs{
+		Table: "t_tsc", Category: "time_series_classification", Intent: "train",
+		LabelColumn: "label",
+		Schema: map[string]string{
+			"sequence_id": "VARCHAR(64)", "timestamp": "INT",
+			"hr": "FLOAT", "label": "INT",
+		},
+	}, false)
+}
+
+// TestBuild_TSC_SchemaConditionalRequiresSequenceColumns pins that the
+// VENDORED ingest.v1 schema actually enforces the sequence-grouped
+// conditional (backend#1054 Decision-2): a time_series_classification spec
+// whose schema map lacks sequence_id/timestamp must FAIL local validation —
+// proof the WS1 schema re-sync landed, not just the enum value.
+func TestBuild_TSC_SchemaConditionalRequiresSequenceColumns(t *testing.T) {
+	v, err := schema.NewV1Validator()
+	if err != nil {
+		t.Fatalf("NewV1Validator: %v", err)
+	}
+	spec := SpecArgs{
+		Table: "t_tsc", Category: "time_series_classification", Intent: "train",
+		LabelColumn: "label",
+		Schema:      map[string]string{"hr": "FLOAT", "label": "INT"},
+	}.Build()
+	b, err := yaml.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	_, errs, parseErr := v.ValidateYAML(b)
+	if parseErr != nil {
+		t.Fatalf("parse: %v\n%s", parseErr, b)
+	}
+	if len(errs) == 0 {
+		t.Fatalf("schema without sequence_id/timestamp must fail the vendored ingest.v1 "+
+			"conditional — the re-synced schema isn't enforcing Decision-2:\n%s", b)
+	}
 }
 
 // TestBuild_Tabular_RegressionDefaultsPolicyBucket: regression-class
@@ -368,8 +470,27 @@ func TestValidateTableName_Accepts(t *testing.T) {
 		"ABC",
 		"table_123",
 		"_leading_underscore",
-		"9starts_with_digit", // valid MySQL identifier + safe path segment
 	} {
+		if err := ValidateTableName(name); err != nil {
+			t.Errorf("ValidateTableName(%q) = %v, want nil", name, err)
+		}
+	}
+}
+
+// TestValidateTableName_LeadingDigit mirrors the ingestor's table-name
+// rule (tracebloc/data-ingestors' validators/table_name_validator.py,
+// ^[a-zA-Z_][a-zA-Z0-9_]*$, the source of truth): a name must start
+// with a letter or underscore. The old CLI pattern was looser and let
+// leading-digit / all-digit names through only for the cluster to
+// reject them post-upload — this pins the CLI to the ingestor so any
+// name accepted here is accepted in-cluster.
+func TestValidateTableName_LeadingDigit(t *testing.T) {
+	for _, name := range []string{"1data", "123"} {
+		if err := ValidateTableName(name); err == nil {
+			t.Errorf("ValidateTableName(%q) = nil, want a leading-digit rejection", name)
+		}
+	}
+	for _, name := range []string{"_data", "Data1", "chest_xrays_train"} {
 		if err := ValidateTableName(name); err != nil {
 			t.Errorf("ValidateTableName(%q) = %v, want nil", name, err)
 		}

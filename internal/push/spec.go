@@ -30,15 +30,40 @@ import (
 //  2. A safe single path segment — the name becomes the
 //     /data/shared/<table>/ subdirectory on the PVC.
 //
-// The intersection of "MySQL identifier" and "single safe path
-// component" is [A-Za-z0-9_]: letters, digits, underscore. No
-// slashes, no dots — which is what closes the path-traversal hole
-// (see ValidateTableName).
+// The name must START with a letter or underscore, then letters,
+// digits, and underscores: [A-Za-z_][A-Za-z0-9_]*. No slashes, no
+// dots — which is what closes the path-traversal hole (see
+// ValidateTableName) — and no leading digit.
+//
+// This mirrors the ingestor's own check (the source of truth):
+// tracebloc/data-ingestors' validators/table_name_validator.py
+// requires ^[a-zA-Z_][a-zA-Z0-9_]*$. Any name accepted here is
+// therefore accepted in-cluster; the looser old pattern let
+// leading-digit / all-digit names ("123", "1data") through the CLI
+// only for the cluster to reject them post-upload.
 //
 // All the real-world example tables (chest_xrays_train,
 // cats_dogs_train) match this; it's the conventional snake_case
 // table-naming style anyway.
-var tableNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+var tableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// MinImageSize is the absolute lower bound on image dimensions as
+// [width, height] in pixels — the CLI's mirror of the ingestor's
+// ImageResolutionValidator.MIN_IMAGE_SIZE (data-ingestors #348).
+// Images with either side below this are rejected in-cluster as
+// too small to train on, independently of the target_size uniformity
+// check. A per-model override travels in spec.file_options.min_size
+// (SpecArgs.MinSize); when unset, the ingestor applies this default (on
+// develop — see below). The CLI preview does NOT default to it: it only
+// previews the floor when the customer set --min-size, because the DEPLOYED
+// ingestor (v0.5.7/v0.6.0) has no floor yet, so a default local block would
+// reject an ingest the live cluster accepts (see PreflightDataset). This
+// constant is still the mirror of the upstream default — once di#348 reaches
+// prod, PreflightDataset should default the preview floor to it.
+//
+// Keep this in lock-step with the upstream constant — it is the source of
+// truth. Do NOT invent a different floor here.
+var MinImageSize = [2]int{32, 32}
 
 // MaxTableNameLength caps `--table` at 63 chars. Two hard limits
 // agree on this:
@@ -74,7 +99,7 @@ const MaxTableNameLength = 63
 // both of which assume a validated name.
 func ValidateTableName(table string) error {
 	if table == "" {
-		return fmt.Errorf("table name is required (set --table)")
+		return fmt.Errorf("dataset name is required (set --name)")
 	}
 	if len(table) > MaxTableNameLength {
 		return fmt.Errorf(
@@ -86,12 +111,13 @@ func ValidateTableName(table string) error {
 	}
 	if !tableNamePattern.MatchString(table) {
 		return fmt.Errorf(
-			"table name %q is invalid: must match [A-Za-z0-9_]+ "+
-				"(letters, digits, underscore only). The table name is "+
+			"table name %q is invalid: must start with a letter or "+
+				"underscore, then letters, digits, and underscores only "+
+				"(matches [A-Za-z_][A-Za-z0-9_]*). The table name is "+
 				"used both as the MySQL table identifier and as the "+
 				"/data/shared/<table>/ subdirectory on the cluster PVC, "+
-				"so slashes, dots, and path-traversal sequences are "+
-				"rejected.",
+				"so a leading digit, slashes, dots, and path-traversal "+
+				"sequences are rejected.",
 			table)
 	}
 	return nil
@@ -153,6 +179,15 @@ type SpecArgs struct {
 	// non-square dataset fail in-cluster; #147 reverted it. Do not
 	// re-introduce a swap. (See the inline comment in buildImage.)
 	TargetSize []int
+
+	// MinSize, when len==2, holds the minimum acceptable image size as
+	// [W, H] — the override for the ingestor's minimum-image-size floor
+	// (data-ingestors #348). Emitted as spec.file_options.min_size.
+	// Empty (len 0) ⇒ omit, and both the CLI preview and the ingestor
+	// fall back to MinImageSize (32x32). Populated by the CLI from
+	// --min-size. Same [W, H] order as TargetSize — no swap. (Image
+	// categories only.)
+	MinSize []int
 
 	// Schema is the column→SQL-type map for tabular / time-series
 	// categories (required by the schema for those). Populated by the
@@ -233,15 +268,22 @@ func (a SpecArgs) Build() map[string]any {
 }
 
 // buildText fills in the text-family fields: the text-file sidecar
-// directory (texts/ for text_classification, sequences/ for
-// masked_language_modeling) and the label. masked_language_modeling
-// has NO label (the schema doesn't require one for it).
+// directory (texts/ for every text task except masked_language_modeling,
+// which uses sequences/) and, for the SUPERVISED text tasks, the label.
+//
+// The self-supervised text tasks (masked/causal language modeling, seq2seq,
+// embeddings) carry NO label column — their target is derived from the text
+// itself, and the schema does not require `label` for them. The supervised
+// ones (text_classification, token_classification, sentence_pair_classification)
+// do, so the label is emitted for exactly those — driven by the registry's
+// SelfSupervised flag (mirrored against the layout contract's has_label_column)
+// rather than a hardcoded id, so a new task can't be wired without deciding it.
 func (a SpecArgs) buildText(spec map[string]any, prefix string) {
 	dir := TextSidecarDir(a.Category)
 	// Trailing slash matches the directory-glob convention the
 	// ingestor uses for sidecar dirs.
 	spec[dir] = path.Join(prefix, dir) + "/"
-	if a.Category == "text_classification" {
+	if !SelfSupervisedText(a.Category) {
 		spec["label"] = a.LabelColumn
 	}
 }
@@ -275,6 +317,16 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 	fileOptions := map[string]any{}
 	if a.Extension != "" {
 		fileOptions["extension"] = a.Extension
+	}
+
+	// Minimum-size floor override (#348). Emitted under file_options for
+	// every image category (the schema places min_size there — there is no
+	// top-level min_size like keypoint's target_size). [width, height] —
+	// same contract as target_size, no swap. Omitted when unset so the
+	// ingestor's MIN_IMAGE_SIZE default (32x32) applies, matching the
+	// CLI's own preview default.
+	if len(a.MinSize) == 2 {
+		fileOptions["min_size"] = []int{a.MinSize[0], a.MinSize[1]}
 	}
 
 	if a.Category == "keypoint_detection" {

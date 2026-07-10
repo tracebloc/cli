@@ -94,31 +94,31 @@ func execDataIngest(t *testing.T, args []string) (exitCode int, stdout, stderr s
 func TestDataIngest_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	root := imgcLayout(t)
 	for _, badCategory := range []string{
-		"semantic_segmentation",     // known but blocked on the ingestor (data-ingestors#136)
+		"semantic_segmentation",     // known but pending (awaiting mask_id + training sign-off, backend#816)
 		"instance_segmentation",     // dead — removed from the registry (#1005), now unrecognized
 		"definitely-not-a-category", // nonsense; gate catches this too
 	} {
 		t.Run(badCategory, func(t *testing.T) {
 			code, _, _ := execDataIngest(t, []string{
 				root,
-				"--table=t1",
-				"--category=" + badCategory,
+				"--name=t1",
+				"--task=" + badCategory,
 				"--intent=train",
 				"--label-column=label",
 			})
 			if code != 2 {
-				t.Fatalf("expected exit 2 for unsupported category %q, got %d", badCategory, code)
+				t.Fatalf("expected exit 2 for unsupported task %q, got %d", badCategory, code)
 			}
 		})
 	}
 }
 
 // TestDataIngest_KnownUnsupportedCategory_PendingNote pins the Bugbot fix
-// (v0.4.0 RC): a registry-known but CLI-unsupported NON-image category
-// (causal_language_modeling) must get the registry's pending-support note, not
-// the misleading "isn't a recognized task category" message. execDataIngest
-// discards the error and SilenceErrors swallows it, so run the command here and
-// inspect the returned error directly.
+// (v0.4.0 RC): a registry-known but CLI-unsupported category
+// (semantic_segmentation — the sole remaining one after phase 4) must get the
+// registry's pending-support note, not the misleading "isn't a recognized task
+// category" message. execDataIngest discards the error and SilenceErrors
+// swallows it, so run the command here and inspect the returned error directly.
 func TestDataIngest_KnownUnsupportedCategory_PendingNote(t *testing.T) {
 	root := imgcLayout(t)
 	rootCmd := NewRootCmd(BuildInfo{Version: "test"})
@@ -126,18 +126,18 @@ func TestDataIngest_KnownUnsupportedCategory_PendingNote(t *testing.T) {
 	rootCmd.SetErr(&bytes.Buffer{})
 	rootCmd.SetArgs([]string{"data", "ingest",
 		"--kubeconfig=/tmp/tracebloc-cli-test-nonexistent-" + t.Name(),
-		root, "--table=t1", "--category=causal_language_modeling",
+		root, "--name=t1", "--task=semantic_segmentation",
 		"--intent=train", "--label-column=label"})
 	err := rootCmd.Execute()
 	if err == nil {
-		t.Fatal("expected an error for a known-but-unsupported category")
+		t.Fatal("expected an error for a known-but-unsupported task")
 	}
 	if got := ExitCodeFromError(err); got != 2 {
 		t.Fatalf("exit code = %d, want 2", got)
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "isn't a recognized task category") {
-		t.Errorf("known category misrouted to the unrecognized-category branch:\n%s", msg)
+	if strings.Contains(msg, "isn't a recognized task") {
+		t.Errorf("known task misrouted to the unrecognized-task branch:\n%s", msg)
 	}
 	if !strings.Contains(msg, "isn't supported by the CLI yet") {
 		t.Errorf("want the registry pending-support note, got:\n%s", msg)
@@ -145,9 +145,9 @@ func TestDataIngest_KnownUnsupportedCategory_PendingNote(t *testing.T) {
 }
 
 // TestDataIngest_TraversalTableName_ExitsTwo is the security
-// regression pin at the CLI layer. --table=../../etc must be
+// regression pin at the CLI layer. --name=../../etc must be
 // rejected with exit 2 BEFORE any spec synthesis or cluster work —
-// the table name flows into the /data/shared/<table>/ PVC path,
+// the name flows into the /data/shared/<table>/ PVC path,
 // and a traversal value would let PR-b's stage Pod escape that
 // subtree. Bugbot flagged this on PR #8 commit 4240097.
 func TestDataIngest_TraversalTableName_ExitsTwo(t *testing.T) {
@@ -156,8 +156,8 @@ func TestDataIngest_TraversalTableName_ExitsTwo(t *testing.T) {
 		t.Run(bad, func(t *testing.T) {
 			code, _, _ := execDataIngest(t, []string{
 				root,
-				"--table=" + bad,
-				"--category=image_classification",
+				"--name=" + bad,
+				"--task=image_classification",
 				"--intent=train",
 				"--label-column=label",
 			})
@@ -168,23 +168,23 @@ func TestDataIngest_TraversalTableName_ExitsTwo(t *testing.T) {
 	}
 }
 
-// TestDataIngest_MissingIntent_ExitsTwo: pins the "intent is
-// required" diagnostic path — different schema violation but the
-// same exit-code class.
-func TestDataIngest_MissingIntent_ExitsTwo(t *testing.T) {
+// TestDataIngest_OmittedIntent_DefaultsToTrain: --intent defaults to
+// "train", so omitting it no longer fails schema validation (exit 2).
+// The run gets past the spec checks and stops at the injected bad
+// kubeconfig (exit 3) — the same fall-through point as
+// TestDataIngest_BadKubeconfig_ExitsThree, which proves the default was
+// applied rather than the value being rejected as missing.
+func TestDataIngest_OmittedIntent_DefaultsToTrain(t *testing.T) {
 	root := imgcLayout(t)
-	code, _, stderr := execDataIngest(t, []string{
+	code, _, _ := execDataIngest(t, []string{
 		root,
-		"--table=t1",
-		"--category=image_classification",
-		// intent omitted
+		"--name=t1",
+		"--task=image_classification",
+		// intent omitted → defaults to train
 		"--label-column=label",
 	})
-	if code != 2 {
-		t.Fatalf("expected exit 2 for missing intent, got %d", code)
-	}
-	if !strings.Contains(stderr, "intent") {
-		t.Errorf("expected stderr to mention 'intent', got:\n%s", stderr)
+	if code != 3 {
+		t.Fatalf("expected exit 3 (default intent applied, then bad kubeconfig), got %d", code)
 	}
 }
 
@@ -202,13 +202,92 @@ func TestDataIngest_MissingIntent_ExitsTwo(t *testing.T) {
 func TestDataIngest_NonexistentLocalPath_ExitsThree(t *testing.T) {
 	code, _, _ := execDataIngest(t, []string{
 		"/tmp/tracebloc-cli-test-no-such-dir-" + t.Name(),
-		"--table=t1",
-		"--category=image_classification",
+		"--name=t1",
+		"--task=image_classification",
 		"--intent=train",
 		"--label-column=label",
 	})
 	if code != 3 {
 		t.Fatalf("expected exit 3 for missing local path, got %d", code)
+	}
+}
+
+// TestDataIngest_NonexistentPath_BeatsTaskGate: a typo'd path must fail on
+// the path (exit 3), NOT on a downstream spec/family error, even when the
+// task is also wrong. Pins the #181 ordering fix: path existence is checked
+// before the category gate (which would otherwise exit 2 for the bad task
+// and send the user chasing the wrong problem).
+func TestDataIngest_NonexistentPath_BeatsTaskGate(t *testing.T) {
+	code, _, _ := execDataIngest(t, []string{
+		"/tmp/tracebloc-cli-test-no-such-dir-" + t.Name(),
+		"--name=t1",
+		"--task=definitely-not-a-task", // would be exit 2 at the task gate
+		"--intent=train",
+	})
+	if code != 3 {
+		t.Fatalf("expected exit 3 (path checked before the task gate), got %d", code)
+	}
+}
+
+// TestDataIngest_BareCSVFile_Accepted: a bare .csv is a valid tabular input
+// (#181). It gets PAST the layout walk — proven by the "Inferred schema"
+// line, which prints only after DiscoverTabular accepted the file — and then
+// falls through the local checks to the injected bad kubeconfig (exit 3),
+// the same fall-through a valid directory reaches.
+func TestDataIngest_BareCSVFile_Accepted(t *testing.T) {
+	dir := t.TempDir()
+	csv := filepath.Join(dir, "churn.csv")
+	if err := os.WriteFile(csv, []byte("age,churned\n30,yes\n40,no\n"), 0o644); err != nil {
+		t.Fatalf("write csv: %v", err)
+	}
+	code, stdout, _ := execDataIngest(t, []string{
+		csv,
+		"--name=churn",
+		"--task=tabular_classification",
+		"--intent=train",
+		"--label-column=churned",
+	})
+	if code != 3 {
+		t.Fatalf("expected exit 3 (bare .csv accepted, then bad kubeconfig), got %d", code)
+	}
+	if !strings.Contains(stdout, "Inferred schema") {
+		t.Errorf("want the schema-inference line proving the bare .csv passed the walk; stdout:\n%s", stdout)
+	}
+}
+
+// TestDataIngest_ImageBareFile_ExitsThree: the image family is directory-only.
+// A bare .csv passed as image_classification is rejected at the walk (exit 3)
+// and never reaches schema inference (that's tabular-only).
+func TestDataIngest_ImageBareFile_ExitsThree(t *testing.T) {
+	dir := t.TempDir()
+	csv := filepath.Join(dir, "labels.csv")
+	if err := os.WriteFile(csv, []byte("image_id,label\n1.jpg,c\n"), 0o644); err != nil {
+		t.Fatalf("write csv: %v", err)
+	}
+	code, stdout, _ := execDataIngest(t, []string{
+		csv,
+		"--name=imgs",
+		"--task=image_classification",
+		"--intent=train",
+		"--label-column=label",
+	})
+	if code != 3 {
+		t.Fatalf("expected exit 3 for a bare file passed as image, got %d", code)
+	}
+	if strings.Contains(stdout, "Inferred schema") {
+		t.Errorf("image walk must not run tabular schema inference on a bare file; stdout:\n%s", stdout)
+	}
+}
+
+// TestDataIngestCmd_UsesDatasetArgName: the positional arg is <dataset>
+// (renamed from <local-path>, #181) in the command's Use string and help.
+func TestDataIngestCmd_UsesDatasetArgName(t *testing.T) {
+	cmd := newDataIngestCmd()
+	if !strings.Contains(cmd.Use, "<dataset>") {
+		t.Errorf("Use = %q, want it to name the arg <dataset>", cmd.Use)
+	}
+	if strings.Contains(cmd.Use, "<local-path>") {
+		t.Errorf("Use = %q still uses the old <local-path> name", cmd.Use)
 	}
 }
 
@@ -230,8 +309,8 @@ func TestDataIngest_MissingLabelsCSV_ExitsThree(t *testing.T) {
 
 	code, _, _ := execDataIngest(t, []string{
 		root,
-		"--table=t1",
-		"--category=image_classification",
+		"--name=t1",
+		"--task=image_classification",
 		"--intent=train",
 		"--label-column=label",
 	})
@@ -249,8 +328,8 @@ func TestDataIngest_BadKubeconfig_ExitsThree(t *testing.T) {
 	root := imgcLayout(t)
 	code, _, _ := execDataIngest(t, []string{
 		root,
-		"--table=t1",
-		"--category=image_classification",
+		"--name=t1",
+		"--task=image_classification",
 		"--intent=train",
 		"--label-column=label",
 	})
@@ -270,7 +349,7 @@ func TestDataIngest_RequiresExactlyOneArg(t *testing.T) {
 		{
 			name: "no positional",
 			args: []string{
-				"--table=t1", "--category=image_classification",
+				"--name=t1", "--task=image_classification",
 				"--intent=train", "--label-column=label",
 			},
 		},
@@ -278,7 +357,7 @@ func TestDataIngest_RequiresExactlyOneArg(t *testing.T) {
 			name: "two positionals",
 			args: []string{
 				"./a", "./b",
-				"--table=t1", "--category=image_classification",
+				"--name=t1", "--task=image_classification",
 				"--intent=train", "--label-column=label",
 			},
 		},
@@ -290,6 +369,69 @@ func TestDataIngest_RequiresExactlyOneArg(t *testing.T) {
 				t.Errorf("expected non-zero exit for %s, got 0", c.name)
 			}
 		})
+	}
+}
+
+// TestDataIngest_DeprecatedFlagAliases pins that the pre-#180 flag names
+// still resolve through their hidden aliases so existing scripts don't
+// break: --table→--name and --category→--task. A valid
+// spec via the old names must fall through the local checks to the
+// injected bad kubeconfig (exit 3) exactly as the canonical names do; a
+// bad value via --category must still reach the task gate (exit 2),
+// proving the aliased value flows through rather than being ignored.
+func TestDataIngest_DeprecatedFlagAliases(t *testing.T) {
+	root := imgcLayout(t)
+
+	t.Run("valid via old names falls through to kubeconfig", func(t *testing.T) {
+		code, _, _ := execDataIngest(t, []string{
+			root,
+			"--table=t1",
+			"--category=image_classification",
+			"--intent=train",
+			"--label-column=label",
+		})
+		if code != 3 {
+			t.Fatalf("expected exit 3 (aliases resolved, then bad kubeconfig), got %d", code)
+		}
+	})
+
+	t.Run("bad value via --category reaches the task gate", func(t *testing.T) {
+		code, _, _ := execDataIngest(t, []string{
+			root,
+			"--table=t1",
+			"--category=definitely-not-a-task",
+			"--intent=train",
+			"--label-column=label",
+		})
+		if code != 2 {
+			t.Fatalf("expected exit 2 (aliased task value hit the gate), got %d", code)
+		}
+	})
+}
+
+// TestDataIngest_OmitTask_NonInteractive_Errors: dropping --task's old
+// image_classification default means a non-interactive run that omits the
+// task no longer silently assumes images. Off a TTY (as in tests) the
+// picker can't run, so the task gate returns a clear exit-2 error naming
+// --task. execDataIngest discards the error, so run the command directly
+// and inspect it (mirrors TestDataIngest_KnownUnsupportedCategory_PendingNote).
+func TestDataIngest_OmitTask_NonInteractive_Errors(t *testing.T) {
+	root := imgcLayout(t)
+	rootCmd := NewRootCmd(BuildInfo{Version: "test"})
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	rootCmd.SetArgs([]string{"data", "ingest",
+		"--kubeconfig=/tmp/tracebloc-cli-test-nonexistent-" + t.Name(),
+		root, "--name=t1", "--intent=train", "--label-column=label"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected an error when --task is omitted non-interactively")
+	}
+	if got := ExitCodeFromError(err); got != 2 {
+		t.Fatalf("exit code = %d, want 2", got)
+	}
+	if !strings.Contains(err.Error(), "--task") {
+		t.Errorf("error should tell the user to pass --task, got:\n%s", err.Error())
 	}
 }
 
@@ -316,12 +458,12 @@ func TestAliasResolution(t *testing.T) {
 		{
 			name: "dataset push alias resolves",
 			args: []string{"dataset", "push", "--help"},
-			want: "Stages a local dataset",
+			want: "Ingests a local dataset",
 		},
 		{
 			name: "data ingest canonical",
 			args: []string{"data", "ingest", "--help"},
-			want: "Stages a local dataset",
+			want: "Ingests a local dataset",
 		},
 		{
 			name: "dataset rm alias resolves",
@@ -399,6 +541,69 @@ func TestDestTableExists(t *testing.T) {
 	}
 }
 
+// existingTableAction is the folded promptable-overwrite decision: a
+// pre-existing table hard-fails exit 6 non-interactively, but becomes a
+// y/N prompt on a terminal (yes → replace, no → clean cancel).
+func TestExistingTableAction(t *testing.T) {
+	t.Run("non-interactive refuses with exit 6", func(t *testing.T) {
+		a := &runDataIngestArgs{Interactive: false, Printer: ui.New(&bytes.Buffer{})}
+		proceed, err := existingTableAction(a, "churn")
+		if proceed {
+			t.Error("non-interactive must not proceed without --overwrite")
+		}
+		if ExitCodeFromError(err) != 6 {
+			t.Errorf("exit code = %d, want 6", ExitCodeFromError(err))
+		}
+	})
+
+	t.Run("interactive yes → replace", func(t *testing.T) {
+		yes := true
+		a := &runDataIngestArgs{
+			Interactive: true,
+			Prompter:    &fakePrompter{confirm: &yes},
+			Printer:     ui.New(&bytes.Buffer{}),
+		}
+		proceed, err := existingTableAction(a, "churn")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !proceed {
+			t.Error("a yes to the replace prompt must proceed (overwrite)")
+		}
+	})
+
+	t.Run("interactive no → clean cancel", func(t *testing.T) {
+		no := false
+		a := &runDataIngestArgs{
+			Interactive: true,
+			Prompter:    &fakePrompter{confirm: &no},
+			Printer:     ui.New(&bytes.Buffer{}),
+		}
+		proceed, err := existingTableAction(a, "churn")
+		if err != nil {
+			t.Fatalf("a declined prompt is a clean cancel, not an error: %v", err)
+		}
+		if proceed {
+			t.Error("a no to the replace prompt must not proceed")
+		}
+	})
+
+	t.Run("reused idempotency key falls through to exit 6", func(t *testing.T) {
+		yes := true
+		a := &runDataIngestArgs{
+			Interactive:    true,
+			Prompter:       &fakePrompter{confirm: &yes},
+			IdempotencyKey: "abc",
+			Printer:        ui.New(&bytes.Buffer{}),
+		}
+		proceed, err := existingTableAction(a, "churn")
+		if proceed || ExitCodeFromError(err) != 6 {
+			t.Errorf("a reused --idempotency-key must not be offered a replace prompt: proceed=%v code=%d",
+				proceed, ExitCodeFromError(err))
+		}
+	})
+}
+
 // The images summary line surfaces the detected extension — the visible
 // half of the cli#68 fix (the spec half is pinned in internal/push).
 func TestPrintLocalSummary_ShowsDetectedExtension(t *testing.T) {
@@ -412,5 +617,47 @@ func TestPrintLocalSummary_ShowsDetectedExtension(t *testing.T) {
 	printLocalSummary(p, layout, spec)
 	if !strings.Contains(buf.String(), "1 files (.png)") {
 		t.Errorf("summary missing detected extension:\n%s", buf.String())
+	}
+}
+
+// TestDataIngest_WrongTaskFlags_ExitTwo pins the task-scoped flag guards: a
+// flag scoped to one task family must be REJECTED (exit 2) on a task that
+// doesn't consume it, rather than silently dropped. Previously only
+// --target-size/--min-size were guarded; the others were parsed only inside
+// their category branch, so the value (and the user's intent) vanished with no
+// error even though the help text says each is scoped.
+func TestDataIngest_WrongTaskFlags_ExitTwo(t *testing.T) {
+	root := imgcLayout(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"schema-on-image", []string{"--task=image_classification", "--label-column=label", "--schema=age:INT"}},
+		{"label-policy-on-image", []string{"--task=image_classification", "--label-column=label", "--label-policy=passthrough"}},
+		{"time-column-on-image", []string{"--task=image_classification", "--label-column=label", "--time-column=t"}},
+		{"keypoints-on-image-classification", []string{"--task=image_classification", "--label-column=label", "--number-of-keypoints=17"}},
+		{"label-column-on-self-supervised-text", []string{"--task=masked_language_modeling", "--label-column=sentiment"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, _, _ := execDataIngest(t, append([]string{root, "--name=t1", "--intent=train"}, tc.args...))
+			if code != 2 {
+				t.Fatalf("expected exit 2 for misapplied flag (%s), got %d", tc.name, code)
+			}
+		})
+	}
+}
+
+// TestDataIngest_ScopedFlag_OnCorrectTask_NotRejected is the negative control:
+// a scoped flag on its VALID task must NOT trip the guard. --number-of-keypoints
+// on keypoint_detection passes the guard and falls through to the (bad)
+// kubeconfig → exit 3, proving the guard didn't over-reject with exit 2.
+func TestDataIngest_ScopedFlag_OnCorrectTask_NotRejected(t *testing.T) {
+	root := imgcLayout(t)
+	code, _, _ := execDataIngest(t, []string{
+		root, "--name=t1", "--intent=train",
+		"--task=keypoint_detection", "--label-column=label", "--number-of-keypoints=17",
+	})
+	if code == 2 {
+		t.Fatal("--number-of-keypoints on keypoint_detection must not be rejected as a wrong-task flag")
 	}
 }

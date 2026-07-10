@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,8 +49,10 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 		"label":    "label",
 	}
 
+	// Verbose so the cluster block renders too — it's --verbose-only now (see
+	// TestPrintClusterSummary_VerboseOnly). The local summary shows regardless.
 	var buf bytes.Buffer
-	p := ui.New(&buf, ui.WithColor(false))
+	p := ui.New(&buf, ui.WithColor(false), ui.WithVerbose(true))
 	printLocalSummary(p, layout, spec)
 	printClusterSummary(p, release, pvc)
 	out := buf.String()
@@ -60,6 +63,41 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("pre-flight output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintClusterSummary_VerboseOnly pins that the Kubernetes cluster detail
+// (release / jobs-manager / shared PVC) is hidden on the default happy path and
+// surfaces only under --verbose — the RFC-0002 §6 ceremony-hiding contract.
+func TestPrintClusterSummary_VerboseOnly(t *testing.T) {
+	release := &cluster.ParentRelease{
+		ReleaseName:        "ingdemo",
+		ChartVersion:       "1.4.2",
+		JobsManagerService: "http://jobs-manager.ingdemo.svc.cluster.local:8080",
+	}
+	pvc := &cluster.SharedPVC{
+		ClaimName:   "client-pvc",
+		MountPath:   "/data/shared",
+		Phase:       corev1.ClaimBound,
+		AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+	}
+
+	// Default (non-verbose): none of the cluster plumbing leaks.
+	var quiet bytes.Buffer
+	printClusterSummary(ui.New(&quiet, ui.WithColor(false)), release, pvc)
+	for _, hidden := range []string{"ingdemo", "1.4.2", "client-pvc", "jobs-manager", "Target cluster"} {
+		if strings.Contains(quiet.String(), hidden) {
+			t.Errorf("non-verbose output leaked cluster detail %q:\n%s", hidden, quiet.String())
+		}
+	}
+
+	// --verbose: the same facts are shown.
+	var loud bytes.Buffer
+	printClusterSummary(ui.New(&loud, ui.WithColor(false), ui.WithVerbose(true)), release, pvc)
+	for _, want := range []string{"ingdemo", "1.4.2", "client-pvc"} {
+		if !strings.Contains(loud.String(), want) {
+			t.Errorf("verbose output missing cluster detail %q:\n%s", want, loud.String())
 		}
 	}
 }
@@ -136,7 +174,10 @@ func TestClassifyPushOutcome(t *testing.T) {
 func TestRunDatasetPush_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
 	var jsonBuf, human bytes.Buffer
 	a := runDataIngestArgs{
-		LocalPath:  "./x",
+		// A real path so the failure is the invalid table name (exit 2), not
+		// the earlier path-existence check (exit 3, #181) — this test pins the
+		// stdout-always-JSON contract on the table-validation failure.
+		LocalPath:  t.TempDir(),
 		Spec:       push.SpecArgs{Table: "../bad", Category: "image_classification", Intent: "train"},
 		Printer:    ui.New(&human, ui.WithColor(false)),
 		OutputJSON: true,
@@ -154,6 +195,49 @@ func TestRunDatasetPush_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
 	}
 	if got.Status != "error" || got.ExitCode != 2 || got.Table != "../bad" {
 		t.Errorf("got %+v, want status=error exit_code=2 table=../bad", got)
+	}
+}
+
+// TestRunDataIngest_ImageOnlyFlagsRejectedOnNonImage: --target-size and
+// --min-size describe image resolution, so on a tabular/text task they
+// must fail fast (exit 2) with a clear message rather than being parsed
+// only inside the image branch — where the value, even a malformed one,
+// was silently dropped (#206 review).
+func TestRunDataIngest_ImageOnlyFlagsRejectedOnNonImage(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*runDataIngestArgs)
+	}{
+		{"target-size on tabular", func(a *runDataIngestArgs) { a.TargetSizeFlag = "64x64" }},
+		{"min-size on tabular", func(a *runDataIngestArgs) { a.MinSizeFlag = "32x32" }},
+		{"malformed min-size on tabular", func(a *runDataIngestArgs) { a.MinSizeFlag = "garbage" }},
+	}
+	// A real, existing path so the earlier dataset-path stat passes and
+	// the image-only guard is what actually fires (the path check runs
+	// before the guard).
+	dir := t.TempDir()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var human bytes.Buffer
+			a := runDataIngestArgs{
+				LocalPath: dir,
+				Spec: push.SpecArgs{
+					Table: "t", Category: "tabular_classification",
+					Intent: "train", LabelColumn: "y",
+				},
+				Printer: ui.New(&human, ui.WithColor(false)),
+			}
+			c.mutate(&a)
+			err := runDataIngest(context.Background(), &human, &human, a)
+
+			var ee *exitError
+			if !errors.As(err, &ee) || ee.Code() != 2 {
+				t.Fatalf("err = %v, want *exitError code 2", err)
+			}
+			if !strings.Contains(ee.Error(), "image tasks only") {
+				t.Errorf("error should explain the flag is image-only; got: %v", ee)
+			}
+		})
 	}
 }
 
@@ -179,6 +263,44 @@ func TestExpandHome(t *testing.T) {
 		if got := expandHome(c.in); got != c.want {
 			t.Errorf("expandHome(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestExpandHome_NamedUser covers the #181 ~user form: "~user" and
+// "~user/…" resolve under that user's home. We look up the CURRENT user by
+// name so the test doesn't depend on a fixed account existing, and compare
+// against os.UserHomeDir. An unknown ~user is left literal (the path-
+// existence check surfaces it), which we also pin.
+func TestExpandHome_NamedUser(t *testing.T) {
+	u, err := user.Current()
+	if err != nil || u.Username == "" {
+		t.Skipf("no current user: %v", err)
+	}
+	// user.Lookup must resolve the same account (it can differ from
+	// UserHomeDir on some CI images); skip if it doesn't rather than assert
+	// on an environment quirk.
+	looked, err := user.Lookup(u.Username)
+	if err != nil {
+		t.Skipf("user.Lookup(%q) unsupported here: %v", u.Username, err)
+	}
+	home := looked.HomeDir
+
+	cases := []struct{ in, want string }{
+		{"~" + u.Username, home},
+		{"~" + u.Username + "/data", filepath.Join(home, "data")},
+		{"~" + u.Username + "/a/b", filepath.Join(home, "a", "b")},
+	}
+	for _, c := range cases {
+		if got := expandHome(c.in); got != c.want {
+			t.Errorf("expandHome(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// An unknown user can't be resolved: the literal is returned unchanged so
+	// the downstream path-existence check reports it plainly.
+	const unknown = "~nsuchuser-tracebloc-181/x"
+	if got := expandHome(unknown); got != unknown {
+		t.Errorf("expandHome(%q) = %q, want it left literal", unknown, got)
 	}
 }
 

@@ -305,9 +305,38 @@ func WatchJob(
 	//    The fresh ctx still propagates SIGINT (parent is customerCtx,
 	//    which carries signal.NotifyContext's cancel); a Ctrl-C in this
 	//    window falls into the detach branches below.
-	finalCtx, finalCancel := context.WithTimeout(customerCtx, 30*time.Second)
+	finalCtx, finalCancel := context.WithTimeout(customerCtx, finalJobStatusTimeout)
 	defer finalCancel()
 	outcome, statusErr := finalJobStatus(finalCtx, cs, namespace, jobName)
+
+	// If the Job controller hasn't posted a terminal condition within the
+	// budget (a slow/contended apiserver), finalJobStatus returns Unknown —
+	// which the orchestrator maps to a failure exit (9). The Pod itself is
+	// authoritative for whether the ingest actually finished, so fall back to
+	// its phase: a Succeeded Pod is a successful run, a Failed one a failure.
+	// RE-LIST and re-select here rather than trusting the podName captured at
+	// the start of the watch: waitForJobPod may have returned an early Failed
+	// Pod while a backoffLimit retry was still Pending, so the current
+	// most-recent Pod (e.g. the retry that Succeeded) is the honest signal. A
+	// fresh short ctx is used since finalCtx may be at its deadline; it still
+	// derives from customerCtx, so a Ctrl-C here leaves Unknown intact and
+	// drops into the detach handling below.
+	if statusErr == nil && outcome == JobOutcomeUnknown {
+		podCtx, podCancel := context.WithTimeout(customerCtx, 5*time.Second)
+		if pods, perr := cs.CoreV1().Pods(namespace).List(podCtx, metav1.ListOptions{
+			LabelSelector: "job-name=" + jobName,
+		}); perr == nil {
+			if best := mostRecentUsefulPod(pods.Items); best != nil {
+				switch best.Status.Phase {
+				case corev1.PodSucceeded:
+					outcome = JobOutcomeSucceeded
+				case corev1.PodFailed:
+					outcome = JobOutcomeFailed
+				}
+			}
+		}
+		podCancel()
+	}
 
 	// A non-ctx log-stream error is incidental if the Job still
 	// reached a terminal state. Previously ANY such error (e.g.
@@ -398,17 +427,7 @@ func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobN
 			// don't count — they have no logs to stream yet, so
 			// we keep polling until they either transition or
 			// become irrelevant.
-			var bestPod *corev1.Pod
-			for i := range pods.Items {
-				p := &pods.Items[i]
-				switch p.Status.Phase {
-				case corev1.PodRunning, corev1.PodSucceeded, corev1.PodFailed:
-					if bestPod == nil ||
-						p.CreationTimestamp.After(bestPod.CreationTimestamp.Time) {
-						bestPod = p
-					}
-				}
-			}
+			bestPod := mostRecentUsefulPod(pods.Items)
 			if bestPod == nil {
 				return false, nil // all Pods still Pending
 			}
@@ -420,6 +439,33 @@ func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobN
 		return "", "", err
 	}
 	return podName, podPhase, nil
+}
+
+// mostRecentUsefulPod picks the Pod whose logs/phase best represent the run
+// among a Job's Pods (they share the job-name label; a backoffLimit retry
+// yields several). "Useful phase" = Running | Succeeded | Failed — Pending
+// Pods have no logs yet. The most recent wins; on a CreationTimestamp tie
+// (1s granularity), a live/succeeded Pod beats a Failed one so a same-second
+// retry isn't overshadowed by the attempt it replaced. Returns nil when every
+// Pod is still Pending.
+func mostRecentUsefulPod(pods []corev1.Pod) *corev1.Pod {
+	var best *corev1.Pod
+	for i := range pods {
+		p := &pods[i]
+		switch p.Status.Phase {
+		case corev1.PodRunning, corev1.PodSucceeded, corev1.PodFailed:
+			switch {
+			case best == nil:
+				best = p
+			case p.CreationTimestamp.After(best.CreationTimestamp.Time):
+				best = p
+			case p.CreationTimestamp.Time.Equal(best.CreationTimestamp.Time) &&
+				best.Status.Phase == corev1.PodFailed && p.Status.Phase != corev1.PodFailed:
+				best = p
+			}
+		}
+	}
+	return best
 }
 
 // streamPodLogsAndParse opens a streaming log read on the Pod and
@@ -463,29 +509,16 @@ func streamPodLogsAndParse(
 	// io.Copy would also work but would buffer chunks at the
 	// transport layer, making the output feel laggy on a fast
 	// ingestion.
-	scanner := bufio.NewScanner(tee)
-	// Default scanner buffer is 64 KB per line — fine for log
-	// lines but bump to 1 MB to handle the (rare) case where a
-	// single ingestion-error stacktrace has a multi-KB Python
-	// traceback line.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		// Print the line + a newline (scanner strips the trailing
-		// '\n'). errcheck-friendly: we discard the writer error
-		// because the exit code is the customer-facing contract.
-		_, _ = out.Write(line)
-		_, _ = out.Write([]byte("\n"))
-	}
-	if err := scanner.Err(); err != nil {
-		// EOF is normal end-of-stream; other errors (network drop
-		// mid-stream, ctx cancel) get propagated.
-		if !errors.Is(err, io.EOF) {
-			// Flush any buffered partial line before returning so
-			// the parser sees content even on mid-line failure.
-			parser.FlushLine()
-			return parser.Result(), err
-		}
+	// Pull the whole stream through the tee (which feeds the summary parser)
+	// while rendering it line-by-line for the customer. An over-long DISPLAY
+	// line (a tqdm '\r'-redraw burst) is drained, not fatal — see
+	// streamDisplayAndParse.
+	if err := streamDisplayAndParse(tee, out, displayLineMax); err != nil {
+		// A genuine mid-stream failure (network drop, ctx cancel). Flush any
+		// buffered partial line so the parser sees content even on a mid-line
+		// failure, then propagate.
+		parser.FlushLine()
+		return parser.Result(), err
 	}
 	// Flush at the end of stream too. A Pod that exited without
 	// a trailing newline on its final stdout write would otherwise
@@ -493,6 +526,58 @@ func streamPodLogsAndParse(
 	// ═-rule that finalizes the banner. Bugbot flagged on PR #10.
 	parser.FlushLine()
 	return parser.Result(), nil
+}
+
+// displayLineMax caps the per-line DISPLAY buffer (grows on demand from 64 KB,
+// so ordinary log lines still cost 64 KB). A tqdm progress "line" — many '\r'
+// redraws with no '\n' — grows for the life of the run; the generous cap lets
+// the common case render fully, and streamDisplayAndParse drains anything past
+// it rather than failing. The 1h JobWatchTimeout bounds accumulation.
+const displayLineMax = 16 * 1024 * 1024
+
+// streamDisplayAndParse renders r line-by-line to out for the customer. The
+// caller wraps the log stream in an io.TeeReader that ALSO feeds the summary
+// parser, and this is the ONLY place the tee is pulled — so the function's real
+// job is to pull the WHOLE stream through, whatever the display does with it.
+//
+// A tqdm progress "line" (many '\r' redraws, no '\n') can outgrow maxLine. That
+// must NOT stop the pull: if it did, the tee would stop feeding the parser and
+// the closing banner would never be parsed, so watch would report a false exit
+// 9 on a healthy run (raising maxLine only postpones the threshold). On
+// bufio.ErrTooLong we therefore keep draining the rest of the stream —
+// discarding only the oversized DISPLAY line — so the parser still sees the
+// banner; the Job status poll is the verdict's real source of truth. Returns a
+// non-nil error only on a genuine read failure (network drop, ctx cancel).
+func streamDisplayAndParse(r io.Reader, out io.Writer, maxLine int) error {
+	scanner := bufio.NewScanner(r)
+	// bufio.Scanner's token cap is max(maxLine, cap(initialBuf)), so the initial
+	// buffer must never exceed maxLine or it would silently raise the effective
+	// cap above maxLine. Start at 64 KB (grows on demand) for the common case,
+	// but clamp it so maxLine stays authoritative — the display path relies on it
+	// (production passes 16 MB, so the clamp is a no-op there).
+	initCap := 64 * 1024
+	if maxLine < initCap {
+		initCap = maxLine
+	}
+	scanner.Buffer(make([]byte, 0, initCap), maxLine)
+	for scanner.Scan() {
+		// scanner strips the trailing '\n'; re-add it. errcheck-friendly: the
+		// write error is discarded because the exit code is the contract.
+		_, _ = out.Write(scanner.Bytes())
+		_, _ = out.Write([]byte("\n"))
+	}
+	err := scanner.Err()
+	if err == nil || errors.Is(err, io.EOF) {
+		return nil
+	}
+	if errors.Is(err, bufio.ErrTooLong) {
+		// Keep draining THROUGH r (the tee) so the parser still sees the banner.
+		if _, derr := io.Copy(io.Discard, r); derr != nil {
+			return derr
+		}
+		return nil
+	}
+	return err
 }
 
 // parserWriter adapts a SummaryParser into an io.Writer for use
@@ -508,6 +593,11 @@ func (pw parserWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// finalJobStatusTimeout bounds the post-stream wait for the Job's terminal
+// condition. A package var (not a const) purely so tests can shrink it; it is
+// never overridden in production.
+var finalJobStatusTimeout = 30 * time.Second
+
 // finalJobStatus does a bounded poll on the Job's status to
 // determine Succeeded vs Failed after log streaming ends. This is
 // a separate step because the log-stream-end doesn't always race
@@ -515,7 +605,7 @@ func (pw parserWriter) Write(b []byte) (int, error) {
 // apiserver to post the terminal phase.
 func finalJobStatus(ctx context.Context, cs kubernetes.Interface, namespace, jobName string) (JobOutcome, error) {
 	var outcome JobOutcome
-	err := wait.PollUntilContextTimeout(ctx, JobPollInterval, 30*time.Second, true,
+	err := wait.PollUntilContextTimeout(ctx, JobPollInterval, finalJobStatusTimeout, true,
 		func(ctx context.Context) (bool, error) {
 			job, err := cs.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
 			if err != nil {

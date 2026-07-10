@@ -8,7 +8,7 @@ The customer-facing CLI for the tracebloc declarative ingestion path. Wraps the 
 
 **v0.3.0 is released** — the latest stable [release](https://github.com/tracebloc/cli/releases/latest), cut from `develop`. It builds on v0.2.0's guided `data ingest` and `dataset rm` with a new `dataset list` command plus home-screen / output polish (clearer copy, guided-first framing). The binary implements `version`, `completion`, `data validate`, `cluster info`, and the full `data ingest` / `dataset list` / `dataset rm` flow — local schema validation, cluster discovery, data staging, submission, and Job watching, end to end.
 
-`data ingest` covers **9 of 10 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `text_classification`, `masked_language_modeling`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, and `time_to_event_prediction`. `semantic_segmentation` is pending mask-sidecar support upstream ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)).
+`data ingest` covers **15 of 16 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `text_classification`, `token_classification`, `sentence_pair_classification`, `masked_language_modeling`, `causal_language_modeling`, `seq2seq`, `embeddings`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, `time_series_classification`, and `time_to_event_prediction`. `semantic_segmentation` is pending mask-sidecar support upstream ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)).
 
 The release pipeline ships [`v0.3.0`](https://github.com/tracebloc/cli/releases/latest) as **cosign-signed, multi-arch binaries** — Linux (`amd64`, `arm64`, `386`, `arm`), macOS (`amd64`, `arm64`), and Windows (`amd64`, `arm64`) — each with `SHA256SUMS` and the install scripts. Install via [Customer experience](#customer-experience) or [build from source](#building-from-source). (A Homebrew tap and the `install.tracebloc.io` vanity URL are later follow-ups; the GitHub release URL serves installs today.)
 
@@ -54,8 +54,8 @@ irm https://github.com/tracebloc/cli/releases/latest/download/install.ps1 | iex
 
 # Per dataset
 tracebloc data ingest ./my-data \
-  --table cats_dogs_train \
-  --category image_classification \
+  --name cats_dogs_train \
+  --task image_classification \
   --intent train \
   --label-column label
 ```
