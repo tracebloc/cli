@@ -3,6 +3,7 @@ package push
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/tracebloc/cli/internal/schema"
@@ -171,11 +172,13 @@ func ValidateTextRecord(rf RecordFormat, content string) error {
 				"Put one %s per .txt", rf.shape(), rf.shape())
 	}
 	parts := strings.Split(record, rf.Separator)
-	if !containsInt(rf.AllowedFieldCounts(), len(parts)) {
+	if !slices.Contains(rf.AllowedFieldCounts(), len(parts)) {
+		// Separator comes from the contract (sepLabel renders a tab as "<TAB>"),
+		// so a future non-tab task isn't misdescribed as "tab-separated".
 		return fmt.Errorf(
-			"expected %s tab-separated fields (%s), found %d. "+
-				"Separate each field with exactly one tab",
-			rf.countPhrase(), rf.shape(), len(parts))
+			"expected %s %s-separated fields (%s), found %d. "+
+				"Separate each field with exactly one %s",
+			rf.countPhrase(), rf.sepLabel(), rf.shape(), len(parts), rf.sepLabel())
 	}
 	for i, p := range parts {
 		if strings.TrimSpace(p) == "" {
@@ -185,13 +188,4 @@ func ValidateTextRecord(rf RecordFormat, content string) error {
 		}
 	}
 	return nil
-}
-
-func containsInt(xs []int, want int) bool {
-	for _, x := range xs {
-		if x == want {
-			return true
-		}
-	}
-	return false
 }

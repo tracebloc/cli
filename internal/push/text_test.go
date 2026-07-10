@@ -186,7 +186,9 @@ func TestDiscoverText_EnforcedRecordFormat_Reject(t *testing.T) {
 			if err == nil {
 				t.Fatalf("DiscoverText(%s) accepted a malformed record", category)
 			}
-			for _, want := range []string{"bad.txt", "tab-separated fields"} {
+			// The separator label comes from the contract (sepLabel renders a
+			// tab as "<TAB>"), not a hardcoded "tab-separated" literal.
+			for _, want := range []string{"bad.txt", "<TAB>-separated fields"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error missing %q: %v", want, err)
 				}
@@ -244,6 +246,99 @@ func TestDiscoverText_SentencePair_WrongFieldCount(t *testing.T) {
 	dir2 := mkStructuredTextDir(t, false, three)
 	if _, err := DiscoverText("embeddings", dir2); err != nil {
 		t.Errorf("embeddings should accept a 3-field triplet: %v", err)
+	}
+}
+
+// TestDiscoverText_ConfiguredExtension: the ingestor appends the CONFIGURED
+// extension (.txt OR .text — file_options.extension), so the enforced check
+// must match a manifest value against the file actually on disk, not a
+// reconstructed "<value>.txt". A row "a" resolves to texts/a.text when that is
+// what exists — a malformed a.text is rejected, a well-formed one passes.
+func TestDiscoverText_ConfiguredExtension(t *testing.T) {
+	mk := func(t *testing.T, body string) string {
+		t.Helper()
+		dir := t.TempDir()
+		writeFile(t, dir, "labels.csv", "filename\na\n") // embeddings: no label; value carries no extension
+		sub := filepath.Join(dir, "texts")
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sub, "a.text"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	if _, err := DiscoverText("embeddings", mk(t, "one blob no tab")); err == nil {
+		t.Fatal("malformed a.text should be rejected via the configured .text extension")
+	} else if !strings.Contains(err.Error(), "a.text") {
+		t.Errorf("error should name the on-disk file a.text: %v", err)
+	}
+
+	if _, err := DiscoverText("embeddings", mk(t, "anchor\tpositive")); err != nil {
+		t.Errorf("well-formed a.text rejected: %v", err)
+	}
+}
+
+// TestDiscoverText_MissingFilenameColumn: the ingestor's validator rejects a
+// manifest with no filename column ("Missing required column: filename"); the
+// enforced check surfaces that locally instead of validating nothing (which
+// would fail-open post-upload).
+func TestDiscoverText_MissingFilenameColumn(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "labels.csv", "id\nrow1\n") // no filename column
+	sub := filepath.Join(dir, "texts")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "a.txt"), []byte("anchor\tpositive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := DiscoverText("embeddings", dir)
+	if err == nil {
+		t.Fatal("a manifest with no filename column should be rejected locally")
+	}
+	if !strings.Contains(err.Error(), "filename") {
+		t.Errorf("error should name the missing filename column: %v", err)
+	}
+}
+
+// TestDiscoverText_CaseMismatchedBasename: a manifest value "A.txt" must resolve
+// to the on-disk a.txt case-insensitively — otherwise the file goes unchecked
+// (fail-open). The malformed a.txt is therefore still rejected.
+func TestDiscoverText_CaseMismatchedBasename(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "labels.csv", "filename,label\nA.txt,x\n")
+	sub := filepath.Join(dir, "texts")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "a.txt"), []byte("one blob no tab"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DiscoverText("sentence_pair_classification", dir); err == nil {
+		t.Fatal("case-mismatched manifest value A.txt should still match a.txt and reject the malformed file")
+	}
+}
+
+// TestDiscoverText_TolerantManifestRow: a row Go's strict csv.Reader rejects but
+// pandas tolerates (an unescaped quote) must still be read — LazyQuotes — so its
+// filename is validated, not silently dropped. Here the tolerated row names a
+// malformed a.txt, which must be rejected; without LazyQuotes the row (and its
+// file) would be skipped and discovery would fail-open.
+func TestDiscoverText_TolerantManifestRow(t *testing.T) {
+	dir := t.TempDir()
+	// The unescaped " in the label field trips Go's strict reader; pandas reads it.
+	writeFile(t, dir, "labels.csv", "filename,label\na.txt,he said \"hi\"\n")
+	sub := filepath.Join(dir, "texts")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "a.txt"), []byte("one blob no tab"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DiscoverText("sentence_pair_classification", dir); err == nil {
+		t.Fatal("a pandas-tolerable row must be read (LazyQuotes) so its file is validated")
 	}
 }
 

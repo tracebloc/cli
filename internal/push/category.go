@@ -1,6 +1,9 @@
 package push
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // CategorySpec is the single source of truth for one task category's
 // CLI-relevant rules. It mirrors data-ingestors'
@@ -304,12 +307,20 @@ func SupportedCategoriesList() string { return strings.Join(SupportedCategoryIDs
 // The value is READ from the vendored layout contract's primary_subdir — the
 // ingestor owns this fact (data-ingestors registry ModalitySpec.file_subdir),
 // so the CLI mirrors it rather than keeping a Go fork of the same rule
-// (RFC-0002 Principle 6). Falls back to "texts" for a category the contract
-// doesn't pin — defensive only; the contract covers every text task and
-// TestTextSidecarDirMirrorsContract enforces the two agree.
+// (RFC-0002 Principle 6).
+//
+// A text category with no primary_subdir in the contract is a vendoring/drift
+// bug, not a runtime condition: every text task pins one and
+// TestTextSidecarDirMirrorsContract enforces the registry and contract agree.
+// Silently falling back to "texts" would stage files into a directory the
+// ingestor never reads, so fail loud instead — the only way here is a broken
+// vendored contract, which scripts/sync-schema.sh --check catches in CI.
 func TextSidecarDir(category string) string {
 	if layout, ok := LayoutFor(category); ok && layout.PrimarySubdir != nil {
 		return *layout.PrimarySubdir
 	}
-	return "texts"
+	panic(fmt.Sprintf(
+		"text category %q has no primary_subdir in the vendored layout contract — "+
+			"the Go registry has drifted from layout.v1.json; re-run scripts/sync-schema.sh",
+		category))
 }

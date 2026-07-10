@@ -108,7 +108,17 @@ sync_one() {
   _tmpfiles+=("$tmp")
 
   echo "==> fetching $url"
-  curl -fsSL "$url" -o "$tmp"
+  # sync_one is called as `if ! sync_one ...`, which suspends `set -e` for the
+  # whole body — so a failed curl (e.g. a 404) would otherwise fall through and
+  # be misdiagnosed as "not valid JSON" on the empty temp file. Check curl's
+  # exit explicitly and report the real fetch failure. --tlsv1.2 matches every
+  # other curl in the repo (scripts/install.sh).
+  curl -fsSL --tlsv1.2 "$url" -o "$tmp"
+  local curl_rc=$?
+  if [[ $curl_rc -ne 0 ]]; then
+    echo "error: failed to fetch $url (curl exited $curl_rc)" >&2
+    return "$curl_rc"
+  fi
 
   # Make sure what came back is valid JSON before we trust it.
   if ! python3 -m json.tool < "$tmp" > /dev/null 2>&1; then
