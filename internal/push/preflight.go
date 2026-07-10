@@ -678,6 +678,101 @@ func CheckSchemaColumns(header []string, schema map[string]string, csvName strin
 		csvName, strings.Join(missing, ", "))
 }
 
+// CheckSequenceSchemaColumns previews the ingest.v1 schema's sequence-grouped
+// conditional (the time_series_classification if/then) plus the presence
+// probes of SequenceGroupValidator / PerGroupTimeOrderedValidator: a grouped
+// task's schema must declare BOTH fixed sequence columns — the group key
+// (sequence_id) and the time column (timestamp). The names are FIXED by the
+// platform (backend#1054 Decision-2); there is no flag to rename them, so the
+// fix is always renaming the CSV columns (or extending an explicit --schema).
+// Compared as exact schema-map keys, matching the JSON-schema `required`
+// semantics — the vendored-schema validation would reject the same YAML, this
+// check just fails earlier with a friendlier message.
+func CheckSequenceSchemaColumns(schema map[string]string, g GroupingSpec) error {
+	var missing []string
+	for _, col := range []string{g.GroupColumn, g.TimeColumn} {
+		if _, ok := schema[col]; !ok {
+			missing = append(missing, col)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"this task's data is sequence-grouped: the schema must declare %q (groups the timestep "+
+			"rows of one sequence — e.g. a patient/device/session id) and %q (orders the rows "+
+			"within each sequence). Missing: %s. The column names are fixed by the platform — "+
+			"rename your CSV columns to match and re-run.",
+		g.GroupColumn, g.TimeColumn, strings.Join(missing, ", "))
+}
+
+// CheckSequenceRows previews the SequenceGroupValidator's null-id rule
+// (sequence_group_validator.py): every timestep row must carry a non-empty
+// sequence id — a row whose group key is null/empty belongs to NO sequence,
+// so it can't contribute to any per-sequence sample and the in-cluster
+// rejection otherwise lands after the full upload. Together with
+// CheckHasDataRows this guarantees every sequence has >= 1 real row and at
+// least one sequence exists at all.
+//
+// NA sentinels count as null: the ingestor loads the column with pandas,
+// whose NA parsing turns "NA"/"null"/… into NaN before the validator's
+// isna() probe — mirrored here via naSentinels (the ingestor's
+// coercion.NA_SENTINELS). The column is resolved with the shared
+// case-/whitespace-insensitive rule (#340). An absent column benign-skips
+// (returns 0, nil): that is CheckSequenceSchemaColumns' /
+// CheckSchemaColumns' diagnostic, not this one's.
+//
+// sequences is the count of distinct non-null ids — the dataset's SAMPLE
+// count, since the platform counts sequence-grouped data in sequences, not
+// rows (backend#1054 Decision-3); the caller echoes it as a note.
+func CheckSequenceRows(csvPath, groupColumn string) (sequences int, err error) {
+	r, closer, err := openCSVReader(csvPath)
+	if err != nil {
+		return 0, nil // unreadable file is another check's diagnostic
+	}
+	defer func() { _ = closer.Close() }()
+	header, err := r.Read()
+	if err != nil {
+		return 0, nil
+	}
+	col := matchColumnIndex(header, groupColumn)
+	if col == -1 {
+		return 0, nil // benign skip — the schema checks own this diagnostic
+	}
+	distinct := map[string]bool{}
+	nullCount, rowNum, firstNullRow := 0, 0, 0
+	for {
+		rec, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			continue
+		}
+		rowNum++
+		v := ""
+		if len(rec) > col {
+			v = strings.TrimSpace(rec[col])
+		}
+		if _, isNA := naSentinels[v]; isNA {
+			nullCount++
+			if firstNullRow == 0 {
+				firstNullRow = rowNum
+			}
+			continue
+		}
+		distinct[v] = true
+	}
+	if nullCount > 0 {
+		return len(distinct), fmt.Errorf(
+			"the sequence column %q has %d empty/null value(s) (first at data row %d). Every "+
+				"timestep row must carry the id of the sequence it belongs to — the cluster rejects "+
+				"this after the upload; fill in the ids and re-run.",
+			groupColumn, nullCount, firstNullRow)
+	}
+	return len(distinct), nil
+}
+
 // PreflightProblem is a preflight rejection. BadFlag marks problems whose
 // fix is a flag value (the CLI maps those to exit 2); everything else is a
 // data problem (exit 3).
@@ -730,7 +825,35 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if err := CheckLabelColumn(header, spec.LabelColumn, "the data CSV"); err != nil {
 			return nil, &PreflightProblem{Err: err, BadFlag: true}
 		}
-		if spec.Category == "tabular_classification" {
+		// Sequence-grouped tasks (time_series_classification), gated on the
+		// vendored contract's grouping TRAIT — never the category id
+		// (backend#1054 Decision-4). Previews SequenceGroupValidator +
+		// the ingest.v1 sequence-column conditional: the fixed sequence_id /
+		// timestamp columns must be in the schema, and every timestep row
+		// must carry a sequence id. Runs before the label checks, mirroring
+		// the ingestor's factory order (SequenceGroupValidator first).
+		if g, grouped := GroupingFor(spec.Category); grouped {
+			if err := CheckSequenceSchemaColumns(spec.Schema, g); err != nil {
+				return nil, dataProblem(err)
+			}
+			seqs, err := CheckSequenceRows(layout.LabelsCSV, g.GroupColumn)
+			if err != nil {
+				return nil, dataProblem(err)
+			}
+			if seqs > 0 {
+				// The platform counts this dataset in sequences, not rows
+				// (Decision-3) — echo the sample count the customer will see.
+				notes = append(notes, fmt.Sprintf(
+					"Note: %d sequence(s) grouped by %q — the platform counts this dataset "+
+						"in sequences, not rows", seqs, g.GroupColumn))
+			}
+		}
+		// Label diversity for every tabular classification task — gated on
+		// the registry's IsClassification (the ingestor's is_classification
+		// wiring: tabular_classification + time_series_classification), not
+		// a hardcoded id, so a future classification task can't silently
+		// skip the preview.
+		if IsClassification(spec.Category) {
 			// The label is a schema-typed column: the ingestor drops NA
 			// sentinels for it, and collapses numeric-looking values ONLY
 			// for numeric types — a VARCHAR label is pinned to dtype=str,

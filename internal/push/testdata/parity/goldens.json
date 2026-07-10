@@ -220,6 +220,42 @@
         "row_count": 2
       },
       "verdict": "accept"
+    },
+    "tsc-label-flip": {
+      "errors": [
+        "LabelConstantWithinGroupValidator: Found 1 sequence(s) whose 'label' value changes mid-sequence (first offending sequences start at rows [0]). Time-series classification assigns ONE label per sequence: every row of a 'sequence_id' must repeat the same label value."
+      ],
+      "verdict": "reject"
+    },
+    "tsc-label-uniform": {
+      "errors": [
+        "LabelDiversityValidator: Classification category requires at least 2 distinct label values in column 'label' (after whitespace stripping); this dataset has 1 distinct value(s): [np.int64(1)]. Raw value counts: {1: 4}. If this is intentional (e.g. you have a continuous target), pick a regression-family category like tabular_regression or time_series_forecasting instead."
+      ],
+      "verdict": "reject"
+    },
+    "tsc-missing-sequence-col": {
+      "errors": [
+        "SequenceGroupValidator: Required sequence column 'sequence_id' not found in dataset. Available columns: ['timestamp', 'hr', 'temp', 'label']. Time-series classification data must carry a 'sequence_id' column grouping the timestep rows of each sequence (e.g. a patient / device / session id).",
+        "LabelConstantWithinGroupValidator: Required sequence column 'sequence_id' not found in dataset. Available columns: ['timestamp', 'hr', 'temp', 'label'].",
+        "PerGroupTimeOrderedValidator: Required sequence column 'sequence_id' not found. Available: ['timestamp', 'hr', 'temp', 'label']"
+      ],
+      "verdict": "reject"
+    },
+    "tsc-null-sequence-id": {
+      "errors": [
+        "SequenceGroupValidator: Sequence column 'sequence_id' contains 2 null/empty value(s) at rows [1, 3]. Every timestep row must carry the id of the sequence it belongs to."
+      ],
+      "verdict": "reject"
+    },
+    "tsc-ok": {
+      "errors": [],
+      "verdict": "accept"
+    },
+    "tsc-unsorted-timestamp": {
+      "errors": [
+        "PerGroupTimeOrderedValidator: Found 1 sequence(s) with out-of-order 'timestamp' values (first offending rows [1]). Timestep rows must be sorted by 'timestamp' within each 'sequence_id' \u2014 sort each sequence's rows ascending and re-run. Interleaving different sequences is fine; ordering is only checked within a sequence."
+      ],
+      "verdict": "reject"
     }
   }
 }

@@ -9,4 +9,12 @@
 #
 # Format: the first non-comment, non-blank line is the ref (a full commit SHA
 # preferred; a branch name works but reintroduces floating drift).
-efaeb07185c42556f833e876cb17791f30f4916d
+#
+# CURRENT PIN: the time_series_classification WS1 branch head
+# (data-ingestors#359, backend#1054/#1056) — the schema gains the
+# time_series_classification enum value + the sequence-column conditional,
+# and layout.v1 gains the grouping trait (Decision-4). Coupled release
+# (T16): once #359 merges, bump this to the merge commit on master and
+# re-run scripts/sync-schema.sh (a squash merge leaves this PR-branch SHA
+# fetchable, so CI stays green either way).
+c38c8adb13f6d49c5c56119b1a20b3454beb7afb

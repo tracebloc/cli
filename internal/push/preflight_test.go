@@ -439,3 +439,141 @@ func TestPreflightDataset_TextLabelParity(t *testing.T) {
 			"(BIO labels aren't class labels; the ingestor runs BIOLabelValidator, not LabelDiversity): %v", problem.Err)
 	}
 }
+
+func TestCheckSequenceSchemaColumns(t *testing.T) {
+	// Previews the ingest.v1 sequence-grouped conditional (backend#1054
+	// Decision-2): the schema must declare BOTH fixed sequence columns.
+	g := GroupingSpec{GroupColumn: "sequence_id", TimeColumn: "timestamp", CountUnit: "sequences"}
+
+	ok := map[string]string{"sequence_id": "VARCHAR(64)", "timestamp": "INT", "hr": "FLOAT", "label": "VARCHAR(16)"}
+	if err := CheckSequenceSchemaColumns(ok, g); err != nil {
+		t.Errorf("schema with both sequence columns rejected: %v", err)
+	}
+
+	missingBoth := map[string]string{"hr": "FLOAT", "label": "VARCHAR(16)"}
+	err := CheckSequenceSchemaColumns(missingBoth, g)
+	if err == nil {
+		t.Fatal("schema without sequence_id/timestamp must be rejected")
+	}
+	for _, want := range []string{"sequence_id", "timestamp", "fixed by the platform"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+
+	// The JSON-schema `required` is exact on keys — a case variant must not
+	// satisfy it, or the CLI would accept a YAML the schema validation (and
+	// the cluster) rejects.
+	caseVariant := map[string]string{"Sequence_ID": "VARCHAR(64)", "timestamp": "INT"}
+	if err := CheckSequenceSchemaColumns(caseVariant, g); err == nil {
+		t.Error("a case-variant sequence_id key must not satisfy the schema conditional")
+	}
+}
+
+func TestCheckSequenceRows(t *testing.T) {
+	// Previews SequenceGroupValidator's null-id rule: every timestep row
+	// must carry a sequence id; NA sentinels count as null (pandas parity).
+	g := "sequence_id"
+
+	good := writeTmp(t, "good.csv", []byte("sequence_id,timestamp,hr,label\np1,1,80,sepsis\np1,2,82,sepsis\np2,1,70,healthy\n"))
+	seqs, err := CheckSequenceRows(good, g)
+	if err != nil {
+		t.Fatalf("clean grouped CSV rejected: %v", err)
+	}
+	if seqs != 2 {
+		t.Errorf("sequences = %d, want 2 (the platform counts sequences, not rows)", seqs)
+	}
+
+	// Empty and NA-sentinel ids are both null (the ingestor loads with
+	// pandas, whose NA parsing fires before the isna() probe).
+	nulls := writeTmp(t, "nulls.csv", []byte("sequence_id,timestamp,hr,label\np1,1,80,a\n,2,82,a\nNA,3,84,b\n"))
+	if _, err := CheckSequenceRows(nulls, g); err == nil {
+		t.Fatal("rows with empty/NA sequence ids must be rejected")
+	} else if !strings.Contains(err.Error(), "2 empty/null value(s)") {
+		t.Errorf("error should count both null forms, got: %v", err)
+	}
+
+	// Header resolution follows the shared case-/whitespace-insensitive
+	// rule (#340) — a " Sequence_ID " header still resolves.
+	loose := writeTmp(t, "loose.csv", []byte(" Sequence_ID ,timestamp,label\np1,1,a\np2,1,b\n"))
+	if seqs, err := CheckSequenceRows(loose, g); err != nil || seqs != 2 {
+		t.Errorf("case/whitespace-variant header must resolve (ingestor rule): seqs=%d err=%v", seqs, err)
+	}
+
+	// Absent column benign-skips — CheckSequenceSchemaColumns owns that
+	// diagnostic, exactly like the diversity check's benign skip.
+	noCol := writeTmp(t, "nocol.csv", []byte("id,timestamp,label\np1,1,a\n"))
+	if _, err := CheckSequenceRows(noCol, g); err != nil {
+		t.Errorf("missing column must benign-skip: %v", err)
+	}
+}
+
+// TestPreflightDataset_SequenceGrouped locks the dispatch-level wiring for the
+// sequence-grouped tabular task (time_series_classification, backend#1054):
+// the grouping checks fire off the vendored contract's grouping TRAIT
+// (Decision-4), the diversity gate fires off IsClassification (not a
+// hardcoded id), and the ungrouped time-series sibling is untouched.
+func TestPreflightDataset_SequenceGrouped(t *testing.T) {
+	writeLayout := func(t *testing.T, content string) *LocalLayout {
+		t.Helper()
+		dir := t.TempDir()
+		p := filepath.Join(dir, "data.csv")
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return &LocalLayout{Root: dir, LabelsCSV: p}
+	}
+	schema := map[string]string{
+		"sequence_id": "VARCHAR(64)", "timestamp": "INT",
+		"hr": "FLOAT", "label": "VARCHAR(16)",
+	}
+	spec := func(s map[string]string) SpecArgs {
+		return SpecArgs{Category: "time_series_classification", LabelColumn: "label", Schema: s}
+	}
+
+	// Valid two-sequence, two-class dataset: accepted, and the advisory
+	// note surfaces the SEQUENCE count (Decision-3's sample unit).
+	good := "sequence_id,timestamp,hr,label\np1,1,80,sepsis\np1,2,82,sepsis\np2,1,70,healthy\n"
+	notes, problem := PreflightDataset(spec(schema), writeLayout(t, good))
+	if problem != nil {
+		t.Fatalf("valid grouped dataset rejected: %v", problem.Err)
+	}
+	foundNote := false
+	for _, n := range notes {
+		if strings.Contains(n, "2 sequence(s)") {
+			foundNote = true
+		}
+	}
+	if !foundNote {
+		t.Errorf("expected a sequence-count note, got %v", notes)
+	}
+
+	// Schema missing the fixed sequence columns → rejected before upload.
+	bare := map[string]string{"hr": "FLOAT", "label": "VARCHAR(16)"}
+	bareCSV := "hr,label\n80,sepsis\n70,healthy\n"
+	if _, problem := PreflightDataset(spec(bare), writeLayout(t, bareCSV)); problem == nil {
+		t.Error("schema without sequence_id/timestamp should be rejected")
+	}
+
+	// A null sequence id → rejected (SequenceGroupValidator preview).
+	nullID := "sequence_id,timestamp,hr,label\np1,1,80,sepsis\n,2,82,sepsis\np2,1,70,healthy\n"
+	if _, problem := PreflightDataset(spec(schema), writeLayout(t, nullID)); problem == nil {
+		t.Error("a row with an empty sequence_id should be rejected")
+	}
+
+	// Single-class labels → rejected via IsClassification (the diversity
+	// gate must cover TSC, not just tabular_classification).
+	oneClass := "sequence_id,timestamp,hr,label\np1,1,80,sepsis\np2,1,70,sepsis\n"
+	if _, problem := PreflightDataset(spec(schema), writeLayout(t, oneClass)); problem == nil {
+		t.Error("a single-class grouped dataset should be rejected (LabelDiversityValidator preview)")
+	}
+
+	// The ungrouped time-series sibling must NOT gain the grouping checks:
+	// forecasting has no grouping trait and no diversity gate.
+	tsf := SpecArgs{Category: "time_series_forecasting", LabelColumn: "label",
+		Schema: map[string]string{"timestamp": "INT", "hr": "FLOAT", "label": "FLOAT"}}
+	tsfCSV := "timestamp,hr,label\n1,80,0.1\n2,82,0.1\n"
+	if _, problem := PreflightDataset(tsf, writeLayout(t, tsfCSV)); problem != nil {
+		t.Errorf("time_series_forecasting must stay ungrouped and diversity-free: %v", problem.Err)
+	}
+}

@@ -341,6 +341,49 @@ func TestBuild_Tabular_PassesSchema(t *testing.T) {
 		LabelColumn: "DEATH_EVENT", TimeColumn: "time",
 		Schema: map[string]string{"age": "INT", "time": "INT", "DEATH_EVENT": "INT"},
 	}, true)
+
+	// time_series_classification (backend#1054): classification-class, so
+	// the label takes the plain STRING form (no label.policy) even though
+	// its time-series siblings are regression-class — and the schema must
+	// carry the fixed sequence columns (Decision-2), or the vendored
+	// ingest.v1 conditional rejects it (see the negative test below).
+	check("time_series_classification", SpecArgs{
+		Table: "t_tsc", Category: "time_series_classification", Intent: "train",
+		LabelColumn: "label",
+		Schema: map[string]string{
+			"sequence_id": "VARCHAR(64)", "timestamp": "INT",
+			"hr": "FLOAT", "label": "INT",
+		},
+	}, false)
+}
+
+// TestBuild_TSC_SchemaConditionalRequiresSequenceColumns pins that the
+// VENDORED ingest.v1 schema actually enforces the sequence-grouped
+// conditional (backend#1054 Decision-2): a time_series_classification spec
+// whose schema map lacks sequence_id/timestamp must FAIL local validation —
+// proof the WS1 schema re-sync landed, not just the enum value.
+func TestBuild_TSC_SchemaConditionalRequiresSequenceColumns(t *testing.T) {
+	v, err := schema.NewV1Validator()
+	if err != nil {
+		t.Fatalf("NewV1Validator: %v", err)
+	}
+	spec := SpecArgs{
+		Table: "t_tsc", Category: "time_series_classification", Intent: "train",
+		LabelColumn: "label",
+		Schema:      map[string]string{"hr": "FLOAT", "label": "INT"},
+	}.Build()
+	b, err := yaml.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	_, errs, parseErr := v.ValidateYAML(b)
+	if parseErr != nil {
+		t.Fatalf("parse: %v\n%s", parseErr, b)
+	}
+	if len(errs) == 0 {
+		t.Fatalf("schema without sequence_id/timestamp must fail the vendored ingest.v1 "+
+			"conditional — the re-synced schema isn't enforcing Decision-2:\n%s", b)
+	}
 }
 
 // TestBuild_Tabular_RegressionDefaultsPolicyBucket: regression-class

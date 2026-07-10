@@ -109,6 +109,17 @@ var categoryRegistry = []CategorySpec{
 		Blurb: "predict a number from table columns"},
 	{ID: "time_series_forecasting", Family: FamilyTabular, Label: "Time-series forecasting", RegressionClass: true, CLISupported: true,
 		Blurb: "predict future values from past ones"},
+	// time_series_classification is the sequence-GROUPED time-series task
+	// (backend#1054): the CSV carries fixed sequence_id / timestamp columns
+	// (Decision-2), each sequence_id groups the timestep rows of ONE sequence,
+	// and the label is constant within it — one class per whole sequence, not
+	// per row. NOT RegressionClass (real class labels → plain string label
+	// form, no label.policy); IsClassification mirrors the ingestor registry's
+	// is_classification=True, so the label-diversity preflight gates it. The
+	// per-sequence grouping facts live in the vendored layout contract's
+	// grouping trait (Decision-4), read via GroupingFor — not hardcoded here.
+	{ID: "time_series_classification", Family: FamilyTabular, Label: "Time-series classification", CLISupported: true, IsClassification: true,
+		Blurb: "predict a class for each whole sequence"},
 	{ID: "time_to_event_prediction", Family: FamilyTabular, Label: "Time-to-event prediction", Gloss: "Survival analysis", RegressionClass: true, CLISupported: true,
 		Blurb: "predict how long until an event happens"},
 	{ID: "causal_language_modeling", Family: FamilyText, Label: "Causal language modeling", CLISupported: true, SelfSupervised: true,
