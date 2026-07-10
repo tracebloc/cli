@@ -208,11 +208,15 @@ func TestRunDataIngest_ImageOnlyFlagsRejectedOnNonImage(t *testing.T) {
 		{"min-size on tabular", func(a *runDataIngestArgs) { a.MinSizeFlag = "32x32" }},
 		{"malformed min-size on tabular", func(a *runDataIngestArgs) { a.MinSizeFlag = "garbage" }},
 	}
+	// A real, existing path so the earlier dataset-path stat passes and
+	// the image-only guard is what actually fires (the path check runs
+	// before the guard).
+	dir := t.TempDir()
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			var human bytes.Buffer
 			a := runDataIngestArgs{
-				LocalPath: "./x",
+				LocalPath: dir,
 				Spec: push.SpecArgs{
 					Table: "t", Category: "tabular_classification",
 					Intent: "train", LabelColumn: "y",
