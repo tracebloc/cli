@@ -4,11 +4,15 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 // reservedColumns are framework-managed columns the ingestor adds
@@ -32,12 +36,73 @@ var reservedColumns = map[string]bool{
 }
 
 // schemaInferenceSampleRows caps how many data rows InferSchema reads
-// to decide each column's type. The whole CSV would be more accurate
-// but a few thousand rows is plenty to distinguish INT/FLOAT/text in
-// practice, and bounds the work for large files. A column whose true
-// type only reveals itself past the sample (e.g. an int column that
-// turns float on row 10k) is the case --schema exists to override.
+// to decide each column's type. It MIRRORS data-ingestors'
+// schema_inference.SAMPLE_CAP (5000) so the two implementations agree on
+// the same prefix of a file (di#349). The whole CSV would be more
+// accurate but a few thousand rows is plenty to distinguish the SQL
+// types in practice, and bounds the work for large files. A column whose
+// true type only reveals itself past the sample (e.g. an int column that
+// turns float on row 10k, or a zero-padded code that first appears past
+// the cap) is the case --schema exists to override.
+// The value-level parity fixture pins this equality
+// (internal/push/testdata/schema_inference_parity.json, "sample_cap").
 const schemaInferenceSampleRows = 5000
+
+// Signed 32-bit bounds. A parsed integer outside this range needs BIGINT,
+// not INT, or it overflows a MySQL INT column on write. Mirrors
+// schema_inference.INT32_MIN/INT32_MAX (di#349). The int64 bound is
+// enforced by strconv.ParseInt(…, 10, 64) erroring on overflow — an
+// all-digit value beyond int64 is not storable as an integer and falls
+// through to VARCHAR, matching the ingestor.
+const (
+	int32Min = -2147483648
+	int32Max = 2147483647
+)
+
+// boolText is the textual-boolean vocabulary — deliberately NOT the 0/1
+// digit forms. A pure 0/1 column is inferred INT (lossless); only these
+// unambiguous words map to BOOLEAN. Mirrors schema_inference._BOOL_TEXT
+// (di#349), a deliberate subset of coercion.BOOL_STRINGS.
+var boolText = map[string]struct{}{
+	"true": {}, "false": {}, "t": {}, "f": {},
+	"yes": {}, "no": {}, "y": {}, "n": {},
+}
+
+// ASCII-only digit grammars ([0-9], not \d). Restricting to ASCII routes
+// Unicode-digit and underscore-grouped tokens to VARCHAR, keeping the CLI
+// and the ingestor in lockstep (schema_inference._LEADING_ZERO_CODE /
+// _INT_RE / _FLOAT_RE). The float grammar pre-screens the token before
+// ParseFloat so Go and Python reject the same non-finite / grouped forms.
+var (
+	leadingZeroCodeRE = regexp.MustCompile(`^[+-]?0[0-9]+$`)
+	intRE             = regexp.MustCompile(`^[+-]?[0-9]+$`)
+	floatRE           = regexp.MustCompile(`^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`)
+)
+
+// dateLayouts / datetimeLayouts are the naive (no-timezone) calendar forms
+// the CLI recognizes when mirroring schema_inference's date rule (rule 5,
+// checked AFTER numeric so an all-digit id like "20240101" stays INT).
+// data-ingestors uses pandas' liberal to_datetime; the CLI cannot reproduce
+// every pandas spelling in Go, so it recognizes the common ISO forms and
+// otherwise falls back to VARCHAR — the SAFE direction: a mis-typed VARCHAR
+// is correctable with --schema, and because the CLI EMITS the schema
+// explicitly, the CLI's answer is authoritative in-cluster regardless of the
+// deployed ingestor's own guess. The tz-aware RFC3339 form is parsed
+// separately (parseCalendarDate) so a column of MIXED UTC offsets is detected
+// and routed to VARCHAR — matching the ingestor, whose _infer_datetime
+// returns None (→ VARCHAR) on mixed timezones. The value-level parity fixture
+// pins the forms that must agree.
+var (
+	dateLayouts = []string{"2006-01-02", "2006/01/02"}
+	// Naive datetime layouts only — tz-aware RFC3339 is handled explicitly
+	// in parseCalendarDate (see the mixed-offset guard there).
+	datetimeLayouts = []string{
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006/01/02 15:04:05",
+	}
+)
 
 // DiscoverTabular validates a local input for a tabular / time-series
 // ingestion. Unlike the image layout, tabular categories have NO
@@ -184,100 +249,343 @@ func ParseSchema(s string) (map[string]string, error) {
 	return out, nil
 }
 
-// InferSchema reads the CSV header and a sample of rows and infers a
-// column→SQL-type map: all-integer columns → INT, otherwise
-// all-numeric → FLOAT, otherwise VARCHAR(255). Empty cells are
-// ignored when judging a column; a column with NO non-empty sampled
-// value is typed as a nullable FLOAT (not VARCHAR — an all-NULL VARCHAR
-// is exactly what the ingestor's string validator rejects) and returned
-// in `empty` so the caller can warn.
+// SchemaInference is the result of inferring a tabular schema from a CSV.
+// Schema is the column→SQL-type map the CLI emits as spec.schema.
+// Skipped/Empty/IDLike are the risky cases surfaced to the user as warnings
+// so a wrong guess can be corrected with --schema before anything is
+// ingested — never a silent guess (RFC-0002 §8.1).
+type SchemaInference struct {
+	// Schema maps each non-reserved column to its inferred SQL type.
+	Schema map[string]string
+	// Skipped lists framework-managed columns (see reservedColumns) that
+	// were excluded — the ingestor adds them itself and rejects a schema
+	// that redeclares them.
+	Skipped []string
+	// Empty lists columns with NO non-missing value in the sample; they
+	// are typed VARCHAR(1) (mirroring the ingestor's all-missing rule) and
+	// flagged because the type is a guess with no evidence behind it.
+	Empty []string
+	// IDLike lists INT/BIGINT columns whose sampled values are all
+	// distinct — they look like identifiers. If such a column is really a
+	// zero-padded code the leading zeros were stripped somewhere upstream,
+	// or it should be a VARCHAR; the warning points it out.
+	IDLike []string
+}
+
+// InferSchema reads the CSV header and up to schemaInferenceSampleRows
+// data rows and infers a column→SQL-type map, MIRRORING data-ingestors'
+// schema_inference.infer_schema (di#349) column-for-column via
+// inferColumnType. The ingestor OWNS these rules; the CLI mirrors them so
+// the schema it EMITS is the same answer the ingestor would compute — and,
+// because it is emitted explicitly (a.Spec.Schema → spec.schema), is
+// authoritative in-cluster regardless of the deployed ingestor version
+// (RFC-0002 Principle 6). The value-level parity fixture pins the two
+// implementations to the same per-column answer.
 //
-// It's a convenience so customers don't hand-write a --schema for the
-// common case. Non-numeric specials (timestamps, dates, booleans)
-// infer as VARCHAR(255); pass --schema to declare them precisely.
-//
-// Framework-managed columns (see reservedColumns — id, data_id, …)
-// are skipped and returned as the second value so the caller can tell
-// the customer they weren't included.
-func InferSchema(csvPath string) (schema map[string]string, skipped, empty []string, err error) {
+// Framework-managed columns (see reservedColumns — id, data_id, …) are
+// skipped: the ingestor adds them itself and rejects a schema that
+// redeclares them. The risky cases (empty-in-sample, id-like) are returned
+// alongside the schema so the caller can surface them as warnings.
+func InferSchema(csvPath string) (*SchemaInference, error) {
 	f, err := os.Open(csvPath)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	defer func() { _ = f.Close() }()
 
 	r := csv.NewReader(f)
+	r.FieldsPerRecord = -1 // ragged rows are CheckDuplicateHeaders' / read-time's diagnostic, not ours
 	header, err := r.Read()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("reading CSV header from %s: %w", csvPath, err)
+		return nil, fmt.Errorf("reading CSV header from %s: %w", csvPath, err)
 	}
 	if len(header) == 0 {
-		return nil, nil, nil, fmt.Errorf("CSV %s has no columns", csvPath)
+		return nil, fmt.Errorf("CSV %s has no columns", csvPath)
 	}
 
-	// Per-column running judgement.
-	couldBeInt := make([]bool, len(header))
-	couldBeFloat := make([]bool, len(header))
-	sawValue := make([]bool, len(header))
-	for i := range header {
-		couldBeInt[i] = true
-		couldBeFloat[i] = true
-	}
-
+	// Collect each column's raw sampled values (row-capped at
+	// schemaInferenceSampleRows to match the ingestor's SAMPLE_CAP), then
+	// infer per column. Cleaning (trim + drop empty/NA) happens inside
+	// cleanTokens so inferColumnType matches the ingestor byte-for-byte.
+	cols := make([][]string, len(header))
 	for n := 0; n < schemaInferenceSampleRows; n++ {
 		row, err := r.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("reading CSV row from %s: %w", csvPath, err)
+			return nil, fmt.Errorf("reading CSV row from %s: %w", csvPath, err)
 		}
 		for i := 0; i < len(header) && i < len(row); i++ {
-			v := strings.TrimSpace(row[i])
-			if v == "" {
-				continue
-			}
-			sawValue[i] = true
-			if couldBeInt[i] {
-				if _, e := strconv.ParseInt(v, 10, 64); e != nil {
-					couldBeInt[i] = false
-				}
-			}
-			if couldBeFloat[i] {
-				if _, e := strconv.ParseFloat(v, 64); e != nil {
-					couldBeFloat[i] = false
-				}
-			}
+			cols[i] = append(cols[i], row[i])
 		}
 	}
 
-	schema = make(map[string]string, len(header))
+	res := &SchemaInference{Schema: make(map[string]string, len(header))}
 	for i, col := range header {
 		col = strings.TrimSpace(col)
 		if reservedColumns[col] {
-			// Framework-managed (id, data_id, …): the ingestor adds it
-			// and rejects a schema that redeclares it. Skip + report.
-			skipped = append(skipped, col)
+			res.Skipped = append(res.Skipped, col)
 			continue
 		}
-		switch {
-		case sawValue[i] && couldBeInt[i]:
-			schema[col] = "INT"
-		case sawValue[i] && couldBeFloat[i]:
-			schema[col] = "FLOAT"
-		case !sawValue[i]:
-			// Entirely empty in the sample (e.g. an unmeasured analyte in a
-			// sparse panel). It can't be typed from data; default to a
-			// nullable FLOAT rather than VARCHAR — a tabular feature column
-			// is numeric far more often than text, and an all-NULL VARCHAR
-			// is exactly the shape the ingestor's string validator rejects.
-			// Reported in `empty` so the caller can warn / the user can
-			// --schema-override.
-			schema[col] = "FLOAT"
-			empty = append(empty, col)
-		default:
-			schema[col] = "VARCHAR(255)"
+		tokens := cleanTokens(cols[i])
+		typ := classifyTokens(tokens)
+		res.Schema[col] = typ
+		if len(tokens) == 0 {
+			res.Empty = append(res.Empty, col)
+		} else if isIntegerType(typ) && allDistinct(tokens) {
+			res.IDLike = append(res.IDLike, col)
 		}
 	}
-	return schema, skipped, empty, nil
+	return res, nil
+}
+
+// inferColumnType returns the SQL type for one column from its RAW values,
+// a faithful mirror of schema_inference.infer_column_type (di#349). Used
+// directly by the value-level parity test. See classifyTokens for the
+// rule precedence.
+func inferColumnType(values []string) string {
+	return classifyTokens(cleanTokens(values))
+}
+
+// cleanTokens takes the first schemaInferenceSampleRows raw values, trims
+// each, and drops empty / NA-sentinel tokens — mirroring
+// schema_inference._clean_tokens (the cap is applied to the RAW values,
+// then missing tokens are dropped). naSentinels (preflight.go) is the same
+// set as the ingestor's coercion.NA_SENTINELS.
+func cleanTokens(values []string) []string {
+	if len(values) > schemaInferenceSampleRows {
+		values = values[:schemaInferenceSampleRows]
+	}
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		s := strings.TrimSpace(v)
+		if s == "" {
+			continue
+		}
+		if _, isNA := naSentinels[s]; isNA {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// classifyTokens applies the di#349 rule precedence (FIRST MATCH WINS) to
+// already-cleaned tokens:
+//
+//  0. no tokens (all missing)     -> VARCHAR(1)
+//  1. any leading-zero code       -> VARCHAR(n)   (THE #349 fix: "007" is text)
+//  2. all textual boolean         -> BOOLEAN      (0/1 is INT, not BOOL)
+//  3. all integer                 -> INT / BIGINT (BIGINT past int32; >int64 -> text)
+//  4. all finite float            -> FLOAT
+//  5. all date / datetime         -> DATE / DATETIME (after numeric)
+//  6. otherwise                   -> VARCHAR(n)
+//
+// VARCHAR(n) sizes n by RUNE count (utf8.RuneCountInString), matching
+// MySQL VARCHAR(n) character semantics and the ingestor's char-count
+// sizing — NOT byte length.
+func classifyTokens(tokens []string) string {
+	if len(tokens) == 0 {
+		return "VARCHAR(1)"
+	}
+
+	// 1. Leading-zero code — one such token pins the column to text.
+	for _, t := range tokens {
+		if leadingZeroCodeRE.MatchString(t) {
+			return varcharOf(tokens)
+		}
+	}
+
+	// 2. Textual boolean.
+	if allBoolText(tokens) {
+		return "BOOLEAN"
+	}
+
+	// 3. Integer (INT vs BIGINT by magnitude; >int64 all-digit -> text).
+	if allMatch(intRE, tokens) {
+		return integerType(tokens)
+	}
+
+	// 4. Float.
+	if allFiniteFloat(tokens) {
+		return "FLOAT"
+	}
+
+	// 5. Date / datetime (after numeric, so numeric ids can't be mis-dated).
+	if dt := inferDatetime(tokens); dt != "" {
+		return dt
+	}
+
+	// 6. Fallback.
+	return varcharOf(tokens)
+}
+
+func allBoolText(tokens []string) bool {
+	for _, t := range tokens {
+		if _, ok := boolText[strings.ToLower(t)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func allMatch(re *regexp.Regexp, tokens []string) bool {
+	for _, t := range tokens {
+		if !re.MatchString(t) {
+			return false
+		}
+	}
+	return true
+}
+
+// integerType assumes every token already matched intRE. It returns INT
+// (all within signed int32), BIGINT (within int64 but past int32), or
+// VARCHAR (any token beyond int64 — not storable as an integer). Mirrors
+// schema_inference rule 3.
+func integerType(tokens []string) string {
+	widen := false
+	for _, t := range tokens {
+		v, err := strconv.ParseInt(t, 10, 64)
+		if err != nil {
+			// Beyond int64: not storable as an integer -> text.
+			return varcharOf(tokens)
+		}
+		if v < int32Min || v > int32Max {
+			widen = true
+		}
+	}
+	if widen {
+		return "BIGINT"
+	}
+	return "INT"
+}
+
+// allFiniteFloat reports whether every token is a finite float under the
+// ASCII float grammar — the regex pre-screen rejects underscore grouping,
+// Unicode digits, and the inf/nan spellings ParseFloat would otherwise
+// accept, and the isfinite guard catches a regex-valid overflow ("1e400").
+func allFiniteFloat(tokens []string) bool {
+	for _, t := range tokens {
+		if !floatRE.MatchString(t) {
+			return false
+		}
+		fv, err := strconv.ParseFloat(t, 64)
+		if err != nil || math.IsInf(fv, 0) || math.IsNaN(fv) {
+			return false
+		}
+	}
+	return true
+}
+
+// inferDatetime returns "DATE"/"DATETIME" if every token parses as a
+// calendar date under the recognized layouts, else "". Guard: each token
+// must contain an ASCII digit (so plain words / month names stay text) —
+// mirrors schema_inference._infer_datetime's ASCII-digit guard. hasTime is
+// true when any token carries a time-of-day component.
+//
+// Mixed-offset guard: a column whose tokens don't all share one timezone key
+// (tz-aware values with differing UTC offsets, or a mix of tz-aware and
+// tz-naive values) is not a single-timezone calendar column, so it falls back
+// to VARCHAR. This mirrors the ingestor, where pd.to_datetime(format="mixed")
+// returns None on mixed timezones (schema_inference._infer_datetime) — without
+// the guard the CLI would emit a tz-naive DATETIME that silently drops the
+// per-row offset.
+func inferDatetime(tokens []string) string {
+	hasTime := false
+	tzKey := ""
+	haveTZ := false
+	for _, t := range tokens {
+		if !containsASCIIDigit(t) {
+			return ""
+		}
+		ok, withTime, key := parseCalendarDate(t)
+		if !ok {
+			return ""
+		}
+		if withTime {
+			hasTime = true
+		}
+		if !haveTZ {
+			tzKey, haveTZ = key, true
+		} else if key != tzKey {
+			// Non-uniform timezone across the column — VARCHAR, matching the
+			// ingestor's None result for mixed timezones.
+			return ""
+		}
+	}
+	if hasTime {
+		return "DATETIME"
+	}
+	return "DATE"
+}
+
+func containsASCIIDigit(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// parseCalendarDate reports whether t parses under a recognized date /
+// datetime layout, whether the matched layout carries a time, and a timezone
+// key used to detect a column of mixed UTC offsets. A tz-aware RFC3339 token
+// keys on its offset in seconds ("z<offset>"); every naive (no-timezone) date
+// or datetime layout keys as "naive". A column whose tokens don't all share
+// one key is not a single-timezone calendar column (see inferDatetime's
+// mixed-offset guard).
+func parseCalendarDate(t string) (ok, withTime bool, tzKey string) {
+	// tz-aware: RFC3339 carries an explicit offset (or Z).
+	if tm, err := time.Parse(time.RFC3339, t); err == nil {
+		_, off := tm.Zone()
+		return true, true, "z" + strconv.Itoa(off)
+	}
+	for _, layout := range datetimeLayouts {
+		if _, err := time.Parse(layout, t); err == nil {
+			return true, true, "naive"
+		}
+	}
+	for _, layout := range dateLayouts {
+		if _, err := time.Parse(layout, t); err == nil {
+			return true, false, "naive"
+		}
+	}
+	return false, false, ""
+}
+
+// varcharOf sizes VARCHAR(n) by the longest sampled value in RUNES (code
+// points), floor 1 — MySQL VARCHAR(n) counts characters, so a multibyte
+// value must not be sized by its UTF-8 byte length. Mirrors
+// schema_inference._varchar.
+func varcharOf(tokens []string) string {
+	n := 1
+	for _, t := range tokens {
+		if c := utf8.RuneCountInString(t); c > n {
+			n = c
+		}
+	}
+	return fmt.Sprintf("VARCHAR(%d)", n)
+}
+
+// isIntegerType reports whether an inferred type is INT or BIGINT — used
+// to flag id-like columns (all-distinct integers).
+func isIntegerType(typ string) bool {
+	return typ == "INT" || typ == "BIGINT"
+}
+
+// allDistinct reports whether every token is unique. An all-distinct
+// integer column looks like an identifier — flagged so the user can
+// confirm it is a real feature (and not a code whose leading zeros were
+// lost upstream).
+func allDistinct(tokens []string) bool {
+	seen := make(map[string]struct{}, len(tokens))
+	for _, t := range tokens {
+		if _, dup := seen[t]; dup {
+			return false
+		}
+		seen[t] = struct{}{}
+	}
+	return true
 }

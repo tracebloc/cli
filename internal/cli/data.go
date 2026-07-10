@@ -315,7 +315,7 @@ Exit codes:
 			"size check).")
 	cmd.Flags().StringVar(&schemaFlag, "schema", "",
 		"tabular/time-series only: column types as col:TYPE,col:TYPE (e.g. age:INT,price:FLOAT). "+
-			"Default: inferred from the CSV (INT/FLOAT/VARCHAR).")
+			"Default: inferred from the CSV (INT/BIGINT/FLOAT/BOOLEAN/DATE/DATETIME/VARCHAR(n)).")
 	cmd.Flags().StringVar(&labelPolicy, "label-policy", "",
 		"regression-class only (tabular_regression, time_series_forecasting, time_to_event_prediction): "+
 			"passthrough|bucket (default bucket — bins the target so the raw value never leaves the cluster)")
@@ -638,9 +638,14 @@ collaborators can train against that table without ever seeing the raw files.`))
 			return &exitError{code: 3, err: perr}
 		}
 
-		// Column schema: an explicit --schema wins; otherwise infer
-		// INT/FLOAT/VARCHAR types from the CSV so the customer doesn't
-		// hand-write one for the common case.
+		// Column schema. An explicit --schema wins (raw flag, or the
+		// optional override the interactive prompt captures into SchemaFlag).
+		// Otherwise infer the types here — mirroring the ingestor's own rules
+		// (di#349) — and EMIT the result explicitly (below, via a.Spec.Schema
+		// → spec.schema), so the ingestor uses the CLI's answer regardless of
+		// its own version. Inference runs on both a no-schema non-interactive
+		// run and an interactive run where the user left the schema prompt
+		// blank; the risky cases below are surfaced as warnings.
 		if a.SchemaFlag != "" {
 			sch, perr := push.ParseSchema(a.SchemaFlag)
 			if perr != nil {
@@ -648,22 +653,28 @@ collaborators can train against that table without ever seeing the raw files.`))
 			}
 			a.Spec.Schema = sch
 		} else {
-			sch, skipped, empty, ierr := push.InferSchema(layout.LabelsCSV)
+			res, ierr := push.InferSchema(layout.LabelsCSV)
 			if ierr != nil {
 				return &exitError{code: 3, err: fmt.Errorf("inferring schema from CSV: %w", ierr)}
 			}
-			a.Spec.Schema = sch
+			a.Spec.Schema = res.Schema
 			_, _ = fmt.Fprintf(out,
 				"Inferred schema for %d column(s) from %s (override with --schema).\n",
-				len(sch), filepath.Base(layout.LabelsCSV))
-			if len(skipped) > 0 {
+				len(res.Schema), filepath.Base(layout.LabelsCSV))
+			if len(res.Skipped) > 0 {
 				_, _ = fmt.Fprintf(out,
-					"  (skipped framework-managed column(s): %s)\n", strings.Join(skipped, ", "))
+					"  (skipped framework-managed column(s): %s)\n", strings.Join(res.Skipped, ", "))
 			}
-			if len(empty) > 0 {
+			if len(res.Empty) > 0 {
 				_, _ = fmt.Fprintf(out,
-					"  (warning: %d column(s) had no values in the sample and were typed FLOAT (nullable): %s)\n",
-					len(empty), strings.Join(empty, ", "))
+					"  (warning: %d column(s) had no values in the sample and were typed VARCHAR(1): %s)\n",
+					len(res.Empty), strings.Join(res.Empty, ", "))
+			}
+			if len(res.IDLike) > 0 {
+				_, _ = fmt.Fprintf(out,
+					"  (warning: %d column(s) look like identifiers (all-unique integers): %s — "+
+						"if any is a zero-padded code, pass --schema to type it VARCHAR)\n",
+					len(res.IDLike), strings.Join(res.IDLike, ", "))
 			}
 		}
 	case push.IsImage(a.Spec.Category):

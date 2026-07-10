@@ -115,8 +115,8 @@ func goLabelValues(t *testing.T, c parityCase) LabelReadValues {
 	csvPath := filepath.Join("testdata", "parity", "cases", c.Name, c.CSV)
 	schema := c.Schema
 	if IsTabular(c.Category) && len(schema) == 0 {
-		if sch, _, _, err := InferSchema(csvPath); err == nil {
-			schema = sch
+		if res, err := InferSchema(csvPath); err == nil {
+			schema = res.Schema
 		}
 	}
 	dropNA, collapse := false, false
@@ -152,8 +152,8 @@ func runGoPreflight(t *testing.T, c parityCase) string {
 		// schema the same way, so dtype-sensitive verdicts stay comparable.
 		if len(c.Schema) > 0 {
 			spec.Schema = c.Schema
-		} else if sch, _, _, err := InferSchema(layout.LabelsCSV); err == nil {
-			spec.Schema = sch
+		} else if res, err := InferSchema(layout.LabelsCSV); err == nil {
+			spec.Schema = res.Schema
 		}
 	}
 	_, problem := PreflightDataset(spec, layout)

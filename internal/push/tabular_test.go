@@ -142,48 +142,50 @@ func TestDiscoverTabular_MultipleCSV(t *testing.T) {
 
 // TestInferSchema covers the INT / FLOAT / VARCHAR inference from a
 // CSV header + sample rows. Integer-only columns → INT, numeric (with
-// a decimal) → FLOAT, anything else → VARCHAR(255).
+// a decimal) → FLOAT, anything else → VARCHAR(n) sized by the longest value.
 func TestInferSchema(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeFile(t, dir, "data.csv",
 		"count,age,price,name\n1,30,9.99,alice\n2,40,19.5,bob\n")
 
-	schema, _, _, err := InferSchema(csv)
+	res, err := InferSchema(csv)
 	if err != nil {
 		t.Fatalf("InferSchema: %v", err)
 	}
+	// VARCHAR(n) is sized by the longest sampled value (rune count),
+	// mirroring di#349 — "alice" (5) is the longest name.
 	want := map[string]string{
 		"count": "INT",
 		"age":   "INT",
 		"price": "FLOAT",
-		"name":  "VARCHAR(255)",
+		"name":  "VARCHAR(5)",
 	}
 	for col, typ := range want {
-		if schema[col] != typ {
-			t.Errorf("schema[%q] = %q, want %q (full: %v)", col, schema[col], typ, schema)
+		if res.Schema[col] != typ {
+			t.Errorf("schema[%q] = %q, want %q (full: %v)", col, res.Schema[col], typ, res.Schema)
 		}
 	}
 }
 
-// TestInferSchema_EmptyColumnIsFloat: a column with no non-empty sampled
-// value can't be typed from data; it's returned as a nullable FLOAT (not
-// VARCHAR — an all-NULL VARCHAR is what the ingestor's string validator
-// rejects) and reported in the `empty` return so the caller can warn.
-func TestInferSchema_EmptyColumnIsFloat(t *testing.T) {
+// TestInferSchema_EmptyColumnIsVarchar1: a column with no non-empty sampled
+// value can't be typed from data; it comes back as VARCHAR(1) (mirroring
+// the ingestor's all-missing rule) and is reported in the Empty list so
+// it can be surfaced as a warning that the type is a guess with no evidence.
+func TestInferSchema_EmptyColumnIsVarchar1(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeFile(t, dir, "data.csv", "filled,empty\n1,\n2,\n")
-	schema, _, empty, err := InferSchema(csv)
+	res, err := InferSchema(csv)
 	if err != nil {
 		t.Fatalf("InferSchema: %v", err)
 	}
-	if schema["empty"] != "FLOAT" {
-		t.Errorf("schema[empty] = %q, want FLOAT", schema["empty"])
+	if res.Schema["empty"] != "VARCHAR(1)" {
+		t.Errorf("schema[empty] = %q, want VARCHAR(1)", res.Schema["empty"])
 	}
-	if schema["filled"] != "INT" {
-		t.Errorf("schema[filled] = %q, want INT", schema["filled"])
+	if res.Schema["filled"] != "INT" {
+		t.Errorf("schema[filled] = %q, want INT", res.Schema["filled"])
 	}
-	if len(empty) != 1 || empty[0] != "empty" {
-		t.Errorf("empty = %v, want [empty]", empty)
+	if len(res.Empty) != 1 || res.Empty[0] != "empty" {
+		t.Errorf("empty = %v, want [empty]", res.Empty)
 	}
 }
 
@@ -195,24 +197,56 @@ func TestInferSchema_SkipsReservedColumns(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeFile(t, dir, "data.csv", "id,feature_00,label\n1,1.5,0\n2,2.5,1\n")
 
-	schema, skipped, _, err := InferSchema(csv)
+	res, err := InferSchema(csv)
 	if err != nil {
 		t.Fatalf("InferSchema: %v", err)
 	}
-	if _, present := schema["id"]; present {
-		t.Errorf("schema includes reserved column id: %v", schema)
+	if _, present := res.Schema["id"]; present {
+		t.Errorf("schema includes reserved column id: %v", res.Schema)
 	}
-	if schema["feature_00"] != "FLOAT" || schema["label"] != "INT" {
-		t.Errorf("schema = %v, want feature_00:FLOAT, label:INT", schema)
+	if res.Schema["feature_00"] != "FLOAT" || res.Schema["label"] != "INT" {
+		t.Errorf("schema = %v, want feature_00:FLOAT, label:INT", res.Schema)
 	}
 	foundID := false
-	for _, s := range skipped {
+	for _, s := range res.Skipped {
 		if s == "id" {
 			foundID = true
 		}
 	}
 	if !foundID {
-		t.Errorf("skipped = %v, want it to contain id", skipped)
+		t.Errorf("skipped = %v, want it to contain id", res.Skipped)
+	}
+}
+
+// TestInferColumnType_TimezoneParity pins the datetime timezone behavior
+// against data-ingestors' schema_inference.infer_column_type (di#349,
+// verified against pandas 3.0.3). A column of tz-aware RFC3339 values is
+// DATETIME only when the tokens share ONE timezone (all-naive, all-Z, or all
+// the same offset). Mixed UTC offsets — or a mix of tz-aware and tz-naive —
+// cannot form a single-timezone column, so the ingestor's _infer_datetime
+// returns None and the column is VARCHAR; the CLI must mirror that rather than
+// emit a tz-naive DATETIME that silently drops the per-row offset. The shared
+// parity fixture is ASCII-only and carries no tz case, so this is pinned here.
+func TestInferColumnType_TimezoneParity(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []string
+		want   string
+	}{
+		{"mixed_offsets", []string{"2024-01-02T00:00:00+00:00", "2024-01-02T00:00:00+05:00"}, "VARCHAR(25)"},
+		{"uniform_offset", []string{"2024-01-02T00:00:00+05:00", "2024-01-03T00:00:00+05:00"}, "DATETIME"},
+		{"all_zulu", []string{"2024-01-02T00:00:00Z", "2024-01-03T00:00:00Z"}, "DATETIME"},
+		{"naive_datetime", []string{"2024-01-02T00:00:00", "2024-01-03T00:00:00"}, "DATETIME"},
+		{"naive_plus_aware", []string{"2024-01-02T00:00:00", "2024-01-02T00:00:00+05:00"}, "VARCHAR(25)"},
+		{"naive_plus_zulu", []string{"2024-01-02T00:00:00", "2024-01-02T00:00:00Z"}, "VARCHAR(20)"},
+		{"space_naive", []string{"2024-01-02 13:45:00", "2024-01-03 08:00:00"}, "DATETIME"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := inferColumnType(c.values); got != c.want {
+				t.Errorf("inferColumnType(%v) = %q, want %q (di#349)", c.values, got, c.want)
+			}
+		})
 	}
 }
 
