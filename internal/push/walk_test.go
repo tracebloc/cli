@@ -113,6 +113,24 @@ func TestDiscover_SkipsNonImageFiles(t *testing.T) {
 	}
 }
 
+// TestDiscover_BareFileRejected: the image layout is directory-only. A bare
+// file (even a .csv) must be rejected with a clear "not a directory" error —
+// bare-file support is tabular-only (#181), so image datasets can't shortcut it.
+func TestDiscover_BareFileRejected(t *testing.T) {
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "labels.csv")
+	if err := os.WriteFile(bare, []byte("image_id,label\n1.jpg,c\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Discover(bare)
+	if err == nil {
+		t.Fatal("Discover(bare file) returned nil error; image layout must require a directory")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("error = %q, want it to say the path is not a directory", err)
+	}
+}
+
 func TestDiscover_MissingLabelsCSV(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "images"), 0o755); err != nil {

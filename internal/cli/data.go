@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/tracebloc/cli/internal/cluster"
+	"github.com/tracebloc/cli/internal/pathutil"
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/schema"
 	"github.com/tracebloc/cli/internal/submit"
@@ -44,6 +45,11 @@ submits the ingestion run, and watches it to completion (streaming
 logs + the final summary). ` + "`data validate`" + ` checks an ingest.yaml
 locally first.
 
+What a dataset looks like depends on the task:
+  tabular / time-series — a .csv file, or a folder with one .csv
+  image                  — a folder with labels.csv + images/
+  text                   — a folder with labels.csv + texts/
+
 ` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run
 before the first ingest.`,
 		// A bare `tracebloc data` prints help; a mistyped subcommand errors with a
@@ -58,7 +64,7 @@ before the first ingest.`,
 	return cmd
 }
 
-// newDataIngestCmd implements `tracebloc data ingest <local-path>`.
+// newDataIngestCmd implements `tracebloc data ingest <dataset>`.
 //
 // Phase 3 scope (now complete across PR-a + PR-b):
 //
@@ -133,7 +139,7 @@ func newDataIngestCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:     "ingest <local-path>",
+		Use:     "ingest <dataset>",
 		Aliases: []string{"push"},
 		Short:   "Ingest a local dataset into your workspace",
 		Long: `Ingests a local dataset into your workspace's storage,
@@ -143,14 +149,36 @@ infrastructure. Supports 9 tasks (image classification,
 object/keypoint detection, text classification, masked language
 modeling, and the tabular / time-series family); pick one with --task.
 
-Expected local layout (image_classification shown):
+<dataset> is the data itself. What it looks like depends on the task:
 
-    <local-path>/
-      labels.csv             (required)
-      images/                (required)
-        001.jpg
-        002.jpg
-        ...
+  tabular / time-series — the dataset is a single CSV. Pass the .csv
+  file directly, or a folder holding exactly one .csv:
+
+      churn.csv                (the .csv file itself)
+    or
+      churn/
+        data.csv               (the one .csv in the folder)
+
+  image (classification, object/keypoint detection) — a folder with
+  labels.csv + an images/ subfolder:
+
+      cats_dogs/
+        labels.csv             (required)
+        images/                (required)
+          001.jpg
+          ...
+
+  text (classification, masked language modeling) — a folder with
+  labels.csv + a texts/ subfolder:
+
+      reviews/
+        labels.csv             (required)
+        texts/                 (required)
+          001.txt
+          ...
+
+A bare .csv file is accepted only for the tabular / time-series family;
+image and text datasets must be a folder.
 
 Accepted image extensions: .jpg, .jpeg, or .png (case-insensitive).
 All images in one dataset must share a single type — the cluster
@@ -358,25 +386,32 @@ type runDataIngestArgs struct {
 	ImageDigest    string
 }
 
-// expandHome expands a leading ~ or ~/… to $HOME, leaving every other
-// path (relative, absolute, empty) untouched. It mirrors
-// cluster.expandPath — kept as a small local copy rather than coupling
-// the data path-handling to the cluster package's internals; if a
-// third caller appears, promote both to a shared pathutil.
+// expandHome expands a leading ~ (current user or ~user) to a home
+// directory, leaving every other path untouched. It's the CLI-local
+// name for the shared pathutil.ExpandHome; cluster.expandPath resolves
+// to the same helper, so ~-expansion is identical across subcommands
+// (a --kubeconfig ~alice/... resolves alice's home just like a data
+// ingest path does). See pathutil.ExpandHome for the full contract. (#181)
 func expandHome(path string) string {
-	if path == "" || path[0] != '~' {
-		return path
+	return pathutil.ExpandHome(path)
+}
+
+// statDatasetPath is the "path existence FIRST" guard (#181): a typo'd
+// path fails plainly on the path — a clean "no such file or directory" —
+// before any family sniff, label preview, or schema work touches it.
+// Both entry points call it: the flag-only path from runDataIngest's 0b
+// step, and the guided path from runInteractive (before the family sniff),
+// so the invariant holds on every route rather than only the flag path.
+func statDatasetPath(path string) error {
+	if _, serr := os.Stat(path); serr != nil {
+		if errors.Is(serr, os.ErrNotExist) {
+			return &exitError{code: 3, err: fmt.Errorf(
+				"no such file or directory: %q — check the path to your dataset", path)}
+		}
+		return &exitError{code: 3, err: fmt.Errorf(
+			"can't read %q: %w", path, serr)}
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		// Can't resolve $HOME — leave it and let the downstream
-		// Discover* error mention the literal path, which is more
-		// useful than a generic failure here.
-		return path
-	}
-	// path[1:] is "" for "~" (→ home) and "/x" for "~/x" (→ home/x);
-	// filepath.Join cleans the join either way.
-	return filepath.Join(home, path[1:])
+	return nil
 }
 
 // runDataIngest is the full Phase 3 implementation: pre-flight
@@ -437,6 +472,14 @@ collaborators can train against that table without ever seeing the raw files.`))
 				a.Printer.Infof("Cancelled — nothing was ingested.")
 				return nil
 			}
+			// A typed exitError from a guided step (e.g. the path-existence
+			// guard, which runInteractive runs before the family sniff)
+			// already carries its own code + clean message — surface it as-is
+			// rather than burying it under "interactive setup:".
+			var ee *exitError
+			if errors.As(err, &ee) {
+				return err
+			}
 			return &exitError{code: 3, err: fmt.Errorf("interactive setup: %w", err)}
 		}
 	}
@@ -459,6 +502,20 @@ collaborators can train against that table without ever seeing the raw files.`))
 	// cluster.expandPath; done here so it covers both entry points
 	// before any push.Discover* call. (#37)
 	a.LocalPath = expandHome(a.LocalPath)
+
+	// 0b. Path existence FIRST — before any spec / schema / family
+	//     validation. A typo'd path should fail on the path with a plain
+	//     "no such file or directory", not surface later as a confusing
+	//     downstream error (e.g. the task gate asking which task the
+	//     non-existent data is for). runInteractive runs this same guard
+	//     before its family sniff / label preview, so the invariant holds on
+	//     the guided route too; this re-check covers the flag-only path and
+	//     is cheap (one stat). The family walk below stats again for its
+	//     layout-specific diagnostics; this is only about ordering the first
+	//     failure a customer sees. (#181)
+	if err := statDatasetPath(a.LocalPath); err != nil {
+		return err
+	}
 
 	// 1. Validate the table name BEFORE anything else. It's both
 	//    the MySQL identifier and the /data/shared/<table>/ PVC

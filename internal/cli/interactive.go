@@ -136,8 +136,8 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 
 	// (c) path — then detect the family from the layout and echo it back.
 	if a.LocalPath == "" {
-		p.PromptHint("The folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn")
-		ans, err := pr.Input("Where is your data? (the folder holding it)", "e.g. ./my-data", "", validateDatasetPath)
+		p.PromptHint("The file or folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn")
+		ans, err := pr.Input("Where is your data? (file or folder)", "e.g. ./my-data", "", validateDatasetPath)
 		if err != nil {
 			return err
 		}
@@ -152,6 +152,16 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	// Expand a leading ~ now so the family sniff + label-header preview read
 	// the real path; runDataIngest's own expandHome then no-ops.
 	a.LocalPath = expandHome(a.LocalPath)
+
+	// Path existence FIRST (#181): fail plainly on a typo'd path here, before
+	// the family sniff / label preview below touch it — otherwise the user
+	// answers the whole questionnaire (family, task, label) against a path
+	// that doesn't exist, only to hit the hard error afterward. runDataIngest
+	// re-checks for the flag-only route; this keeps the invariant on the
+	// guided route too. The exitError propagates unwrapped (see runDataIngest).
+	if err := statDatasetPath(a.LocalPath); err != nil {
+		return err
+	}
 
 	// (d) task — family-scoped. An explicit --task wins and skips both the
 	// sniff and the picker (§5.1). Otherwise the family is sniffed from the
