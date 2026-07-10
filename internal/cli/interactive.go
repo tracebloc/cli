@@ -123,9 +123,9 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	// (b) name — no auto-fill: the example lives in the hint, so the user
 	// types their own name rather than editing a pre-filled default.
 	if a.Spec.Table == "" {
-		p.PromptHint("A name for this dataset — you'll reference it by this name when you start a training run. Letters, digits, underscores.  e.g. churn_train")
+		p.PromptHint("A name for this dataset — you'll reference it by this name when you start a training run. Start with a letter or underscore, then letters, digits, underscores.  e.g. churn_train")
 		ans, err := pr.Input("What should we call this dataset?",
-			"MySQL identifier + PVC subdir; letters, digits, underscore only", "",
+			"MySQL identifier + PVC subdir; start with a letter or underscore, then letters, digits, underscore", "",
 			push.ValidateTableName)
 		if err != nil {
 			return err

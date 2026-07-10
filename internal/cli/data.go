@@ -261,7 +261,7 @@ Exit codes:
 	// schema validator catches missing/empty values with the canonical
 	// JSON-pointer-anchored error.
 	cmd.Flags().StringVar(&name, "name", "",
-		"a name for this dataset (letters, digits, underscore) — you'll reference it by this name when you start a training run")
+		"a name for this dataset — start with a letter or underscore, then letters/digits/underscores — you'll reference it by this name when you start a training run")
 	cmd.Flags().StringVar(&tableAlias, "table", "",
 		"deprecated alias for --name")
 	_ = cmd.Flags().MarkHidden("table")
