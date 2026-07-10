@@ -1,6 +1,8 @@
 package push
 
 import (
+	"encoding/csv"
+	"errors"
 	"image"
 	"image/png"
 	"os"
@@ -575,5 +577,48 @@ func TestPreflightDataset_SequenceGrouped(t *testing.T) {
 	tsfCSV := "timestamp,hr,label\n1,80,0.1\n2,82,0.1\n"
 	if _, problem := PreflightDataset(tsf, writeLayout(t, tsfCSV)); problem != nil {
 		t.Errorf("time_series_forecasting must stay ungrouped and diversity-free: %v", problem.Err)
+	}
+}
+
+// TestLabelColumnValuesFrom_ReadErrorFailsClosed: a mid-scan read error on the
+// label column must abort with an error (fail closed) rather than return a
+// PARTIAL class set — a truncated count would false-reject good data or pass a
+// bad file. Mirrors the text preflight (#221) and CrossCheckLabels. The trigger
+// is I/O, not malformed CSV (LazyQuotes + FieldsPerRecord=-1 parse every bad
+// shape), so it's exercised with an injected reader that fails after the header.
+func TestLabelColumnValuesFrom_ReadErrorFailsClosed(t *testing.T) {
+	sentinel := errors.New("disk gave up mid-read")
+	r := csv.NewReader(&failAfterReader{data: []byte("label\n"), err: sentinel})
+	r.FieldsPerRecord = -1 // match openCSVReader
+
+	v, err := labelColumnValuesFrom(r, "label", false, false)
+	if err == nil {
+		t.Fatal("labelColumnValuesFrom returned nil error on a mid-scan read failure; must fail closed")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error should wrap the underlying read failure, got: %v", err)
+	}
+	if v.Found {
+		t.Error("a failed read must not report Found=true (a partial column)")
+	}
+}
+
+// TestSequenceScanFrom_ReadErrorFailsClosed: the sequence-id scan must surface a
+// mid-scan read error (readErr) rather than silently pass a partial scan whose
+// unread tail could hide null ids. Same fail-closed contract as #221.
+func TestSequenceScanFrom_ReadErrorFailsClosed(t *testing.T) {
+	sentinel := errors.New("disk gave up mid-read")
+	r := csv.NewReader(&failAfterReader{data: []byte("sequence_id\n"), err: sentinel})
+	r.FieldsPerRecord = -1 // match openCSVReader
+
+	_, nullErr, readErr := sequenceScanFrom(r, "sequence_id")
+	if readErr == nil {
+		t.Fatal("sequenceScanFrom returned nil readErr on a mid-scan read failure; must fail closed")
+	}
+	if !errors.Is(readErr, sentinel) {
+		t.Errorf("readErr should wrap the underlying read failure, got: %v", readErr)
+	}
+	if nullErr != nil {
+		t.Errorf("a read failure must not be reported as a null-id domain error: %v", nullErr)
 	}
 }

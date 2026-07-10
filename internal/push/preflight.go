@@ -457,7 +457,13 @@ func TruncateList(items []string, max int) string {
 // even an empty string is a real class and every distinct trimmed string
 // counts. The caller derives the two flags from the label's schema type.
 func CheckLabelDiversity(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) error {
-	v := readLabelColumnValues(csvPath, labelColumn, dropNASentinels, collapseNumeric)
+	v, err := readLabelColumnValues(csvPath, labelColumn, dropNASentinels, collapseNumeric)
+	if err != nil {
+		// A mid-read failure leaves a PARTIAL column — trusting its class count
+		// would false-reject good data (under-counted classes) or pass a bad
+		// file. Fail closed, like the text preflight (#221) and CrossCheckLabels.
+		return err
+	}
 	// Benign-skip when the column is absent (that's CheckLabelColumn's
 	// diagnostic) or an unreadable file (another check's) — both leave Found
 	// false. Two or more classes is diverse enough.
@@ -490,7 +496,11 @@ type LabelReadValues struct {
 // readLabelColumnValues, so the value preview and the diversity verdict cannot
 // drift from each other.
 func ReadLabelValues(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) LabelReadValues {
-	return readLabelColumnValues(csvPath, labelColumn, dropNASentinels, collapseNumeric)
+	// The preview path tolerates a mid-read failure as "not found" (the
+	// diversity GATE, CheckLabelDiversity, is the one that fails closed on it);
+	// a partial preview simply reports nothing rather than a wrong count.
+	v, _ := readLabelColumnValues(csvPath, labelColumn, dropNASentinels, collapseNumeric)
+	return v
 }
 
 // readLabelColumnValues reads csvPath's label column once and returns its
@@ -501,15 +511,29 @@ func ReadLabelValues(csvPath, labelColumn string, dropNASentinels, collapseNumer
 // the ingestor's per-column read). Unlike the previous early-exit diversity
 // scan, this reads the whole column to build the full class set + row count —
 // one scan now backs both the diversity verdict and the value-level preview.
-func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) LabelReadValues {
+func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) (LabelReadValues, error) {
 	r, closer, err := openCSVReader(csvPath)
 	if err != nil {
-		return LabelReadValues{} // Found=false: unreadable file is another check's diagnostic
+		return LabelReadValues{}, nil // Found=false: unreadable file is another check's diagnostic
 	}
 	defer func() { _ = closer.Close() }()
+	v, err := labelColumnValuesFrom(r, labelColumn, dropNASentinels, collapseNumeric)
+	if err != nil {
+		// Mid-read failure: the column is now partial. Fail closed rather than
+		// count a truncated class set (matches CrossCheckLabels / #221).
+		return LabelReadValues{}, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
+	}
+	return v, nil
+}
+
+// labelColumnValuesFrom is the label scan over an already-opened reader — split
+// out so the mid-stream read-error path can be exercised with an injected
+// failing reader. A benign miss (no header, or the column absent) returns
+// Found=false with a nil error; only a mid-scan read failure is a non-nil error.
+func labelColumnValuesFrom(r *csv.Reader, labelColumn string, dropNASentinels, collapseNumeric bool) (LabelReadValues, error) {
 	header, err := r.Read()
 	if err != nil {
-		return LabelReadValues{}
+		return LabelReadValues{}, nil // no header (empty/unreadable) — another check's diagnostic
 	}
 	col, resolved := -1, ""
 	for i, c := range header {
@@ -528,7 +552,7 @@ func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collaps
 		}
 	}
 	if col == -1 {
-		return LabelReadValues{} // Found=false — benign skip, like the ingestor
+		return LabelReadValues{}, nil // Found=false — benign skip, like the ingestor
 	}
 	distinct := map[string]bool{}
 	rowCount := 0
@@ -538,7 +562,7 @@ func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collaps
 			break
 		}
 		if err != nil {
-			continue
+			return LabelReadValues{}, err // caller wraps with the filename and fails closed
 		}
 		rowCount++
 		if len(rec) <= col {
@@ -564,7 +588,7 @@ func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collaps
 		classes = append(classes, k)
 	}
 	sort.Strings(classes)
-	return LabelReadValues{Resolved: resolved, Classes: classes, RowCount: rowCount, Found: true}
+	return LabelReadValues{Resolved: resolved, Classes: classes, RowCount: rowCount, Found: true}, nil
 }
 
 // knownMediaExtensions mirrors the ingestor's FileExtension.get_all_extensions
@@ -731,13 +755,29 @@ func CheckSequenceRows(csvPath, groupColumn string) (sequences int, err error) {
 		return 0, nil // unreadable file is another check's diagnostic
 	}
 	defer func() { _ = closer.Close() }()
+	seqs, nullErr, readErr := sequenceScanFrom(r, groupColumn)
+	if readErr != nil {
+		// Mid-read failure: null/missing ids in the unread tail would never
+		// surface. Fail closed rather than pass a partial scan (matches
+		// CrossCheckLabels / #221).
+		return 0, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), readErr)
+	}
+	return seqs, nullErr
+}
+
+// sequenceScanFrom scans the group column over an already-opened reader — split
+// out so the mid-stream read-error path can be exercised with an injected
+// failing reader. nullErr is the domain rejection (empty/null ids); readErr is
+// a mid-scan read failure the caller wraps with the filename. A benign miss (no
+// header, or the column absent) returns zero values.
+func sequenceScanFrom(r *csv.Reader, groupColumn string) (sequences int, nullErr, readErr error) {
 	header, err := r.Read()
 	if err != nil {
-		return 0, nil
+		return 0, nil, nil // no header — benign
 	}
 	col := matchColumnIndex(header, groupColumn)
 	if col == -1 {
-		return 0, nil // benign skip — the schema checks own this diagnostic
+		return 0, nil, nil // benign skip — the schema checks own this diagnostic
 	}
 	distinct := map[string]bool{}
 	nullCount, rowNum, firstNullRow := 0, 0, 0
@@ -747,7 +787,7 @@ func CheckSequenceRows(csvPath, groupColumn string) (sequences int, err error) {
 			break
 		}
 		if err != nil {
-			continue
+			return 0, nil, err // caller wraps with the filename and fails closed
 		}
 		rowNum++
 		v := ""
@@ -768,9 +808,9 @@ func CheckSequenceRows(csvPath, groupColumn string) (sequences int, err error) {
 			"the sequence column %q has %d empty/null value(s) (first at data row %d). Every "+
 				"timestep row must carry the id of the sequence it belongs to — the cluster rejects "+
 				"this after the upload; fill in the ids and re-run.",
-			groupColumn, nullCount, firstNullRow)
+			groupColumn, nullCount, firstNullRow), nil
 	}
-	return len(distinct), nil
+	return len(distinct), nil, nil
 }
 
 // PreflightProblem is a preflight rejection. BadFlag marks problems whose
