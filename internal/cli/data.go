@@ -593,6 +593,39 @@ collaborators can train against that table without ever seeing the raw files.`))
 		}
 	}
 
+	// Task-scoped flags. Like --target-size/--min-size above, each of these is
+	// read only inside the one category branch that consumes it, so passing one
+	// on a task that doesn't use it silently dropped the value — and the user's
+	// intent — with no error, even though the help text says each is scoped.
+	// Reject a misapplied flag explicitly so it fails fast instead of being
+	// ignored (the scope mirrors spec.go's build gates exactly).
+	if a.SchemaFlag != "" && !push.IsTabular(a.Spec.Category) {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"--schema is tabular/time-series tasks only; it doesn't apply to task %q", a.Spec.Category)}
+	}
+	if a.Spec.LabelPolicy != "" && !push.IsRegressionClass(a.Spec.Category) {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"--label-policy is regression-class tasks only (tabular_regression, "+
+				"time_series_forecasting, time_to_event_prediction); it doesn't apply to task %q",
+			a.Spec.Category)}
+	}
+	if a.Spec.TimeColumn != "" && a.Spec.Category != "time_to_event_prediction" {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"--time-column is time_to_event_prediction only; it doesn't apply to task %q", a.Spec.Category)}
+	}
+	if a.Spec.NumberOfKeypoints != 0 && a.Spec.Category != "keypoint_detection" {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"--number-of-keypoints is keypoint_detection only; it doesn't apply to task %q", a.Spec.Category)}
+	}
+	// --label-column is meaningless for self-supervised text (the label is the
+	// text itself); buildText drops it, so accepting it silently discarded the
+	// user's value and the review echoed a column that never shipped.
+	if a.Spec.LabelColumn != "" && push.SelfSupervisedText(a.Spec.Category) {
+		return &exitError{code: 2, err: fmt.Errorf(
+			"--label-column doesn't apply to task %q — it trains on the text itself, with no label column",
+			a.Spec.Category)}
+	}
+
 	// 3. Walk the local directory FIRST (local "fail fast"), dispatched
 	//    by category family. Image categories expect labels.csv +
 	//    images/; tabular / time-series categories expect a single

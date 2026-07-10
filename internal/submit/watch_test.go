@@ -395,3 +395,52 @@ func TestParserWriter_FeedsParser(t *testing.T) {
 		t.Errorf("TotalRecords = %d, want 1234 (via parserWriter)", got.TotalRecords)
 	}
 }
+
+// TestWaitForJobPod_SameSecondTiePrefersLive: CreationTimestamp is 1s-granular,
+// so a backoffLimit retry created in the same second as the failed Pod it
+// replaces ties on .After. Without a tie-break the watch can latch onto the old
+// Failed Pod (List order is unspecified). The live Pod must win the tie. #219.
+func TestWaitForJobPod_SameSecondTiePrefersLive(t *testing.T) {
+	ts := metav1.NewTime(time.Now().Truncate(time.Second))
+	failed := jobPod("a-failed", "ingestor", corev1.PodFailed)
+	failed.CreationTimestamp = ts
+	running := jobPod("b-running", "ingestor", corev1.PodRunning)
+	running.CreationTimestamp = ts
+	cs := fake.NewClientset(failed, running)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	name, phase, err := waitForJobPod(ctx, cs, "tracebloc", "ingestor")
+	if err != nil {
+		t.Fatalf("waitForJobPod: %v", err)
+	}
+	if name != "b-running" || phase != corev1.PodRunning {
+		t.Fatalf("got %s/%s, want b-running/Running (live Pod wins a same-second tie over Failed)", name, phase)
+	}
+}
+
+// TestWatchJob_UnknownJobFallsBackToPodPhase: the Job controller hasn't posted a
+// terminal condition (slow/contended apiserver) but the Pod already Succeeded.
+// WatchJob must fall back to the Pod phase and report Succeeded rather than
+// Unknown — which the orchestrator maps to a false exit 9. #219.
+func TestWatchJob_UnknownJobFallsBackToPodPhase(t *testing.T) {
+	prev := finalJobStatusTimeout
+	finalJobStatusTimeout = 150 * time.Millisecond
+	defer func() { finalJobStatusTimeout = prev }()
+
+	cs := fake.NewClientset(
+		jobPod("ingestor-fast", "ingestor", corev1.PodSucceeded),
+		// A Job with no terminal condition yet — finalJobStatus times out Unknown.
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "ingestor", Namespace: "tracebloc"}},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor", &out, nil)
+	if err != nil {
+		t.Fatalf("WatchJob: %v", err)
+	}
+	if wr.Outcome != JobOutcomeSucceeded {
+		t.Fatalf("Outcome = %v, want Succeeded (pod-phase fallback when the Job condition lags)", wr.Outcome)
+	}
+}

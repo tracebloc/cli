@@ -305,9 +305,30 @@ func WatchJob(
 	//    The fresh ctx still propagates SIGINT (parent is customerCtx,
 	//    which carries signal.NotifyContext's cancel); a Ctrl-C in this
 	//    window falls into the detach branches below.
-	finalCtx, finalCancel := context.WithTimeout(customerCtx, 30*time.Second)
+	finalCtx, finalCancel := context.WithTimeout(customerCtx, finalJobStatusTimeout)
 	defer finalCancel()
 	outcome, statusErr := finalJobStatus(finalCtx, cs, namespace, jobName)
+
+	// If the Job controller hasn't posted a terminal condition within the
+	// budget (a slow/contended apiserver), finalJobStatus returns Unknown —
+	// which the orchestrator maps to a failure exit (9). The Pod itself is
+	// authoritative for whether the ingest actually finished, so fall back to
+	// its phase: a Succeeded Pod is a successful run, a Failed one a failure.
+	// A fresh short ctx is used since finalCtx may already be at its deadline;
+	// it still derives from customerCtx, so a Ctrl-C here leaves Unknown intact
+	// and drops into the detach handling below.
+	if statusErr == nil && outcome == JobOutcomeUnknown && podName != "" {
+		podCtx, podCancel := context.WithTimeout(customerCtx, 5*time.Second)
+		if pod, perr := cs.CoreV1().Pods(namespace).Get(podCtx, podName, metav1.GetOptions{}); perr == nil {
+			switch pod.Status.Phase {
+			case corev1.PodSucceeded:
+				outcome = JobOutcomeSucceeded
+			case corev1.PodFailed:
+				outcome = JobOutcomeFailed
+			}
+		}
+		podCancel()
+	}
 
 	// A non-ctx log-stream error is incidental if the Job still
 	// reached a terminal state. Previously ANY such error (e.g.
@@ -403,8 +424,18 @@ func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobN
 				p := &pods.Items[i]
 				switch p.Status.Phase {
 				case corev1.PodRunning, corev1.PodSucceeded, corev1.PodFailed:
-					if bestPod == nil ||
-						p.CreationTimestamp.After(bestPod.CreationTimestamp.Time) {
+					switch {
+					case bestPod == nil:
+						bestPod = p
+					case p.CreationTimestamp.After(bestPod.CreationTimestamp.Time):
+						bestPod = p
+					case p.CreationTimestamp.Time.Equal(bestPod.CreationTimestamp.Time) &&
+						bestPod.Status.Phase == corev1.PodFailed && p.Status.Phase != corev1.PodFailed:
+						// CreationTimestamp is 1s-granular, so a backoffLimit retry
+						// spawned in the same second as the Pod it replaces ties on
+						// .After. Prefer the live/succeeded Pod over a Failed one so
+						// the watch doesn't latch onto the stale failed attempt and
+						// misframe the run with its logs/phase.
 						bestPod = p
 					}
 				}
@@ -547,6 +578,11 @@ func (pw parserWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// finalJobStatusTimeout bounds the post-stream wait for the Job's terminal
+// condition. A package var (not a const) purely so tests can shrink it; it is
+// never overridden in production.
+var finalJobStatusTimeout = 30 * time.Second
+
 // finalJobStatus does a bounded poll on the Job's status to
 // determine Succeeded vs Failed after log streaming ends. This is
 // a separate step because the log-stream-end doesn't always race
@@ -554,7 +590,7 @@ func (pw parserWriter) Write(b []byte) (int, error) {
 // apiserver to post the terminal phase.
 func finalJobStatus(ctx context.Context, cs kubernetes.Interface, namespace, jobName string) (JobOutcome, error) {
 	var outcome JobOutcome
-	err := wait.PollUntilContextTimeout(ctx, JobPollInterval, 30*time.Second, true,
+	err := wait.PollUntilContextTimeout(ctx, JobPollInterval, finalJobStatusTimeout, true,
 		func(ctx context.Context) (bool, error) {
 			job, err := cs.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
 			if err != nil {
