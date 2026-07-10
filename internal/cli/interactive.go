@@ -208,9 +208,16 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 // prompts for the task afterward, so resolveFamily needn't report whether
 // it prompted the family question.)
 func resolveFamily(p *ui.Printer, pr prompter, path string) (push.Family, error) {
-	if s := push.SniffFamily(path); s.Confident {
+	s := push.SniffFamily(path)
+	if s.Confident {
 		p.Successf("%s", s.Echo)
 		return s.Family, nil
+	}
+	if s.Hint != "" {
+		// Advisory only — e.g. a mis-cased media folder the walk won't see
+		// (#203). We still ask the family question; the hint just tells the
+		// user what looks off so they can fix the layout.
+		p.Warnf("%s", s.Hint)
 	}
 	p.PromptHint("We couldn't tell the data type from what's there — which is it?")
 	opts := push.FamilyNouns()

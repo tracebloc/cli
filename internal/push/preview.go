@@ -25,6 +25,11 @@ type FamilySniff struct {
 	// e.g. "Found a CSV table — this is tabular data." Empty when not
 	// confident.
 	Echo string
+	// Hint is an optional plain-language note for the ambiguous case, e.g.
+	// pointing out a mis-cased media folder ("Images/") that the walk won't
+	// see. Purely advisory — it never makes the sniff confident; the caller
+	// still asks the family question. Empty when there's nothing to add.
+	Hint string
 }
 
 // SniffFamily previews the family of the dataset at path by looking for
@@ -102,6 +107,10 @@ func SniffFamily(path string) FamilySniff {
 	// ingested as a table, images/texts dropped. When we see one, stay
 	// ambiguous and ask the family plainly.
 	miscasedMarker := false
+	// miscasedName / miscasedCanonical hold the first mis-cased dir we see
+	// and the lowercase marker it resembles, so the ambiguous return can
+	// name the likely rename (e.g. "Images" → "images") in its Hint.
+	var miscasedName, miscasedCanonical string
 	csvCount := 0
 	for _, e := range entries {
 		name := e.Name()
@@ -114,8 +123,14 @@ func SniffFamily(path string) FamilySniff {
 			case "sequences":
 				hasSequences = true
 			default:
-				if isMarkerFold(name) {
+				// The exact lowercase markers are matched by the cases above,
+				// so anything that EqualFolds a marker here is case-insensitive
+				// but NOT exact — a likely mis-cased media folder.
+				if m := markerFold(name); m != "" {
 					miscasedMarker = true
+					if miscasedName == "" {
+						miscasedName, miscasedCanonical = name, m
+					}
 				}
 			}
 			continue
@@ -160,22 +175,34 @@ func SniffFamily(path string) FamilySniff {
 		// whose media folder was mis-cased must not masquerade as a table.
 		return FamilySniff{Family: FamilyTabular, Confident: true,
 			Echo: "Found a CSV table — this is tabular data."}
+	case miscasedMarker:
+		// A subdir matches a media marker case-insensitively but not exactly
+		// (e.g. "Images/"). The walk keys on the literal lowercase name, so it
+		// won't see this folder — an image/text layout here would otherwise
+		// look like a lone-CSV table and be silently ingested as one (#203).
+		// Stay ambiguous, but point at the likely rename so the user can fix
+		// the layout rather than just being asked a blind question.
+		return FamilySniff{Hint: fmt.Sprintf(
+			"Found a %q folder — image and text data use a lowercase folder like %q. "+
+				"If that's your data folder, rename it and ingest again.",
+			miscasedName, miscasedCanonical)}
 	default:
 		return FamilySniff{}
 	}
 }
 
-// isMarkerFold reports whether name is one of the media-folder markers
-// (images / texts / sequences) ignoring case. Used only to detect a
-// mis-cased marker dir; the confident image/text branches still require an
-// EXACT match, mirroring the walk's literal os.Lstat.
-func isMarkerFold(name string) bool {
+// markerFold returns the media-folder marker (images / texts / sequences)
+// that name matches ignoring case, or "" if none. Used only to detect a
+// mis-cased marker dir and name the correct lowercase form in the hint; the
+// confident image/text branches still require an EXACT match, mirroring the
+// walk's literal os.Lstat.
+func markerFold(name string) string {
 	for _, m := range []string{"images", "texts", "sequences"} {
 		if strings.EqualFold(name, m) {
-			return true
+			return m
 		}
 	}
-	return false
+	return ""
 }
 
 // PreviewLabelHeaders returns the column names of the CSV a label column

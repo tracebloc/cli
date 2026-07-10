@@ -3,6 +3,7 @@ package push
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -91,34 +92,45 @@ func TestSniffFamily(t *testing.T) {
 		}
 	})
 
-	t.Run("mis-cased Images/ + labels.csv is ambiguous, NOT confident tabular", func(t *testing.T) {
-		// Discover Lstats the literal "images"; a mis-cased "Images/" is not
-		// its marker. The sniff must not claim confident image — but it must
-		// ALSO not fall through to confident tabular, or the lone labels.csv
-		// of a mis-cased image layout would be silently ingested as a table
-		// (cli#203). It stays ambiguous so the flow asks the family plainly.
-		dir := t.TempDir()
-		writePrev(t, filepath.Join(dir, "labels.csv"), "image_id,label\n1.jpg,c\n")
-		if err := os.Mkdir(filepath.Join(dir, "Images"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if s := SniffFamily(dir); s.Confident {
-			t.Fatalf("mis-cased Images/ + labels.csv must be ambiguous, got %+v", s)
-		}
-	})
+	// The mis-cased-media footgun (#203): labels.csv next to a media folder
+	// whose name matches a marker case-insensitively but not exactly. The
+	// walk keys on the literal lowercase name, so it won't see the folder;
+	// without the guard the lone labels.csv falls through to confident
+	// tabular and the media is silently ingested away as a table. Each
+	// mis-cased marker (Images/, Texts/, Sequences/) must stay ambiguous —
+	// NOT confident image AND NOT confident tabular — and carry a hint that
+	// names the likely lowercase rename so the flow can guide the fix.
+	for _, tc := range []struct{ folder, canonical string }{
+		{"Images", "images"},
+		{"Texts", "texts"},
+		{"Sequences", "sequences"},
+	} {
+		tc := tc
+		t.Run("mis-cased "+tc.folder+"/ + labels.csv is ambiguous with a rename hint", func(t *testing.T) {
+			dir := t.TempDir()
+			writePrev(t, filepath.Join(dir, "labels.csv"), "id,label\n1,c\n")
+			if err := os.Mkdir(filepath.Join(dir, tc.folder), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			s := SniffFamily(dir)
+			if s.Confident {
+				t.Fatalf("mis-cased %s/ + labels.csv must be ambiguous, got %+v", tc.folder, s)
+			}
+			// Regression: the real footgun is confident TABULAR, not just
+			// not-image. Pin that the family is not confidently claimed at all.
+			if s.Family == FamilyTabular && s.Confident {
+				t.Fatalf("mis-cased %s/ must NOT sniff as confident tabular, got %+v", tc.folder, s)
+			}
+			if s.Hint == "" {
+				t.Fatalf("mis-cased %s/ should carry a rename hint, got %+v", tc.folder, s)
+			}
+			if !strings.Contains(s.Hint, tc.folder) || !strings.Contains(s.Hint, tc.canonical) {
+				t.Fatalf("hint should name both %q and %q, got %q", tc.folder, tc.canonical, s.Hint)
+			}
+		})
+	}
 
-	t.Run("mis-cased Texts/ + labels.csv is ambiguous, NOT confident tabular", func(t *testing.T) {
-		dir := t.TempDir()
-		writePrev(t, filepath.Join(dir, "labels.csv"), "text_id,label\n1.txt,c\n")
-		if err := os.Mkdir(filepath.Join(dir, "Texts"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if s := SniffFamily(dir); s.Confident {
-			t.Fatalf("mis-cased Texts/ + labels.csv must be ambiguous, got %+v", s)
-		}
-	})
-
-	t.Run("single csv + unrelated subdir stays confident tabular", func(t *testing.T) {
+	t.Run("single csv + unrelated subdir stays confident tabular, no hint", func(t *testing.T) {
 		// The mis-cased guard must be narrow: a subdir that is NOT a marker
 		// name (case-insensitively) — a stray backup/ etc. — must not derail
 		// the confident-tabular sniff, since DiscoverTabular ignores it too.
@@ -130,6 +142,9 @@ func TestSniffFamily(t *testing.T) {
 		s := SniffFamily(dir)
 		if !s.Confident || s.Family != FamilyTabular {
 			t.Fatalf("single csv + unrelated subdir should stay confident tabular, got %+v", s)
+		}
+		if s.Hint != "" {
+			t.Fatalf("an unrelated subdir must not trigger a mis-cased hint, got %q", s.Hint)
 		}
 	})
 
