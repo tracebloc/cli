@@ -210,7 +210,27 @@ type SummaryParser struct {
 	// genuinely 0 (early failure case) — Bugbot caught this on
 	// PR #10 round 2.
 	sawAnyField bool
+
+	// droppingLine is set when buf outgrew parserLineMax before a
+	// '\n' arrived: the partial (newline-less) line was discarded
+	// (see Feed). It stays set until the terminating '\n' is seen,
+	// so the oversized line's tail is dropped too rather than
+	// parsed as a spurious fresh line.
+	droppingLine bool
 }
+
+// parserLineMax bounds the partial (newline-less) content the
+// parser buffers in buf. It mirrors displayLineMax (watch.go)
+// exactly — same package, so we reference it directly and the two
+// paths can't drift. Rationale: the display side drains a tqdm
+// '\r'-redraw burst that outgrows displayLineMax rather than
+// failing, but those drained bytes still flow through the
+// TeeReader into Feed. Without a matching bound here, a
+// pathological ingestor emitting many MB of '\r' redraws with no
+// '\n' for the life of a (up to 1h) run would grow buf without
+// limit. A real banner line is tens of bytes; newline-less content
+// past this ceiling cannot be one, so Feed drops it.
+const parserLineMax = displayLineMax
 
 // NewSummaryParser returns an initialized parser. Caller's
 // goroutine owns it for the duration of the watch loop.
@@ -229,10 +249,27 @@ func (p *SummaryParser) Feed(b []byte) {
 	for {
 		idx := bytes.IndexByte(p.buf.Bytes(), '\n')
 		if idx < 0 {
-			// No complete line yet — wait for more input.
+			// No complete line yet. If the partial (newline-less)
+			// content has outgrown parserLineMax it cannot be a
+			// banner line — drop it and enter drop-until-newline
+			// mode so the oversized line's tail is discarded too,
+			// not mistaken for a fresh line. Bounds buf at
+			// parserLineMax + one Feed chunk regardless of how long
+			// the ingestor withholds a '\n'.
+			if p.buf.Len() > parserLineMax {
+				p.buf.Reset()
+				p.droppingLine = true
+			}
 			return
 		}
 		line := p.buf.Next(idx + 1) // consume up to and including '\n'
+		if p.droppingLine {
+			// This '\n' terminates an oversized line whose head we
+			// already dropped; discard the buffered tail and resume
+			// normal parsing on the lines that follow.
+			p.droppingLine = false
+			continue
+		}
 		p.feedLine(string(bytes.TrimRight(line, "\n")))
 	}
 }
@@ -242,7 +279,18 @@ func (p *SummaryParser) Feed(b []byte) {
 // terminated without a final '\n' (rare but possible if the
 // container's stdout was killed mid-write).
 func (p *SummaryParser) FlushLine() {
-	if p.buf.Len() > 0 && !p.finalized {
+	if p.finalized {
+		return
+	}
+	if p.droppingLine {
+		// EOF landed mid-drop: buf holds the tail of an oversized
+		// line whose head was already discarded. Drop the tail too
+		// rather than parse it as a line.
+		p.buf.Reset()
+		p.droppingLine = false
+		return
+	}
+	if p.buf.Len() > 0 {
 		p.feedLine(p.buf.String())
 		p.buf.Reset()
 	}

@@ -174,6 +174,51 @@ func TestSummaryParser_PostBannerLogsIgnored(t *testing.T) {
 	}
 }
 
+// TestSummaryParser_BufferBoundedOnNewlinelessFlood pins finding D3
+// (deferred from the v0.8.0 review): a pathological ingestor can emit
+// many MB of tqdm '\r'-redraws with no '\n' for the life of a run. The
+// display path drains those past displayLineMax, but the drained bytes
+// still flow through the TeeReader into Feed — so without a matching
+// bound the parser's buf would grow unbounded. Assert buf stays within
+// parserLineMax under the flood, and that a real banner arriving after
+// the flood terminates (a '\n' finally lands) still parses.
+func TestSummaryParser_BufferBoundedOnNewlinelessFlood(t *testing.T) {
+	p := NewSummaryParser()
+
+	// tqdm-style redraw: '\r' + progress text, never a '\n'. Feed well
+	// past parserLineMax in bounded chunks so we also exercise the
+	// across-Feed-calls accumulation, not just one giant Write.
+	chunk := []byte("\r" + strings.Repeat("#", 512*1024-1)) // 512 KiB, no '\n'
+	for total := 0; total <= parserLineMax*2; total += len(chunk) {
+		p.Feed(chunk)
+		if p.buf.Len() > parserLineMax {
+			t.Fatalf("buf grew to %d bytes after a newline-less flood, exceeds parserLineMax=%d",
+				p.buf.Len(), parserLineMax)
+		}
+	}
+
+	// The flood is one newline-less line; none of it should have been
+	// mistaken for a banner.
+	if got := p.Result(); got != nil {
+		t.Fatalf("newline-less flood produced a non-nil Summary: %+v", got)
+	}
+
+	// The pathological line finally terminates and a real banner
+	// follows. The parser must recover: drop the oversized line's tail,
+	// then parse the banner that comes after.
+	p.Feed([]byte("\n"))
+	p.Feed([]byte(realIngestorBanner))
+
+	got := p.Result()
+	if got == nil {
+		t.Fatal("banner after a newline-less flood did not parse; Result is nil")
+	}
+	if got.TotalRecords != 1234 || got.FailedRecords != 30 {
+		t.Errorf("post-flood banner parsed wrong: TotalRecords=%d FailedRecords=%d, want 1234/30",
+			got.TotalRecords, got.FailedRecords)
+	}
+}
+
 // TestStripANSI: the parser strips ANSI SGR codes from each line
 // before matching. Validate the regex handles common shapes.
 func TestStripANSI(t *testing.T) {
