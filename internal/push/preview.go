@@ -121,7 +121,15 @@ func SniffFamily(path string) FamilySniff {
 	// point at the fix.
 	var badMarker bool
 	var badMarkerName, badMarkerCanonical string
+	// csvCount counts CSVs exactly as findSingleCSV does — every non-dir .csv,
+	// symlinks INCLUDED — so the sniff's exactly-one check agrees with the
+	// walk's (a lone regular CSV + a symlinked CSV is "multiple" to both).
+	// csvSymlink notes whether any counted CSV is a symlink: DiscoverTabular
+	// Lstat+rejectSymlinks the sole CSV, so a directory whose only CSV is a
+	// symlink is a layout the walk refuses — the sniff must not confidently
+	// promise tabular for it.
 	csvCount := 0
+	csvSymlink := false
 	for _, e := range entries {
 		name := e.Name()
 		if m := markerFold(name); m != "" {
@@ -136,14 +144,14 @@ func SniffFamily(path string) FamilySniff {
 			}
 			continue
 		}
-		// A non-marker entry. Count the CSVs the tabular walk would accept: skip
-		// directories, and skip a symlinked .csv (DiscoverTabular Lstat+
-		// rejectSymlinks it, exactly like the bare-file branch above).
-		if e.IsDir() || e.Type()&os.ModeSymlink != 0 {
+		if e.IsDir() {
 			continue
 		}
 		if isCSV(name) {
 			csvCount++
+			if e.Type()&os.ModeSymlink != 0 {
+				csvSymlink = true
+			}
 		}
 	}
 
@@ -188,11 +196,11 @@ func SniffFamily(path string) FamilySniff {
 		return FamilySniff{Hint: "Found only labels.csv and no images/, texts/, or sequences/ " +
 			"folder next to it. If this is image or text data, add its media folder beside " +
 			"labels.csv; if it's genuinely a table, choose tabular below."}
-	case !hasImages && !hasText && csvCount == 1:
-		// Exactly one non-manifest CSV in a directory, mirroring
-		// DiscoverTabular's findSingleCSV rule. Two or more CSVs is a directory
-		// the tabular walk rejects, so stay ambiguous rather than confidently
-		// promise a layout it refuses.
+	case !hasImages && !hasText && csvCount == 1 && !csvSymlink:
+		// Exactly one non-manifest, non-symlink CSV in a directory, mirroring
+		// DiscoverTabular (findSingleCSV's exactly-one count + its rejectSymlink
+		// on that CSV). Two or more CSVs — or a lone symlinked one — is a layout
+		// the tabular walk refuses, so stay ambiguous rather than promise it.
 		return FamilySniff{Family: FamilyTabular, Confident: true,
 			Echo: "Found a CSV table — this is tabular data."}
 	default:

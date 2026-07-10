@@ -289,6 +289,27 @@ func TestSniffFamily(t *testing.T) {
 		}
 	})
 
+	t.Run("regular csv + symlinked csv is ambiguous (walk counts both → multiple)", func(t *testing.T) {
+		// findSingleCSV counts every non-dir .csv, symlinks included, so a
+		// regular CSV plus a symlinked one is "multiple CSVs" to the walk. The
+		// sniff must count them the same way and stay ambiguous, not sniff
+		// confident tabular off the lone regular CSV. (#223 Bugbot follow-up.)
+		dir := t.TempDir()
+		writePrev(t, filepath.Join(dir, "data.csv"), "a,b\n1,2\n")
+		target := filepath.Join(t.TempDir(), "extra.csv")
+		writePrev(t, target, "c,d\n3,4\n")
+		if err := os.Symlink(target, filepath.Join(dir, "link.csv")); err != nil {
+			t.Skipf("symlink unsupported on this platform: %v", err)
+		}
+		if s := SniffFamily(dir); s.Confident {
+			t.Fatalf("regular + symlinked CSV must be ambiguous, got %+v", s)
+		}
+		// And the walk it mirrors rejects the same dir as multi-CSV.
+		if _, err := DiscoverTabular(dir); err == nil {
+			t.Fatal("DiscoverTabular should reject a dir with a regular + a symlinked CSV")
+		}
+	})
+
 	t.Run("missing path is ambiguous", func(t *testing.T) {
 		if s := SniffFamily(filepath.Join(t.TempDir(), "nope")); s.Confident {
 			t.Fatalf("missing path should be ambiguous, got %+v", s)
