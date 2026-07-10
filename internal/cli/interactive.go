@@ -402,6 +402,12 @@ func renderReview(p *ui.Printer, a *runDataIngestArgs) {
 	case push.IsImage(a.Spec.Category):
 		p.Field("resolution", "auto-detect")
 	}
+	// Only shown when set — --min-size is opt-in with no local default,
+	// so there's nothing to echo otherwise. Surfacing it lets a mistyped
+	// floor (e.g. 640x640 for 64x64) be caught at the confirm gate.
+	if a.MinSizeFlag != "" {
+		p.Field("min size", a.MinSizeFlag)
+	}
 	switch {
 	case a.SchemaFlag != "":
 		p.Field("schema", a.SchemaFlag)

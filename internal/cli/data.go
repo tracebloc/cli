@@ -518,6 +518,24 @@ collaborators can train against that table without ever seeing the raw files.`))
 			a.Spec.Category, push.SupportedCategoriesList())}
 	}
 
+	// Image-only flags. --target-size / --min-size describe image
+	// resolution, so they're meaningless on a tabular / text task.
+	// Reject them explicitly here: without this guard they'd be parsed
+	// only inside the image branch below, so on a non-image task the
+	// value — even a malformed one — was silently dropped with no error.
+	if !push.IsImage(a.Spec.Category) {
+		for _, f := range []struct{ name, val string }{
+			{"--target-size", a.TargetSizeFlag},
+			{"--min-size", a.MinSizeFlag},
+		} {
+			if f.val != "" {
+				return &exitError{code: 2, err: fmt.Errorf(
+					"%s is image tasks only; it doesn't apply to task %q",
+					f.name, a.Spec.Category)}
+			}
+		}
+	}
+
 	// 3. Walk the local directory FIRST (local "fail fast"), dispatched
 	//    by category family. Image categories expect labels.csv +
 	//    images/; tabular / time-series categories expect a single

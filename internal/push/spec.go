@@ -49,8 +49,8 @@ var tableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // MinImageSize is the absolute lower bound on image dimensions as
 // [width, height] in pixels — the CLI's mirror of the ingestor's
-// ImageResolutionValidator.MIN_IMAGE_SIZE (data-ingestors #348, RFC-0002
-// §12.9). Images with either side below this are rejected in-cluster as
+// ImageResolutionValidator.MIN_IMAGE_SIZE (data-ingestors #348).
+// Images with either side below this are rejected in-cluster as
 // too small to train on, independently of the target_size uniformity
 // check. A per-model override travels in spec.file_options.min_size
 // (SpecArgs.MinSize); when unset, the ingestor applies this default (on
@@ -62,7 +62,7 @@ var tableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // prod, PreflightDataset should default the preview floor to it.
 //
 // Keep this in lock-step with the upstream constant — it is the source of
-// truth. Do NOT invent a different floor here (Principle 6).
+// truth. Do NOT invent a different floor here.
 var MinImageSize = [2]int{32, 32}
 
 // MaxTableNameLength caps `--table` at 63 chars. Two hard limits
