@@ -278,7 +278,7 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 		}
 		return nil, nil, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
 	}
-	fnIdx := filenameColIndex(header)
+	fnIdx := imageFileColIndex(header)
 	for {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
@@ -316,22 +316,29 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 	return missing, orphans, nil
 }
 
-// filenameColIndex returns the header index of the "filename" column — the one the
-// ingestor reads each image's filename from (record.get("filename"), order-
-// independent). Matches "filename" exactly first, then case-insensitively with
-// surrounding whitespace stripped (the ingestor's _match_column rule that
-// IngestableRecordsValidator applies to the filename column). Falls back to 0 when
-// there's no filename-ish column — a malformed image_classification labels.csv the
-// ingestor fails on regardless, which is not this check's job to diagnose.
-func filenameColIndex(header []string) int {
-	for i, h := range header {
-		if strings.TrimSpace(h) == "filename" {
-			return i
+// imageFileColIndex returns the header index of the column the ingestor reads each
+// image's file key from: "filename" if present, else "data_id" — the ingestor's own
+// precedence (image_paths.prepare_classification_pytorch_image_df / image_loader),
+// position-independent for both. A label,data_id CSV (no filename column) is ingested
+// cleanly by the cluster, so matching only "filename" and falling back to index 0
+// would read the label column as filenames and false-reject it (exit 3).
+//
+// Each name is matched exactly first, then case-insensitively with surrounding
+// whitespace stripped (the ingestor's _match_column rule). "filename" wins over
+// "data_id" when both resolve. Falls back to 0 only when NEITHER column exists — a
+// labels.csv the ingestor rejects at validate_data regardless, not this check's job
+// to diagnose.
+func imageFileColIndex(header []string) int {
+	for _, want := range []string{"filename", "data_id"} {
+		for i, h := range header {
+			if strings.TrimSpace(h) == want {
+				return i
+			}
 		}
-	}
-	for i, h := range header {
-		if strings.EqualFold(strings.TrimSpace(h), "filename") {
-			return i
+		for i, h := range header {
+			if strings.EqualFold(strings.TrimSpace(h), want) {
+				return i
+			}
 		}
 	}
 	return 0
