@@ -301,3 +301,50 @@ func TestCheckLabelDiversitySchemaTypeDispatch(t *testing.T) {
 		t.Error("FLOAT label should collapse '1'/'1.0' and be rejected")
 	}
 }
+
+// TestPreflightDataset_TextLabelParity locks the text-family label preflight to
+// the ingestor's wiring across ALL supervised text tasks (not just
+// text_classification, which is how the gate drifted when #182 wired the rest):
+//   - a missing label column fails locally (BadFlag) for every supervised text
+//     task — LabelColumnValidator for text/sentence_pair, BIOLabelValidator for
+//     token_classification — instead of uploading and failing in-cluster;
+//   - a single-class label is rejected for the is_classification text tasks
+//     (LabelDiversityValidator), but token_classification (BIO tag sequences,
+//     is_classification=false) must NOT trigger diversity — the ingestor never
+//     runs it, so neither may the CLI.
+func TestPreflightDataset_TextLabelParity(t *testing.T) {
+	writeLayout := func(t *testing.T, content string) *LocalLayout {
+		t.Helper()
+		dir := t.TempDir()
+		p := filepath.Join(dir, "labels.csv")
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return &LocalLayout{Root: dir, LabelsCSV: p}
+	}
+
+	for _, cat := range []string{"text_classification", "sentence_pair_classification", "token_classification"} {
+		layout := writeLayout(t, "filename,text\na.txt,foo\nb.txt,bar\n")
+		_, problem := PreflightDataset(SpecArgs{Category: cat, LabelColumn: "label"}, layout)
+		if problem == nil {
+			t.Errorf("%s: a missing label column should fail preflight before upload", cat)
+			continue
+		}
+		if !problem.BadFlag {
+			t.Errorf("%s: a missing label column should be a BadFlag (settings) problem, got %v", cat, problem.Err)
+		}
+	}
+
+	single := "filename,label\na.txt,x\nb.txt,x\n"
+	for _, cat := range []string{"text_classification", "sentence_pair_classification"} {
+		layout := writeLayout(t, single)
+		if _, problem := PreflightDataset(SpecArgs{Category: cat, LabelColumn: "label"}, layout); problem == nil {
+			t.Errorf("%s: a single-class label should be rejected (classification needs >=2 classes)", cat)
+		}
+	}
+	layout := writeLayout(t, single)
+	if _, problem := PreflightDataset(SpecArgs{Category: "token_classification", LabelColumn: "label"}, layout); problem != nil {
+		t.Errorf("token_classification: a single-value label must NOT trigger the diversity check "+
+			"(BIO labels aren't class labels; the ingestor runs BIOLabelValidator, not LabelDiversity): %v", problem.Err)
+	}
+}

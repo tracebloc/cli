@@ -559,12 +559,12 @@ collaborators can train against that table without ever seeing the raw files.`))
 	case push.IsCLISupported(a.Spec.Category):
 		// supported
 	case push.IsKnown(a.Spec.Category):
-		// A recognized category data ingest doesn't implement yet — image
-		// (semantic_segmentation) or text (causal_language_modeling, seq2seq,
-		// …). Routed here (not the default branch) so the
-		// user gets the registry's per-category pending-support reason, not a
-		// misleading "unrecognized category". Supported categories were already
-		// caught above, so IsKnown here means known-but-unsupported.
+		// A recognized category data ingest doesn't implement yet — today just
+		// semantic_segmentation (awaiting the ingestor's mask_id link column +
+		// training sign-off, backend#816). Routed here (not the default branch)
+		// so the user gets the registry's per-category pending-support reason,
+		// not a misleading "unrecognized category". Supported categories were
+		// already caught above, so IsKnown here means known-but-unsupported.
 		spec, _ := push.Lookup(a.Spec.Category)
 		return &exitError{code: 2, err: fmt.Errorf(
 			"task %q isn't supported by the CLI yet (%s). Supported tasks: %s.",
@@ -724,9 +724,13 @@ collaborators can train against that table without ever seeing the raw files.`))
 		}
 		a.Spec.Extension = ext
 	default:
-		// Text family: no extra per-category resolution. The label (for
-		// text_classification) comes straight from --label-column;
-		// masked_language_modeling needs neither a label nor a schema.
+		// Text family: no extra per-category resolution. The supervised text
+		// tasks (text_classification, token_classification,
+		// sentence_pair_classification) carry a label straight from
+		// --label-column; the self-supervised ones (masked/causal language
+		// modeling, seq2seq, embeddings) need neither a label nor a schema.
+		// buildText emits the label for exactly the supervised set, keyed on
+		// the registry's SelfSupervised flag (not a hardcoded id).
 	}
 
 	// 4. Synthesize the spec from flags + validate against schema.

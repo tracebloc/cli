@@ -37,17 +37,21 @@ func TestRegistryKnownCategories(t *testing.T) {
 
 func TestSupportedCategories(t *testing.T) {
 	got := SupportedCategoryIDs()
-	if len(got) != 9 {
-		t.Fatalf("SupportedCategoryIDs() len = %d, want 9: %v", len(got), got)
+	// RFC-0002 phase 4 wired the 5 text tasks (token/sentence-pair
+	// classification, causal LM, seq2seq, embeddings), so 14 of the 15
+	// categories are pushable; only semantic_segmentation remains pending.
+	if len(got) != 14 {
+		t.Fatalf("SupportedCategoryIDs() len = %d, want 14: %v", len(got), got)
 	}
 	for _, id := range got {
 		if !IsCLISupported(id) {
 			t.Errorf("SupportedCategoryIDs returned %q but IsCLISupported is false", id)
 		}
 	}
-	// semantic_segmentation + the self-supervised text categories (CLM, seq2seq)
-	// + token_classification are known but not yet pushable, and must explain why.
-	for _, id := range []string{"semantic_segmentation", "causal_language_modeling", "seq2seq", "token_classification", "sentence_pair_classification", "embeddings"} {
+	// semantic_segmentation is the sole known-but-not-yet-pushable category
+	// (awaiting the ingestor's mask_id link column + training sign-off,
+	// backend#816); it must stay gated out and explain why.
+	for _, id := range []string{"semantic_segmentation"} {
 		if !IsKnown(id) {
 			t.Errorf("%s should be known", id)
 		}
@@ -56,6 +60,16 @@ func TestSupportedCategories(t *testing.T) {
 		}
 		if spec, _ := Lookup(id); spec.UnsupportedNote == "" {
 			t.Errorf("%s should carry an UnsupportedNote", id)
+		}
+	}
+	// The 5 newly-wired text tasks must now be pushable AND carry no stale
+	// pending note (the picker only greys out categories with a note).
+	for _, id := range []string{"token_classification", "sentence_pair_classification", "causal_language_modeling", "seq2seq", "embeddings"} {
+		if !IsCLISupported(id) {
+			t.Errorf("%s should be CLI-supported after phase 4", id)
+		}
+		if spec, _ := Lookup(id); spec.UnsupportedNote != "" {
+			t.Errorf("%s is supported but still carries an UnsupportedNote: %q", id, spec.UnsupportedNote)
 		}
 	}
 }

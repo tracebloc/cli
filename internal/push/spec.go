@@ -268,15 +268,22 @@ func (a SpecArgs) Build() map[string]any {
 }
 
 // buildText fills in the text-family fields: the text-file sidecar
-// directory (texts/ for text_classification, sequences/ for
-// masked_language_modeling) and the label. masked_language_modeling
-// has NO label (the schema doesn't require one for it).
+// directory (texts/ for every text task except masked_language_modeling,
+// which uses sequences/) and, for the SUPERVISED text tasks, the label.
+//
+// The self-supervised text tasks (masked/causal language modeling, seq2seq,
+// embeddings) carry NO label column — their target is derived from the text
+// itself, and the schema does not require `label` for them. The supervised
+// ones (text_classification, token_classification, sentence_pair_classification)
+// do, so the label is emitted for exactly those — driven by the registry's
+// SelfSupervised flag (mirrored against the layout contract's has_label_column)
+// rather than a hardcoded id, so a new task can't be wired without deciding it.
 func (a SpecArgs) buildText(spec map[string]any, prefix string) {
 	dir := TextSidecarDir(a.Category)
 	// Trailing slash matches the directory-glob convention the
 	// ingestor uses for sidecar dirs.
 	spec[dir] = path.Join(prefix, dir) + "/"
-	if a.Category == "text_classification" {
+	if !SelfSupervisedText(a.Category) {
 		spec["label"] = a.LabelColumn
 	}
 }

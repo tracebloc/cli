@@ -31,6 +31,47 @@ import (
 // utf8BOM is the byte-order mark Excel's "CSV UTF-8" export prepends.
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
+// openCSVReader opens path for row-walking with any UTF-8 BOM stripped, the one
+// idiom the pandas-backed checks share (cli#71): pandas strips the BOM even
+// under encoding="utf-8", so a BOM'd file must read as if it had none or the
+// CLI would reject what the cluster accepts. FieldsPerRecord is -1 so a ragged
+// row is a per-row concern, not an abort. The caller closes the returned
+// Closer. A caller that must read the rows pandas tolerates (an unescaped
+// quote) sets r.LazyQuotes = true before its first Read.
+func openCSVReader(path string) (*csv.Reader, io.Closer, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	br := bufio.NewReader(f)
+	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
+		_, _ = br.Discard(3)
+	}
+	r := csv.NewReader(br)
+	r.FieldsPerRecord = -1
+	return r, f, nil
+}
+
+// matchColumnIndex returns the index of the header column matching want — an
+// exact match first, then case-insensitively with surrounding whitespace
+// stripped (the ingestor's resolve_column / _match_column rule). Returns -1
+// when absent. Shared by the label-column and filename-column checks so the
+// ingestor's single resolve rule has a single Go copy.
+func matchColumnIndex(header []string, want string) int {
+	for i, c := range header {
+		if c == want {
+			return i
+		}
+	}
+	wl := strings.ToLower(strings.TrimSpace(want))
+	for i, c := range header {
+		if strings.ToLower(strings.TrimSpace(c)) == wl {
+			return i
+		}
+	}
+	return -1
+}
+
 // HasBOM reports whether the file starts with a UTF-8 BOM.
 func HasBOM(path string) (bool, error) {
 	f, err := os.Open(path)
@@ -56,16 +97,11 @@ func HasBOM(path string) (bool, error) {
 // accepts. The one in-cluster path that does NOT strip it is the tabular
 // schema probe — see CheckTabularBOM.
 func ReadCSVHeader(path string) ([]string, error) {
-	f, err := os.Open(path)
+	r, closer, err := openCSVReader(path)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-	br := bufio.NewReader(f)
-	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
-		_, _ = br.Discard(3)
-	}
-	r := csv.NewReader(br)
+	defer func() { _ = closer.Close() }()
 	header, err := r.Read()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
@@ -110,16 +146,8 @@ func CheckTabularBOM(path string) error {
 // must stay this loose or the CLI would reject datasets the cluster
 // accepts).
 func CheckLabelColumn(header []string, labelColumn, csvName string) error {
-	for _, c := range header {
-		if c == labelColumn {
-			return nil
-		}
-	}
-	want := strings.ToLower(strings.TrimSpace(labelColumn))
-	for _, c := range header {
-		if strings.ToLower(strings.TrimSpace(c)) == want {
-			return nil
-		}
+	if matchColumnIndex(header, labelColumn) >= 0 {
+		return nil
 	}
 	return fmt.Errorf(
 		"label column %q isn't in %s's header (columns: %s). Pass --label-column with one of "+
@@ -158,17 +186,11 @@ func CheckDuplicateHeaders(header []string, csvName string) error {
 // category): a header-only CSV has zero ingestable records and is
 // rejected in-cluster before any table is created.
 func CheckHasDataRows(path string) error {
-	f, err := os.Open(path)
+	r, closer, err := openCSVReader(path)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", filepath.Base(path), err)
 	}
-	defer func() { _ = f.Close() }()
-	br := bufio.NewReader(f)
-	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
-		_, _ = br.Discard(3)
-	}
-	r := csv.NewReader(br)
-	r.FieldsPerRecord = -1 // row-shape problems are someone else's diagnostic
+	defer func() { _ = closer.Close() }()
 	if _, err := r.Read(); err != nil {
 		if errors.Is(err, io.EOF) {
 			return fmt.Errorf("%s is empty — add a header and at least one data row, then re-run", filepath.Base(path))
@@ -275,17 +297,11 @@ func ValidateImages(images []string, expectedW, expectedH, minW, minH int) error
 // filenameColumn is the CSV's first column (the ingestor reads filenames
 // positionally from the id column of labels.csv).
 func CrossCheckLabels(csvPath string, images []string, extension string) (missing []string, orphans []string, err error) {
-	f, err := os.Open(csvPath)
+	r, closer, err := openCSVReader(csvPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
 	}
-	defer func() { _ = f.Close() }()
-	br := bufio.NewReader(f)
-	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
-		_, _ = br.Discard(3)
-	}
-	r := csv.NewReader(br)
-	r.FieldsPerRecord = -1
+	defer func() { _ = closer.Close() }()
 
 	present := make(map[string]bool, len(images))
 	for _, img := range images {
@@ -453,17 +469,11 @@ func ReadLabelValues(csvPath, labelColumn string, dropNASentinels, collapseNumer
 // scan, this reads the whole column to build the full class set + row count —
 // one scan now backs both the diversity verdict and the value-level preview.
 func readLabelColumnValues(csvPath, labelColumn string, dropNASentinels, collapseNumeric bool) LabelReadValues {
-	f, err := os.Open(csvPath)
+	r, closer, err := openCSVReader(csvPath)
 	if err != nil {
 		return LabelReadValues{} // Found=false: unreadable file is another check's diagnostic
 	}
-	defer func() { _ = f.Close() }()
-	br := bufio.NewReader(f)
-	if head, _ := br.Peek(3); bytes.Equal(head, utf8BOM) {
-		_, _ = br.Discard(3)
-	}
-	r := csv.NewReader(br)
-	r.FieldsPerRecord = -1
+	defer func() { _ = closer.Close() }()
 	header, err := r.Read()
 	if err != nil {
 		return LabelReadValues{}
@@ -797,14 +807,28 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if err := CheckDuplicateHeaders(header, "labels.csv"); err != nil {
 			return nil, dataProblem(err)
 		}
-		if spec.Category == "text_classification" {
+		// Every SUPERVISED text task carries a label column the ingestor
+		// requires present — text_classification & sentence_pair_classification
+		// via LabelColumnValidator, token_classification via BIOLabelValidator —
+		// so preview the header for all of them. Gating on !SelfSupervisedText
+		// mirrors buildText's label emission, so a typo'd --label-column fails
+		// locally (exit 2) instead of after the full upload. The self-supervised
+		// tasks (MLM, CLM, seq2seq, embeddings) carry no label.
+		if !SelfSupervisedText(spec.Category) {
 			if err := CheckLabelColumn(header, spec.LabelColumn, "labels.csv"); err != nil {
 				return nil, &PreflightProblem{Err: err, BadFlag: true}
 			}
-			// Text labels are read untyped (like image), so no NA drop and
-			// no numeric collapse.
-			if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
-				return nil, dataProblem(err)
+			// LabelDiversityValidator is wired only for the is_classification
+			// text tasks (text_classification, sentence_pair_classification), NOT
+			// token_classification — its BIO tag sequences aren't class labels,
+			// so the ingestor runs BIOLabelValidator instead and never checks
+			// label diversity. Mirror that exactly (Principle 6): gate on
+			// IsClassification. Text labels are read untyped (like image), so no
+			// NA drop and no numeric collapse.
+			if IsClassification(spec.Category) {
+				if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
+					return nil, dataProblem(err)
+				}
 			}
 		}
 	}

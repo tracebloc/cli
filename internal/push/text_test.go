@@ -107,6 +107,241 @@ func TestDiscoverText_MissingSidecarDir(t *testing.T) {
 	}
 }
 
+// mkStructuredTextDir builds a text dataset whose texts/ files carry the given
+// contents (filename → body). labels.csv lists each file; hasLabel adds a
+// label column (supervised tasks) so the CSV mirrors what the ingestor reads.
+func mkStructuredTextDir(t *testing.T, hasLabel bool, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	header := "filename\n"
+	if hasLabel {
+		header = "filename,label\n"
+	}
+	csv := header
+	sub := filepath.Join(dir, "texts")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range files {
+		if hasLabel {
+			csv += name + ",x\n"
+		} else {
+			csv += name + "\n"
+		}
+		if err := os.WriteFile(filepath.Join(sub, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, dir, "labels.csv", csv)
+	return dir
+}
+
+// TestDiscoverText_AllPhase4Tasks: each of the 5 newly-wired text tasks
+// discovers its texts/ layout and stages labels.csv + the text files, with a
+// valid fixture per the layout contract (enforced formats get a well-formed
+// record; unenforced ones get raw text).
+func TestDiscoverText_AllPhase4Tasks(t *testing.T) {
+	cases := []struct {
+		category string
+		hasLabel bool
+		body     string
+	}{
+		{"token_classification", true, "the\tDET\ncat\tNOUN"},                   // per-token; no enforced record_format
+		{"sentence_pair_classification", true, "a rose is red\tit is a flower"}, // text_a<TAB>text_b (enforced)
+		{"causal_language_modeling", false, "just some raw pretraining text"},   // unenforced
+		{"seq2seq", false, "bonjour le monde\thello world"},                     // source<TAB>target (unenforced)
+		{"embeddings", false, "query\tpositive doc\thard negative"},             // anchor<TAB>positive<TAB>negative (enforced)
+	}
+	for _, tc := range cases {
+		t.Run(tc.category, func(t *testing.T) {
+			dir := mkStructuredTextDir(t, tc.hasLabel, map[string]string{"a.txt": tc.body})
+			layout, err := DiscoverText(tc.category, dir)
+			if err != nil {
+				t.Fatalf("DiscoverText(%s): %v", tc.category, err)
+			}
+			if len(layout.Sidecars["texts"]) != 1 {
+				t.Errorf("texts files = %d, want 1", len(layout.Sidecars["texts"]))
+			}
+			if got := layout.FileCount(); got != 2 { // labels.csv + 1 text
+				t.Errorf("FileCount = %d, want 2", got)
+			}
+		})
+	}
+}
+
+// TestDiscoverText_EnforcedRecordFormat_Reject: the ENFORCED formats
+// (sentence_pair_classification, embeddings) reject a malformed .txt at
+// discovery, with a message that names the file and the expected shape —
+// mirroring the ingestor's TabSeparatedRecordValidator. The UNENFORCED formats
+// (seq2seq, causal LM) accept the same raw content, so a mirror must not reject.
+func TestDiscoverText_EnforcedRecordFormat_Reject(t *testing.T) {
+	// A single field, no tab: malformed for the enforced tasks.
+	rawNoTab := map[string]string{"bad.txt": "one blob of prose with no tab"}
+
+	for _, category := range []string{"sentence_pair_classification", "embeddings"} {
+		t.Run(category+"_rejects", func(t *testing.T) {
+			hasLabel := !SelfSupervisedText(category)
+			dir := mkStructuredTextDir(t, hasLabel, rawNoTab)
+			_, err := DiscoverText(category, dir)
+			if err == nil {
+				t.Fatalf("DiscoverText(%s) accepted a malformed record", category)
+			}
+			// The separator label comes from the contract (sepLabel renders a
+			// tab as "<TAB>"), not a hardcoded "tab-separated" literal.
+			for _, want := range []string{"bad.txt", "<TAB>-separated fields"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error missing %q: %v", want, err)
+				}
+			}
+		})
+	}
+
+	// The unenforced tasks accept the very same raw file.
+	for _, category := range []string{"seq2seq", "causal_language_modeling"} {
+		t.Run(category+"_accepts_raw", func(t *testing.T) {
+			dir := mkStructuredTextDir(t, false, rawNoTab)
+			if _, err := DiscoverText(category, dir); err != nil {
+				t.Errorf("DiscoverText(%s) rejected raw text it should accept: %v", category, err)
+			}
+		})
+	}
+}
+
+// TestDiscoverText_EnforcedRecordFormat_IgnoresUnreferenced: the enforced
+// record-format check runs only over the files labels.csv references, mirroring
+// the ingestor's manifest walk (TabSeparatedRecordValidator iterates the CSV
+// rows, not the directory). A stray unreferenced .txt in texts/ — a README, a
+// scratch draft with no tab — must NOT fail discovery: the ingestor never opens
+// a file no row names, so rejecting it would block a layout the cluster accepts
+// (RFC-0002 Principle 6).
+func TestDiscoverText_EnforcedRecordFormat_IgnoresUnreferenced(t *testing.T) {
+	for _, category := range []string{"sentence_pair_classification", "embeddings"} {
+		t.Run(category, func(t *testing.T) {
+			hasLabel := !SelfSupervisedText(category)
+			// a.txt is a well-formed 2-field record AND is referenced by
+			// labels.csv; notes.txt is prose with no tab and is NOT referenced.
+			dir := mkStructuredTextDir(t, hasLabel, map[string]string{"a.txt": "left side\tright side"})
+			stray := filepath.Join(dir, "texts", "notes.txt")
+			if err := os.WriteFile(stray, []byte("just some prose with no tab"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DiscoverText(category, dir); err != nil {
+				t.Errorf("DiscoverText(%s) rejected a dataset with an unreferenced stray .txt "+
+					"the ingestor would accept: %v", category, err)
+			}
+		})
+	}
+}
+
+// TestDiscoverText_SentencePair_WrongFieldCount: sentence_pair requires exactly
+// 2 fields — a 3-field record is rejected, whereas embeddings accepts 2 or 3.
+func TestDiscoverText_SentencePair_WrongFieldCount(t *testing.T) {
+	three := map[string]string{"a.txt": "one\ttwo\tthree"}
+
+	dir := mkStructuredTextDir(t, true, three)
+	if _, err := DiscoverText("sentence_pair_classification", dir); err == nil {
+		t.Error("sentence_pair_classification should reject a 3-field record")
+	}
+
+	dir2 := mkStructuredTextDir(t, false, three)
+	if _, err := DiscoverText("embeddings", dir2); err != nil {
+		t.Errorf("embeddings should accept a 3-field triplet: %v", err)
+	}
+}
+
+// TestDiscoverText_ConfiguredExtension: the ingestor appends the CONFIGURED
+// extension (.txt OR .text — file_options.extension), so the enforced check
+// must match a manifest value against the file actually on disk, not a
+// reconstructed "<value>.txt". A row "a" resolves to texts/a.text when that is
+// what exists — a malformed a.text is rejected, a well-formed one passes.
+func TestDiscoverText_ConfiguredExtension(t *testing.T) {
+	mk := func(t *testing.T, body string) string {
+		t.Helper()
+		dir := t.TempDir()
+		writeFile(t, dir, "labels.csv", "filename\na\n") // embeddings: no label; value carries no extension
+		sub := filepath.Join(dir, "texts")
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sub, "a.text"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	if _, err := DiscoverText("embeddings", mk(t, "one blob no tab")); err == nil {
+		t.Fatal("malformed a.text should be rejected via the configured .text extension")
+	} else if !strings.Contains(err.Error(), "a.text") {
+		t.Errorf("error should name the on-disk file a.text: %v", err)
+	}
+
+	if _, err := DiscoverText("embeddings", mk(t, "anchor\tpositive")); err != nil {
+		t.Errorf("well-formed a.text rejected: %v", err)
+	}
+}
+
+// TestDiscoverText_MissingFilenameColumn: the ingestor's validator rejects a
+// manifest with no filename column ("Missing required column: filename"); the
+// enforced check surfaces that locally instead of validating nothing (which
+// would fail-open post-upload).
+func TestDiscoverText_MissingFilenameColumn(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "labels.csv", "id\nrow1\n") // no filename column
+	sub := filepath.Join(dir, "texts")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "a.txt"), []byte("anchor\tpositive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := DiscoverText("embeddings", dir)
+	if err == nil {
+		t.Fatal("a manifest with no filename column should be rejected locally")
+	}
+	if !strings.Contains(err.Error(), "filename") {
+		t.Errorf("error should name the missing filename column: %v", err)
+	}
+}
+
+// TestDiscoverText_CaseMismatchedBasename: a manifest value "A.txt" must resolve
+// to the on-disk a.txt case-insensitively — otherwise the file goes unchecked
+// (fail-open). The malformed a.txt is therefore still rejected.
+func TestDiscoverText_CaseMismatchedBasename(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "labels.csv", "filename,label\nA.txt,x\n")
+	sub := filepath.Join(dir, "texts")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "a.txt"), []byte("one blob no tab"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DiscoverText("sentence_pair_classification", dir); err == nil {
+		t.Fatal("case-mismatched manifest value A.txt should still match a.txt and reject the malformed file")
+	}
+}
+
+// TestDiscoverText_TolerantManifestRow: a row Go's strict csv.Reader rejects but
+// pandas tolerates (an unescaped quote) must still be read — LazyQuotes — so its
+// filename is validated, not silently dropped. Here the tolerated row names a
+// malformed a.txt, which must be rejected; without LazyQuotes the row (and its
+// file) would be skipped and discovery would fail-open.
+func TestDiscoverText_TolerantManifestRow(t *testing.T) {
+	dir := t.TempDir()
+	// The unescaped " in the label field trips Go's strict reader; pandas reads it.
+	writeFile(t, dir, "labels.csv", "filename,label\na.txt,he said \"hi\"\n")
+	sub := filepath.Join(dir, "texts")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "a.txt"), []byte("one blob no tab"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DiscoverText("sentence_pair_classification", dir); err == nil {
+		t.Fatal("a pandas-tolerable row must be read (LazyQuotes) so its file is validated")
+	}
+}
+
 // TestBuild_Text_PassesSchema: the text Build branch emits the right
 // sidecar field (texts vs sequences), a label for text_classification
 // but NOT for masked_language_modeling, never an images field, and a
@@ -149,4 +384,26 @@ func TestBuild_Text_PassesSchema(t *testing.T) {
 	check("masked_language_modeling", SpecArgs{
 		Table: "t_mlm", Category: "masked_language_modeling", Intent: "train",
 	}, "sequences", false)
+
+	// Phase 4: supervised text tasks emit a label under texts/; the
+	// self-supervised ones emit none. Each must still be schema-valid.
+	check("token_classification", SpecArgs{
+		Table: "t_tok", Category: "token_classification", Intent: "train", LabelColumn: "label",
+	}, "texts", true)
+
+	check("sentence_pair_classification", SpecArgs{
+		Table: "t_sp", Category: "sentence_pair_classification", Intent: "train", LabelColumn: "label",
+	}, "texts", true)
+
+	check("causal_language_modeling", SpecArgs{
+		Table: "t_clm", Category: "causal_language_modeling", Intent: "train",
+	}, "texts", false)
+
+	check("seq2seq", SpecArgs{
+		Table: "t_s2s", Category: "seq2seq", Intent: "train",
+	}, "texts", false)
+
+	check("embeddings", SpecArgs{
+		Table: "t_emb", Category: "embeddings", Intent: "train",
+	}, "texts", false)
 }

@@ -293,12 +293,16 @@ func TestCategoriesByFamily(t *testing.T) {
 }
 
 func TestSelfSupervisedText(t *testing.T) {
-	for _, id := range []string{"masked_language_modeling", "causal_language_modeling"} {
+	// The self-supervised text tasks have no label column (MLM/CLM predict from
+	// the text itself; seq2seq/embeddings derive their target from the record
+	// structure), so the interactive flow skips the label question for them.
+	for _, id := range []string{"masked_language_modeling", "causal_language_modeling", "seq2seq", "embeddings"} {
 		if !SelfSupervisedText(id) {
 			t.Errorf("%s should be self-supervised", id)
 		}
 	}
-	for _, id := range []string{"text_classification", "tabular_regression", "image_classification"} {
+	// The SUPERVISED text tasks carry a label column and must still be asked.
+	for _, id := range []string{"text_classification", "token_classification", "sentence_pair_classification", "tabular_regression", "image_classification"} {
 		if SelfSupervisedText(id) {
 			t.Errorf("%s should not be self-supervised", id)
 		}

@@ -3,6 +3,7 @@ package push
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,26 @@ func DiscoverText(category, rootDir string) (*LocalLayout, error) {
 	layout.Sidecars[dirName] = files
 	layout.TotalBytes += sidecarBytes
 
+	// Structured-text tasks whose .txt shape the ingestor ENFORCES
+	// (sentence_pair_classification: text_a<TAB>text_b; embeddings:
+	// anchor<TAB>positive[<TAB>negative]) get the same per-file structural
+	// check here, so a malformed layout fails locally with a clear message
+	// instead of after the full stage. The rule comes from the vendored
+	// layout contract, not hardcoded — the CLI mirrors the ingestor's
+	// TabSeparatedRecordValidator (RFC-0002 Principle 6). Unenforced formats
+	// (seq2seq, causal LM) accept raw text and are not checked.
+	//
+	// The check is scoped to the files the manifest actually references, NOT
+	// every .txt in the dir: the ingestor's validator walks labels.csv rows and
+	// only opens the file each row names, so an unreferenced stray .txt (a
+	// README, a scratch draft) must not fail discovery — the ingestor would
+	// accept the dataset.
+	if rf, ok := RecordFormatFor(category); ok && rf.Enforced {
+		if err := validateTextRecords(labelsPath, dirName, files, rf); err != nil {
+			return nil, err
+		}
+	}
+
 	if layout.TotalBytes > MaxTotalBytes {
 		return nil, fmt.Errorf(
 			"dataset is %s, exceeds v0.1 cap of %s. For larger datasets, the "+
@@ -91,6 +112,122 @@ func DiscoverText(category, rootDir string) (*LocalLayout, error) {
 			HumanBytes(layout.TotalBytes), HumanBytes(MaxTotalBytes))
 	}
 	return layout, nil
+}
+
+// validateTextRecords runs the enforced record-format check over the
+// manifest-referenced text files in dirName, mirroring the ingestor's per-file
+// TabSeparatedRecordValidator: it walks labels.csv rows (not the directory) and
+// checks the file each row names. Only files a row references are checked — the
+// ingestor never opens a file no row references, so validating a stray
+// unreferenced .txt would reject a layout the ingestor accepts (RFC-0002
+// Principle 6). The first malformed file fails discovery with a message naming
+// the offending file (relative to the dataset root, e.g. "texts/bad.txt"), so
+// the fix is obvious without reaching the cluster.
+//
+// Each manifest value is matched against the files actually discovered on disk,
+// not a reconstructed "<value>.txt": the ingestor appends the CONFIGURED
+// extension (.txt or .text — file_options.extension), so a row "a" must match
+// texts/a.text when that is what is on disk. Matching is case-insensitive on
+// both the basename and the stem so "A.txt" in the manifest still resolves to
+// a.txt on disk (fail-open otherwise).
+func validateTextRecords(csvPath, dirName string, files []string, rf RecordFormat) error {
+	referenced, err := manifestReferencedTextNames(csvPath)
+	if err != nil {
+		return err
+	}
+
+	// Index the discovered files by lowercased basename and by lowercased stem,
+	// so a manifest value resolves to the file the ingestor would open whether
+	// or not it carries the extension, and regardless of case.
+	byBase := make(map[string]string, len(files))
+	byStem := make(map[string]string, len(files))
+	for _, f := range files {
+		base := filepath.Base(f)
+		byBase[strings.ToLower(base)] = f
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		byStem[strings.ToLower(stem)] = f
+	}
+
+	for name := range referenced {
+		// Mirror file_transfer._has_extension: a value that already ends in a
+		// known extension names the file directly; otherwise the ingestor
+		// appends its configured extension, so match on the stem.
+		var path string
+		if hasKnownExtension(name) {
+			path = byBase[strings.ToLower(name)]
+		} else {
+			path = byStem[strings.ToLower(name)]
+		}
+		if path == "" {
+			continue // manifest names a file not on disk — a missing-file check's job, not ours
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", filepath.Join(dirName, filepath.Base(path)), err)
+		}
+		if verr := ValidateTextRecord(rf, string(content)); verr != nil {
+			return fmt.Errorf("%s: %w", filepath.Join(dirName, filepath.Base(path)), verr)
+		}
+	}
+	return nil
+}
+
+// manifestReferencedTextNames returns the set of raw text-file values the
+// manifest (labels.csv) references — the "filename" column, trimmed, dropping
+// blanks — mirroring the ingestor's TabSeparatedRecordValidator manifest walk.
+// The values are returned unresolved (no extension appended); the caller
+// matches them against the discovered files, since only there does it know
+// which extension is actually on disk.
+//
+// The filename column is REQUIRED: the ingestor's validator rejects a manifest
+// without it ("Missing required column: filename"), so — for the enforced tasks
+// that call this — surface that locally rather than validating nothing (which
+// would fail-open post-upload). An empty CSV yields an empty set (its own
+// emptiness is another check's diagnostic). The CSV is read with LazyQuotes so
+// a row pandas tolerates (an unescaped quote) is read here too, not silently
+// dropped — its filename would otherwise never be validated.
+func manifestReferencedTextNames(csvPath string) (map[string]struct{}, error) {
+	r, closer, err := openCSVReader(csvPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading labels.csv: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+	r.LazyQuotes = true // read the rows pandas would, don't drop them
+
+	header, err := r.Read()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return map[string]struct{}{}, nil // empty CSV — another check's diagnostic
+		}
+		return nil, fmt.Errorf("reading labels.csv: %w", err)
+	}
+	col := matchColumnIndex(header, "filename")
+	if col < 0 {
+		return nil, fmt.Errorf(
+			"labels.csv has no \"filename\" column (columns: %s) — the ingestor matches each "+
+				"row to its text file by that column and rejects a manifest without it. "+
+				"Add a filename column and re-run.",
+			strings.Join(header, ", "))
+	}
+	referenced := map[string]struct{}{}
+	for {
+		rec, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			continue // a row even LazyQuotes can't read is another check's diagnostic
+		}
+		if col >= len(rec) {
+			continue
+		}
+		name := strings.TrimSpace(rec[col])
+		if name == "" {
+			continue
+		}
+		referenced[name] = struct{}{}
+	}
+	return referenced, nil
 }
 
 // discoverSidecarFiles walks <root>/<dirName> (non-recursive) for files

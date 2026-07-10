@@ -240,13 +240,13 @@ func TestRunInteractive_ExplicitTaskSkipsSniff(t *testing.T) {
 }
 
 // TestPickTask_FamilyScoped: the picker offers only the given family's
-// tasks, wires the friendly display names + the locked glosses, and lists
-// the not-yet-supported ones (greyed, with a reason) — never the other
-// families' tasks.
+// tasks, wires the friendly display names + the locked glosses — never the
+// other families' tasks. After RFC-0002 phase 4 every text task is wired, so
+// the text picker has no "Not yet in the CLI" section at all.
 func TestPickTask_FamilyScoped(t *testing.T) {
-	// Text family: fill-mask (gloss) is available; seq2seq
-	// (translation / summarization, gloss) + token_classification are
-	// pending; image/tabular tasks must not appear.
+	// Text family: all tasks are available now — fill-mask (gloss),
+	// classification, the two structured-pair tasks, and the two seq tasks;
+	// image/tabular tasks must not appear.
 	f := &fakePrompter{answers: map[string]string{"Which task?": "Text classification"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
@@ -260,21 +260,50 @@ func TestPickTask_FamilyScoped(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"Tasks for text data",
-		"fill-mask",                   // MLM gloss (available)
-		"Text classification",         // label
-		"Not yet in the CLI:",         // pending header
-		"translation / summarization", // seq2seq gloss (pending)
-		"token_classification",        // pending id
-		"schema-recognized",           // an UnsupportedNote fragment
+		"Available now:",
+		"fill-mask",                    // MLM gloss (available)
+		"Text classification",          // label
+		"translation / summarization",  // seq2seq gloss (now available)
+		"token_classification",         // now available
+		"sentence_pair_classification", // now available
+		"Embeddings",                   // now available
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("picker output missing %q:\n%s", want, out)
 		}
 	}
+	// Every text task is wired now — no pending section.
+	if strings.Contains(out, "Not yet in the CLI:") {
+		t.Errorf("text picker should have no pending section now:\n%s", out)
+	}
 	// Other families must not leak in.
 	for _, unwanted := range []string{"Image classification", "Tabular classification", "Survival analysis"} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("text picker leaked a non-text task %q:\n%s", unwanted, out)
+		}
+	}
+}
+
+// TestPickTask_ImagePending: semantic_segmentation is the sole remaining
+// CLI-pending task, so the image picker still renders a greyed "Not yet in the
+// CLI" section with its backend#816 reason.
+func TestPickTask_ImagePending(t *testing.T) {
+	f := &fakePrompter{answers: map[string]string{"Which task?": "Image classification"}}
+	var buf bytes.Buffer
+	p := ui.New(&buf, ui.WithColor(false))
+	if _, err := pickTask(p, f, push.FamilyImage); err != nil {
+		t.Fatalf("pickTask: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"Available now:",
+		"Image classification",
+		"Not yet in the CLI:",
+		"semantic_segmentation",
+		"backend#816", // the UnsupportedNote reason
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("image picker missing %q:\n%s", want, out)
 		}
 	}
 }

@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Sync ingest.v1.json from tracebloc/data-ingestors into the CLI's
-# embedded copy at internal/schema/ingest.v1.json.
+# Sync the CLI's embedded contract files from tracebloc/data-ingestors:
 #
-# The CLI validates locally using this schema. Drift between the
+#   - ingest.v1.json  — the ingest-config JSON Schema the CLI validates against
+#   - layout.v1.json  — the per-task dataset-layout contract (data-ingestors
+#                        #347/#353) the CLI mirrors for discovery + staging
+#
+# both under internal/schema/.
+#
+# The CLI validates locally using these files. Drift between the
 # CLI's copy and data-ingestors' canonical source is a real
 # correctness hazard — a customer's YAML could pass `tracebloc ingest
-# validate` locally but be rejected by jobs-manager (or vice versa).
+# validate` locally but be rejected by jobs-manager (or vice versa), or the
+# CLI could stage a layout the ingestor rejects.
 #
 # Run this script when bumping the schema version. CI invokes it in
 # check-mode (`--check`) to fail builds that have drifted without
@@ -16,11 +22,12 @@
 #   scripts/sync-schema.sh --check        # verify in-tree copy matches upstream; exit non-zero on drift
 #
 # Env knobs:
-#   SCHEMA_SOURCE_URL   override the upstream URL (default: built from the
-#                       pinned ref below)
+#   SCHEMA_SOURCE_URL   override the upstream URL for ingest.v1.json (default:
+#                       built from the pinned ref below)
 #   DATA_INGESTORS_REF  override the data-ingestors ref (default: the pinned
 #                       SHA in scripts/.data-ingestors-ref, else master)
-#   SCHEMA_OUT          override the in-tree destination (default: internal/schema/ingest.v1.json)
+#   SCHEMA_OUT          override the in-tree destination for ingest.v1.json
+#                       (default: internal/schema/ingest.v1.json)
 #
 # The ref is PINNED (scripts/.data-ingestors-ref), not a floating branch, so an
 # unrelated upstream commit doesn't red every open CLI PR — adopting upstream
@@ -54,61 +61,118 @@ if ! printf '%s' "$DATA_INGESTORS_REF" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$
   exit 2
 fi
 
-readonly DEFAULT_URL="https://raw.githubusercontent.com/tracebloc/data-ingestors/${DATA_INGESTORS_REF}/tracebloc_ingestor/schema/ingest.v1.json"
+readonly UPSTREAM_BASE="https://raw.githubusercontent.com/tracebloc/data-ingestors/${DATA_INGESTORS_REF}/tracebloc_ingestor/schema"
+
+readonly DEFAULT_URL="${UPSTREAM_BASE}/ingest.v1.json"
 readonly DEFAULT_OUT="internal/schema/ingest.v1.json"
 
+# ingest.v1.json keeps its historical env overrides; layout.v1.json is derived
+# from the pinned ref. Each entry is "URL|OUT".
 SCHEMA_SOURCE_URL="${SCHEMA_SOURCE_URL:-$DEFAULT_URL}"
 SCHEMA_OUT="${SCHEMA_OUT:-$DEFAULT_OUT}"
+FILES=(
+  "${SCHEMA_SOURCE_URL}|${SCHEMA_OUT}"
+  "${UPSTREAM_BASE}/layout.v1.json|internal/schema/layout.v1.json"
+)
 
 CHECK_MODE=false
 if [[ "${1:-}" == "--check" ]]; then
   CHECK_MODE=true
 fi
 
-# Stage the fetched schema in a temp file so a half-failed curl doesn't
-# leave a truncated file in the repo.
-tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
+# Track every temp file we stage so a single top-level trap can clean them all
+# up — on normal exit AND on a signal-driven one (SIGINT/SIGTERM during the curl
+# fetch or json.tool validation). The pre-refactor code used a top-level EXIT
+# trap; a per-function RETURN trap alone would leak the temp file when the run
+# is killed mid-fetch, so keep cleanup at the top level.
+_tmpfiles=()
+cleanup_tmpfiles() {
+  # Guard the expansion: under `set -u`, "${arr[@]}" on an empty array is an
+  # unbound-variable error in bash < 4.4 (macOS ships 3.2).
+  [[ ${#_tmpfiles[@]} -eq 0 ]] && return 0
+  local f
+  for f in "${_tmpfiles[@]}"; do
+    rm -f "$f"
+  done
+}
+trap cleanup_tmpfiles EXIT INT TERM
 
-echo "==> fetching $SCHEMA_SOURCE_URL"
-curl -fsSL "$SCHEMA_SOURCE_URL" -o "$tmp"
+# sync_one fetches one upstream file and either checks it against the in-tree
+# copy (--check) or writes it. Returns non-zero on drift / missing file in
+# check mode. Each fetch is staged in its own temp file so a half-failed curl
+# never leaves a truncated file in the repo.
+sync_one() {
+  local url="$1" out="$2"
+  local tmp
+  tmp=$(mktemp)
+  _tmpfiles+=("$tmp")
 
-# Make sure what came back is valid JSON before we trust it.
-if ! python3 -m json.tool < "$tmp" > /dev/null 2>&1; then
-  echo "error: upstream response is not valid JSON" >&2
-  echo "first 200 bytes of response:" >&2
-  head -c 200 "$tmp" >&2
-  exit 2
-fi
-
-mkdir -p "$(dirname "$SCHEMA_OUT")"
-
-if $CHECK_MODE; then
-  if [[ ! -f "$SCHEMA_OUT" ]]; then
-    echo "error: $SCHEMA_OUT does not exist" >&2
-    echo "run \`scripts/sync-schema.sh\` (without --check) to seed it." >&2
-    exit 1
+  echo "==> fetching $url"
+  # sync_one is called as `if ! sync_one ...`, which suspends `set -e` for the
+  # whole body — so a failed curl (e.g. a 404) would otherwise fall through and
+  # be misdiagnosed as "not valid JSON" on the empty temp file. Check curl's
+  # exit explicitly and report the real fetch failure. --tlsv1.2 matches every
+  # other curl in the repo (scripts/install.sh).
+  curl -fsSL --tlsv1.2 "$url" -o "$tmp"
+  local curl_rc=$?
+  if [[ $curl_rc -ne 0 ]]; then
+    echo "error: failed to fetch $url (curl exited $curl_rc)" >&2
+    return "$curl_rc"
   fi
-  if ! diff -q "$tmp" "$SCHEMA_OUT" >/dev/null; then
-    echo "error: $SCHEMA_OUT has drifted from upstream." >&2
-    echo "diff (upstream → in-tree):" >&2
-    diff -u "$SCHEMA_OUT" "$tmp" | head -40 >&2 || true
-    echo >&2
-    echo "to fix, run \`scripts/sync-schema.sh\` and commit the result." >&2
-    exit 1
+
+  # Make sure what came back is valid JSON before we trust it.
+  if ! python3 -m json.tool < "$tmp" > /dev/null 2>&1; then
+    echo "error: upstream response is not valid JSON ($url)" >&2
+    echo "first 200 bytes of response:" >&2
+    head -c 200 "$tmp" >&2
+    return 2
   fi
-  echo "==> $SCHEMA_OUT matches upstream — no drift"
-  exit 0
-fi
 
-# Write mode. Only touch the destination if the content actually
-# changed, so re-running the script on an already-current schema
-# produces no file-mtime churn.
-if [[ -f "$SCHEMA_OUT" ]] && diff -q "$tmp" "$SCHEMA_OUT" >/dev/null; then
-  echo "==> $SCHEMA_OUT already matches upstream — no change"
-  exit 0
-fi
+  mkdir -p "$(dirname "$out")"
 
-mv "$tmp" "$SCHEMA_OUT"
-trap - EXIT  # the temp file is now in place; don't try to rm it
-echo "==> wrote $SCHEMA_OUT ($(wc -c < "$SCHEMA_OUT" | tr -d ' ') bytes)"
+  if $CHECK_MODE; then
+    if [[ ! -f "$out" ]]; then
+      echo "error: $out does not exist" >&2
+      echo "run \`scripts/sync-schema.sh\` (without --check) to seed it." >&2
+      return 1
+    fi
+    if ! diff -q "$tmp" "$out" >/dev/null; then
+      echo "error: $out has drifted from upstream." >&2
+      echo "diff (upstream → in-tree):" >&2
+      diff -u "$out" "$tmp" | head -40 >&2 || true
+      echo >&2
+      echo "to fix, bump scripts/.data-ingestors-ref if needed, run \`scripts/sync-schema.sh\`, and commit the result." >&2
+      return 1
+    fi
+    echo "==> $out matches upstream — no drift"
+    return 0
+  fi
+
+  # Write mode. Only touch the destination if the content actually changed, so
+  # re-running the script on an already-current file produces no mtime churn.
+  if [[ -f "$out" ]] && diff -q "$tmp" "$out" >/dev/null; then
+    echo "==> $out already matches upstream — no change"
+    return 0
+  fi
+
+  # Check the write explicitly: sync_one is called as `if ! sync_one ...`, which
+  # suspends `set -e` for the whole function body, so a failed cp (unwritable
+  # dir, full disk) would otherwise fall through to the "wrote" line and return
+  # 0 — a false success that lets a stale vendored file get committed.
+  if ! cp "$tmp" "$out"; then
+    echo "error: failed to write $out (check directory permissions / disk space)" >&2
+    return 1
+  fi
+  echo "==> wrote $out ($(wc -c < "$out" | tr -d ' ') bytes)"
+  return 0
+}
+
+rc=0
+for entry in "${FILES[@]}"; do
+  url="${entry%%|*}"
+  out="${entry##*|}"
+  if ! sync_one "$url" "$out"; then
+    rc=1
+  fi
+done
+exit "$rc"
