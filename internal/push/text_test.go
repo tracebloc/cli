@@ -1,6 +1,8 @@
 package push
 
 import (
+	"encoding/csv"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -406,4 +408,41 @@ func TestBuild_Text_PassesSchema(t *testing.T) {
 	check("embeddings", SpecArgs{
 		Table: "t_emb", Category: "embeddings", Intent: "train",
 	}, "texts", false)
+}
+
+// failAfterReader yields its data once, then returns err on every subsequent
+// Read — simulating labels.csv failing to read partway through (the header
+// parses, the body read then errors).
+type failAfterReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (f *failAfterReader) Read(p []byte) (int, error) {
+	if !f.done {
+		f.done = true
+		return copy(p, f.data), nil
+	}
+	return 0, f.err
+}
+
+// TestReferencedTextNames_ReadErrorFailsClosed: a mid-stream read error on
+// labels.csv must abort the manifest walk (fail closed) rather than silently
+// return a partial referenced set that leaves the unread rows' text files
+// unvalidated — the image mirror-check (CrossCheckLabels) aborts on the same
+// error, and the enforced-text path must match. The trigger is I/O, not
+// malformed CSV: LazyQuotes + FieldsPerRecord=-1 parse every bad shape cleanly
+// (like pandas), so the only way into this branch is a genuine read failure.
+func TestReferencedTextNames_ReadErrorFailsClosed(t *testing.T) {
+	sentinel := errors.New("disk gave up mid-read")
+	r := csv.NewReader(&failAfterReader{data: []byte("filename,label\n"), err: sentinel})
+	r.FieldsPerRecord = -1 // match openCSVReader
+
+	if _, err := referencedTextNames(r); err == nil {
+		t.Fatal("referencedTextNames returned nil error on a mid-stream read failure; " +
+			"the manifest walk must fail closed")
+	} else if !errors.Is(err, sentinel) {
+		t.Errorf("error should wrap the underlying read failure, got: %v", err)
+	}
 }
