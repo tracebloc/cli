@@ -193,21 +193,57 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 
 	// 1. Revoke the machine credential server-side (POST /edge-device/<id>/revoke,
 	//    §7.10 / C.6). This kills the credential without deleting the row — the
-	//    retained history in scope 2 stays intact. A 403 → ask-an-admin.
+	//    retained history in scope 2 stays intact.
+	revoked := true
 	if rerr := client.RevokeClient(ctx, id); rerr != nil {
-		var ae *api.APIError
-		if errors.As(rerr, &ae) && ae.StatusCode == http.StatusForbidden {
-			return askAnAdmin(ctx, p, client, "offboard this machine", "offboarding")
+		revoked = false
+		// A 426 (CLI too old) won't recover by continuing — the whole offboard talks
+		// to the same backend — so fail fast with the upgrade message rather than
+		// tear the machine down against a backend that can't process the revoke.
+		// Mirrors the pre-offboard guard above (which treats 426 as terminal).
+		var ue *api.UpgradeRequiredError
+		if errors.As(rerr, &ue) {
+			return &exitError{code: 1, err: rerr}
 		}
-		return &exitError{code: 1, err: fmt.Errorf("revoking the machine credential: %w", rerr)}
+		var ae *api.APIError
+		if errors.As(rerr, &ae) {
+			switch ae.StatusCode {
+			case http.StatusForbidden:
+				// A 403 is a genuine authorization decision — you can't revoke a
+				// client you don't manage; route to ask-an-admin (unchanged).
+				return askAnAdmin(ctx, p, client, "offboard this machine", "offboarding")
+			case http.StatusUnauthorized:
+				// A 401 means the signed-in session is expired/revoked. With --force
+				// the online-guard above is skipped, so DON'T silently tear the machine
+				// down while a live credential remains — fail fast and point at sign-in,
+				// mirroring the pre-offboard guard's 401 handling.
+				return &exitError{code: 1, err: errors.New(
+					"tracebloc rejected your credentials — run `tracebloc login`, then retry `tracebloc delete`")}
+			}
+		}
+		// Any OTHER revoke failure must NOT block the local teardown. Removing
+		// tracebloc from THIS machine (helm uninstall, cluster teardown, on-host
+		// data + config wipe, self-remove) is offline-capable and is the command's
+		// primary job — it can't be held hostage to a best-effort remote call. This
+		// hits on a 404 (a stale/wrong-account active-client pointer, or a backend
+		// predating the /revoke route), a transient network/5xx error, etc. Warn and
+		// continue, mirroring the online-guard above. The credential may remain live
+		// server-side (revoked stays false), so the closing summary says so: the user
+		// can revoke it from the dashboard, and the orphan reaper (backend#970) sweeps
+		// a never-torn-down record later.
+		p.Hintf("Couldn't revoke the credential server-side (%v) — continuing with local teardown. "+
+			"The credential may still be live on tracebloc; revoke it from the dashboard if needed.", rerr)
+	} else {
+		p.Successf("Revoked this machine's credential (client %q kept on tracebloc as a record).", name)
 	}
-	p.Successf("Revoked this machine's credential (client %q kept on tracebloc as a record).", name)
 
-	// The teardown steps below are best-effort (the credential is already revoked),
-	// but a step that leaves real state behind — a live release, the local cluster,
-	// or on-host data — must NOT be papered over by the final success line. Track it
-	// so the closing message tells the truth (image reclaim is pure disk cleanup, so
-	// it's intentionally excluded — its own warning already surfaces it).
+	// The teardown steps below are best-effort. (The credential is revoked when the
+	// server-side revoke above succeeded; on a best-effort revoke failure it may
+	// still be live — the closing summary reports which.) A step that leaves real
+	// state behind — a live release, the local cluster, or on-host data — must NOT be
+	// papered over by the final success line. Track it so the closing message tells
+	// the truth (image reclaim is pure disk cleanup, so it's intentionally excluded —
+	// its own warning already surfaces it).
 	degraded := false
 
 	// Clear the local enrollment pointer and persist it IMMEDIATELY — before the
@@ -283,14 +319,23 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	}
 
 	p.Newline()
-	// The credential is revoked either way, so the machine can no longer connect —
-	// but only claim a clean offboard when the teardown actually completed. If a
-	// step left real state behind, say so instead of printing an unqualified success.
-	if degraded {
+	// Be honest on BOTH axes: whether the server-side revoke succeeded (revoked) and
+	// whether the local teardown completed (!degraded). Neither is guaranteed — the
+	// revoke is best-effort on a non-terminal failure, and the teardown steps are
+	// best-effort — so only claim "revoked / no longer connected" when it's true.
+	switch {
+	case revoked && !degraded:
+		p.Successf("Offboarded %q. This machine is no longer connected to tracebloc.", name)
+	case revoked && degraded:
 		p.Warnf("Offboarded %q: the machine credential is revoked, so it can no longer connect to tracebloc — "+
 			"but some cleanup above didn't complete. Finish the flagged steps by hand.", name)
-	} else {
-		p.Successf("Offboarded %q. This machine is no longer connected to tracebloc.", name)
+	case !revoked && !degraded:
+		p.Warnf("Tore down %q on this machine. The server-side revoke didn't complete, so the credential may "+
+			"still be live on tracebloc — revoke it from the dashboard if needed (the orphan reaper sweeps it otherwise).", name)
+	default: // !revoked && degraded
+		p.Warnf("Tore down %q on this machine, but some cleanup above didn't complete and the server-side revoke "+
+			"didn't complete — the credential may still be live on tracebloc (revoke it from the dashboard). "+
+			"Finish the flagged steps by hand.", name)
 	}
 	return nil
 }
