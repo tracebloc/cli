@@ -111,6 +111,23 @@ func recoveredPod(name string, restarts int32) *corev1.Pod {
 	}
 }
 
+// initRestartPod has an init container that restarted repeatedly but is not
+// crash-looping now (it terminated Completed). Exercises the
+// InitContainerStatuses arm of the restart-history scan.
+func initRestartPod(name string, restarts int32) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name:         "init",
+				RestartCount: restarts,
+				State:        corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Completed"}},
+			}},
+		},
+	}
+}
+
 func pendingPod(name string, age time.Duration) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -178,6 +195,41 @@ func TestCheckPods(t *testing.T) {
 			cs := fake.NewClientset(tc.pod)
 			if r := checkPods(bg(), cs, ns); r.Status != tc.want {
 				t.Fatalf("checkPods = %v (%q), want %v", r.Status, r.Detail, tc.want)
+			}
+		})
+	}
+}
+
+// checkRestartHistory is the backend#1028 restart-*history* signal: it must warn
+// on a container whose RestartCount crossed the threshold even though it is not
+// crash-looping now (checkPods reads only the current waiting reason and would
+// call these OK). It scans both init and app container statuses and caps at ⚠.
+func TestCheckRestartHistory(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want Status
+	}{
+		{"no restarts", runningPod("ok"), StatusOK},
+		{"below threshold", recoveredPod("blip", restartWarnThreshold-1), StatusOK},
+		{"at threshold", recoveredPod("flap", restartWarnThreshold), StatusWarn},
+		{"above threshold", recoveredPod("flap", restartWarnThreshold+2), StatusWarn},
+		{"init container restarts", initRestartPod("initflap", restartWarnThreshold), StatusWarn},
+		// A recovered pod that flapped is OK to checkPods but ⚠ here — that's the gap.
+		{"crash-loop-now stays OK here (not this check's job)", crashPod("bad"), StatusOK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewClientset(tc.pod)
+			r := checkRestartHistory(bg(), cs, ns)
+			if r.Status != tc.want {
+				t.Fatalf("checkRestartHistory = %v (%q), want %v", r.Status, r.Detail, tc.want)
+			}
+			// A warn must name the offending pod and container so the operator
+			// knows where to look.
+			if tc.want == StatusWarn &&
+				(!strings.Contains(r.Detail, tc.pod.Name) || !strings.Contains(r.Detail, "restarted")) {
+				t.Fatalf("warn detail %q should name pod %q and its restart count", r.Detail, tc.pod.Name)
 			}
 		})
 	}
@@ -337,8 +389,8 @@ func TestRun_HealthyCluster(t *testing.T) {
 		HTTPProbe: func(context.Context, string) error { return nil },
 	})
 
-	if len(results) != 8 {
-		t.Fatalf("want 8 checks, got %d", len(results))
+	if len(results) != 9 {
+		t.Fatalf("want 9 checks, got %d", len(results))
 	}
 	if w := Worst(results); w != StatusOK {
 		for _, r := range results {

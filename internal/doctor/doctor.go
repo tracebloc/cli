@@ -78,6 +78,18 @@ func Worst(results []Result) Status {
 const (
 	pendingGrace     = 5 * time.Minute // a pod Pending longer than this is flagged
 	httpProbeTimeout = 8 * time.Second
+
+	// restartWarnThreshold is the container RestartCount at/above which the
+	// doctor surfaces a pod's restart *history* as a ⚠. checkPods reads only the
+	// current waiting reason, so a container that crashed several times and then
+	// recovered — or a job that flapped before Succeeding — leaves no live trace
+	// there and reads as OK (the gap backend#1028 flagged). We pick 3, not 1: a
+	// single restart is routine (a node drain, an image warm-up, a dependency not
+	// ready on first boot, a one-off liveness-probe miss), so 1–2 would be noisy.
+	// 3+ distinct restarts is a genuine flap worth a log look, while staying a
+	// history hint that never escalates past ⚠ or overrides checkPods'
+	// crash-loop-now failure.
+	restartWarnThreshold = 3
 )
 
 // Options configures a diagnosis run. The zero value is usable: Namespace
@@ -109,6 +121,7 @@ func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 	return []Result{
 		checkReachable(release, relErr, ns),
 		checkPods(ctx, cs, ns),
+		checkRestartHistory(ctx, cs, ns),
 		checkPVC(ctx, cs, ns),
 		checkNodeFit(ctx, cs, jmEnv),
 		checkImagePull(ctx, cs, ns, release),
@@ -215,6 +228,49 @@ func podCrashLooping(p corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// checkRestartHistory surfaces containers that have restarted repeatedly even
+// though they are not crash-looping right now — the restart-*history* signal
+// backend#1028 asked for. checkPods reads only the current waiting reason, so a
+// container that crashed several times and then came up healthy (or a job that
+// flapped before Succeeding) reads as OK there, hiding a real problem. This is
+// deliberately an ADDITIONAL check and never touches podCrashLooping: it caps
+// at ⚠ (history, not liveness) and both init AND app container statuses are
+// scanned, since an init container that keeps dying blocks startup just as much.
+func checkRestartHistory(ctx context.Context, cs kubernetes.Interface, ns string) Result {
+	const name = "Restart history"
+	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return Result{
+			Name:   name,
+			Status: StatusWarn,
+			Detail: "could not list pods: " + err.Error(),
+			Remedy: "Ensure your kubeconfig user can list pods in " + ns + ".",
+		}
+	}
+
+	var flapped []string
+	for _, p := range pods.Items {
+		for _, group := range [][]corev1.ContainerStatus{p.Status.InitContainerStatuses, p.Status.ContainerStatuses} {
+			for _, c := range group {
+				if c.RestartCount >= restartWarnThreshold {
+					flapped = append(flapped, fmt.Sprintf("pod %s container %s restarted %d times", p.Name, c.Name, c.RestartCount))
+				}
+			}
+		}
+	}
+	sort.Strings(flapped)
+
+	if len(flapped) > 0 {
+		return Result{
+			Name:   name,
+			Status: StatusWarn,
+			Detail: fmt.Sprintf("restarted ≥%d times — check logs: %v", restartWarnThreshold, flapped),
+			Remedy: "A container that restarted repeatedly may be flapping even if it's up now. Check its logs: kubectl logs -n " + ns + " <pod> -c <container> --previous",
+		}
+	}
+	return Result{Name: name, Status: StatusOK, Detail: fmt.Sprintf("%d pod(s), none restarted ≥%d times", len(pods.Items), restartWarnThreshold)}
 }
 
 // checkPVC reuses cluster.DiscoverSharedPVC — which already verifies the
