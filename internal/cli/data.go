@@ -638,9 +638,13 @@ collaborators can train against that table without ever seeing the raw files.`))
 			return &exitError{code: 3, err: perr}
 		}
 
-		// Column schema: an explicit --schema wins; otherwise infer
-		// INT/FLOAT/VARCHAR types from the CSV so the customer doesn't
-		// hand-write one for the common case.
+		// Column schema. An explicit schema wins — that's either a raw
+		// --schema, or the schema the interactive confirm step already
+		// inferred, showed, and materialized into SchemaFlag (so the
+		// confirmed/amended types flow through the same path). Otherwise —
+		// a non-interactive run with no --schema — infer here and EMIT it
+		// explicitly (below, via a.Spec.Schema → spec.schema), so the
+		// ingestor uses the CLI's answer regardless of its own version.
 		if a.SchemaFlag != "" {
 			sch, perr := push.ParseSchema(a.SchemaFlag)
 			if perr != nil {
@@ -648,22 +652,28 @@ collaborators can train against that table without ever seeing the raw files.`))
 			}
 			a.Spec.Schema = sch
 		} else {
-			sch, skipped, empty, ierr := push.InferSchema(layout.LabelsCSV)
+			res, ierr := push.InferSchema(layout.LabelsCSV)
 			if ierr != nil {
 				return &exitError{code: 3, err: fmt.Errorf("inferring schema from CSV: %w", ierr)}
 			}
-			a.Spec.Schema = sch
+			a.Spec.Schema = res.Schema
 			_, _ = fmt.Fprintf(out,
 				"Inferred schema for %d column(s) from %s (override with --schema).\n",
-				len(sch), filepath.Base(layout.LabelsCSV))
-			if len(skipped) > 0 {
+				len(res.Schema), filepath.Base(layout.LabelsCSV))
+			if len(res.Skipped) > 0 {
 				_, _ = fmt.Fprintf(out,
-					"  (skipped framework-managed column(s): %s)\n", strings.Join(skipped, ", "))
+					"  (skipped framework-managed column(s): %s)\n", strings.Join(res.Skipped, ", "))
 			}
-			if len(empty) > 0 {
+			if len(res.Empty) > 0 {
 				_, _ = fmt.Fprintf(out,
-					"  (warning: %d column(s) had no values in the sample and were typed FLOAT (nullable): %s)\n",
-					len(empty), strings.Join(empty, ", "))
+					"  (warning: %d column(s) had no values in the sample and were typed VARCHAR(1): %s)\n",
+					len(res.Empty), strings.Join(res.Empty, ", "))
+			}
+			if len(res.IDLike) > 0 {
+				_, _ = fmt.Fprintf(out,
+					"  (warning: %d column(s) look like identifiers (all-unique integers): %s — "+
+						"if any is a zero-padded code, pass --schema to type it VARCHAR)\n",
+					len(res.IDLike), strings.Join(res.IDLike, ", "))
 			}
 		}
 	case push.IsImage(a.Spec.Category):
