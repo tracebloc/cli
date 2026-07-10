@@ -188,18 +188,30 @@ func CheckHasDataRows(path string) error {
 
 // ValidateImages previews the ingestor's ImageResolutionValidator
 // (image_validator.py): it opens EVERY image (header-only decode — cheap)
-// and rejects zero-byte files, undecodable files, and any image whose
-// resolution differs from the expected size (exact equality, zero
-// tolerance — the ingestor validates, it does not resize). Previously the
-// CLI decoded only the first image, so a single odd-sized or corrupt file
-// failed in-cluster after the full upload (cli#72b/c).
+// and rejects zero-byte files, undecodable files, images below the
+// minimum-size floor, and any image whose resolution differs from the
+// expected size (exact equality, zero tolerance — the ingestor validates,
+// it does not resize). Previously the CLI decoded only the first image, so
+// a single odd-sized or corrupt file failed in-cluster after the full
+// upload (cli#72b/c).
 //
 // expectedW/expectedH of 0 skips the resolution comparison (the caller
 // couldn't establish a target size — the ingestor would then auto-detect
 // from its first file, which the CLI's detection already mirrors).
-func ValidateImages(images []string, expectedW, expectedH int) error {
+//
+// minW/minH is the minimum-size floor (#348), mirroring the ingestor's
+// _meets_min_size: an image is too small when EITHER side is below the
+// floor; an image exactly at the floor passes. 0/0 disables the floor.
+// PreflightDataset passes a non-zero floor ONLY when the customer set
+// --min-size — it does NOT default to MinImageSize, because the deployed
+// ingestor has no floor yet (see the PreflightDataset image branch), so a
+// default block would reject an ingest the live cluster accepts. The
+// too-small check takes precedence over the resolution mismatch, exactly
+// as data-ingestors #348 returns the too_small error before the
+// target_size uniformity error.
+func ValidateImages(images []string, expectedW, expectedH, minW, minH int) error {
 	const maxListed = 5
-	var broken, mismatched []string
+	var broken, tooSmall, mismatched []string
 	for _, path := range images {
 		name := filepath.Base(path)
 		f, err := os.Open(path)
@@ -217,10 +229,23 @@ func ValidateImages(images []string, expectedW, expectedH int) error {
 			}
 			continue
 		}
+		if minW > 0 && minH > 0 && (cfg.Width < minW || cfg.Height < minH) {
+			tooSmall = append(tooSmall,
+				fmt.Sprintf("%s (%dx%d)", name, cfg.Width, cfg.Height))
+		}
 		if expectedW > 0 && expectedH > 0 && (cfg.Width != expectedW || cfg.Height != expectedH) {
 			mismatched = append(mismatched,
 				fmt.Sprintf("%s (%dx%d)", name, cfg.Width, cfg.Height))
 		}
+	}
+	// Floor first: an image below the minimum size simply can't be trained
+	// on, so it's the most fundamental, actionable failure — data-ingestors
+	// #348 returns it ahead of the uniformity / target_size mismatch.
+	if len(tooSmall) > 0 {
+		return fmt.Errorf(
+			"%d image(s) are smaller than the %dx%d minimum you set with --min-size: %s. "+
+				"Provide larger images, or lower the floor with --min-size, then re-run.",
+			len(tooSmall), minW, minH, TruncateList(tooSmall, maxListed))
 	}
 	if len(broken) > 0 {
 		return fmt.Errorf(
@@ -688,7 +713,24 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if len(spec.TargetSize) == 2 {
 			expW, expH = spec.TargetSize[0], spec.TargetSize[1]
 		}
-		if err := ValidateImages(layout.Images, expW, expH); err != nil {
+		// Minimum-size floor (#348). The floor lives in data-ingestors only
+		// on develop (di#348/#356); the DEPLOYED ingestor (v0.5.7/v0.6.0) has
+		// no floor and ingests small images fine. So the preview must NOT
+		// apply the 32x32 default on its own — a default block would reject an
+		// ingest the live cluster accepts, the inverse of the tabular-BOM
+		// block (whose reject mirrors a real deployed rejection). Apply the
+		// floor ONLY when the customer explicitly set --min-size (spec.MinSize)
+		// — their own declared requirement, honored locally regardless of the
+		// cluster. Once di#348 reaches prod, default this to MinImageSize and
+		// flip the imgc-too-small parity case so the floor is previewed by
+		// default. The emit side already matches: it omits file_options.min_size
+		// when unset, letting whichever ingestor is deployed apply its own
+		// default (none today; MinImageSize post-#348).
+		minW, minH := 0, 0
+		if len(spec.MinSize) == 2 {
+			minW, minH = spec.MinSize[0], spec.MinSize[1]
+		}
+		if err := ValidateImages(layout.Images, expW, expH, minW, minH); err != nil {
 			return nil, dataProblem(err)
 		}
 		if err := CheckHasDataRows(layout.LabelsCSV); err != nil {

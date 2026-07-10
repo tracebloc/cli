@@ -317,9 +317,9 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			prompted = true
 		}
 		if a.TargetSizeFlag == "" {
-			p.PromptHint("All images must share one resolution; the ingestor checks it (it won't resize). Blank = auto-detect from the first image.  e.g. 224x224")
-			ans, err := pr.Input("Image resolution as WxH (blank = auto-detect from the first image)",
-				"all images must share it; the ingestor validates, it doesn't resize", "",
+			p.PromptHint("The resolution your images already are. tracebloc never resizes — it checks every image is exactly this size and rejects any that differ. Blank = read it from your first image.  e.g. 224x224")
+			ans, err := pr.Input("Image resolution as WxH (blank = read it from your first image)",
+				"the size your images already are; tracebloc checks it, it never resizes", "",
 				validateOptionalTargetSize)
 			if err != nil {
 				return prompted, err
@@ -411,6 +411,12 @@ func renderReview(p *ui.Printer, a *runDataIngestArgs) {
 		p.Field("resolution", a.TargetSizeFlag)
 	case push.IsImage(a.Spec.Category):
 		p.Field("resolution", "auto-detect")
+	}
+	// Only shown when set — --min-size is opt-in with no local default,
+	// so there's nothing to echo otherwise. Surfacing it lets a mistyped
+	// floor (e.g. 640x640 for 64x64) be caught at the confirm gate.
+	if a.MinSizeFlag != "" {
+		p.Field("min size", a.MinSizeFlag)
 	}
 	switch {
 	case a.SchemaFlag != "":

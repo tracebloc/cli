@@ -47,6 +47,24 @@ import (
 // table-naming style anyway.
 var tableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// MinImageSize is the absolute lower bound on image dimensions as
+// [width, height] in pixels — the CLI's mirror of the ingestor's
+// ImageResolutionValidator.MIN_IMAGE_SIZE (data-ingestors #348).
+// Images with either side below this are rejected in-cluster as
+// too small to train on, independently of the target_size uniformity
+// check. A per-model override travels in spec.file_options.min_size
+// (SpecArgs.MinSize); when unset, the ingestor applies this default (on
+// develop — see below). The CLI preview does NOT default to it: it only
+// previews the floor when the customer set --min-size, because the DEPLOYED
+// ingestor (v0.5.7/v0.6.0) has no floor yet, so a default local block would
+// reject an ingest the live cluster accepts (see PreflightDataset). This
+// constant is still the mirror of the upstream default — once di#348 reaches
+// prod, PreflightDataset should default the preview floor to it.
+//
+// Keep this in lock-step with the upstream constant — it is the source of
+// truth. Do NOT invent a different floor here.
+var MinImageSize = [2]int{32, 32}
+
 // MaxTableNameLength caps `--table` at 63 chars. Two hard limits
 // agree on this:
 //
@@ -161,6 +179,15 @@ type SpecArgs struct {
 	// non-square dataset fail in-cluster; #147 reverted it. Do not
 	// re-introduce a swap. (See the inline comment in buildImage.)
 	TargetSize []int
+
+	// MinSize, when len==2, holds the minimum acceptable image size as
+	// [W, H] — the override for the ingestor's minimum-image-size floor
+	// (data-ingestors #348). Emitted as spec.file_options.min_size.
+	// Empty (len 0) ⇒ omit, and both the CLI preview and the ingestor
+	// fall back to MinImageSize (32x32). Populated by the CLI from
+	// --min-size. Same [W, H] order as TargetSize — no swap. (Image
+	// categories only.)
+	MinSize []int
 
 	// Schema is the column→SQL-type map for tabular / time-series
 	// categories (required by the schema for those). Populated by the
@@ -283,6 +310,16 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 	fileOptions := map[string]any{}
 	if a.Extension != "" {
 		fileOptions["extension"] = a.Extension
+	}
+
+	// Minimum-size floor override (#348). Emitted under file_options for
+	// every image category (the schema places min_size there — there is no
+	// top-level min_size like keypoint's target_size). [width, height] —
+	// same contract as target_size, no swap. Omitted when unset so the
+	// ingestor's MIN_IMAGE_SIZE default (32x32) applies, matching the
+	// CLI's own preview default.
+	if len(a.MinSize) == 2 {
+		fileOptions["min_size"] = []int{a.MinSize[0], a.MinSize[1]}
 	}
 
 	if a.Category == "keypoint_detection" {

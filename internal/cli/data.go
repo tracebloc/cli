@@ -109,6 +109,7 @@ func newDataIngestCmd() *cobra.Command {
 		intent            string
 		labelColumn       string
 		targetSize        string
+		minSize           string
 		schemaFlag        string
 		labelPolicy       string
 		timeColumn        string
@@ -259,6 +260,7 @@ Exit codes:
 						NumberOfKeypoints: numberOfKeypoints,
 					},
 					TargetSizeFlag: targetSize,
+					MinSizeFlag:    minSize,
 					SchemaFlag:     schemaFlag,
 					DryRun:         dryRun,
 					Overwrite:      overwrite,
@@ -304,8 +306,13 @@ Exit codes:
 	cmd.Flags().StringVar(&labelColumn, "label-column", "",
 		"name of the label/target column (in labels.csv for image tasks, in the data CSV for tabular)")
 	cmd.Flags().StringVar(&targetSize, "target-size", "",
-		"image tasks only: resolution as WxH (e.g. 512x512). Default: auto-detected from the first image. "+
-			"All images must share this resolution — the ingestor validates it, it does not resize.")
+		"image tasks only: the resolution your images already are, as WxH (e.g. 512x512). tracebloc never "+
+			"resizes — it checks every image is exactly this size and rejects any that differ. Default: "+
+			"read from your first image.")
+	cmd.Flags().StringVar(&minSize, "min-size", "",
+		"image tasks only: reject images smaller than WxH before the ingest (e.g. 64x64). Set it to the "+
+			"smallest size your model can train on — raise or lower it freely. Default: unset (no local "+
+			"size check).")
 	cmd.Flags().StringVar(&schemaFlag, "schema", "",
 		"tabular/time-series only: column types as col:TYPE,col:TYPE (e.g. age:INT,price:FLOAT). "+
 			"Default: inferred from the CSV (INT/FLOAT/VARCHAR).")
@@ -354,6 +361,7 @@ type runDataIngestArgs struct {
 	Namespace      string
 	Spec           push.SpecArgs
 	TargetSizeFlag string // raw --target-size; resolved after Discover (image)
+	MinSizeFlag    string // raw --min-size; resolved after Discover (image) — #348 floor override
 	SchemaFlag     string // raw --schema; resolved or inferred after Discover (tabular)
 	DryRun         bool
 	Overwrite      bool
@@ -567,6 +575,24 @@ collaborators can train against that table without ever seeing the raw files.`))
 			a.Spec.Category, push.SupportedCategoriesList())}
 	}
 
+	// Image-only flags. --target-size / --min-size describe image
+	// resolution, so they're meaningless on a tabular / text task.
+	// Reject them explicitly here: without this guard they'd be parsed
+	// only inside the image branch below, so on a non-image task the
+	// value — even a malformed one — was silently dropped with no error.
+	if !push.IsImage(a.Spec.Category) {
+		for _, f := range []struct{ name, val string }{
+			{"--target-size", a.TargetSizeFlag},
+			{"--min-size", a.MinSizeFlag},
+		} {
+			if f.val != "" {
+				return &exitError{code: 2, err: fmt.Errorf(
+					"%s is image tasks only; it doesn't apply to task %q",
+					f.name, a.Spec.Category)}
+			}
+		}
+	}
+
 	// 3. Walk the local directory FIRST (local "fail fast"), dispatched
 	//    by category family. Image categories expect labels.csv +
 	//    images/; tabular / time-series categories expect a single
@@ -672,6 +698,21 @@ collaborators can train against that table without ever seeing the raw files.`))
 						"default. Pass --target-size WxH if ingestion reports a "+
 						"resolution mismatch.\n", derr)
 			}
+		}
+		// Minimum-size floor override (#348): plumb an explicit --min-size to
+		// spec.file_options.min_size. When unset, no spec field is emitted, so
+		// the ingestor applies its own default (none on the deployed
+		// v0.5.7/v0.6.0; 32x32 on develop post-#348) — and the local preview
+		// applies NO floor either (PreflightDataset only previews the floor
+		// when --min-size is set, so it never rejects an ingest the live
+		// cluster accepts). The below-floor reject is previewed in
+		// runLocalPreflight (ValidateImages).
+		if a.MinSizeFlag != "" {
+			w, h, perr := push.ParseMinSize(a.MinSizeFlag)
+			if perr != nil {
+				return &exitError{code: 2, err: perr}
+			}
+			a.Spec.MinSize = []int{w, h}
 		}
 		// Extension: every image must share one type, and the spec tells
 		// the cluster which one to validate against (file_options.extension).

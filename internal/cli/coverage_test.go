@@ -198,6 +198,49 @@ func TestRunDatasetPush_OutputJSONEarlyFailureEmitsJSON(t *testing.T) {
 	}
 }
 
+// TestRunDataIngest_ImageOnlyFlagsRejectedOnNonImage: --target-size and
+// --min-size describe image resolution, so on a tabular/text task they
+// must fail fast (exit 2) with a clear message rather than being parsed
+// only inside the image branch — where the value, even a malformed one,
+// was silently dropped (#206 review).
+func TestRunDataIngest_ImageOnlyFlagsRejectedOnNonImage(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*runDataIngestArgs)
+	}{
+		{"target-size on tabular", func(a *runDataIngestArgs) { a.TargetSizeFlag = "64x64" }},
+		{"min-size on tabular", func(a *runDataIngestArgs) { a.MinSizeFlag = "32x32" }},
+		{"malformed min-size on tabular", func(a *runDataIngestArgs) { a.MinSizeFlag = "garbage" }},
+	}
+	// A real, existing path so the earlier dataset-path stat passes and
+	// the image-only guard is what actually fires (the path check runs
+	// before the guard).
+	dir := t.TempDir()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var human bytes.Buffer
+			a := runDataIngestArgs{
+				LocalPath: dir,
+				Spec: push.SpecArgs{
+					Table: "t", Category: "tabular_classification",
+					Intent: "train", LabelColumn: "y",
+				},
+				Printer: ui.New(&human, ui.WithColor(false)),
+			}
+			c.mutate(&a)
+			err := runDataIngest(context.Background(), &human, &human, a)
+
+			var ee *exitError
+			if !errors.As(err, &ee) || ee.Code() != 2 {
+				t.Fatalf("err = %v, want *exitError code 2", err)
+			}
+			if !strings.Contains(ee.Error(), "image tasks only") {
+				t.Errorf("error should explain the flag is image-only; got: %v", ee)
+			}
+		})
+	}
+}
+
 // TestExpandHome covers the #37 fix: a leading ~ / ~/… resolves under
 // $HOME, while relative, absolute, and empty paths pass through
 // untouched (the case that bit the interactive prompt — the shell

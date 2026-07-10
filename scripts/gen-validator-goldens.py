@@ -134,6 +134,12 @@ def run_case(case):
             options["extension"] = case["extension"]
         if case.get("target_size"):
             options["target_size"] = case["target_size"]
+        if case.get("min_size"):
+            # The --min-size floor override (#348), cross-checked end-to-end:
+            # the image factory reads options["min_size"] into
+            # ImageResolutionValidator, so a per-case override drives the REAL
+            # validator the same way the Go preview drives SpecArgs.MinSize.
+            options["min_size"] = case["min_size"]
         if case["category"].startswith(("tabular", "time_")):
             # An explicit per-case schema (mirroring --schema) wins; else
             # infer — BOTH sides of the harness use the same source so
