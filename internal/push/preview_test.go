@@ -232,6 +232,84 @@ func TestSniffFamily(t *testing.T) {
 		}
 	})
 
+	t.Run("lone labels.csv (no media dir) is ambiguous, not a table", func(t *testing.T) {
+		// labels.csv is the image/text MANIFEST name; a folder with only it and
+		// no images/texts/sequences is far more likely an incomplete image/text
+		// dataset than a table. The sniff must ask, not confidently ingest it as
+		// a table (which would drop the intended media silently).
+		dir := t.TempDir()
+		writePrev(t, filepath.Join(dir, "labels.csv"), "filename,label\na.jpg,cat\n")
+		if s := SniffFamily(dir); s.Confident {
+			t.Fatalf("lone labels.csv must be ambiguous, got %+v", s)
+		} else if s.Hint == "" || !strings.Contains(s.Hint, "labels.csv") {
+			t.Fatalf("hint should explain the missing media folder, got %q", s.Hint)
+		}
+		// Contrast: a single NON-manifest CSV is still confident tabular.
+		dir2 := t.TempDir()
+		writePrev(t, filepath.Join(dir2, "patients.csv"), "age,label\n1,c\n")
+		if s := SniffFamily(dir2); !s.Confident || s.Family != FamilyTabular {
+			t.Fatalf("a single non-labels CSV should stay confident tabular, got %+v", s)
+		}
+	})
+
+	t.Run("symlinked media marker + labels.csv is ambiguous (walk can't use it)", func(t *testing.T) {
+		// A symlinked images/ is not a real directory to the walk (Lstat +
+		// rejectSymlink), so it must not fall through to confident tabular and
+		// silently ingest labels.csv as a table — the symlink sibling of #203.
+		dir := t.TempDir()
+		writePrev(t, filepath.Join(dir, "labels.csv"), "filename,label\na.jpg,cat\n")
+		if err := os.Symlink(t.TempDir(), filepath.Join(dir, "images")); err != nil {
+			t.Skipf("symlink unsupported on this platform: %v", err)
+		}
+		if s := SniffFamily(dir); s.Confident {
+			t.Fatalf("a symlinked images/ marker must be ambiguous, got %+v", s)
+		} else if !strings.Contains(s.Hint, "images") {
+			t.Fatalf("hint should name the unusable images marker, got %q", s.Hint)
+		}
+	})
+
+	t.Run("a plain file named images is ambiguous (not a usable marker)", func(t *testing.T) {
+		dir := t.TempDir()
+		writePrev(t, filepath.Join(dir, "labels.csv"), "filename,label\na.jpg,cat\n")
+		writePrev(t, filepath.Join(dir, "images"), "not a folder")
+		if s := SniffFamily(dir); s.Confident {
+			t.Fatalf("a plain file named images must be ambiguous, got %+v", s)
+		}
+	})
+
+	t.Run("dir whose only csv is a symlink is ambiguous (walk rejects it)", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(t.TempDir(), "real.csv")
+		writePrev(t, target, "a,b\n1,2\n")
+		if err := os.Symlink(target, filepath.Join(dir, "data.csv")); err != nil {
+			t.Skipf("symlink unsupported on this platform: %v", err)
+		}
+		if s := SniffFamily(dir); s.Confident {
+			t.Fatalf("a dir whose only csv is a symlink must be ambiguous, got %+v", s)
+		}
+	})
+
+	t.Run("regular csv + symlinked csv is ambiguous (walk counts both → multiple)", func(t *testing.T) {
+		// findSingleCSV counts every non-dir .csv, symlinks included, so a
+		// regular CSV plus a symlinked one is "multiple CSVs" to the walk. The
+		// sniff must count them the same way and stay ambiguous, not sniff
+		// confident tabular off the lone regular CSV. (#223 Bugbot follow-up.)
+		dir := t.TempDir()
+		writePrev(t, filepath.Join(dir, "data.csv"), "a,b\n1,2\n")
+		target := filepath.Join(t.TempDir(), "extra.csv")
+		writePrev(t, target, "c,d\n3,4\n")
+		if err := os.Symlink(target, filepath.Join(dir, "link.csv")); err != nil {
+			t.Skipf("symlink unsupported on this platform: %v", err)
+		}
+		if s := SniffFamily(dir); s.Confident {
+			t.Fatalf("regular + symlinked CSV must be ambiguous, got %+v", s)
+		}
+		// And the walk it mirrors rejects the same dir as multi-CSV.
+		if _, err := DiscoverTabular(dir); err == nil {
+			t.Fatal("DiscoverTabular should reject a dir with a regular + a symlinked CSV")
+		}
+	})
+
 	t.Run("missing path is ambiguous", func(t *testing.T) {
 		if s := SniffFamily(filepath.Join(t.TempDir(), "nope")); s.Confident {
 			t.Fatalf("missing path should be ambiguous, got %+v", s)

@@ -242,7 +242,7 @@ func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 		// Case-sensitive FS: the walk can't see Images/, so the sniff stays
 		// ambiguous with a rename hint. resolveFamily must print it, and still
 		// ask the family plainly (the hint is advisory, not a lock).
-		if !strings.Contains(buf.String(), "rename it and ingest again") {
+		if !strings.Contains(buf.String(), "fix it and ingest again") {
 			t.Errorf("resolveFamily must surface the mis-cased rename hint; got:\n%s", buf.String())
 		}
 		if !contains(f.asked, "What kind of data is this?") {
@@ -254,7 +254,7 @@ func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 		if fam != push.FamilyImage {
 			t.Errorf("family = %v, want image (walk resolves the mis-cased folder here)", fam)
 		}
-		if strings.Contains(buf.String(), "rename it and ingest again") {
+		if strings.Contains(buf.String(), "fix it and ingest again") {
 			t.Errorf("no false rename hint when the walk sees the folder; got:\n%s", buf.String())
 		}
 		if contains(f.asked, "What kind of data is this?") {

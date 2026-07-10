@@ -97,79 +97,63 @@ func SniffFamily(path string) FamilySniff {
 	if err != nil {
 		return FamilySniff{}
 	}
-	// Match the walk's markers with the literal, case-sensitive names it
-	// uses (filepath.Join + os.Lstat on "images" / "texts" / "sequences" /
-	// "labels.csv"). The .csv extension check is case-insensitive to mirror
-	// DiscoverTabular's EqualFold.
-	var hasImages, hasTexts, hasSequences, hasLabels bool
-	// miscasedMarker flags a subdir that matches a marker name only
-	// case-insensitively (e.g. "Images", "Texts") AND that the walk can't
-	// actually see. Whether the walk sees it is filesystem-dependent, so we
-	// don't guess from the on-disk casing — we probe the literal lowercase
-	// path the walk keys on (markerResolves, below). On a case-sensitive FS
-	// (Linux) a mis-cased dir is invisible to the walk, so its lone
-	// labels.csv would otherwise fall through to the confident-tabular
-	// branch and get silently ingested as a table, images/texts dropped —
-	// that's the footgun we flag. On a case-insensitive FS (macOS, Windows)
-	// the walk DOES resolve the mis-cased dir, so it's a real marker and we
-	// never set this. When set, stay ambiguous and ask the family plainly.
-	miscasedMarker := false
-	// miscasedName / miscasedCanonical hold the first mis-cased dir we see
-	// and the lowercase marker it resembles, so the ambiguous return can
-	// name the likely rename (e.g. "Images" → "images") in its Hint.
-	var miscasedName, miscasedCanonical string
+	// Mirror the walk's marker resolution instead of guessing from the
+	// directory listing. Discover / DiscoverText key on
+	// os.Lstat(filepath.Join(dir, "images"|"texts"|"sequences")) and reject a
+	// symlink, so a media marker is real only when that literal lowercase path
+	// resolves to a real directory — true for an exact lowercase dir and, on a
+	// case-insensitive FS (macOS, Windows), a mis-cased one; false for a
+	// symlinked, mis-cased-on-Linux, or plain-file "images". labels.csv is
+	// probed the same way (a regular file — DiscoverText rejectSymlinks it), so
+	// the label marker follows the walk's case behavior on this FS too.
+	hasImages := markerResolves(abs, "images")
+	hasTexts := markerResolves(abs, "texts")
+	hasSequences := markerResolves(abs, "sequences")
+	hasText := hasTexts || hasSequences
+	hasLabels := regularFileResolves(abs, "labels.csv")
+
+	// badMarker flags an entry whose name matches a media marker (exactly or
+	// case-insensitively) but which the walk can't use — a symlink, a mis-cased
+	// dir on a case-sensitive FS, or a plain file. Such a layout is usually an
+	// image/text dataset whose media folder the walk won't see, and it must not
+	// masquerade as a lone-CSV table (#203 and its symlink/file siblings).
+	// badMarkerName/Canonical name the first one so the ambiguous return can
+	// point at the fix.
+	var badMarker bool
+	var badMarkerName, badMarkerCanonical string
+	// csvCount counts CSVs exactly as findSingleCSV does — every non-dir .csv,
+	// symlinks INCLUDED — so the sniff's exactly-one check agrees with the
+	// walk's (a lone regular CSV + a symlinked CSV is "multiple" to both).
+	// csvSymlink notes whether any counted CSV is a symlink: DiscoverTabular
+	// Lstat+rejectSymlinks the sole CSV, so a directory whose only CSV is a
+	// symlink is a layout the walk refuses — the sniff must not confidently
+	// promise tabular for it.
 	csvCount := 0
+	csvSymlink := false
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() {
-			switch name {
-			case "images":
-				hasImages = true
-			case "texts":
-				hasTexts = true
-			case "sequences":
-				hasSequences = true
-			default:
-				// The exact lowercase markers are matched by the cases above, so
-				// anything that EqualFolds a marker here is case-insensitive but
-				// NOT exact — e.g. "Images". Whether the walk actually SEES it is
-				// filesystem-dependent, so mirror the walk rather than guess:
-				// Discover keys on the literal lowercase name via
-				// os.Lstat(filepath.Join(dir, "images")). On a case-insensitive
-				// FS (macOS APFS, Windows) that resolves the mis-cased dir, so
-				// the walk accepts it — treat it as the real marker, exactly as
-				// Discover will (no false rename hint). Only when the lowercase
-				// literal does NOT resolve (a case-sensitive FS, e.g. Linux) is
-				// this a genuine footgun the walk can't see: flag it ambiguous
-				// and name the likely rename.
-				if m := markerFold(name); m != "" {
-					if markerResolves(abs, m) {
-						switch m {
-						case "images":
-							hasImages = true
-						case "texts":
-							hasTexts = true
-						case "sequences":
-							hasSequences = true
-						}
-					} else {
-						miscasedMarker = true
-						if miscasedName == "" {
-							miscasedName, miscasedCanonical = name, m
-						}
-					}
+		if m := markerFold(name); m != "" {
+			// A marker-named entry. If the walk's literal probe already resolved
+			// it (hasImages/hasTexts/hasSequences above) it's a real marker;
+			// otherwise the walk can't see a usable marker dir here — flag it.
+			if !markerResolves(abs, m) {
+				badMarker = true
+				if badMarkerName == "" {
+					badMarkerName, badMarkerCanonical = name, m
 				}
 			}
 			continue
 		}
-		if name == "labels.csv" {
-			hasLabels = true
+		if e.IsDir() {
+			continue
 		}
 		if isCSV(name) {
 			csvCount++
+			if e.Type()&os.ModeSymlink != 0 {
+				csvSymlink = true
+			}
 		}
 	}
-	hasText := hasTexts || hasSequences
 
 	// An images/ directory is the image layout's tell; a texts/ or
 	// sequences/ directory is the text family's. Both require labels.csv
@@ -193,27 +177,32 @@ func SniffFamily(path string) FamilySniff {
 		// chosen task disagree.
 		return FamilySniff{Family: FamilyText, Confident: true,
 			Echo: fmt.Sprintf("Found labels.csv and a %s folder — this looks like text data.", dir)}
-	case !hasImages && !hasText && !miscasedMarker && csvCount == 1:
-		// Exactly one CSV, mirroring DiscoverTabular's findSingleCSV rule.
-		// Two or more CSVs is a directory the tabular walk rejects, so stay
-		// ambiguous rather than confidently promise a layout it refuses.
-		// A mis-cased marker dir alongside the CSV (miscasedMarker) also
-		// bails to ambiguous: the lone labels.csv of an image/text layout
-		// whose media folder was mis-cased must not masquerade as a table.
+	case badMarker:
+		// A marker-named entry the walk can't use (mis-cased on a case-sensitive
+		// FS, a symlink, or a plain file). An image/text layout here would
+		// otherwise look like a lone-CSV table and be silently ingested as one
+		// (#203 and its symlink/file siblings). Stay ambiguous, and name the
+		// likely fix rather than asking a blind question.
+		return FamilySniff{Hint: fmt.Sprintf(
+			"Found a %q entry, but image and text data need a real lowercase folder like %q "+
+				"(not a symlink or a file). If that's your data folder, fix it and ingest again.",
+			badMarkerName, badMarkerCanonical)}
+	case !hasImages && !hasText && csvCount == 1 && hasLabels:
+		// The one CSV is labels.csv — the image/text MANIFEST name — with no
+		// images/, texts/, or sequences/ folder beside it. That is far more
+		// likely an image/text dataset missing its media folder than a table
+		// that happens to be named labels.csv, so don't silently ingest it as a
+		// table: stay ambiguous and say what's missing.
+		return FamilySniff{Hint: "Found only labels.csv and no images/, texts/, or sequences/ " +
+			"folder next to it. If this is image or text data, add its media folder beside " +
+			"labels.csv; if it's genuinely a table, choose tabular below."}
+	case !hasImages && !hasText && csvCount == 1 && !csvSymlink:
+		// Exactly one non-manifest, non-symlink CSV in a directory, mirroring
+		// DiscoverTabular (findSingleCSV's exactly-one count + its rejectSymlink
+		// on that CSV). Two or more CSVs — or a lone symlinked one — is a layout
+		// the tabular walk refuses, so stay ambiguous rather than promise it.
 		return FamilySniff{Family: FamilyTabular, Confident: true,
 			Echo: "Found a CSV table — this is tabular data."}
-	case miscasedMarker:
-		// A subdir matches a media marker case-insensitively but not exactly
-		// (e.g. "Images/"), AND markerResolves already confirmed the walk's
-		// literal lowercase path does NOT resolve on this filesystem — so the
-		// walk genuinely won't see this folder. An image/text layout here would
-		// otherwise look like a lone-CSV table and be silently ingested as one
-		// (#203). Stay ambiguous, but point at the likely rename so the user can
-		// fix the layout rather than just being asked a blind question.
-		return FamilySniff{Hint: fmt.Sprintf(
-			"Found a %q folder — image and text data use a lowercase folder like %q. "+
-				"If that's your data folder, rename it and ingest again.",
-			miscasedName, miscasedCanonical)}
 	default:
 		return FamilySniff{}
 	}
@@ -229,6 +218,17 @@ func SniffFamily(path string) FamilySniff {
 func markerResolves(dir, canonical string) bool {
 	fi, err := os.Lstat(filepath.Join(dir, canonical))
 	return err == nil && fi.IsDir()
+}
+
+// regularFileResolves reports whether name resolves to a REGULAR file under dir
+// via the walk's own os.Lstat(filepath.Join(dir, name)) — used for labels.csv.
+// IsRegular() is false for a directory and for a symlink, matching DiscoverText
+// (which Lstats labels.csv and rejectSymlinks it, and errors if it's a dir); on
+// a case-insensitive FS the Lstat also resolves "Labels.csv", so the label
+// marker tracks the walk's case behavior exactly as the media markers do.
+func regularFileResolves(dir, name string) bool {
+	fi, err := os.Lstat(filepath.Join(dir, name))
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // markerFold returns the media-folder marker (images / texts / sequences)
