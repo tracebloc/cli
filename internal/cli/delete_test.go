@@ -240,6 +240,91 @@ func TestDelete_RevokeNon403_ContinuesTeardown(t *testing.T) {
 	}
 }
 
+// (b”) A non-403 revoke failure that ALSO hits a degraded teardown step (here: no
+// namespace → the uninstall is skipped) must tell the truth on BOTH axes — it must
+// NOT claim the credential was revoked or the machine disconnected. Regression for
+// the overclaim: the old closing hardcoded "the credential is revoked, so it can no
+// longer connect" even when the revoke had failed.
+func TestDelete_RevokeNon403_Degraded_HonestClosing(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusNotFound) // 404: best-effort revoke fails
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "") // no namespace → uninstall skipped → degraded
+	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
+	fn.install(t)
+
+	var out bytes.Buffer
+	if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true}); err != nil {
+		t.Fatalf("a best-effort revoke failure must not abort the offboard, got: %v", err)
+	}
+	s := out.String()
+	if strings.Contains(s, "no longer connect") || strings.Contains(s, "credential is revoked") {
+		t.Errorf("closing must NOT claim the credential was revoked / the machine disconnected when revoke failed:\n%s", s)
+	}
+	if !strings.Contains(s, "revoke didn't complete") {
+		t.Errorf("closing should say the server-side revoke didn't complete:\n%s", s)
+	}
+	if !strings.Contains(s, "still be live") {
+		t.Errorf("closing should point at the possibly-live credential:\n%s", s)
+	}
+}
+
+// A 426 from the REVOKE call (reached under --force, which skips the online guard)
+// must fail fast with the upgrade message rather than warn-and-continue into a
+// teardown against a backend that can't process the revoke — matching the guard.
+func TestDelete_RevokeUpgradeRequired_FailsFast(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
+			w.WriteHeader(http.StatusUpgradeRequired) // 426
+			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
+	fn.install(t)
+
+	var out bytes.Buffer
+	err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true, force: true})
+	if err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Fatalf("a 426 revoke must fail fast with the upgrade message, got: %v", err)
+	}
+	if len(fn.calls) != 0 {
+		t.Errorf("no teardown after a 426 revoke, got: %v", fn.calls)
+	}
+}
+
+// A 401 from the REVOKE call (reached under --force) means the session is expired/
+// revoked; fail fast and point at re-login rather than tear the machine down while a
+// live credential remains. Without this, --force + an expired token silently wipes
+// the machine and leaves the credential alive.
+func TestDelete_RevokeUnauthorized_FailsFast(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
+			w.WriteHeader(http.StatusUnauthorized) // 401
+			_, _ = w.Write([]byte(`{"detail":"invalid token"}`))
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
+	fn.install(t)
+
+	var out bytes.Buffer
+	err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true, force: true})
+	if err == nil || !strings.Contains(err.Error(), "tracebloc login") {
+		t.Fatalf("a 401 revoke must fail fast with a sign-in hint, got: %v", err)
+	}
+	if len(fn.calls) != 0 {
+		t.Errorf("no teardown after a 401 revoke, got: %v", fn.calls)
+	}
+}
+
 // (c) --keep-data spares ~/.tracebloc but still uninstalls + removes the binary.
 func TestDelete_KeepData_SparesDataDir(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
