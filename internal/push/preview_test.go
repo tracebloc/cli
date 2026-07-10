@@ -94,32 +94,53 @@ func TestSniffFamily(t *testing.T) {
 
 	// The mis-cased-media footgun (#203): labels.csv next to a media folder
 	// whose name matches a marker case-insensitively but not exactly. The
-	// walk keys on the literal lowercase name, so it won't see the folder;
-	// without the guard the lone labels.csv falls through to confident
-	// tabular and the media is silently ingested away as a table. Each
-	// mis-cased marker (Images/, Texts/, Sequences/) must stay ambiguous —
-	// NOT confident image AND NOT confident tabular — and carry a hint that
-	// names the likely lowercase rename so the flow can guide the fix.
-	for _, tc := range []struct{ folder, canonical string }{
-		{"Images", "images"},
-		{"Texts", "texts"},
-		{"Sequences", "sequences"},
+	// sniff mirrors the walk, which keys on the literal lowercase name via
+	// os.Lstat — so behavior is filesystem-dependent, and each subtest asserts
+	// the branch that actually applies on the FS it runs on:
+	//   - case-SENSITIVE FS (Linux CI): the walk can't see the folder, so the
+	//     lone labels.csv would otherwise fall through to confident tabular and
+	//     the media be silently ingested away. The sniff must stay ambiguous
+	//     (NOT confident — that covers the confident-tabular footgun) and carry
+	//     a rename hint naming both the folder and its lowercase form.
+	//   - case-INSENSITIVE FS (macOS APFS, Windows): the walk resolves the
+	//     mis-cased folder under its lowercase name, so the layout is valid.
+	//     The sniff must AGREE — confident media, no false rename hint telling
+	//     the user to fix a layout that already works (#203 cross-platform).
+	for _, tc := range []struct {
+		folder, canonical string
+		wantFamily        Family
+	}{
+		{"Images", "images", FamilyImage},
+		{"Texts", "texts", FamilyText},
+		{"Sequences", "sequences", FamilyText},
 	} {
 		tc := tc
-		t.Run("mis-cased "+tc.folder+"/ + labels.csv is ambiguous with a rename hint", func(t *testing.T) {
+		t.Run("mis-cased "+tc.folder+"/ + labels.csv tracks the walk", func(t *testing.T) {
 			dir := t.TempDir()
 			writePrev(t, filepath.Join(dir, "labels.csv"), "id,label\n1,c\n")
 			if err := os.Mkdir(filepath.Join(dir, tc.folder), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			// The walk's own probe: does the literal lowercase marker resolve?
+			fi, err := os.Lstat(filepath.Join(dir, tc.canonical))
+			walkSeesIt := err == nil && fi.IsDir()
+
 			s := SniffFamily(dir)
-			if s.Confident {
-				t.Fatalf("mis-cased %s/ + labels.csv must be ambiguous, got %+v", tc.folder, s)
+			if walkSeesIt {
+				// Case-insensitive FS: the folder IS the marker to the walk.
+				if !s.Confident || s.Family != tc.wantFamily {
+					t.Fatalf("case-insensitive FS: mis-cased %s/ should sniff confident %v, got %+v", tc.folder, tc.wantFamily, s)
+				}
+				if s.Hint != "" {
+					t.Fatalf("no false rename hint when the walk resolves %s/, got %q", tc.folder, s.Hint)
+				}
+				return
 			}
-			// Regression: the real footgun is confident TABULAR, not just
-			// not-image. Pin that the family is not confidently claimed at all.
-			if s.Family == FamilyTabular && s.Confident {
-				t.Fatalf("mis-cased %s/ must NOT sniff as confident tabular, got %+v", tc.folder, s)
+			// Case-sensitive FS: the real #203 footgun. Not confident at all —
+			// that single check covers the confident-tabular masquerade — plus a
+			// rename hint that names both the folder and its lowercase form.
+			if s.Confident {
+				t.Fatalf("case-sensitive FS: mis-cased %s/ + labels.csv must be ambiguous, got %+v", tc.folder, s)
 			}
 			if s.Hint == "" {
 				t.Fatalf("mis-cased %s/ should carry a rename hint, got %+v", tc.folder, s)
