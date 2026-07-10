@@ -170,7 +170,7 @@ func TestInferSchema(t *testing.T) {
 // TestInferSchema_EmptyColumnIsVarchar1: a column with no non-empty sampled
 // value can't be typed from data; it comes back as VARCHAR(1) (mirroring
 // the ingestor's all-missing rule) and is reported in the Empty list so
-// the confirm step can flag that the type is a guess with no evidence.
+// it can be surfaced as a warning that the type is a guess with no evidence.
 func TestInferSchema_EmptyColumnIsVarchar1(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeFile(t, dir, "data.csv", "filled,empty\n1,\n2,\n")
@@ -215,6 +215,38 @@ func TestInferSchema_SkipsReservedColumns(t *testing.T) {
 	}
 	if !foundID {
 		t.Errorf("skipped = %v, want it to contain id", res.Skipped)
+	}
+}
+
+// TestInferColumnType_TimezoneParity pins the datetime timezone behavior
+// against data-ingestors' schema_inference.infer_column_type (di#349,
+// verified against pandas 3.0.3). A column of tz-aware RFC3339 values is
+// DATETIME only when the tokens share ONE timezone (all-naive, all-Z, or all
+// the same offset). Mixed UTC offsets — or a mix of tz-aware and tz-naive —
+// cannot form a single-timezone column, so the ingestor's _infer_datetime
+// returns None and the column is VARCHAR; the CLI must mirror that rather than
+// emit a tz-naive DATETIME that silently drops the per-row offset. The shared
+// parity fixture is ASCII-only and carries no tz case, so this is pinned here.
+func TestInferColumnType_TimezoneParity(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []string
+		want   string
+	}{
+		{"mixed_offsets", []string{"2024-01-02T00:00:00+00:00", "2024-01-02T00:00:00+05:00"}, "VARCHAR(25)"},
+		{"uniform_offset", []string{"2024-01-02T00:00:00+05:00", "2024-01-03T00:00:00+05:00"}, "DATETIME"},
+		{"all_zulu", []string{"2024-01-02T00:00:00Z", "2024-01-03T00:00:00Z"}, "DATETIME"},
+		{"naive_datetime", []string{"2024-01-02T00:00:00", "2024-01-03T00:00:00"}, "DATETIME"},
+		{"naive_plus_aware", []string{"2024-01-02T00:00:00", "2024-01-02T00:00:00+05:00"}, "VARCHAR(25)"},
+		{"naive_plus_zulu", []string{"2024-01-02T00:00:00", "2024-01-02T00:00:00Z"}, "VARCHAR(20)"},
+		{"space_naive", []string{"2024-01-02 13:45:00", "2024-01-03 08:00:00"}, "DATETIME"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := inferColumnType(c.values); got != c.want {
+				t.Errorf("inferColumnType(%v) = %q, want %q (di#349)", c.values, got, c.want)
+			}
+		})
 	}
 }
 

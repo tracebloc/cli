@@ -315,7 +315,7 @@ Exit codes:
 			"size check).")
 	cmd.Flags().StringVar(&schemaFlag, "schema", "",
 		"tabular/time-series only: column types as col:TYPE,col:TYPE (e.g. age:INT,price:FLOAT). "+
-			"Default: inferred from the CSV (INT/FLOAT/VARCHAR).")
+			"Default: inferred from the CSV (INT/BIGINT/FLOAT/BOOLEAN/DATE/DATETIME/VARCHAR(n)).")
 	cmd.Flags().StringVar(&labelPolicy, "label-policy", "",
 		"regression-class only (tabular_regression, time_series_forecasting, time_to_event_prediction): "+
 			"passthrough|bucket (default bucket — bins the target so the raw value never leaves the cluster)")
@@ -638,13 +638,14 @@ collaborators can train against that table without ever seeing the raw files.`))
 			return &exitError{code: 3, err: perr}
 		}
 
-		// Column schema. An explicit schema wins — that's either a raw
-		// --schema, or the schema the interactive confirm step already
-		// inferred, showed, and materialized into SchemaFlag (so the
-		// confirmed/amended types flow through the same path). Otherwise —
-		// a non-interactive run with no --schema — infer here and EMIT it
-		// explicitly (below, via a.Spec.Schema → spec.schema), so the
-		// ingestor uses the CLI's answer regardless of its own version.
+		// Column schema. An explicit --schema wins (raw flag, or the
+		// optional override the interactive prompt captures into SchemaFlag).
+		// Otherwise infer the types here — mirroring the ingestor's own rules
+		// (di#349) — and EMIT the result explicitly (below, via a.Spec.Schema
+		// → spec.schema), so the ingestor uses the CLI's answer regardless of
+		// its own version. Inference runs on both a no-schema non-interactive
+		// run and an interactive run where the user left the schema prompt
+		// blank; the risky cases below are surfaced as warnings.
 		if a.SchemaFlag != "" {
 			sch, perr := push.ParseSchema(a.SchemaFlag)
 			if perr != nil {

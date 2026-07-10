@@ -43,7 +43,7 @@ var reservedColumns = map[string]bool{
 // types in practice, and bounds the work for large files. A column whose
 // true type only reveals itself past the sample (e.g. an int column that
 // turns float on row 10k, or a zero-padded code that first appears past
-// the cap) is the case the confirm step + --schema exist to override.
+// the cap) is the case --schema exists to override.
 // The value-level parity fixture pins this equality
 // (internal/push/testdata/schema_inference_parity.json, "sample_cap").
 const schemaInferenceSampleRows = 5000
@@ -79,20 +79,24 @@ var (
 	floatRE           = regexp.MustCompile(`^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`)
 )
 
-// dateLayouts / datetimeLayouts are the calendar forms the CLI recognizes
-// when mirroring schema_inference's date rule (rule 5, checked AFTER
-// numeric so an all-digit id like "20240101" stays INT). data-ingestors
-// uses pandas' liberal to_datetime; the CLI cannot reproduce every pandas
-// spelling in Go, so it recognizes the common ISO forms and otherwise
-// falls back to VARCHAR — the SAFE direction: a mis-typed VARCHAR is
-// amendable at the confirm step, and because the CLI EMITS the schema
-// explicitly, the CLI's answer is authoritative in-cluster regardless of
-// the deployed ingestor's own guess. The value-level parity fixture pins
-// the forms that must agree.
+// dateLayouts / datetimeLayouts are the naive (no-timezone) calendar forms
+// the CLI recognizes when mirroring schema_inference's date rule (rule 5,
+// checked AFTER numeric so an all-digit id like "20240101" stays INT).
+// data-ingestors uses pandas' liberal to_datetime; the CLI cannot reproduce
+// every pandas spelling in Go, so it recognizes the common ISO forms and
+// otherwise falls back to VARCHAR — the SAFE direction: a mis-typed VARCHAR
+// is correctable with --schema, and because the CLI EMITS the schema
+// explicitly, the CLI's answer is authoritative in-cluster regardless of the
+// deployed ingestor's own guess. The tz-aware RFC3339 form is parsed
+// separately (parseCalendarDate) so a column of MIXED UTC offsets is detected
+// and routed to VARCHAR — matching the ingestor, whose _infer_datetime
+// returns None (→ VARCHAR) on mixed timezones. The value-level parity fixture
+// pins the forms that must agree.
 var (
-	dateLayouts     = []string{"2006-01-02", "2006/01/02"}
+	dateLayouts = []string{"2006-01-02", "2006/01/02"}
+	// Naive datetime layouts only — tz-aware RFC3339 is handled explicitly
+	// in parseCalendarDate (see the mixed-offset guard there).
 	datetimeLayouts = []string{
-		time.RFC3339,
 		"2006-01-02T15:04:05",
 		"2006-01-02 15:04:05",
 		"2006-01-02 15:04",
@@ -245,25 +249,14 @@ func ParseSchema(s string) (map[string]string, error) {
 	return out, nil
 }
 
-// InferredColumn is one column's inferred type, kept in CSV-header order
-// so the CLI can show + emit the schema in the order the user sees in
-// their file (a map alone loses that).
-type InferredColumn struct {
-	Name string
-	Type string
-}
-
 // SchemaInference is the result of inferring a tabular schema from a CSV.
-// Schema is the column→SQL-type map the CLI emits as spec.schema; Columns
-// is the same content in header order (for display + deterministic
-// serialization). Skipped/Empty/IDLike are the RISKY cases the confirm
-// step surfaces so the user can amend before anything is ingested — never
-// a silent guess (RFC-0002 §8.1).
+// Schema is the column→SQL-type map the CLI emits as spec.schema.
+// Skipped/Empty/IDLike are the risky cases surfaced to the user as warnings
+// so a wrong guess can be corrected with --schema before anything is
+// ingested — never a silent guess (RFC-0002 §8.1).
 type SchemaInference struct {
 	// Schema maps each non-reserved column to its inferred SQL type.
 	Schema map[string]string
-	// Columns is Schema in CSV-header order.
-	Columns []InferredColumn
 	// Skipped lists framework-managed columns (see reservedColumns) that
 	// were excluded — the ingestor adds them itself and rejects a schema
 	// that redeclares them.
@@ -275,7 +268,7 @@ type SchemaInference struct {
 	// IDLike lists INT/BIGINT columns whose sampled values are all
 	// distinct — they look like identifiers. If such a column is really a
 	// zero-padded code the leading zeros were stripped somewhere upstream,
-	// or it should be a VARCHAR; the confirm step points it out.
+	// or it should be a VARCHAR; the warning points it out.
 	IDLike []string
 }
 
@@ -283,16 +276,16 @@ type SchemaInference struct {
 // data rows and infers a column→SQL-type map, MIRRORING data-ingestors'
 // schema_inference.infer_schema (di#349) column-for-column via
 // inferColumnType. The ingestor OWNS these rules; the CLI mirrors them so
-// the schema it shows, confirms, and EMITS is the same answer the
-// ingestor would compute — and, because it is emitted explicitly, is
+// the schema it EMITS is the same answer the ingestor would compute — and,
+// because it is emitted explicitly (a.Spec.Schema → spec.schema), is
 // authoritative in-cluster regardless of the deployed ingestor version
 // (RFC-0002 Principle 6). The value-level parity fixture pins the two
 // implementations to the same per-column answer.
 //
 // Framework-managed columns (see reservedColumns — id, data_id, …) are
 // skipped: the ingestor adds them itself and rejects a schema that
-// redeclares them. The risky cases the confirm step surfaces
-// (empty-in-sample, id-like) are returned alongside the schema.
+// redeclares them. The risky cases (empty-in-sample, id-like) are returned
+// alongside the schema so the caller can surface them as warnings.
 func InferSchema(csvPath string) (*SchemaInference, error) {
 	f, err := os.Open(csvPath)
 	if err != nil {
@@ -338,7 +331,6 @@ func InferSchema(csvPath string) (*SchemaInference, error) {
 		tokens := cleanTokens(cols[i])
 		typ := classifyTokens(tokens)
 		res.Schema[col] = typ
-		res.Columns = append(res.Columns, InferredColumn{Name: col, Type: typ})
 		if len(tokens) == 0 {
 			res.Empty = append(res.Empty, col)
 		} else if isIntegerType(typ) && allDistinct(tokens) {
@@ -491,18 +483,35 @@ func allFiniteFloat(tokens []string) bool {
 // must contain an ASCII digit (so plain words / month names stay text) —
 // mirrors schema_inference._infer_datetime's ASCII-digit guard. hasTime is
 // true when any token carries a time-of-day component.
+//
+// Mixed-offset guard: a column whose tokens don't all share one timezone key
+// (tz-aware values with differing UTC offsets, or a mix of tz-aware and
+// tz-naive values) is not a single-timezone calendar column, so it falls back
+// to VARCHAR. This mirrors the ingestor, where pd.to_datetime(format="mixed")
+// returns None on mixed timezones (schema_inference._infer_datetime) — without
+// the guard the CLI would emit a tz-naive DATETIME that silently drops the
+// per-row offset.
 func inferDatetime(tokens []string) string {
 	hasTime := false
+	tzKey := ""
+	haveTZ := false
 	for _, t := range tokens {
 		if !containsASCIIDigit(t) {
 			return ""
 		}
-		ok, withTime := parseCalendarDate(t)
+		ok, withTime, key := parseCalendarDate(t)
 		if !ok {
 			return ""
 		}
 		if withTime {
 			hasTime = true
+		}
+		if !haveTZ {
+			tzKey, haveTZ = key, true
+		} else if key != tzKey {
+			// Non-uniform timezone across the column — VARCHAR, matching the
+			// ingestor's None result for mixed timezones.
+			return ""
 		}
 	}
 	if hasTime {
@@ -521,19 +530,29 @@ func containsASCIIDigit(s string) bool {
 }
 
 // parseCalendarDate reports whether t parses under a recognized date /
-// datetime layout, and whether the matched layout carries a time.
-func parseCalendarDate(t string) (ok, withTime bool) {
+// datetime layout, whether the matched layout carries a time, and a timezone
+// key used to detect a column of mixed UTC offsets. A tz-aware RFC3339 token
+// keys on its offset in seconds ("z<offset>"); every naive (no-timezone) date
+// or datetime layout keys as "naive". A column whose tokens don't all share
+// one key is not a single-timezone calendar column (see inferDatetime's
+// mixed-offset guard).
+func parseCalendarDate(t string) (ok, withTime bool, tzKey string) {
+	// tz-aware: RFC3339 carries an explicit offset (or Z).
+	if tm, err := time.Parse(time.RFC3339, t); err == nil {
+		_, off := tm.Zone()
+		return true, true, "z" + strconv.Itoa(off)
+	}
 	for _, layout := range datetimeLayouts {
 		if _, err := time.Parse(layout, t); err == nil {
-			return true, true
+			return true, true, "naive"
 		}
 	}
 	for _, layout := range dateLayouts {
 		if _, err := time.Parse(layout, t); err == nil {
-			return true, false
+			return true, false, "naive"
 		}
 	}
-	return false, false
+	return false, false, ""
 }
 
 // varcharOf sizes VARCHAR(n) by the longest sampled value in RUNES (code
@@ -569,19 +588,4 @@ func allDistinct(tokens []string) bool {
 		seen[t] = struct{}{}
 	}
 	return true
-}
-
-// SerializeSchema renders an inferred schema as the col:TYPE,... string
-// the --schema flag accepts, in header order. Round-trips through
-// ParseSchema, so a confirmed inference flows through the exact same
-// plumbing an explicit --schema does. A col name never contains ':' or
-// ',' (it is a CSV header the ingestor also constrains), and a TYPE is
-// one of the fixed SQL forms (no ',' — VARCHAR(n)'s parens are safe), so
-// the serialization is unambiguous.
-func SerializeSchema(columns []InferredColumn) string {
-	parts := make([]string, 0, len(columns))
-	for _, c := range columns {
-		parts = append(parts, c.Name+":"+c.Type)
-	}
-	return strings.Join(parts, ",")
 }
