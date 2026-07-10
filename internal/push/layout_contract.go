@@ -39,6 +39,21 @@ type TaskLayout struct {
 	PrimarySubdir *string        `json:"primary_subdir"` // images | texts | sequences | null
 	Sidecars      []SidecarSpec  `json:"sidecars"`
 	RecordFormat  *RecordFormat  `json:"record_format"` // structured-text tasks only
+	Grouping      *GroupingSpec  `json:"grouping"`      // sequence-grouped tasks only (time_series_classification)
+}
+
+// GroupingSpec is the sequence-grouping trait a grouped task declares
+// (backend#1054 Decision-4: grouping is a ModalitySpec TRAIT the contract
+// carries, never a category if/else in consuming code). GroupColumn names the
+// column whose value groups the timestep rows of one sequence; TimeColumn
+// orders the rows WITHIN each group; CountUnit is the SAMPLE UNIT the platform
+// counts in ("sequences" — labels payloads, data_per_class, metrics are all
+// per-sequence, not per-row). Mirrors the ingestor registry's
+// ModalitySpec.grouping (data-ingestors modalities/spec.py).
+type GroupingSpec struct {
+	GroupColumn string `json:"group_column"` // sequence_id (fixed, Decision-2)
+	TimeColumn  string `json:"time_column"`  // timestamp (fixed, Decision-2)
+	CountUnit   string `json:"count_unit"`   // "sequences"
 }
 
 // ManifestLayout describes the task's manifest CSV.
@@ -90,6 +105,19 @@ func mustLoadLayoutContract() *LayoutContract {
 func LayoutFor(category string) (TaskLayout, bool) {
 	t, ok := layoutContract.Tasks[category]
 	return t, ok
+}
+
+// GroupingFor returns the sequence-grouping trait for a category and whether
+// it declares one (today only time_series_classification). Ungrouped tasks
+// return false. Consumers gate per-sequence behaviour on THIS trait, never on
+// a category id (Decision-4) — a future grouped task is handled the moment
+// the vendored contract declares it, with zero CLI edits.
+func GroupingFor(category string) (GroupingSpec, bool) {
+	t, ok := layoutContract.Tasks[category]
+	if !ok || t.Grouping == nil {
+		return GroupingSpec{}, false
+	}
+	return *t.Grouping, true
 }
 
 // RecordFormatFor returns the record format for a text category and whether it

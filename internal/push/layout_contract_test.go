@@ -171,3 +171,41 @@ func TestValidateTextRecord(t *testing.T) {
 		t.Errorf("empty file should be tolerated by the structural check: %v", err)
 	}
 }
+
+// TestGroupingForMirrorsContract pins the sequence-grouping trait
+// (backend#1054 Decision-4) against the vendored contract:
+// time_series_classification — and ONLY it, today — declares grouping, with
+// the platform's fixed column names (Decision-2) and the sequence count unit
+// (Decision-3). Every other category must stay ungrouped, so the grouped
+// preflight path can't accidentally fire for them.
+func TestGroupingForMirrorsContract(t *testing.T) {
+	g, ok := GroupingFor("time_series_classification")
+	if !ok {
+		t.Fatal("time_series_classification must declare a grouping trait in the vendored contract")
+	}
+	if g.GroupColumn != "sequence_id" || g.TimeColumn != "timestamp" || g.CountUnit != "sequences" {
+		t.Errorf("grouping = %+v, want the fixed {sequence_id, timestamp, sequences} contract", g)
+	}
+
+	for _, c := range categoryRegistry {
+		if c.ID == "time_series_classification" {
+			continue
+		}
+		if _, grouped := GroupingFor(c.ID); grouped {
+			t.Errorf("%s: unexpectedly declares a grouping trait — only the sequence-grouped "+
+				"time-series task is grouped today; a new grouped task needs a conscious "+
+				"preflight/staging review, not a silent contract edit", c.ID)
+		}
+	}
+
+	// A grouped task is tabular (single data CSV) and a classification task
+	// — the facts the grouped preflight path relies on.
+	if !IsTabular("time_series_classification") || !IsClassification("time_series_classification") {
+		t.Error("time_series_classification must be tabular-family and is_classification")
+	}
+
+	// Unknown category: no grouping, no panic.
+	if _, grouped := GroupingFor("nope"); grouped {
+		t.Error("unknown category must report no grouping")
+	}
+}

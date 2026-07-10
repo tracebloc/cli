@@ -349,6 +349,101 @@
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
       "note": "same values under a FLOAT label: numeric read collapses 1/1.0 into one class \u2014 both sides reject (the counterpart pin)"
+    },
+    {
+      "name": "tsc-ok",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "3 sequences (T=3/2/2), 2 classes, per-group monotonic INT step index \u2014 the WS1 done-contract shape (backend#1054)"
+    },
+    {
+      "name": "tsc-missing-sequence-col",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "no sequence_id anywhere: SequenceGroupValidator rejects in-cluster; the CLI previews the fixed-column requirement (ingest.v1 conditional, Decision-2)"
+    },
+    {
+      "name": "tsc-null-sequence-id",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "empty + 'NA' sequence ids: unassignable timestep rows \u2014 SequenceGroupValidator's null-id rule, previewed by CheckSequenceRows (both null forms via pandas NA parsing)"
+    },
+    {
+      "name": "tsc-label-uniform",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "single-class dataset: LabelDiversityValidator (is_classification=True composes it for TSC), previewed via the registry's IsClassification gate \u2014 not a hardcoded tabular_classification id"
+    },
+    {
+      "name": "tsc-label-flip",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DELIBERATE divergence (documented gap): p1 flips label mid-sequence \u2014 LabelConstantWithinGroupValidator rejects in-cluster, the CLI has no whole-group label-constancy preview yet (needs a per-group scan; candidate follow-up if burned uploads show up)"
+    },
+    {
+      "name": "tsc-unsorted-timestamp",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DELIBERATE divergence (documented gap): p1's step index is out of order \u2014 PerGroupTimeOrderedValidator rejects in-cluster (monotonic non-decreasing PER GROUP), the CLI has no per-group order preview yet (same follow-up as tsc-label-flip)"
     }
   ]
 }

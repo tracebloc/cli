@@ -20,7 +20,8 @@ func TestRegistryKnownCategories(t *testing.T) {
 		"masked_language_modeling", "causal_language_modeling", "seq2seq",
 		"sentence_pair_classification", "embeddings",
 		"tabular_classification", "tabular_regression",
-		"time_series_forecasting", "time_to_event_prediction",
+		"time_series_forecasting", "time_series_classification",
+		"time_to_event_prediction",
 	}
 	if got := AllCategoryIDs(); !equalSet(got, want) {
 		t.Fatalf("AllCategoryIDs() = %v, want set %v", got, want)
@@ -38,10 +39,11 @@ func TestRegistryKnownCategories(t *testing.T) {
 func TestSupportedCategories(t *testing.T) {
 	got := SupportedCategoryIDs()
 	// RFC-0002 phase 4 wired the 5 text tasks (token/sentence-pair
-	// classification, causal LM, seq2seq, embeddings), so 14 of the 15
-	// categories are pushable; only semantic_segmentation remains pending.
-	if len(got) != 14 {
-		t.Fatalf("SupportedCategoryIDs() len = %d, want 14: %v", len(got), got)
+	// classification, causal LM, seq2seq, embeddings) and backend#1054 WS2
+	// added time_series_classification, so 15 of the 16 categories are
+	// pushable; only semantic_segmentation remains pending.
+	if len(got) != 15 {
+		t.Fatalf("SupportedCategoryIDs() len = %d, want 15: %v", len(got), got)
 	}
 	for _, id := range got {
 		if !IsCLISupported(id) {
