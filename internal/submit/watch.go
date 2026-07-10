@@ -314,17 +314,25 @@ func WatchJob(
 	// which the orchestrator maps to a failure exit (9). The Pod itself is
 	// authoritative for whether the ingest actually finished, so fall back to
 	// its phase: a Succeeded Pod is a successful run, a Failed one a failure.
-	// A fresh short ctx is used since finalCtx may already be at its deadline;
-	// it still derives from customerCtx, so a Ctrl-C here leaves Unknown intact
-	// and drops into the detach handling below.
-	if statusErr == nil && outcome == JobOutcomeUnknown && podName != "" {
+	// RE-LIST and re-select here rather than trusting the podName captured at
+	// the start of the watch: waitForJobPod may have returned an early Failed
+	// Pod while a backoffLimit retry was still Pending, so the current
+	// most-recent Pod (e.g. the retry that Succeeded) is the honest signal. A
+	// fresh short ctx is used since finalCtx may be at its deadline; it still
+	// derives from customerCtx, so a Ctrl-C here leaves Unknown intact and
+	// drops into the detach handling below.
+	if statusErr == nil && outcome == JobOutcomeUnknown {
 		podCtx, podCancel := context.WithTimeout(customerCtx, 5*time.Second)
-		if pod, perr := cs.CoreV1().Pods(namespace).Get(podCtx, podName, metav1.GetOptions{}); perr == nil {
-			switch pod.Status.Phase {
-			case corev1.PodSucceeded:
-				outcome = JobOutcomeSucceeded
-			case corev1.PodFailed:
-				outcome = JobOutcomeFailed
+		if pods, perr := cs.CoreV1().Pods(namespace).List(podCtx, metav1.ListOptions{
+			LabelSelector: "job-name=" + jobName,
+		}); perr == nil {
+			if best := mostRecentUsefulPod(pods.Items); best != nil {
+				switch best.Status.Phase {
+				case corev1.PodSucceeded:
+					outcome = JobOutcomeSucceeded
+				case corev1.PodFailed:
+					outcome = JobOutcomeFailed
+				}
 			}
 		}
 		podCancel()
@@ -419,27 +427,7 @@ func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobN
 			// don't count — they have no logs to stream yet, so
 			// we keep polling until they either transition or
 			// become irrelevant.
-			var bestPod *corev1.Pod
-			for i := range pods.Items {
-				p := &pods.Items[i]
-				switch p.Status.Phase {
-				case corev1.PodRunning, corev1.PodSucceeded, corev1.PodFailed:
-					switch {
-					case bestPod == nil:
-						bestPod = p
-					case p.CreationTimestamp.After(bestPod.CreationTimestamp.Time):
-						bestPod = p
-					case p.CreationTimestamp.Time.Equal(bestPod.CreationTimestamp.Time) &&
-						bestPod.Status.Phase == corev1.PodFailed && p.Status.Phase != corev1.PodFailed:
-						// CreationTimestamp is 1s-granular, so a backoffLimit retry
-						// spawned in the same second as the Pod it replaces ties on
-						// .After. Prefer the live/succeeded Pod over a Failed one so
-						// the watch doesn't latch onto the stale failed attempt and
-						// misframe the run with its logs/phase.
-						bestPod = p
-					}
-				}
-			}
+			bestPod := mostRecentUsefulPod(pods.Items)
 			if bestPod == nil {
 				return false, nil // all Pods still Pending
 			}
@@ -451,6 +439,33 @@ func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobN
 		return "", "", err
 	}
 	return podName, podPhase, nil
+}
+
+// mostRecentUsefulPod picks the Pod whose logs/phase best represent the run
+// among a Job's Pods (they share the job-name label; a backoffLimit retry
+// yields several). "Useful phase" = Running | Succeeded | Failed — Pending
+// Pods have no logs yet. The most recent wins; on a CreationTimestamp tie
+// (1s granularity), a live/succeeded Pod beats a Failed one so a same-second
+// retry isn't overshadowed by the attempt it replaced. Returns nil when every
+// Pod is still Pending.
+func mostRecentUsefulPod(pods []corev1.Pod) *corev1.Pod {
+	var best *corev1.Pod
+	for i := range pods {
+		p := &pods[i]
+		switch p.Status.Phase {
+		case corev1.PodRunning, corev1.PodSucceeded, corev1.PodFailed:
+			switch {
+			case best == nil:
+				best = p
+			case p.CreationTimestamp.After(best.CreationTimestamp.Time):
+				best = p
+			case p.CreationTimestamp.Time.Equal(best.CreationTimestamp.Time) &&
+				best.Status.Phase == corev1.PodFailed && p.Status.Phase != corev1.PodFailed:
+				best = p
+			}
+		}
+	}
+	return best
 }
 
 // streamPodLogsAndParse opens a streaming log read on the Pod and

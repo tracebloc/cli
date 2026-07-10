@@ -444,3 +444,66 @@ func TestWatchJob_UnknownJobFallsBackToPodPhase(t *testing.T) {
 		t.Fatalf("Outcome = %v, want Succeeded (pod-phase fallback when the Job condition lags)", wr.Outcome)
 	}
 }
+
+// TestMostRecentUsefulPod covers the selection the Unknown-fallback and
+// waitForJobPod share: the newest useful-phase Pod wins, a same-second tie goes
+// to the live/succeeded Pod over a Failed one, and all-Pending yields nil.
+func TestMostRecentUsefulPod(t *testing.T) {
+	now := time.Now()
+	mk := func(name string, phase corev1.PodPhase, age time.Duration) corev1.Pod {
+		p := jobPod(name, "ingestor", phase)
+		p.CreationTimestamp = metav1.NewTime(now.Add(-age))
+		return *p
+	}
+
+	// Newer Succeeded beats older Failed.
+	if best := mostRecentUsefulPod([]corev1.Pod{
+		mk("old-failed", corev1.PodFailed, 10*time.Minute),
+		mk("new-ok", corev1.PodSucceeded, 1*time.Minute),
+	}); best == nil || best.Name != "new-ok" {
+		t.Fatalf("want new-ok, got %v", best)
+	}
+	// Same-second tie → live/succeeded over Failed, regardless of slice order.
+	ts := metav1.NewTime(now.Truncate(time.Second))
+	f := jobPod("f", "ingestor", corev1.PodFailed)
+	f.CreationTimestamp = ts
+	s := jobPod("s", "ingestor", corev1.PodSucceeded)
+	s.CreationTimestamp = ts
+	if best := mostRecentUsefulPod([]corev1.Pod{*f, *s}); best == nil || best.Name != "s" {
+		t.Fatalf("same-second tie should prefer the succeeded pod, got %v", best)
+	}
+	// All Pending → nil (no logs/phase to attach to yet).
+	if best := mostRecentUsefulPod([]corev1.Pod{mk("p", corev1.PodPending, time.Minute)}); best != nil {
+		t.Fatalf("all-Pending must yield nil, got %v", best)
+	}
+}
+
+// TestWatchJob_UnknownFallbackPrefersSucceededOverFailed: the Unknown-timeout
+// fallback must re-list Pods and pick the current most-recent useful one, not
+// classify off a stale Failed Pod. With an older Failed Pod and a newer
+// Succeeded one and no Job condition, WatchJob must report Succeeded. #224.
+func TestWatchJob_UnknownFallbackPrefersSucceededOverFailed(t *testing.T) {
+	prev := finalJobStatusTimeout
+	finalJobStatusTimeout = 150 * time.Millisecond
+	defer func() { finalJobStatusTimeout = prev }()
+
+	now := time.Now()
+	failed := jobPod("ingestor-failed", "ingestor", corev1.PodFailed)
+	failed.CreationTimestamp = metav1.NewTime(now.Add(-5 * time.Minute))
+	succeeded := jobPod("ingestor-retry-ok", "ingestor", corev1.PodSucceeded)
+	succeeded.CreationTimestamp = metav1.NewTime(now.Add(-1 * time.Minute))
+	cs := fake.NewClientset(
+		failed, succeeded,
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "ingestor", Namespace: "tracebloc"}}, // no terminal condition
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	wr, err := WatchJob(ctx, cs, "tracebloc", "ingestor", &out, nil)
+	if err != nil {
+		t.Fatalf("WatchJob: %v", err)
+	}
+	if wr.Outcome != JobOutcomeSucceeded {
+		t.Fatalf("Outcome = %v, want Succeeded (fallback must prefer the newer Succeeded pod over the old Failed one)", wr.Outcome)
+	}
+}
