@@ -1,6 +1,7 @@
 package push
 
 import (
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -192,6 +193,14 @@ func manifestReferencedTextNames(csvPath string) (map[string]struct{}, error) {
 		return nil, fmt.Errorf("reading labels.csv: %w", err)
 	}
 	defer func() { _ = closer.Close() }()
+	return referencedTextNames(r)
+}
+
+// referencedTextNames is the manifest walk over an already-opened reader —
+// split out so the mid-stream read-error path (unreachable through a real
+// file, since openCSVReader's LazyQuotes+FieldsPerRecord=-1 tolerate every
+// malformed shape) can be exercised with an injected failing reader.
+func referencedTextNames(r *csv.Reader) (map[string]struct{}, error) {
 	r.LazyQuotes = true // read the rows pandas would, don't drop them
 
 	header, err := r.Read()
@@ -216,7 +225,14 @@ func manifestReferencedTextNames(csvPath string) (map[string]struct{}, error) {
 			break
 		}
 		if err != nil {
-			continue // a row even LazyQuotes can't read is another check's diagnostic
+			// LazyQuotes + FieldsPerRecord=-1 make the reader tolerate every
+			// malformed CSV shape pandas does, so this is not a "bad row" — it
+			// is a genuine I/O read error partway through labels.csv. Skipping
+			// it would return a partial referenced set and silently leave the
+			// unread rows' text files unchecked — a local fail-open. The image
+			// mirror-check (CrossCheckLabels) aborts on the same read error;
+			// do the same here so the enforced-text path fails closed.
+			return nil, fmt.Errorf("reading labels.csv: %w", err)
 		}
 		if col >= len(rec) {
 			continue
