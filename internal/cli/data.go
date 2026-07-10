@@ -57,11 +57,49 @@ before the first ingest.`,
 		RunE:                       runGroup,
 		SuggestionsMinimumDistance: 2,
 	}
+	// Deprecation notices (#879): the data verb was renamed (dataset→data,
+	// push→ingest, rm→delete). The old spellings still work as aliases for one
+	// cycle, but an aliased invocation warns once on stderr. root.go has no
+	// PersistentPreRunE, so this — the closest hook for any `data <sub>` — is
+	// where we detect and warn; cobra passes the executed (leaf) command in.
+	cmd.PersistentPreRunE = func(leaf *cobra.Command, _ []string) error {
+		warnDeprecatedAlias(leaf, leaf.ErrOrStderr())
+		return nil
+	}
 	cmd.AddCommand(newDataIngestCmd())
 	cmd.AddCommand(newDataListCmd())
 	cmd.AddCommand(newDataDeleteCmd())
 	cmd.AddCommand(newIngestValidateCmd())
 	return cmd
+}
+
+// deprecatedAliasCanonical maps each deprecated command alias to the canonical
+// invocation to steer the user to. Keyed by the alias token; the value is the
+// full canonical form so the notice nudges the whole rename (e.g. a `push`
+// steers to `data ingest`, covering the dataset→data group rename too).
+var deprecatedAliasCanonical = map[string]string{
+	"dataset": "data",
+	"push":    "data ingest",
+	"rm":      "data delete",
+}
+
+// warnDeprecatedAlias prints a one-line deprecation notice to w when the executed
+// command was invoked through a deprecated alias. It reads cobra's exported
+// Command.CalledAs(), which reliably reports the alias for the EXECUTED command —
+// so `data push` / `dataset push` warn (leaf `ingest` called as `push`), `data
+// rm` / `dataset rm` warn, and a bare `dataset` warns (the `data` group has a
+// RunE, so it is the executed command). We intentionally do NOT chase a parent
+// group's alias for `dataset <canonical-verb>` (cobra doesn't expose an
+// ancestor's invoked-as name without reaching into its internals); the verb
+// notices already point at the full `data <verb>` form, which nudges the group
+// rename. Canonical invocations warn for nothing.
+func warnDeprecatedAlias(cmd *cobra.Command, w io.Writer) {
+	invoked := cmd.CalledAs()
+	if canonical, ok := deprecatedAliasCanonical[invoked]; ok {
+		_, _ = fmt.Fprintf(w,
+			"%q is deprecated and will be removed in a future release — use %q instead.\n",
+			invoked, canonical)
+	}
 }
 
 // newDataIngestCmd implements `tracebloc data ingest <dataset>`.
