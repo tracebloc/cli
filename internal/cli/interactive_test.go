@@ -212,6 +212,57 @@ func TestRunInteractive_SniffIsHintNotLock(t *testing.T) {
 	}
 }
 
+// TestResolveFamily_SurfacesMiscasedHint pins the PR's headline behavior: an
+// ambiguous sniff that carries an advisory hint (a mis-cased media folder next
+// to labels.csv the walk can't see) has that hint surfaced through the printer
+// before the family question — instead of silently ingesting the tree as a
+// table (#203). The sniff tracks the walk, so behavior is FS-dependent; this
+// asserts whichever branch applies on the machine it runs on. On a
+// case-sensitive FS (Linux CI) the hint fires, so deleting resolveFamily's
+// Warnf branch fails this test there.
+func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "labels.csv"),
+		[]byte("image_id,label\n001.jpg,cat\n"), 0o644); err != nil {
+		t.Fatalf("write labels.csv: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "Images"), 0o755); err != nil {
+		t.Fatalf("mkdir Images: %v", err)
+	}
+
+	var buf bytes.Buffer
+	p := ui.New(&buf, ui.WithColor(false))
+	f := &fakePrompter{answers: map[string]string{"What kind of data is this?": "image"}}
+	fam, err := resolveFamily(p, f, dir)
+	if err != nil {
+		t.Fatalf("resolveFamily: %v", err)
+	}
+
+	if push.SniffFamily(dir).Hint != "" {
+		// Case-sensitive FS: the walk can't see Images/, so the sniff stays
+		// ambiguous with a rename hint. resolveFamily must print it, and still
+		// ask the family plainly (the hint is advisory, not a lock).
+		if !strings.Contains(buf.String(), "rename it and ingest again") {
+			t.Errorf("resolveFamily must surface the mis-cased rename hint; got:\n%s", buf.String())
+		}
+		if !contains(f.asked, "What kind of data is this?") {
+			t.Errorf("hint is advisory — the family question must still be asked; asked=%v", f.asked)
+		}
+	} else {
+		// Case-insensitive FS: the walk resolves Images/, so the sniff is
+		// confident image — no false rename hint, no family question.
+		if fam != push.FamilyImage {
+			t.Errorf("family = %v, want image (walk resolves the mis-cased folder here)", fam)
+		}
+		if strings.Contains(buf.String(), "rename it and ingest again") {
+			t.Errorf("no false rename hint when the walk sees the folder; got:\n%s", buf.String())
+		}
+		if contains(f.asked, "What kind of data is this?") {
+			t.Errorf("a confident sniff must not ask the family question; asked=%v", f.asked)
+		}
+	}
+}
+
 // TestRunInteractive_ExplicitTaskSkipsSniff: an explicit --task wins — no
 // sniff echo, no family question, no task picker.
 func TestRunInteractive_ExplicitTaskSkipsSniff(t *testing.T) {
