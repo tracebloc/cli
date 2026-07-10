@@ -33,14 +33,23 @@ func (r *errAfterReader) Read(p []byte) (int, error) {
 // watch returns a false exit 9 on a healthy run. The drain-past-ErrTooLong must
 // keep pulling so the parser still resolves the summary.
 func TestStreamDisplayAndParse_DrainsPastOversizedLineSoParserSeesBanner(t *testing.T) {
-	oversized := strings.Repeat("\rprocessing... ", 500) // ~7 KB, no '\n'
+	// A tqdm-style progress "line": 500 '\r'-redraws, no '\n', ~7.5 KB.
+	oversized := strings.Repeat("\rprocessing... ", 500)
+	// maxLine is authoritative in streamDisplayAndParse (the initial buffer is
+	// clamped to it), so a small cap genuinely trips bufio.ErrTooLong and fires
+	// the drain. Guard it: a cap >= the line would make this test vacuously pass
+	// WITHOUT exercising the drain. Production uses 16 MB.
+	const maxLine = 4096
+	if len(oversized) <= maxLine {
+		t.Fatalf("test setup: oversized line (%d B) must exceed maxLine (%d B) to trip ErrTooLong",
+			len(oversized), maxLine)
+	}
 	stream := strings.NewReader(oversized + realIngestorBanner)
 	parser := NewSummaryParser()
 	tee := io.TeeReader(stream, parserWriter{parser: parser})
 
 	var out bytes.Buffer
-	// Tiny cap so the oversized line trips ErrTooLong (production uses 16 MB).
-	if err := streamDisplayAndParse(tee, &out, 1024); err != nil {
+	if err := streamDisplayAndParse(tee, &out, maxLine); err != nil {
 		t.Fatalf("an over-long DISPLAY line must not be fatal; got: %v", err)
 	}
 	parser.FlushLine()

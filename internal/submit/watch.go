@@ -504,7 +504,16 @@ const displayLineMax = 16 * 1024 * 1024
 // non-nil error only on a genuine read failure (network drop, ctx cancel).
 func streamDisplayAndParse(r io.Reader, out io.Writer, maxLine int) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLine)
+	// bufio.Scanner's token cap is max(maxLine, cap(initialBuf)), so the initial
+	// buffer must never exceed maxLine or it would silently raise the effective
+	// cap above maxLine. Start at 64 KB (grows on demand) for the common case,
+	// but clamp it so maxLine stays authoritative — the display path relies on it
+	// (production passes 16 MB, so the clamp is a no-op there).
+	initCap := 64 * 1024
+	if maxLine < initCap {
+		initCap = maxLine
+	}
+	scanner.Buffer(make([]byte, 0, initCap), maxLine)
 	for scanner.Scan() {
 		// scanner strips the trailing '\n'; re-add it. errcheck-friendly: the
 		// write error is discarded because the exit code is the contract.
