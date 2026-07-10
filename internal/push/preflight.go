@@ -35,9 +35,12 @@ var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 // idiom the pandas-backed checks share (cli#71): pandas strips the BOM even
 // under encoding="utf-8", so a BOM'd file must read as if it had none or the
 // CLI would reject what the cluster accepts. FieldsPerRecord is -1 so a ragged
-// row is a per-row concern, not an abort. The caller closes the returned
-// Closer. A caller that must read the rows pandas tolerates (an unescaped
-// quote) sets r.LazyQuotes = true before its first Read.
+// row is a per-row concern, not an abort, and LazyQuotes is on so a row pandas
+// tolerates (an unescaped/bare quote) is read here too rather than turned into
+// a parse error — otherwise these mirror-checks would reject a layout the
+// ingestor ingests cleanly (the inverse fail direction). With both set, a
+// non-EOF Read error is only ever a genuine I/O failure, so callers can treat
+// it as fail-closed. The caller closes the returned Closer.
 func openCSVReader(path string) (*csv.Reader, io.Closer, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -49,6 +52,7 @@ func openCSVReader(path string) (*csv.Reader, io.Closer, error) {
 	}
 	r := csv.NewReader(br)
 	r.FieldsPerRecord = -1
+	r.LazyQuotes = true // read the rows pandas would, don't drop or error on them
 	return r, f, nil
 }
 
