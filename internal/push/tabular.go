@@ -295,6 +295,7 @@ func InferSchema(csvPath string) (*SchemaInference, error) {
 
 	r := csv.NewReader(f)
 	r.FieldsPerRecord = -1 // ragged rows are CheckDuplicateHeaders' / read-time's diagnostic, not ours
+	r.LazyQuotes = true    // read the rows pandas would; a bare quote must not abort inference
 	header, err := r.Read()
 	if err != nil {
 		return nil, fmt.Errorf("reading CSV header from %s: %w", csvPath, err)

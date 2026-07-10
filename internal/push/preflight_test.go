@@ -622,3 +622,26 @@ func TestSequenceScanFrom_ReadErrorFailsClosed(t *testing.T) {
 		t.Errorf("a read failure must not be reported as a null-id domain error: %v", nullErr)
 	}
 }
+
+// TestOpenCSVReader_LazyQuotesMatchesPandas: a bare/unescaped quote in a data
+// row is tolerated by pandas (the ingestor), so the CLI's mirror-checks must
+// read the row rather than error on it. Before openCSVReader set LazyQuotes,
+// CheckLabelDiversity/CrossCheckLabels/CheckSequenceRows all errored on such a
+// row → false-rejecting a dataset the cluster accepts. Guard against regressing
+// to the strict reader.
+func TestOpenCSVReader_LazyQuotesMatchesPandas(t *testing.T) {
+	// Row 2's filename cell has a bare quote pandas keeps; the label column has
+	// two distinct classes across the three rows.
+	csvBody := "label,filename\ncat,a.jpg\ndog,b\"x.jpg\ncat,c.jpg\n"
+	p := writeTmp(t, "labels.csv", []byte(csvBody))
+
+	// Diversity must NOT false-reject: all 3 rows read → classes {cat,dog}.
+	if err := CheckLabelDiversity(p, "label", false, false); err != nil {
+		t.Errorf("bare-quote row must be read like pandas, not rejected: %v", err)
+	}
+	v := ReadLabelValues(p, "label", false, false)
+	if !v.Found || v.RowCount != 3 || len(v.Classes) != 2 {
+		t.Errorf("bare-quote CSV misread: Found=%v RowCount=%d classes=%v (want 3 rows, 2 classes)",
+			v.Found, v.RowCount, v.Classes)
+	}
+}
