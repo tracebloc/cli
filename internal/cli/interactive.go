@@ -263,20 +263,25 @@ func pickTask(p *ui.Printer, pr prompter, fam push.Family) (string, error) {
 	}
 
 	opts := make([]string, len(available))
-	byName := make(map[string]string, len(available))
 	for i, s := range available {
 		opts[i] = s.DisplayName()
-		byName[s.DisplayName()] = s.ID
 	}
 	ans, err := pr.Select("Which task?", "pick the task this data is for", opts, opts[0])
 	if err != nil {
 		return "", err
 	}
-	if id, ok := byName[ans]; ok {
-		return id, nil
+	// Map the answer back to a task by POSITION, not through a
+	// DisplayName→ID map: two tasks in a family could in principle share a
+	// display name, and a map would silently keep only the last, returning the
+	// wrong ID for the first. Matching the offered option by index returns the
+	// one the user actually saw (the list above is in this same order).
+	for i, o := range opts {
+		if o == ans {
+			return available[i].ID, nil
+		}
 	}
-	// Defensive: an answer that isn't one of the offered display names.
-	// Never return an empty category — fall back to the first available.
+	// Defensive: an answer that isn't one of the offered options. Never return
+	// an empty category — fall back to the first available.
 	return available[0].ID, nil
 }
 

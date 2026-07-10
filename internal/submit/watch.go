@@ -305,9 +305,38 @@ func WatchJob(
 	//    The fresh ctx still propagates SIGINT (parent is customerCtx,
 	//    which carries signal.NotifyContext's cancel); a Ctrl-C in this
 	//    window falls into the detach branches below.
-	finalCtx, finalCancel := context.WithTimeout(customerCtx, 30*time.Second)
+	finalCtx, finalCancel := context.WithTimeout(customerCtx, finalJobStatusTimeout)
 	defer finalCancel()
 	outcome, statusErr := finalJobStatus(finalCtx, cs, namespace, jobName)
+
+	// If the Job controller hasn't posted a terminal condition within the
+	// budget (a slow/contended apiserver), finalJobStatus returns Unknown —
+	// which the orchestrator maps to a failure exit (9). The Pod itself is
+	// authoritative for whether the ingest actually finished, so fall back to
+	// its phase: a Succeeded Pod is a successful run, a Failed one a failure.
+	// RE-LIST and re-select here rather than trusting the podName captured at
+	// the start of the watch: waitForJobPod may have returned an early Failed
+	// Pod while a backoffLimit retry was still Pending, so the current
+	// most-recent Pod (e.g. the retry that Succeeded) is the honest signal. A
+	// fresh short ctx is used since finalCtx may be at its deadline; it still
+	// derives from customerCtx, so a Ctrl-C here leaves Unknown intact and
+	// drops into the detach handling below.
+	if statusErr == nil && outcome == JobOutcomeUnknown {
+		podCtx, podCancel := context.WithTimeout(customerCtx, 5*time.Second)
+		if pods, perr := cs.CoreV1().Pods(namespace).List(podCtx, metav1.ListOptions{
+			LabelSelector: "job-name=" + jobName,
+		}); perr == nil {
+			if best := mostRecentUsefulPod(pods.Items); best != nil {
+				switch best.Status.Phase {
+				case corev1.PodSucceeded:
+					outcome = JobOutcomeSucceeded
+				case corev1.PodFailed:
+					outcome = JobOutcomeFailed
+				}
+			}
+		}
+		podCancel()
+	}
 
 	// A non-ctx log-stream error is incidental if the Job still
 	// reached a terminal state. Previously ANY such error (e.g.
@@ -398,17 +427,7 @@ func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobN
 			// don't count — they have no logs to stream yet, so
 			// we keep polling until they either transition or
 			// become irrelevant.
-			var bestPod *corev1.Pod
-			for i := range pods.Items {
-				p := &pods.Items[i]
-				switch p.Status.Phase {
-				case corev1.PodRunning, corev1.PodSucceeded, corev1.PodFailed:
-					if bestPod == nil ||
-						p.CreationTimestamp.After(bestPod.CreationTimestamp.Time) {
-						bestPod = p
-					}
-				}
-			}
+			bestPod := mostRecentUsefulPod(pods.Items)
 			if bestPod == nil {
 				return false, nil // all Pods still Pending
 			}
@@ -420,6 +439,33 @@ func waitForJobPod(ctx context.Context, cs kubernetes.Interface, namespace, jobN
 		return "", "", err
 	}
 	return podName, podPhase, nil
+}
+
+// mostRecentUsefulPod picks the Pod whose logs/phase best represent the run
+// among a Job's Pods (they share the job-name label; a backoffLimit retry
+// yields several). "Useful phase" = Running | Succeeded | Failed — Pending
+// Pods have no logs yet. The most recent wins; on a CreationTimestamp tie
+// (1s granularity), a live/succeeded Pod beats a Failed one so a same-second
+// retry isn't overshadowed by the attempt it replaced. Returns nil when every
+// Pod is still Pending.
+func mostRecentUsefulPod(pods []corev1.Pod) *corev1.Pod {
+	var best *corev1.Pod
+	for i := range pods {
+		p := &pods[i]
+		switch p.Status.Phase {
+		case corev1.PodRunning, corev1.PodSucceeded, corev1.PodFailed:
+			switch {
+			case best == nil:
+				best = p
+			case p.CreationTimestamp.After(best.CreationTimestamp.Time):
+				best = p
+			case p.CreationTimestamp.Time.Equal(best.CreationTimestamp.Time) &&
+				best.Status.Phase == corev1.PodFailed && p.Status.Phase != corev1.PodFailed:
+				best = p
+			}
+		}
+	}
+	return best
 }
 
 // streamPodLogsAndParse opens a streaming log read on the Pod and
@@ -547,6 +593,11 @@ func (pw parserWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// finalJobStatusTimeout bounds the post-stream wait for the Job's terminal
+// condition. A package var (not a const) purely so tests can shrink it; it is
+// never overridden in production.
+var finalJobStatusTimeout = 30 * time.Second
+
 // finalJobStatus does a bounded poll on the Job's status to
 // determine Succeeded vs Failed after log streaming ends. This is
 // a separate step because the log-stream-end doesn't always race
@@ -554,7 +605,7 @@ func (pw parserWriter) Write(b []byte) (int, error) {
 // apiserver to post the terminal phase.
 func finalJobStatus(ctx context.Context, cs kubernetes.Interface, namespace, jobName string) (JobOutcome, error) {
 	var outcome JobOutcome
-	err := wait.PollUntilContextTimeout(ctx, JobPollInterval, 30*time.Second, true,
+	err := wait.PollUntilContextTimeout(ctx, JobPollInterval, finalJobStatusTimeout, true,
 		func(ctx context.Context) (bool, error) {
 			job, err := cs.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
 			if err != nil {

@@ -619,3 +619,45 @@ func TestPrintLocalSummary_ShowsDetectedExtension(t *testing.T) {
 		t.Errorf("summary missing detected extension:\n%s", buf.String())
 	}
 }
+
+// TestDataIngest_WrongTaskFlags_ExitTwo pins the task-scoped flag guards: a
+// flag scoped to one task family must be REJECTED (exit 2) on a task that
+// doesn't consume it, rather than silently dropped. Previously only
+// --target-size/--min-size were guarded; the others were parsed only inside
+// their category branch, so the value (and the user's intent) vanished with no
+// error even though the help text says each is scoped.
+func TestDataIngest_WrongTaskFlags_ExitTwo(t *testing.T) {
+	root := imgcLayout(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"schema-on-image", []string{"--task=image_classification", "--label-column=label", "--schema=age:INT"}},
+		{"label-policy-on-image", []string{"--task=image_classification", "--label-column=label", "--label-policy=passthrough"}},
+		{"time-column-on-image", []string{"--task=image_classification", "--label-column=label", "--time-column=t"}},
+		{"keypoints-on-image-classification", []string{"--task=image_classification", "--label-column=label", "--number-of-keypoints=17"}},
+		{"label-column-on-self-supervised-text", []string{"--task=masked_language_modeling", "--label-column=sentiment"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, _, _ := execDataIngest(t, append([]string{root, "--name=t1", "--intent=train"}, tc.args...))
+			if code != 2 {
+				t.Fatalf("expected exit 2 for misapplied flag (%s), got %d", tc.name, code)
+			}
+		})
+	}
+}
+
+// TestDataIngest_ScopedFlag_OnCorrectTask_NotRejected is the negative control:
+// a scoped flag on its VALID task must NOT trip the guard. --number-of-keypoints
+// on keypoint_detection passes the guard and falls through to the (bad)
+// kubeconfig → exit 3, proving the guard didn't over-reject with exit 2.
+func TestDataIngest_ScopedFlag_OnCorrectTask_NotRejected(t *testing.T) {
+	root := imgcLayout(t)
+	code, _, _ := execDataIngest(t, []string{
+		root, "--name=t1", "--intent=train",
+		"--task=keypoint_detection", "--label-column=label", "--number-of-keypoints=17",
+	})
+	if code == 2 {
+		t.Fatal("--number-of-keypoints on keypoint_detection must not be rejected as a wrong-task flag")
+	}
+}
