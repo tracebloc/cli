@@ -167,6 +167,27 @@ func TestInferSchema(t *testing.T) {
 	}
 }
 
+// TestInferSchema_NonFiniteIsNotFloat: Go's strconv.ParseFloat accepts
+// "Inf"/"Infinity"/"NaN", but the ingestor's FLOAT cast rejects a non-finite
+// value — so a column carrying one must NOT infer FLOAT (that would hand the
+// cluster a schema it only refuses AFTER the upload). The di#349 float grammar
+// (floatRE) pre-screens the token before ParseFloat, so "inf"/"NaN" fall
+// through to VARCHAR and preflight matches what the cluster will accept. No
+// parity-fixture case covers this, so pin it here.
+func TestInferSchema_NonFiniteIsNotFloat(t *testing.T) {
+	dir := t.TempDir()
+	csv := writeFile(t, dir, "data.csv",
+		"reading,note\n1.5,ok\ninf,spike\nNaN,dropout\n")
+	res, err := InferSchema(csv)
+	if err != nil {
+		t.Fatalf("InferSchema: %v", err)
+	}
+	// Longest of 1.5/inf/NaN is 3 runes → VARCHAR(3); the point is it is NOT FLOAT.
+	if got := res.Schema["reading"]; got != "VARCHAR(3)" {
+		t.Errorf("schema[reading] = %q, want VARCHAR(3) (Inf/NaN must not infer FLOAT)", got)
+	}
+}
+
 // TestInferSchema_EmptyColumnIsVarchar1: a column with no non-empty sampled
 // value can't be typed from data; it comes back as VARCHAR(1) (mirroring
 // the ingestor's all-missing rule) and is reported in the Empty list so

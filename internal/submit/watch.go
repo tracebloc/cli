@@ -463,29 +463,16 @@ func streamPodLogsAndParse(
 	// io.Copy would also work but would buffer chunks at the
 	// transport layer, making the output feel laggy on a fast
 	// ingestion.
-	scanner := bufio.NewScanner(tee)
-	// Default scanner buffer is 64 KB per line — fine for log
-	// lines but bump to 1 MB to handle the (rare) case where a
-	// single ingestion-error stacktrace has a multi-KB Python
-	// traceback line.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		// Print the line + a newline (scanner strips the trailing
-		// '\n'). errcheck-friendly: we discard the writer error
-		// because the exit code is the customer-facing contract.
-		_, _ = out.Write(line)
-		_, _ = out.Write([]byte("\n"))
-	}
-	if err := scanner.Err(); err != nil {
-		// EOF is normal end-of-stream; other errors (network drop
-		// mid-stream, ctx cancel) get propagated.
-		if !errors.Is(err, io.EOF) {
-			// Flush any buffered partial line before returning so
-			// the parser sees content even on mid-line failure.
-			parser.FlushLine()
-			return parser.Result(), err
-		}
+	// Pull the whole stream through the tee (which feeds the summary parser)
+	// while rendering it line-by-line for the customer. An over-long DISPLAY
+	// line (a tqdm '\r'-redraw burst) is drained, not fatal — see
+	// streamDisplayAndParse.
+	if err := streamDisplayAndParse(tee, out, displayLineMax); err != nil {
+		// A genuine mid-stream failure (network drop, ctx cancel). Flush any
+		// buffered partial line so the parser sees content even on a mid-line
+		// failure, then propagate.
+		parser.FlushLine()
+		return parser.Result(), err
 	}
 	// Flush at the end of stream too. A Pod that exited without
 	// a trailing newline on its final stdout write would otherwise
@@ -493,6 +480,49 @@ func streamPodLogsAndParse(
 	// ═-rule that finalizes the banner. Bugbot flagged on PR #10.
 	parser.FlushLine()
 	return parser.Result(), nil
+}
+
+// displayLineMax caps the per-line DISPLAY buffer (grows on demand from 64 KB,
+// so ordinary log lines still cost 64 KB). A tqdm progress "line" — many '\r'
+// redraws with no '\n' — grows for the life of the run; the generous cap lets
+// the common case render fully, and streamDisplayAndParse drains anything past
+// it rather than failing. The 1h JobWatchTimeout bounds accumulation.
+const displayLineMax = 16 * 1024 * 1024
+
+// streamDisplayAndParse renders r line-by-line to out for the customer. The
+// caller wraps the log stream in an io.TeeReader that ALSO feeds the summary
+// parser, and this is the ONLY place the tee is pulled — so the function's real
+// job is to pull the WHOLE stream through, whatever the display does with it.
+//
+// A tqdm progress "line" (many '\r' redraws, no '\n') can outgrow maxLine. That
+// must NOT stop the pull: if it did, the tee would stop feeding the parser and
+// the closing banner would never be parsed, so watch would report a false exit
+// 9 on a healthy run (raising maxLine only postpones the threshold). On
+// bufio.ErrTooLong we therefore keep draining the rest of the stream —
+// discarding only the oversized DISPLAY line — so the parser still sees the
+// banner; the Job status poll is the verdict's real source of truth. Returns a
+// non-nil error only on a genuine read failure (network drop, ctx cancel).
+func streamDisplayAndParse(r io.Reader, out io.Writer, maxLine int) error {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLine)
+	for scanner.Scan() {
+		// scanner strips the trailing '\n'; re-add it. errcheck-friendly: the
+		// write error is discarded because the exit code is the contract.
+		_, _ = out.Write(scanner.Bytes())
+		_, _ = out.Write([]byte("\n"))
+	}
+	err := scanner.Err()
+	if err == nil || errors.Is(err, io.EOF) {
+		return nil
+	}
+	if errors.Is(err, bufio.ErrTooLong) {
+		// Keep draining THROUGH r (the tee) so the parser still sees the banner.
+		if _, derr := io.Copy(io.Discard, r); derr != nil {
+			return derr
+		}
+		return nil
+	}
+	return err
 }
 
 // parserWriter adapts a SummaryParser into an io.Writer for use

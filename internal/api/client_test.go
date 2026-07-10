@@ -41,6 +41,23 @@ func TestResolveEnv(t *testing.T) {
 	}
 }
 
+func TestIsKnownEnv(t *testing.T) {
+	known := []string{"dev", "stg", "prod", "DEV", "Prod"} // case-insensitive
+	for _, env := range known {
+		if !IsKnownEnv(env) {
+			t.Errorf("IsKnownEnv(%q) = false, want true", env)
+		}
+	}
+	// Typos and the unknown values BaseURL would silently route to prod
+	// must be rejected so `login` fails instead of persisting a prod session.
+	unknown := []string{"staging", "prd", "production", "development", "", "  "}
+	for _, env := range unknown {
+		if IsKnownEnv(env) {
+			t.Errorf("IsKnownEnv(%q) = true, want false", env)
+		}
+	}
+}
+
 func TestRequestDeviceCode(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/device/code" || r.Method != http.MethodPost {
