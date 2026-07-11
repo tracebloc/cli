@@ -147,39 +147,21 @@ func TestRunResourcesShow_BadKubeconfigExit3(t *testing.T) {
 	}
 }
 
-// TestRunResourcesSetDeferred_HonestExit1: the deferral handler returns a
-// silent (err==nil inner, so main() prints no extra "Error:" line) exit-1 with
-// an honest "not supported yet" message that points back at the SHOW view —
-// never a bogus success or a mangled cluster mutation.
-func TestRunResourcesSetDeferred_HonestExit1(t *testing.T) {
-	var buf bytes.Buffer
-	err := runResourcesSetDeferred(ui.New(&buf, ui.WithColor(false)))
-	var ee *exitError
-	if !errors.As(err, &ee) || ee.Code() != 1 {
-		t.Fatalf("err = %v, want *exitError code 1", err)
+// TestResourcesSet_DesignedInvocationsParse: the locked-design invocations must
+// PARSE cleanly through the real root tree (the `--cores`/`--memory`/`--gpus`
+// flags, the hidden `--cpu` alias, and the `max` positional are all wired on the
+// `set` subcommand) — never a cobra "unknown flag" error. They fail with SHOW's
+// exit-3 kubeconfig contract here (broken --kubeconfig) because they route into
+// the cluster-resolving apply path, which proves parsing succeeded.
+func TestResourcesSet_DesignedInvocationsParse(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "broken.yaml")
+	if err := os.WriteFile(bad, []byte("}{ not valid kubeconfig"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !IsSilentError(err) {
-		t.Errorf("deferred message already printed a ✖ block, so the error must be silent")
-	}
-	out := buf.String()
-	if !strings.Contains(out, "isn't supported in this build yet") {
-		t.Errorf("missing honest not-yet-supported message:\n%s", out)
-	}
-	if !strings.Contains(out, "tracebloc resources") {
-		t.Errorf("deferral should point back at `tracebloc resources`:\n%s", out)
-	}
-}
-
-// TestResourcesSet_DesignedInvocationsReachDeferral is the regression for
-// finding #1: the two locked-design invocations must PARSE (the `--cpu`/
-// `--memory` flags and the `max` positional are wired on the `set` subcommand)
-// and reach the honest exit-1 deferral — NOT die on cobra's "unknown flag:
-// --cpu". Driven through the real root tree so flag/arg parsing is exercised
-// end-to-end, which the direct-call test above cannot cover.
-func TestResourcesSet_DesignedInvocationsReachDeferral(t *testing.T) {
 	for _, args := range [][]string{
-		{"resources", "set", "--cpu", "4", "--memory", "16Gi"},
-		{"resources", "set", "max"},
+		{"resources", "set", "--cores", "4", "--memory", "16Gi", "--yes", "--kubeconfig", bad},
+		{"resources", "set", "--cpu", "4", "--yes", "--kubeconfig", bad},
+		{"resources", "set", "max", "--yes", "--kubeconfig", bad},
 	} {
 		root := NewRootCmd(BuildInfo{Version: "test"})
 		root.SetArgs(args)
@@ -188,21 +170,29 @@ func TestResourcesSet_DesignedInvocationsReachDeferral(t *testing.T) {
 		root.SetErr(&buf)
 		err := root.Execute()
 
-		// The whole point: it must not be a cobra parse failure.
 		if err != nil && strings.Contains(err.Error(), "unknown flag") {
-			t.Fatalf("%v: hit cobra unknown-flag error, not the honest deferral: %v", args, err)
+			t.Fatalf("%v: hit cobra unknown-flag error: %v", args, err)
 		}
 		var ee *exitError
-		if !errors.As(err, &ee) || ee.Code() != 1 {
-			t.Fatalf("%v: err = %v, want honest *exitError code 1", args, err)
+		if !errors.As(err, &ee) || ee.Code() != 3 {
+			t.Fatalf("%v: err = %v, want SHOW's *exitError code 3 (proves it parsed + reached cluster resolve)", args, err)
 		}
-		out := buf.String()
-		if !strings.Contains(out, "isn't supported in this build yet") {
-			t.Errorf("%v: missing not-yet-supported message:\n%s", args, out)
-		}
-		if !strings.Contains(out, "tracebloc resources") {
-			t.Errorf("%v: deferral should point at `tracebloc resources`:\n%s", args, out)
-		}
+	}
+}
+
+// TestResourcesSet_MaxWithExplicitRejected: `max` + an explicit value flag is a
+// contradiction and must fail with exit 2 BEFORE any cluster read (no kubeconfig
+// needed to reach it — the pure request check runs first).
+func TestResourcesSet_MaxWithExplicitRejected(t *testing.T) {
+	root := NewRootCmd(BuildInfo{Version: "test"})
+	root.SetArgs([]string{"resources", "set", "max", "--cores", "4"})
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	err := root.Execute()
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("err = %v, want *exitError code 2", err)
 	}
 }
 

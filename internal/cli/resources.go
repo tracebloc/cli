@@ -20,9 +20,10 @@ import (
 // THIS MACHINE, not Kubernetes internals, and the design locked "top-level
 // command" (issue #143, approved 2026-07-06).
 //
-// Raising the allowance (`set --cpu/--memory`, `set max`) and the macOS VM raise
-// are approved later phases (P2/P3) — see newResourcesSetCmd and the deferral
-// note in runResourcesSetDeferred.
+// Raising the allowance (`set --cores/--memory`, `set max`) is built in
+// newResourcesSetCmd (cli#143 P2). The macOS Docker-VM auto-raise stays deferred
+// (P3): on macOS the fit-check gives an honest "raise it in Docker Desktop"
+// message rather than mutating the VM.
 func newResourcesCmd() *cobra.Command {
 	var (
 		kubeconfigPath  string
@@ -41,19 +42,16 @@ func newResourcesCmd() *cobra.Command {
 No Kubernetes concepts, no YAML — one number for the machine and one for
 tracebloc's share of it.
 
-Raising the share (` + "`tracebloc resources set`" + `) is a later phase; today it's
-set when this machine is first connected. Run with --verbose for the
+Raise the share with ` + "`tracebloc resources set`" + `. Run with --verbose for the
 per-node breakdown and the raw values.
 
 Exit codes:
   0   shown
   3   kubeconfig could not be loaded / cluster unreachable
   4   cluster reachable but no tracebloc client found here`,
-		// Bare `tracebloc resources` SHOWS (P1). Raising the share lives in the
-		// `set` subcommand, whose flags + optional `max` positional parse cleanly
-		// and reach an honest deferral (P2 not built) — see newResourcesSetCmd.
-		// NoArgs so a stray token (`resources bogus`) gets cobra's "unknown
-		// command", not a silently-ignored SHOW.
+		// Bare `tracebloc resources` SHOWS. Raising the share lives in the `set`
+		// subcommand (newResourcesSetCmd). NoArgs so a stray token (`resources
+		// bogus`) gets cobra's "unknown command", not a silently-ignored SHOW.
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts := cluster.KubeconfigOptions{
@@ -72,50 +70,10 @@ Exit codes:
 	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
 		"namespace where your tracebloc client is installed (default: the context's namespace, or 'default')")
 
-	// `set` (P2, deferred): wired now so the approved invocation shape parses and
-	// reaches the honest deferral instead of a cobra flag error.
+	// `set` (P2): raise how much of this machine a training run may use.
 	cmd.AddCommand(newResourcesSetCmd())
 
 	return cmd
-}
-
-// newResourcesSetCmd wires `tracebloc resources set` — the approved-but-unbuilt
-// P2 that RAISES how much of this machine tracebloc may use. Two forms, both
-// locked in the #143 design:
-//
-//	tracebloc resources set --cpu 4 --memory 16Gi   # explicit per-run ceiling
-//	tracebloc resources set max                     # give a run the whole machine
-//
-// The `--cpu`/`--memory` flags and the optional `max` positional are registered
-// now for one reason: so these invocations PARSE cleanly and reach the honest
-// exit-1 deferral in runResourcesSetDeferred, instead of dying on cobra's
-// "unknown flag: --cpu". The shape matches the approved design so P2 slots in
-// behind it once the Helm-values persistence path lands. It mutates nothing.
-func newResourcesSetCmd() *cobra.Command {
-	setCmd := &cobra.Command{
-		Use:   "set [max]",
-		Short: "Raise how much of this machine tracebloc may use (coming soon)",
-		Long: `Raise the per-training-run ceiling — how much of this machine a single
-training run may use.
-
-  tracebloc resources set --cpu 4 --memory 16Gi   set an explicit ceiling
-  tracebloc resources set max                     let a run use the whole machine
-
-This is an approved but not-yet-built phase. Today the ceiling is set when this
-machine is first connected; run ` + "`tracebloc resources`" + ` to see it.`,
-		// Optional single positional; when present it can only be `max` (the one
-		// non-flag form in the design). Both guards run so `set max extra` and
-		// `set bogus` are rejected rather than silently accepted.
-		ValidArgs: []string{"max"},
-		Args:      cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runResourcesSetDeferred(printerFor(cmd))
-		},
-	}
-	// Registered (unbound) purely so parsing succeeds; P2 will read them.
-	setCmd.Flags().String("cpu", "", "per-run CPU ceiling (e.g. 4 or 500m)")
-	setCmd.Flags().String("memory", "", "per-run memory ceiling (e.g. 16Gi)")
-	return setCmd
 }
 
 // runResourcesShow renders the read-only allocation view. It resolves the
@@ -182,7 +140,7 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 	}
 
 	p.Newline()
-	p.Hintf("Raising tracebloc's share (`tracebloc resources set`) is coming; today it's set when this machine is connected.")
+	p.Hintf("Raise tracebloc's share with `tracebloc resources set` (run it on a terminal for a guided walkthrough).")
 	return nil
 }
 
@@ -213,25 +171,4 @@ func firstNonEmptyEnv(env map[string]string, keys ...string) string {
 		}
 	}
 	return ""
-}
-
-// runResourcesSetDeferred prints an honest "not in this build" message for the
-// approved-but-unbuilt P2 (`set --cpu/--memory`, `set max`). Building it safely
-// needs a persistence path the shipped groundwork doesn't yet re-expose to the
-// CLI: the value must be written to Helm values (a `kubectl set env` is reverted
-// by the hourly auto-upgrade CronJob), and `helm upgrade` needs the chart
-// reference the installer resolves via TRACEBLOC_HELM_REPO_NAME / a dev path —
-// not recoverable from `helm list` alone. Rather than shell Helm blindly at a
-// customer's live training cluster, `set` is deferred to its own change.
-//
-// Both `set` forms funnel here (the positional-vs-flags distinction is P2's to
-// consume), so the message names the command, not the specific verb.
-func runResourcesSetDeferred(p *ui.Printer) error {
-	p.Banner("tracebloc", "machine resources")
-	p.Errorf("`tracebloc resources set` isn't supported in this build yet.")
-	p.Hintf("Today, how much of this machine tracebloc may use is set when the machine is first connected.")
-	p.Hintf("Run `tracebloc resources` to see the current allocation.")
-	// Silent (err == nil): the ✖ + hints above already explained it, so main()
-	// must not print a redundant "Error:" line (same contract as cluster doctor).
-	return &exitError{code: 1, err: nil}
 }
