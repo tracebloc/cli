@@ -508,6 +508,48 @@ func TestCheckSequenceRows(t *testing.T) {
 	if _, err := CheckSequenceRows(noCol, g); err != nil {
 		t.Errorf("missing column must benign-skip: %v", err)
 	}
+
+	// The null set is pandas' DEFAULT NA tokens (STR_NA_VALUES, raw-matched) ∪
+	// whitespace-only — SequenceGroupValidator's plain read_csv, NOT the curated
+	// coercion.NA_SENTINELS the label checks use (cli#239). Each boundary below
+	// was ground-truthed against the real validator's
+	// `isna() | (astype(str).str.strip()=="")`.
+
+	// 'none' (lowercase) is in coercion.NA_SENTINELS but NOT in STR_NA_VALUES,
+	// so pandas keeps it → a REAL id → ACCEPT. Before the fix the trim+naSentinels
+	// probe saw it as null and REJECTED (the dangerous over-reject). Reverting
+	// sequenceScanFrom to naSentinels flips this to reject — mutation proof.
+	// Parity twin: cases/tsc-none-sequence-id.
+	none := writeTmp(t, "none.csv", []byte("sequence_id,timestamp,label\nnone,1,a\nnone,2,a\np2,1,b\n"))
+	if seqs, err := CheckSequenceRows(none, g); err != nil || seqs != 2 {
+		t.Errorf("'none' is not a pandas NA token → a real id; must accept with 2 sequences: seqs=%d err=%v", seqs, err)
+	}
+
+	// '#NA' is in STR_NA_VALUES but NOT in coercion.NA_SENTINELS, so pandas
+	// drops it to NaN (null) while the pre-fix probe MISSED it (the under-reject
+	// direction). Must now reject.
+	hashNA := writeTmp(t, "hashna.csv", []byte("sequence_id,timestamp,label\np1,1,a\n#NA,2,b\n"))
+	if _, err := CheckSequenceRows(hashNA, g); err == nil {
+		t.Error("'#NA' is a pandas default NA token → a null id; must be rejected")
+	}
+
+	// A whitespace-only id is null via the .str.strip()=="" clause (a non-NA
+	// object cell that strips to empty). "" is already in pandasDefaultNA, so this
+	// clause is what catches genuine whitespace — a guard that it wasn't lost when
+	// the raw-cell trim was dropped.
+	ws := writeTmp(t, "ws.csv", []byte("sequence_id,timestamp,label\np1,1,a\n\"   \",2,b\n"))
+	if _, err := CheckSequenceRows(ws, g); err == nil {
+		t.Error("a whitespace-only sequence id must be rejected (str.strip()=='' clause)")
+	}
+
+	// A PADDED sentinel (' NA ') is NOT a pandas NA token: pandas tokenises NA on
+	// the raw field (skipinitialspace defaults False), so ' NA ' is a REAL id
+	// in-cluster. Matching the raw (not trimmed) cell keeps parity; the pre-fix
+	// trim made it null (over-reject).
+	padded := writeTmp(t, "padded.csv", []byte("sequence_id,timestamp,label\n\" NA \",1,a\n\" NA \",2,a\np2,1,b\n"))
+	if seqs, err := CheckSequenceRows(padded, g); err != nil || seqs != 2 {
+		t.Errorf("padded ' NA ' is a real id in-cluster (raw NA match); must accept with 2 sequences: seqs=%d err=%v", seqs, err)
+	}
 }
 
 // TestPreflightDataset_SequenceGrouped locks the dispatch-level wiring for the

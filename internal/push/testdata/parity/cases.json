@@ -398,6 +398,22 @@
       "note": "empty + 'NA' sequence ids: unassignable timestep rows \u2014 SequenceGroupValidator's null-id rule, previewed by CheckSequenceRows (both null forms via pandas NA parsing)"
     },
     {
+      "name": "tsc-none-sequence-id",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "hr": "FLOAT",
+        "temp": "FLOAT",
+        "label": "INT"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "OVER-REJECT regression pin (cli#239). The literal string 'none' is a sequence id here. SequenceGroupValidator plain-reads (keep_default_na=True) and computes null as isna() | (astype(str).str.strip()==''); 'none' is NOT in pandas' STR_NA_VALUES, so it is a REAL id -> 0 nulls -> ACCEPT (2 sequences, 2 classes, per-group constant label + ascending time). Before the fix CheckSequenceRows mirrored the curated coercion.NA_SENTINELS (which DOES contain lowercase 'none') after trimming, so it saw both 'none' rows as null and REJECTED a dataset the cluster ingests fine \u2014 the dangerous over-reject direction. The Go preview now uses pandasDefaultNA + a whitespace-only clause on the RAW cell. Reverting sequenceScanFrom to naSentinels flips this to reject (mutation proof). Twin of #218's tsc-numeric-label-na-sentinel, one validator over."
+    },
+    {
       "name": "tsc-label-uniform",
       "category": "time_series_classification",
       "csv": "data.csv",
