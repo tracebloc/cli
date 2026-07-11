@@ -89,6 +89,8 @@ Helm, no YAML, no kubectl needed.`,
 	root.AddCommand(newIngestCmd())
 	root.AddCommand(newClusterCmd())
 	root.AddCommand(newDataCmd())
+	// cli#143: one-knob view of how much of this machine tracebloc may use.
+	root.AddCommand(newResourcesCmd())
 	// RFC-0001 (backend#830): browser sign-in + client provisioning.
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newLogoutCmd())
@@ -114,6 +116,7 @@ Helm, no YAML, no kubectl needed.`,
 		p.Infof("tracebloc data list              — datasets in the cluster")
 		p.Infof("tracebloc data delete <table>    — delete an ingested dataset")
 		p.Infof("tracebloc cluster doctor         — diagnose connection issues")
+		p.Infof("tracebloc resources              — how much of this machine tracebloc may use")
 		p.Infof("tracebloc delete                 — remove tracebloc from this machine")
 		p.Newline()
 		p.Hintf("Add --help to any command for the full flag list.")
