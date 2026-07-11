@@ -50,6 +50,12 @@ tasks currently lives, hand-maintained, in five places across three repos.
    dataset facts we cannot see.
 5. **One-liners.** Every task, flag, and prompt carries a plain one-line
    gloss of what it means / predicts.
+6. **Datasets are immutable snapshots.** A dataset is the fixed basis for its
+   use cases and for training — reproducibility depends on it not changing
+   under already-trained models. Ingest **creates** a dataset, or replaces one
+   wholesale (`--overwrite`); it never **appends** in place. Growth means a new
+   (versioned) dataset, never mutation. (This is why `--append` is rejected —
+   §13; rationale of record: backend#1073.)
 
 ## 3. Current state (as shipped on `develop`)
 
@@ -459,7 +465,13 @@ type per dataset. v0.1 caps: 1 GiB total, 500 MiB per file.
 - Cloud-source datasets (S3/GCS/HTTPS) beyond the 1 GiB cap — v0.2.
 - Changing the wire schema field name (`category` stays on the wire; only
   the CLI surface becomes `--task`).
-- Server-side `--append` (tracked separately, cli#156).
+- **Server-side `--append` — rejected** (cli#156 closed obsolete, 2026-07-11).
+  In-place append breaks dataset integrity & reproducibility: a dataset is the
+  fixed basis for its use cases and training, so appending after models have
+  trained makes their results non-comparable and non-reproducible. Datasets are
+  **immutable snapshots** (Principle 6). If incremental growth is ever genuinely
+  needed the correct shape is **dataset versioning** (a new immutable version),
+  not append. Rationale of record: backend#1073.
 
 ## Revision history
 
@@ -486,3 +498,7 @@ type per dataset. v0.1 caps: 1 GiB total, 500 MiB per file.
   questions (§12.5–8) from reconciling the CLI vs. ingestor: drop vestigial
   `--label-column` for sidecar-labeled vision, the forecasting-timestamp
   gap, `--target-size` placement, and schema-required-for-regression.
+- **Rev 5 (2026-07-11)** — record **dataset immutability** as Principle 6 and
+  turn the §13 `--append` non-goal into an explicit **rejection** (cli#156
+  closed obsolete; in-place append breaks integrity/reproducibility; growth =
+  dataset versioning, not mutation; rationale of record backend#1073).
