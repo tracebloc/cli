@@ -185,10 +185,11 @@ func (e *SubmitError) Error() string {
 		e.Endpoint, e.StatusCode, strings.TrimSpace(e.Body))
 }
 
-// IsSubmitError reports whether err is a *SubmitError. Convenience
+// isSubmitError reports whether err is a *SubmitError. Convenience
 // for the orchestrator's exit-code mapping; errors.As would also
-// work but this reads cleaner at the branch site.
-func IsSubmitError(err error) bool {
+// work but this reads cleaner at the branch site. Unexported: only
+// same-package tests reference it today.
+func isSubmitError(err error) bool {
 	var se *SubmitError
 	return errors.As(err, &se)
 }

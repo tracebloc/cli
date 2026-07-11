@@ -23,8 +23,8 @@ func TestRegistryKnownCategories(t *testing.T) {
 		"time_series_forecasting", "time_series_classification",
 		"time_to_event_prediction",
 	}
-	if got := AllCategoryIDs(); !equalSet(got, want) {
-		t.Fatalf("AllCategoryIDs() = %v, want set %v", got, want)
+	if got := allCategoryIDs(); !equalSet(got, want) {
+		t.Fatalf("allCategoryIDs() = %v, want set %v", got, want)
 	}
 	for _, id := range want {
 		if !IsKnown(id) {
@@ -159,7 +159,7 @@ func TestRegistryWithinSchema(t *testing.T) {
 	for _, id := range schemaCategoryEnum(t) {
 		inSchema[id] = true
 	}
-	for _, id := range AllCategoryIDs() {
+	for _, id := range allCategoryIDs() {
 		if !inSchema[id] && !registryAliases[id] {
 			t.Errorf("registry category %q is not in the ingest.v1 schema enum and not a declared "+
 				"alias — add it to the schema (data-ingestors) if it's real, or declare it in "+

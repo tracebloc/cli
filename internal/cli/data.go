@@ -278,12 +278,8 @@ Exit codes:
 		},
 	}
 
-	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
-		"path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
-	cmd.Flags().StringVar(&contextOverride, "context", "",
-		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
-	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where your tracebloc client is installed")
+	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
+	addNamespaceFlag(cmd, &nsOverride, namespaceFlagUsage)
 
 	// Required spec flags. We DON'T mark them required-at-cobra-level
 	// because cobra's "required flag" error message is terse and

@@ -80,12 +80,8 @@ Exit codes:
 		},
 	}
 
-	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
-		"path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
-	cmd.Flags().StringVar(&contextOverride, "context", "",
-		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
-	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where your tracebloc client is installed")
+	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
+	addNamespaceFlag(cmd, &nsOverride, namespaceFlagUsage)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"show what would be deleted without deleting anything")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false,

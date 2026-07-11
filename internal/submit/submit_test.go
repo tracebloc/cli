@@ -117,7 +117,7 @@ func TestRun_SubmitErrorPropagates(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run returned nil on submit error")
 	}
-	if !IsSubmitError(err) {
+	if !isSubmitError(err) {
 		t.Errorf("err is not *SubmitError: %T", err)
 	}
 }

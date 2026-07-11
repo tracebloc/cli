@@ -235,9 +235,11 @@ func (c *Config) Save() error {
 	return nil
 }
 
-// Clear removes the config file (full sign-out + reset, all envs). A missing
-// file is not an error.
-func Clear() error {
+// clearAll removes the config file (full sign-out + reset, all envs). A missing
+// file is not an error. Unexported: no production caller (logout uses Save);
+// retained only for the same-package test that pins the remove-and-tolerate-
+// missing behavior. (`clear` is a Go builtin, hence clearAll.)
+func clearAll() error {
 	path, err := Path()
 	if err != nil {
 		return err
