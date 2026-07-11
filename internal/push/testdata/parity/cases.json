@@ -425,9 +425,9 @@
         "temp": "FLOAT",
         "label": "INT"
       },
-      "cli_verdict": "accept",
+      "cli_verdict": "reject",
       "ingestor_verdict": "reject",
-      "note": "DELIBERATE divergence (documented gap): p1 flips label mid-sequence \u2014 LabelConstantWithinGroupValidator rejects in-cluster, the CLI has no whole-group label-constancy preview yet (needs a per-group scan; candidate follow-up if burned uploads show up)"
+      "note": "p1 flips its label mid-sequence \u2014 LabelConstantWithinGroupValidator rejects in-cluster (one label per sequence_id), and the CLI now previews it in one grouped pass (CheckTSCGroupIntegrity \u2192 labelConstantViolation, cli#218). Closed the former documented gap."
     },
     {
       "name": "tsc-unsorted-timestamp",
@@ -441,9 +441,23 @@
         "temp": "FLOAT",
         "label": "INT"
       },
-      "cli_verdict": "accept",
+      "cli_verdict": "reject",
       "ingestor_verdict": "reject",
-      "note": "DELIBERATE divergence (documented gap): p1's step index is out of order \u2014 PerGroupTimeOrderedValidator rejects in-cluster (monotonic non-decreasing PER GROUP), the CLI has no per-group order preview yet (same follow-up as tsc-label-flip)"
+      "note": "p1's INT step index is out of order (3,1,2) \u2014 PerGroupTimeOrderedValidator rejects in-cluster (monotonic non-decreasing PER GROUP), and the CLI now previews it (CheckTSCGroupIntegrity \u2192 perGroupTimeViolation, numeric branch, cli#218). The TIMESTAMP/date branch stays a documented under-preview (matching pandas' mixed-format + locale-ambiguity parsing in Go would risk over-rejecting)."
+    },
+    {
+      "name": "tsc-numeric-label-na-sentinel",
+      "category": "time_series_classification",
+      "csv": "data.csv",
+      "label_column": "label",
+      "schema": {
+        "sequence_id": "VARCHAR(64)",
+        "timestamp": "INT",
+        "label": "VARCHAR(16)"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "OVER-REJECT regression pin (cli#218). p3's only label '#NA' is a pandas DEFAULT NA token (STR_NA_VALUES) but NOT in the curated coercion.NA_SENTINELS. LabelConstantWithinGroupValidator plain-reads the file, so pandas drops '#NA' to NaN and the label column is all-numeric -> p1's '1' and '1.0' collapse to one value (no flip) -> ACCEPT. Before the fix the CLI mirrored the coercion set, saw '#NA' as a distinct string, read the column as object, and flagged p1 as a false mid-sequence flip -> false REJECT. The Go preview now uses pandasDefaultNA for the grouped checks and accepts. (LabelDiversity reads with keep_default_na=False so '#NA' stays a literal class alongside 1/1.0/2 -> >=2 classes, still accepted.)"
     }
   ]
 }

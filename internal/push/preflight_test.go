@@ -580,6 +580,147 @@ func TestPreflightDataset_SequenceGrouped(t *testing.T) {
 	}
 }
 
+// TestCheckTSCGroupIntegrity previews the two grouped time_series_classification
+// validators di#359 added (cli#218): one label per sequence
+// (LabelConstantWithinGroupValidator) and per-group ascending time order
+// (PerGroupTimeOrderedValidator). Each row of a table asserts the exact
+// over/under-reject boundary the ingestor draws.
+func TestCheckTSCGroupIntegrity(t *testing.T) {
+	const g, lab, tc = "sequence_id", "label", "timestamp"
+	numeric := map[string]string{"sequence_id": "VARCHAR(64)", "timestamp": "INT", "label": "INT"}
+	dateTyped := map[string]string{"sequence_id": "VARCHAR(64)", "timestamp": "TIMESTAMP", "label": "INT"}
+
+	cases := []struct {
+		name       string
+		csv        string
+		schema     map[string]string
+		wantReject bool
+		wantSubstr string // required substring when rejecting
+	}{
+		{
+			name:   "clean-multi-sequence",
+			csv:    "sequence_id,timestamp,label\np1,1,0\np1,2,0\np2,1,1\np2,2,1\n",
+			schema: numeric,
+		},
+		{
+			name:       "label-flip-mid-sequence",
+			csv:        "sequence_id,timestamp,label\np1,1,0\np1,2,1\np2,1,0\n",
+			schema:     numeric,
+			wantReject: true,
+			wantSubstr: "change their",
+		},
+		{
+			name:   "single-row-group-not-flagged",
+			csv:    "sequence_id,timestamp,label\np1,1,0\np2,1,1\n",
+			schema: numeric,
+			// each sequence has exactly one row → one label, one timestamp:
+			// never a flip, never out of order.
+		},
+		{
+			name:       "per-group-unsorted-timestamps",
+			csv:        "sequence_id,timestamp,label\np1,3,1\np1,1,1\np1,2,1\np2,1,0\n",
+			schema:     numeric,
+			wantReject: true,
+			wantSubstr: "out-of-order",
+		},
+		{
+			name:   "ties-are-non-decreasing-ok",
+			csv:    "sequence_id,timestamp,label\np1,1,0\np1,1,0\np1,2,0\np2,1,1\n",
+			schema: numeric, // equal successive timestamps are allowed (monotonic non-decreasing)
+		},
+		{
+			name:   "interleaved-each-sorted-ok",
+			csv:    "sequence_id,timestamp,label\np1,1,0\np2,1,1\np1,2,0\np2,2,1\n",
+			schema: numeric, // interleaving sequences is fine; order is per-sequence only
+		},
+		{
+			name:   "numeric-label-collapse-not-a-flip",
+			csv:    "sequence_id,timestamp,label\np1,1,1\np1,2,1.0\np2,1,0\n",
+			schema: numeric, // "1" and "1.0" under a numeric column are ONE value
+		},
+		{
+			name: "pandas-default-na-sentinel-keeps-label-numeric",
+			// p3's sole label "#NA" is a pandas DEFAULT NA token (STR_NA_VALUES)
+			// but NOT in the curated coercion.NA_SENTINELS. The ingestor plain-
+			// reads the file, so pandas drops it to NaN and the label column is
+			// all-numeric — p1's "1"/"1.0" collapse to one value (no flip), so
+			// the ingestor ACCEPTS. Before cli#218 the CLI mirrored the coercion
+			// set, saw "#NA" as a distinct string, read the column as object, and
+			// flagged p1 as a false mid-sequence flip. This pins the accept —
+			// reverting naSentinels->pandasDefaultNA makes it fail (mutation
+			// proof). Parity twin: cases/tsc-numeric-label-na-sentinel.
+			csv:    "sequence_id,timestamp,label\np1,1,1\np1,2,1.0\np2,1,2\np2,2,2\np3,1,#NA\n",
+			schema: numeric,
+		},
+		{
+			name: "padded-object-label-flip-still-rejected",
+			// object (non-numeric) label column: pandas keeps whitespace on
+			// object cells, so " a" and "a" are DISTINCT values — p1 genuinely
+			// flips. Pins that dropping the cell-trim (cli#218) did not weaken a
+			// real object-label rejection.
+			csv:        "sequence_id,timestamp,label\np1,1, a\np1,2,a\np2,1,b\n",
+			schema:     numeric,
+			wantReject: true,
+			wantSubstr: "change their",
+		},
+		{
+			name:       "null-label-mid-sequence-is-a-flip",
+			csv:        "sequence_id,timestamp,label\np1,1,1\np1,2,\np2,1,0\n",
+			schema:     numeric, // {1, null} within p1 → nunique(dropna=False) = 2
+			wantReject: true,
+			wantSubstr: "change their",
+		},
+		{
+			name:       "invalid-numeric-timestamp",
+			csv:        "sequence_id,timestamp,label\np1,1,0\np1,x,0\np2,1,1\n",
+			schema:     numeric,
+			wantReject: true,
+			wantSubstr: "missing/invalid",
+		},
+		{
+			name: "null-id-rows-dropped-from-grouping",
+			// the null-id row carries a different label + out-of-order time,
+			// but dropna=True excludes it — CheckSequenceRows owns null ids,
+			// so THIS check must not fire on it.
+			csv:    "sequence_id,timestamp,label\np1,1,0\n,9,1\np1,2,0\np2,1,1\n",
+			schema: numeric,
+		},
+		{
+			name: "date-typed-unsorted-benign-skip",
+			// a TIMESTAMP-typed time column that is genuinely unsorted: the
+			// numeric branch is not selected, and the CLI deliberately does
+			// NOT preview the date branch (documented under-preview, cli#218)
+			// — so it must NOT reject here (safe direction).
+			csv:    "sequence_id,timestamp,label\np1,2026-01-02,0\np1,2026-01-01,0\np2,2026-01-01,1\n",
+			schema: dateTyped,
+		},
+		{
+			name: "absent-columns-benign-skip",
+			// no sequence_id column at all → the schema/sequence checks own
+			// that diagnostic; this check benign-skips (returns nil).
+			csv:    "timestamp,label\n1,0\n2,1\n",
+			schema: numeric,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := writeTmp(t, "data.csv", []byte(c.csv))
+			err := CheckTSCGroupIntegrity(p, g, lab, tc, c.schema)
+			if c.wantReject {
+				if err == nil {
+					t.Fatalf("expected reject, got accept")
+				}
+				if c.wantSubstr != "" && !strings.Contains(err.Error(), c.wantSubstr) {
+					t.Errorf("error missing %q: %v", c.wantSubstr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("expected accept, got reject: %v", err)
+			}
+		})
+	}
+}
+
 // TestLabelColumnValuesFrom_ReadErrorFailsClosed: a mid-scan read error on the
 // label column must abort with an error (fail closed) rather than return a
 // PARTIAL class set — a truncated count would false-reject good data or pass a
