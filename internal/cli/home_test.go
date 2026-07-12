@@ -51,7 +51,7 @@ func TestRenderHome_States(t *testing.T) {
 			},
 			// The two axes stay separate + honest: no "running"/"offline"/signed-out
 			// language on a healthy online screen.
-			absent: []string{"running, but", "offline", "Not signed in", "No secure environment"},
+			absent: []string{"· running", "offline", "Not signed in", "No secure environment"},
 		},
 		{
 			name: "online without GPU omits the GPU dimension",
@@ -73,15 +73,32 @@ func TestRenderHome_States(t *testing.T) {
 			absent:  []string{"CPU", "GiB", "("},
 		},
 		{
-			name: "running but not heartbeating never claims Online",
+			// Heartbeat UNCONFIRMED (backend unreachable / timeout / no active
+			// client): we don't know tracebloc's view, so the line must not claim
+			// it — "couldn't confirm", not "hasn't heard from it".
+			name: "running with unconfirmed heartbeat says couldn't-confirm, never Online",
 			model: homeModel{
 				state: homeRunning, email: "a@b.io", envName: "acme-01",
 				inv: binTracebloc, fullMenu: true,
 			},
 			present: []string{
+				`Secure environment "acme-01" · running — couldn't confirm it's connected to tracebloc — run tracebloc cluster doctor`,
+			},
+			absent: []string{"· Online", "hasn't heard from it"},
+		},
+		{
+			// Heartbeat CONFIRMED not-online (backend says offline/pending):
+			// "hasn't heard from it" is literally what that status means — the
+			// stronger claim is earned here, and only here.
+			name: "running with backend-confirmed not-online says hasn't-heard, never Online",
+			model: homeModel{
+				state: homeRunning, email: "a@b.io", envName: "acme-01",
+				inv: binTracebloc, fullMenu: true, confirmedNotOnline: true,
+			},
+			present: []string{
 				`Secure environment "acme-01" · running, but tracebloc hasn't heard from it — run tracebloc cluster doctor`,
 			},
-			absent: []string{"· Online"},
+			absent: []string{"· Online", "couldn't confirm"},
 		},
 		{
 			// Fix 3: a not-Ready workload is "starting up", NOT "hasn't heard from
@@ -279,6 +296,34 @@ func TestResolveHomeModel_States(t *testing.T) {
 	}
 }
 
+// TestResolveHomeModel_RunningDistinguishesConfirmedNotOnline: both not-Online
+// heartbeat answers land on homeRunning, but the model records which KIND so
+// the copy can be accurate — true only for a backend-confirmed not-online,
+// false for a mere couldn't-confirm, and never set on a healthy Online.
+func TestResolveHomeModel_RunningDistinguishesConfirmedNotOnline(t *testing.T) {
+	t.Run("backend positively reports not-online", func(t *testing.T) {
+		d := baseDeps()
+		d.probeBeat = func(context.Context) heartbeatState { return beatNotOnline }
+		m := resolveHomeModel(context.Background(), d)
+		if m.state != homeRunning || !m.confirmedNotOnline {
+			t.Fatalf("state=%d confirmedNotOnline=%v, want running/true", m.state, m.confirmedNotOnline)
+		}
+	})
+	t.Run("unknown heartbeat stays unconfirmed", func(t *testing.T) {
+		d := baseDeps()
+		d.probeBeat = func(context.Context) heartbeatState { return beatUnknown }
+		m := resolveHomeModel(context.Background(), d)
+		if m.state != homeRunning || m.confirmedNotOnline {
+			t.Fatalf("state=%d confirmedNotOnline=%v, want running/false", m.state, m.confirmedNotOnline)
+		}
+	})
+	t.Run("online never carries the flag", func(t *testing.T) {
+		if m := resolveHomeModel(context.Background(), baseDeps()); m.confirmedNotOnline {
+			t.Fatal("a healthy Online must not set confirmedNotOnline")
+		}
+	})
+}
+
 // TestResolveHomeModel_ProvisionedNoReleaseKeepsName is the heart of Fix 1: a
 // reachable cluster that doesn't host this release, on a provisioned machine,
 // must land on a NAMED offline — not the nameless "no environment" screen —
@@ -409,6 +454,34 @@ func TestResolveHomeModel_SlowProbesDegradeFast(t *testing.T) {
 			t.Fatalf("live env + slow (unconfirmed) heartbeat must be running, got state %d", m.state)
 		}
 	})
+}
+
+// TestCollectProbes_BudgetExpiryKeepsBufferedResults: when the budget fires
+// while a finished probe's result is already sitting in its buffered channel,
+// select picks uniformly among ready cases — the Done branch must DRAIN the
+// buffers rather than let the random pick discard a completed answer (a live
+// release rendering as offline/no-env). Pre-filled channels + an already-
+// expired context make the ready-race deterministic; without the drain each
+// round drops a result with probability ≥ 1/3, so 100 rounds catch a
+// regression with near certainty.
+func TestCollectProbes_BudgetExpiryKeepsBufferedResults(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // budget already spent when collection starts
+
+		envCh := make(chan envProbe, 1)
+		beatCh := make(chan heartbeatState, 1)
+		envCh <- envProbe{local: localLive, name: "acme-01"} // both probes finished:
+		beatCh <- beatOnline                                 // results sit in the buffers
+
+		env, beat := collectProbes(ctx, envCh, beatCh)
+		if env.local != localLive || env.name != "acme-01" {
+			t.Fatalf("round %d: completed env result dropped: %+v", i, env)
+		}
+		if beat != beatOnline {
+			t.Fatalf("round %d: completed beat result dropped: %v", i, beat)
+		}
+	}
 }
 
 // node builds a Ready (unless notReady) node with the given allocatable.

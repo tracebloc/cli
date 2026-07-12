@@ -77,7 +77,7 @@ type homeState int
 const (
 	homeNotSignedIn homeState = iota // you're not signed in — minimal, sign in first
 	homeOnline                       // signed in, environment live AND heartbeating
-	homeRunning                      // signed in, environment live locally but heartbeat unconfirmed
+	homeRunning                      // signed in, live locally but not Online (heartbeat unconfirmed, or confirmed not-online)
 	homeStarting                     // signed in, release present but its workload isn't Ready yet
 	homeOffline                      // signed in, provisioned, but the environment isn't reachable from here
 	homeNoEnv                        // signed in, no environment provisioned on this machine
@@ -103,6 +103,11 @@ type homeModel struct {
 	inv        string // invoked binary name: "tb" or "tracebloc"
 	tbTip      bool   // show the "type tb instead" tip
 	fullMenu   bool   // render the full command menu (an environment exists here)
+	// confirmedNotOnline distinguishes the two honest flavors of homeRunning:
+	// true = tracebloc's backend POSITIVELY reported this client not-online
+	// (offline/pending), false = we merely couldn't confirm either way. Same
+	// state, different knowledge — the running line words each accurately.
+	confirmedNotOnline bool
 }
 
 // ── Detection ──
@@ -205,20 +210,7 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 	go func() { envCh <- d.probeEnv(bctx) }()
 	go func() { beatCh <- d.probeBeat(bctx) }()
 
-	env := envProbe{local: localUnreachable} // default if the probe never reports
-	beat := beatUnknown                      // default: unconfirmed, never Online
-	for got := 0; got < 2; {
-		select {
-		case env = <-envCh:
-			envCh = nil // disable this case; a nil channel blocks forever in select
-			got++
-		case beat = <-beatCh:
-			beatCh = nil
-			got++
-		case <-bctx.Done():
-			got = 2 // budget spent — render with whatever arrived, softly
-		}
-	}
+	env, beat := collectProbes(bctx, envCh, beatCh)
 
 	// Whenever the probe didn't surface a name — it timed out, couldn't reach the
 	// cluster, or reached one that doesn't host this release — fall back to the
@@ -240,11 +232,14 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 	case localLive:
 		// Online demands BOTH live-locally AND a positively-confirmed heartbeat.
 		// Anything short of beatOnline (not-online, or couldn't-confirm) is the
-		// honest "· running" state, never a green Online.
+		// honest "· running" state, never a green Online — but the model records
+		// WHICH kind of not-Online it is, so the running line can word a
+		// backend-confirmed "not online" differently from a mere couldn't-confirm.
 		if beat == beatOnline {
 			m.state = homeOnline
 		} else {
 			m.state = homeRunning
+			m.confirmedNotOnline = beat == beatNotOnline
 		}
 		m.fullMenu = true
 	case localDegraded:
@@ -275,6 +270,46 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 		m.tbTip = d.tbAvailable()
 	}
 	return m
+}
+
+// collectProbes receives both probe results, bounded by ctx (the detection
+// budget). When the budget fires, a probe that finished JUST beforehand has its
+// result sitting in the buffered channel — and select picks uniformly among
+// ready cases, so without care the Done branch could win the race and DROP a
+// completed answer in favor of the softer default (a live release rendering as
+// offline/no-env). So on Done we drain, non-blocking, anything already
+// buffered; only a probe that truly hasn't reported keeps its default
+// (localUnreachable / beatUnknown — the honest "couldn't confirm" values).
+func collectProbes(ctx context.Context, envCh <-chan envProbe, beatCh <-chan heartbeatState) (envProbe, heartbeatState) {
+	env := envProbe{local: localUnreachable} // default if the probe never reports
+	beat := beatUnknown                      // default: unconfirmed, never Online
+	for got := 0; got < 2; {
+		select {
+		case env = <-envCh:
+			envCh = nil // disable this case; a nil channel blocks forever in select
+			got++
+		case beat = <-beatCh:
+			beatCh = nil
+			got++
+		case <-ctx.Done():
+			// Budget spent — render with whatever arrived, softly. Honor results
+			// that DID arrive (they're in the buffers), without blocking.
+			if envCh != nil {
+				select {
+				case env = <-envCh:
+				default:
+				}
+			}
+			if beatCh != nil {
+				select {
+				case beat = <-beatCh:
+				default:
+				}
+			}
+			got = 2
+		}
+	}
+	return env, beat
 }
 
 // realSignIn reports the signed-in state + cached email from local config — no
@@ -519,8 +554,19 @@ func renderHome(p *ui.Printer, m homeModel) {
 	case homeOnline:
 		p.CheckLine("Secure environment %q · Online%s", m.envName, computeParen(m))
 	case homeRunning:
-		p.WarnLine("Secure environment %q · running, but tracebloc hasn't heard from it — run %s %s",
-			m.envName, m.inv, doctorPath)
+		// Two honest flavors of running, split by what we actually KNOW.
+		// Backend positively reported not-online (offline/pending): "hasn't
+		// heard from it" is literally what that status means. Merely
+		// couldn't-confirm (backend unreachable, timeout, no active client):
+		// don't claim tracebloc's view — it may be heartbeating fine while only
+		// our probe failed — say we couldn't confirm.
+		if m.confirmedNotOnline {
+			p.WarnLine("Secure environment %q · running, but tracebloc hasn't heard from it — run %s %s",
+				m.envName, m.inv, doctorPath)
+		} else {
+			p.WarnLine("Secure environment %q · running — couldn't confirm it's connected to tracebloc — run %s %s",
+				m.envName, m.inv, doctorPath)
+		}
 	case homeStarting:
 		p.WarnLine("Secure environment %q · starting up, not ready yet — run %s %s",
 			m.envName, m.inv, doctorPath)
