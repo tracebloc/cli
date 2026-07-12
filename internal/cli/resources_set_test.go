@@ -332,6 +332,41 @@ func TestWizard_LeaveAsIs(t *testing.T) {
 	}
 }
 
+// cancellingPrompter aborts the first question asked the way surveyPrompter
+// maps Ctrl-C: errInteractiveCancelled from every prompt.
+type cancellingPrompter struct{}
+
+func (cancellingPrompter) Input(string, string, string, func(string) error) (string, error) {
+	return "", errInteractiveCancelled
+}
+func (cancellingPrompter) Select(string, string, []string, string) (string, error) {
+	return "", errInteractiveCancelled
+}
+func (cancellingPrompter) Confirm(string, bool) (bool, error) {
+	return false, errInteractiveCancelled
+}
+
+// TestWizard_CtrlCIsACleanCancel: Ctrl-C at a wizard prompt (survey's interrupt,
+// mapped to errInteractiveCancelled) is a choice, not a failure — exit 0 with
+// the standard "Cancelled" note and no helm mutation, matching the clean-cancel
+// convention of the other prompting commands (data ingest/delete, offboard).
+func TestWizard_CtrlCIsACleanCancel(t *testing.T) {
+	calls := fakeHelm(t)
+	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
+	err, out := runSet(t, cs, cancellingPrompter{}, setReq{})
+	if err != nil {
+		t.Fatalf("Ctrl-C during the wizard must be a clean cancel (nil error → exit 0), got: %v", err)
+	}
+	if !strings.Contains(out, "Cancelled — nothing was changed.") {
+		t.Errorf("cancel note missing:\n%s", out)
+	}
+	for _, c := range *calls {
+		if len(c) >= 3 && c[1] == "upgrade" && c[2] != "--help" {
+			t.Errorf("a cancelled wizard must not `helm upgrade`: %v", c)
+		}
+	}
+}
+
 // TestSet_CPUOnlyMachineIgnoresChartDefaultGPU: the chart stamps a default
 // GPU_REQUESTS on every install (CPU boxes included); a plain `--cores` change on
 // a GPU-less machine must NOT inherit that phantom GPU and fail the GPU fit-check.

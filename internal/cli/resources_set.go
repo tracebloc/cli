@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -199,9 +200,18 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 		current.HasGPU = false
 	}
 
-	// (3) Decide the desired per-run ceiling.
+	// (3) Decide the desired per-run ceiling. Ctrl-C at a wizard prompt surfaces
+	//     as errInteractiveCancelled — a choice, not a failure: exit 0 with the
+	//     same "Cancelled" note the confirm decline prints below, matching the
+	//     clean-cancel convention of every other prompting command (data
+	//     ingest/delete, offboard). Validation errors (exit 2) and real terminal
+	//     failures pass through unchanged.
 	desired, err := decideDesired(p, pr, req, node, current, machineGPUName, machineGPUCount, machineHasGPU)
 	if err != nil {
+		if errors.Is(err, errInteractiveCancelled) {
+			p.Infof("Cancelled — nothing was changed.")
+			return nil
+		}
 		return err
 	}
 
