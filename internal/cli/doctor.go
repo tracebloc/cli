@@ -14,16 +14,18 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// newClusterDoctorCmd implements `tracebloc cluster doctor` — the sibling of
-// `cluster info` that cluster.go's doc comment anticipated. Where `info`
-// answers "is the CLI pointing at the right cluster?", `doctor` answers "is
-// this running cluster healthy enough to run an experiment, and if not, what
-// do I fix?" — a read-only, post-install health sweep with remedies
-// (epic client-runtime#116, WS3).
+// newDoctorCmd builds the `doctor` command. The SAME command is registered two
+// ways: as the top-level `tracebloc doctor` (visible — the home screen and its
+// env-status lines point here), and, hidden, as `tracebloc cluster doctor` (its
+// original path, kept working so existing docs, muscle memory, and scripts don't
+// break). Pass hidden=true for the cluster-subtree alias. Both entry points
+// share one RunE (runClusterDoctor), so there is a single diagnostic code path.
 //
-// The three kubeconfig flags match `cluster info` exactly so muscle memory
-// carries over; all are zero-value-safe.
-func newClusterDoctorCmd() *cobra.Command {
+// It answers "is this running cluster healthy enough to run an experiment, and
+// if not, what do I fix?" — a read-only, post-install health sweep with remedies
+// (epic client-runtime#116, WS3). The three kubeconfig flags match `cluster
+// info` exactly so muscle memory carries over; all are zero-value-safe.
+func newDoctorCmd(hidden bool) *cobra.Command {
 	var (
 		kubeconfigPath  string
 		contextOverride string
@@ -31,8 +33,9 @@ func newClusterDoctorCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "doctor",
-		Short: "Diagnose a running tracebloc client cluster (✔/⚠/✖ health checks + remedies)",
+		Use:    "doctor",
+		Hidden: hidden,
+		Short:  "Diagnose a running tracebloc client cluster (✔/⚠/✖ health checks + remedies)",
 		Long: `Runs a read-only health sweep over the tracebloc client release in the
 configured cluster + namespace and prints a ✔/⚠/✖ line per check with a
 remedy for anything that isn't green:
@@ -76,7 +79,7 @@ func runClusterDoctor(
 	p *ui.Printer,
 	kubeconfigPath, contextOverride, nsOverride string,
 ) error {
-	p.Banner("tracebloc", "cluster doctor")
+	p.Banner("tracebloc", "doctor")
 
 	// Auth / config checks run FIRST and don't need a cluster — so `doctor` can
 	// diagnose a failed provision (bad/expired token, wrong env, no active

@@ -153,6 +153,14 @@ func (p *Printer) Infof(format string, a ...any) {
 	p.out("  %s %s\n", p.paint("·", color.Faint), fmt.Sprintf(format, a...))
 }
 
+// MenuRow prints a home-screen command row: a dim · bullet, the command padded to
+// width (normal weight, so it's the primary element), a 4-space gap, then the
+// description dimmed — so the command clearly stands out against it. Used by the
+// home screen's command buckets.
+func (p *Printer) MenuRow(width int, cmd, desc string) {
+	p.out("  %s %-*s    %s\n", p.paint("·", color.Faint), width, cmd, p.paint(desc, color.Faint))
+}
+
 // CheckLine, CrossLine, and WarnLine render the status-aware home screen's
 // two-axis state block ("Signed in as …", "Secure environment … · Online"),
 // each led by a colored glyph. They exist alongside Successf/Errorf/Warnf

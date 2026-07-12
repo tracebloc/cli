@@ -21,7 +21,9 @@ func TestRootCmd_HelpMentionsBinary(t *testing.T) {
 	}
 
 	got := out.String()
-	for _, want := range []string{"tracebloc", "version"} {
+	// `doctor` is now a top-level command (promoted from `cluster doctor`), so it
+	// must appear in the root help alongside the binary name + version.
+	for _, want := range []string{"tracebloc", "version", "doctor"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("expected help text to mention %q, got:\n%s", want, got)
 		}

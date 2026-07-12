@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,22 +41,32 @@ func TestRenderHome_States(t *testing.T) {
 		{
 			name: "online with full compute",
 			model: homeModel{
-				state: homeOnline, email: "alice@acme.io", envName: "acme-01",
+				state: homeOnline, email: "alice@acme.io", name: "Alice", envName: "acme-01",
 				compute: computeInfo{CPU: 8, MemGiB: 32, GPU: 1}, hasCompute: true,
-				inv: binTracebloc, fullMenu: true,
+				inv: binTracebloc, fullMenu: true, tbTip: true, hasResources: true,
 			},
 			present: []string{
-				"Welcome to your secure environment for AI",
+				"Welcome to your secure environment for AI, Alice 👋", // greeting by name
 				"Signed in as alice@acme.io",
 				`Secure environment "acme-01" · Online (8 CPU · 32 GiB · 1 GPU)`,
+				"Your data",
 				"tracebloc data ingest", "tracebloc data list", "tracebloc data delete",
-				"tracebloc cluster doctor", "tracebloc delete",
+				"Your secure environment",
+				"tracebloc resources", // shown because a resources command is registered
+				"tracebloc doctor", "tracebloc delete",
+				"tip · type  tb  instead of  tracebloc — either works",
 				"Add --help to any command for the flags.",
+				"──────────────────────────────", // header + footer rule
 				"love from tracebloc",
 			},
 			// The two axes stay separate + honest: no "running"/"offline"/signed-out
-			// language on a healthy online screen.
-			absent: []string{"· running", "offline", "Not signed in", "No secure environment"},
+			// language on a healthy online screen. And the diagnostic is the NEW
+			// top-level `doctor`, never the old `cluster doctor`; the "Manage" and
+			// "Work with your data" buckets are gone.
+			absent: []string{
+				"· running", "offline", "Not signed in", "No secure environment",
+				"cluster doctor", "Manage", "Work with your data",
+			},
 		},
 		{
 			name: "online without GPU omits the GPU dimension",
@@ -84,7 +97,7 @@ func TestRenderHome_States(t *testing.T) {
 				inv: binTracebloc, fullMenu: true,
 			},
 			present: []string{
-				`Secure environment "acme-01" · running — couldn't confirm it's connected to tracebloc — run tracebloc cluster doctor`,
+				`Secure environment "acme-01" · running — couldn't confirm it's connected to tracebloc — run tracebloc doctor`,
 			},
 			absent: []string{"· Online", "hasn't heard from it"},
 		},
@@ -98,7 +111,7 @@ func TestRenderHome_States(t *testing.T) {
 				inv: binTracebloc, fullMenu: true, confirmedNotOnline: true,
 			},
 			present: []string{
-				`Secure environment "acme-01" · running, but tracebloc hasn't heard from it — run tracebloc cluster doctor`,
+				`Secure environment "acme-01" · running, but tracebloc hasn't heard from it — run tracebloc doctor`,
 			},
 			absent: []string{"· Online", "couldn't confirm"},
 		},
@@ -111,7 +124,7 @@ func TestRenderHome_States(t *testing.T) {
 				inv: binTracebloc, fullMenu: true,
 			},
 			present: []string{
-				`Secure environment "acme-01" · starting up, not ready yet — run tracebloc cluster doctor`,
+				`Secure environment "acme-01" · starting up, not ready yet — run tracebloc doctor`,
 			},
 			absent: []string{"· Online", "hasn't heard from it"},
 		},
@@ -122,12 +135,12 @@ func TestRenderHome_States(t *testing.T) {
 				inv: binTB, fullMenu: true,
 			},
 			present: []string{
-				`Secure environment "acme-01" · can't reach it from here — run tb cluster doctor`,
+				`Secure environment "acme-01" · can't reach it from here — run tb doctor`,
 				"tb data ingest", // examples echo the invoked name
 			},
 			// Not the bare "offline" (misleading for the reachable-cluster-wrong-context
 			// cause), and never a green Online.
-			absent: []string{"· offline", "· Online", "tracebloc data ingest"},
+			absent: []string{"· offline", "· Online", "tracebloc data ingest", "cluster doctor"},
 		},
 		{
 			name:  "signed in, no environment nudges the installer",
@@ -135,10 +148,10 @@ func TestRenderHome_States(t *testing.T) {
 			present: []string{
 				"Signed in as a@b.io",
 				"No secure environment on this machine yet — run the installer to set one up.",
-				"tracebloc cluster doctor", // still offer to diagnose
+				"tracebloc doctor", // still offer to diagnose
 			},
 			// Lean: don't parade data commands at a machine with no environment.
-			absent: []string{"data ingest", "· Online", "Add --help"},
+			absent: []string{"data ingest", "· Online", "Add --help", "cluster doctor"},
 		},
 		{
 			name:  "not signed in is minimal",
@@ -192,12 +205,13 @@ func TestRenderHome_States(t *testing.T) {
 // case opts into a remembered name.
 func baseDeps() homeDeps {
 	return homeDeps{
-		signIn:         func() (bool, string) { return true, "alice@acme.io" },
+		signIn:         func() (bool, string, string) { return true, "alice@acme.io", "" },
 		probeEnv:       func(context.Context) envProbe { return envProbe{local: localLive, name: "acme-01"} },
 		probeBeat:      func(context.Context) heartbeatState { return beatOnline },
 		rememberedName: func() string { return "" },
 		invoked:        func() string { return binTracebloc },
 		tbAvailable:    func() bool { return false },
+		hasResources:   func() bool { return false },
 		budget:         2 * time.Second,
 	}
 }
@@ -212,7 +226,7 @@ func TestResolveHomeModel_States(t *testing.T) {
 	}{
 		{
 			name:   "signed out",
-			mutate: func(d *homeDeps) { d.signIn = func() (bool, string) { return false, "" } },
+			mutate: func(d *homeDeps) { d.signIn = func() (bool, string, string) { return false, "", "" } },
 			want:   homeNotSignedIn,
 		},
 		{
@@ -390,7 +404,7 @@ func TestResolveHomeModel_TbTip(t *testing.T) {
 	})
 	t.Run("signed out never tips", func(t *testing.T) {
 		d := baseDeps()
-		d.signIn = func() (bool, string) { return false, "" }
+		d.signIn = func() (bool, string, string) { return false, "", "" }
 		d.tbAvailable = func() bool { return true }
 		if resolveHomeModel(context.Background(), d).tbTip {
 			t.Fatal("the minimal signed-out screen carries no tip")
@@ -607,6 +621,204 @@ func TestSanitizeInvoked(t *testing.T) {
 	for argv0, want := range cases {
 		if got := sanitizeInvoked(argv0); got != want {
 			t.Errorf("sanitizeInvoked(%q) = %q, want %q", argv0, got, want)
+		}
+	}
+}
+
+// TestRenderHome_MatchesLockedDemo is the design sign-off: the signed-in /
+// Online screen must render byte-for-byte the LOCKED reference (cmd/hsdemo). The
+// expected text is reconstructed here from the reference's exact structure —
+// two-blank header, greeting-by-name, dim 30-col rule, the two status axes, the
+// two command buckets (command column padded to a single width, descriptions
+// dim), and the dim sign-off. MenuRow spacing is computed (not hand-typed) at
+// the same width the renderer uses, so the only thing under test is that the
+// renderer emits this exact sequence. Any drift in spacing, copy, glyphs, or
+// blank-line count fails here.
+func TestRenderHome_MatchesLockedDemo(t *testing.T) {
+	// The locked example: signed in, Online, invoked as `tb`, a real alias so the
+	// tip shows, and a resources command registered — matching the demo's inputs.
+	m := homeModel{
+		state: homeOnline, email: "lukas@tracebloc.io", name: "Lukas", envName: "lukas-01",
+		compute: computeInfo{CPU: 8, MemGiB: 32, GPU: 1}, hasCompute: true,
+		inv: binTB, tbTip: true, fullMenu: true, hasResources: true,
+	}
+
+	rule := "  ──────────────────────────────" // 2-space indent + 30 cols
+	// row mirrors ui.MenuRow's color-off output at the width the renderer uses for
+	// this menu (widest entry: "tb data ingest" / "tb data delete" = 14).
+	row := func(cmd, desc string) string { return fmt.Sprintf("  · %-14s    %s", cmd, desc) }
+
+	want := strings.Join([]string{
+		"",
+		"",
+		"  Welcome to your secure environment for AI, Lukas 👋",
+		"",
+		rule,
+		"",
+		"  ✓ Signed in as lukas@tracebloc.io",
+		`  ✓ Secure environment "lukas-01" · Online (8 CPU · 32 GiB · 1 GPU)`,
+		"",
+		"",
+		"  Your data",
+		"",
+		row("tb data ingest", "load a dataset into your secure environment"),
+		row("tb data list", "list your datasets"),
+		row("tb data delete", "remove a dataset"),
+		"",
+		"  Your secure environment",
+		"",
+		row("tb resources", "manage compute & memory"),
+		row("tb doctor", "check the connection & diagnose issues"),
+		row("tb delete", "remove tracebloc from this machine"),
+		"",
+		"",
+		"  tip · type  tb  instead of  tracebloc — either works",
+		"  Add --help to any command for the flags.",
+		"",
+		rule,
+		"",
+		"  love from tracebloc 💚",
+		"",
+	}, "\n") + "\n"
+
+	if got := renderToString(m); got != want {
+		t.Errorf("locked-demo render drifted.\n--- got  (%d bytes) ---\n%q\n--- want (%d bytes) ---\n%q",
+			len(got), got, len(want), want)
+	}
+}
+
+// TestGreetingName pins the name-derivation rule: profile first name wins;
+// otherwise a clean single-alpha email local-part, capitalized; otherwise "".
+func TestGreetingName(t *testing.T) {
+	cases := []struct{ firstName, email, want string }{
+		{"Lukas", "lukas@tracebloc.io", "Lukas"},  // profile first name wins outright
+		{"  Divya  ", "someone@else.io", "Divya"}, // trimmed, and beats the email
+		{"", "lukas@tracebloc.io", "Lukas"},       // email local-part, capitalized
+		{"", "alice@acme.io", "Alice"},            //
+		{"", "LUKAS@x.io", "LUKAS"},               // only the first rune is touched
+		{"", "lukas.wuttke@tracebloc.io", ""},     // dotted → not a single clean token
+		{"", "l.w+tag@x.io", ""},                  // punctuation → omit
+		{"", "user123@x.io", ""},                  // digits → omit
+		{"", "@nolocal.io", ""},                   // empty local part
+		{"", "noatsign", ""},                      // no @ at all
+		{"", "", ""},                              // nothing to derive from
+	}
+	for _, c := range cases {
+		if got := greetingName(c.firstName, c.email); got != c.want {
+			t.Errorf("greetingName(%q, %q) = %q, want %q", c.firstName, c.email, got, c.want)
+		}
+	}
+}
+
+// TestResolveHomeModel_Name drives the derivation through the detection layer:
+// the profile-name / email-fallback / omit branches all flow into m.name.
+func TestResolveHomeModel_Name(t *testing.T) {
+	t.Run("profile first name is preferred over the email", func(t *testing.T) {
+		d := baseDeps()
+		d.signIn = func() (bool, string, string) { return true, "lukas@tracebloc.io", "Divya" }
+		if got := resolveHomeModel(context.Background(), d).name; got != "Divya" {
+			t.Errorf("name = %q, want Divya", got)
+		}
+	})
+	t.Run("falls back to a clean email local-part, capitalized", func(t *testing.T) {
+		d := baseDeps()
+		d.signIn = func() (bool, string, string) { return true, "lukas@tracebloc.io", "" }
+		if got := resolveHomeModel(context.Background(), d).name; got != "Lukas" {
+			t.Errorf("name = %q, want Lukas", got)
+		}
+	})
+	t.Run("omitted when neither yields a clean single token", func(t *testing.T) {
+		d := baseDeps()
+		d.signIn = func() (bool, string, string) { return true, "lukas.wuttke@tracebloc.io", "" }
+		if got := resolveHomeModel(context.Background(), d).name; got != "" {
+			t.Errorf("name = %q, want empty", got)
+		}
+	})
+}
+
+// TestRenderHome_ResourcesRowGating: the `resources` row appears iff
+// m.hasResources (the render side of the command-tree gate) — driven both ways.
+func TestRenderHome_ResourcesRowGating(t *testing.T) {
+	base := homeModel{
+		state: homeOnline, email: "a@b.io", envName: "n",
+		inv: binTracebloc, fullMenu: true,
+	}
+	t.Run("present when a resources command is registered", func(t *testing.T) {
+		m := base
+		m.hasResources = true
+		if got := renderToString(m); !strings.Contains(got, "tracebloc resources") {
+			t.Errorf("resources row missing when registered:\n%s", got)
+		}
+	})
+	t.Run("absent when no resources command is registered", func(t *testing.T) {
+		m := base
+		m.hasResources = false
+		if got := renderToString(m); strings.Contains(got, "resources") {
+			t.Errorf("resources row must not appear when the command isn't wired:\n%s", got)
+		}
+	})
+}
+
+// TestHasTopLevelCommand pins the command-tree gate that feeds hasResources: the
+// commands wired today are detected, `resources` is NOT (so the home row stays
+// absent until #237 lands), and adding one flips the gate — which is exactly how
+// the row will appear automatically once the command ships.
+func TestHasTopLevelCommand(t *testing.T) {
+	root := NewRootCmd(BuildInfo{Version: "test"})
+
+	for _, name := range []string{"data", "cluster", "doctor", "delete"} {
+		if !hasTopLevelCommand(root, name) {
+			t.Errorf("expected %q to be registered on the root", name)
+		}
+	}
+	if hasTopLevelCommand(root, "resources") {
+		t.Error("resources must not be wired yet — the home row would name a non-existent command")
+	}
+	root.AddCommand(&cobra.Command{Use: "resources"})
+	if !hasTopLevelCommand(root, "resources") {
+		t.Error("resources must be detected once registered, so the home row appears automatically")
+	}
+}
+
+// TestDoctor_TopLevelSharesClusterDoctor: the new top-level `doctor` runs the
+// SAME code path as the (now hidden) `cluster doctor` alias. Not-signed-in + an
+// unreadable kubeconfig makes the shared path deterministic — auth fails, the
+// kubeconfig load fails, and the exit escalates to 2 — so both entry points must
+// produce the identical exit code and the same shared diagnostic output.
+func TestDoctor_TopLevelSharesClusterDoctor(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // signed out
+	badKC := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(badKC, []byte("}{ this is not valid kubeconfig"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) (string, *exitError) {
+		root := NewRootCmd(BuildInfo{Version: "test"})
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs(append(args, "--kubeconfig", badKC))
+		err := root.Execute()
+		var ee *exitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("%v: want an *exitError, got %v", args, err)
+		}
+		return out.String(), ee
+	}
+
+	topOut, topErr := run("doctor")
+	clOut, clErr := run("cluster", "doctor")
+
+	if topErr.Code() != clErr.Code() {
+		t.Errorf("exit codes differ: `doctor`=%d, `cluster doctor`=%d — they must share one code path",
+			topErr.Code(), clErr.Code())
+	}
+	if topErr.Code() != 2 {
+		t.Errorf("`doctor` exit = %d, want 2 (auth fail + kubeconfig fail escalates)", topErr.Code())
+	}
+	for label, out := range map[string]string{"doctor": topOut, "cluster doctor": clOut} {
+		if !strings.Contains(out, "Auth & config") || !strings.Contains(out, "not signed in") {
+			t.Errorf("%s output missing the shared diagnostic (auth section + not-signed-in):\n%s", label, out)
 		}
 	}
 }

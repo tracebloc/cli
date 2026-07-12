@@ -62,7 +62,6 @@ func TestGroup_UnknownSubcommand_Suggests(t *testing.T) {
 	}{
 		{[]string{"data", "ingst"}, "ingest"},
 		{[]string{"cluster", "inf"}, "info"},
-		{[]string{"cluster", "doctr"}, "doctor"},
 	}
 	for _, c := range cases {
 		t.Run(strings.Join(c.args, " "), func(t *testing.T) {
@@ -74,13 +73,16 @@ func TestGroup_UnknownSubcommand_Suggests(t *testing.T) {
 	}
 }
 
-// The hidden `client list` (Hidden per Rev-9 §7.10) must NOT be offered as a
-// suggestion even though `lst` is one edit from `list` — SuggestionsFor skips
-// unavailable commands.
+// Hidden subcommands must NOT be offered as suggestions even when the typo is
+// one edit away — SuggestionsFor skips unavailable commands. Two are hidden:
+// `client list` (Rev-9 §7.10) and `cluster doctor` (now a hidden alias of the
+// top-level `doctor`, cli#244).
 func TestGroup_HiddenSubcommand_NotSuggested(t *testing.T) {
-	_, out := execGroup(t, "client", "lst")
-	if strings.Contains(out, "list") {
+	if _, out := execGroup(t, "client", "lst"); strings.Contains(out, "list") {
 		t.Errorf("hidden `client list` must not be suggested:\n%s", out)
+	}
+	if _, out := execGroup(t, "cluster", "doctr"); strings.Contains(out, "doctor") {
+		t.Errorf("hidden `cluster doctor` must not be suggested:\n%s", out)
 	}
 }
 

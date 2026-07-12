@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,10 +48,15 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// doctorPath is the REAL command that diagnoses the environment on develop
-// (`cluster doctor`, wired in cluster.go). Kept as a const so the home screen
-// never invents a top-level `doctor` — a rename is a separate follow-up.
-const doctorPath = "cluster doctor"
+// doctorPath is the command the home screen + env-status lines tell the user to
+// run to diagnose the environment. It's the top-level `doctor` (newDoctorCmd,
+// registered on the root; `cluster doctor` stays working as a hidden alias), so
+// the lines read "run <inv> doctor".
+const doctorPath = "doctor"
+
+// homeRule is the 30-column dim divider drawn under the greeting and above the
+// sign-off — the same string top and bottom, matching the locked design.
+const homeRule = "──────────────────────────────"
 
 // Invoked binary names we recognize. `<inv>` in the examples echoes how the user
 // actually called the CLI so copy-paste matches their muscle memory.
@@ -97,12 +103,17 @@ type computeInfo struct {
 type homeModel struct {
 	state      homeState
 	email      string // signed-in account, "" when unknown
+	name       string // first name for the greeting (profile → email local-part → ""); see greetingName
 	envName    string // secure environment name, when known
 	compute    computeInfo
 	hasCompute bool
 	inv        string // invoked binary name: "tb" or "tracebloc"
 	tbTip      bool   // show the "type tb instead" tip
 	fullMenu   bool   // render the full command menu (an environment exists here)
+	// hasResources gates the `resources` row: shown only when a `resources`
+	// command is actually registered on the root (root.go checks the tree), so
+	// the menu never advertises a command that isn't wired (#237).
+	hasResources bool
 	// confirmedNotOnline distinguishes the two honest flavors of homeRunning:
 	// true = tracebloc's backend POSITIVELY reported this client not-online
 	// (offline/pending), false = we merely couldn't confirm either way. Same
@@ -147,9 +158,14 @@ type envProbe struct {
 // implementations; tests inject fakes to drive every state, the honesty
 // fallback, and the timeout/degrade path without touching a real cluster.
 type homeDeps struct {
-	signIn    func() (signedIn bool, email string)
+	signIn    func() (signedIn bool, email, firstName string)
 	probeEnv  func(ctx context.Context) envProbe
 	probeBeat func(ctx context.Context) heartbeatState
+	// hasResources reports whether a `resources` command is registered on the
+	// root — the gate for the home screen's `resources` row. The production
+	// wiring (renderHomeScreen) checks the real command tree; tests drive both
+	// sides.
+	hasResources func() bool
 	// rememberedName is the active client's cached name (no network). It's the
 	// name we fall back on whenever the probe couldn't surface one — including
 	// the budget-timeout path, so a provisioned machine degrades to a *named*
@@ -168,14 +184,22 @@ func defaultHomeDeps() homeDeps {
 		rememberedName: realRememberedName,
 		invoked:        invokedName,
 		tbAvailable:    tbAliasAvailable,
-		budget:         homeDetectBudget,
+		// Safe default: assume `resources` isn't wired. renderHomeScreen
+		// overrides this from the real command tree; a test may too.
+		hasResources: func() bool { return false },
+		budget:       homeDetectBudget,
 	}
 }
 
 // renderHomeScreen is the bare-`tracebloc` entry point: detect (bounded,
-// best-effort) then render. Called from root.RunE.
-func renderHomeScreen(ctx context.Context, p *ui.Printer) {
-	renderHome(p, resolveHomeModel(ctx, defaultHomeDeps()))
+// best-effort) then render. Called from root.RunE. resourcesRegistered says
+// whether a `resources` command is wired on the root (root.go inspects the
+// tree) — the gate for the home screen's `resources` row, so it never lists a
+// command that isn't there.
+func renderHomeScreen(ctx context.Context, p *ui.Printer, resourcesRegistered bool) {
+	d := defaultHomeDeps()
+	d.hasResources = func() bool { return resourcesRegistered }
+	renderHome(p, resolveHomeModel(ctx, d))
 }
 
 // resolveHomeModel runs the (best-effort, bounded) probes and assembles the
@@ -189,7 +213,7 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 	// minimal "sign in first" screen and skip all cluster/backend I/O entirely —
 	// the common just-installed case returns immediately, and there's no
 	// login-free credential path to honestly report the environment anyway.
-	signedIn, email := d.signIn()
+	signedIn, email, firstName := d.signIn()
 	if !signedIn {
 		return homeModel{state: homeNotSignedIn, inv: inv}
 	}
@@ -221,11 +245,13 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 	}
 
 	m := homeModel{
-		email:      email,
-		inv:        inv,
-		envName:    env.name,
-		compute:    env.compute,
-		hasCompute: env.hasCompute,
+		email:        email,
+		name:         greetingName(firstName, email),
+		inv:          inv,
+		envName:      env.name,
+		compute:      env.compute,
+		hasCompute:   env.hasCompute,
+		hasResources: d.hasResources(),
 	}
 
 	switch env.local {
@@ -312,15 +338,49 @@ func collectProbes(ctx context.Context, envCh <-chan envProbe, beatCh <-chan hea
 	return env, beat
 }
 
-// realSignIn reports the signed-in state + cached email from local config — no
-// network. The cached identity is enough for the display; token validity, when
-// it matters, surfaces through the heartbeat probe (which exercises the token).
-func realSignIn() (bool, string) {
+// realSignIn reports the signed-in state + cached email and first name from
+// local config — no network. The cached identity is enough for the display;
+// token validity, when it matters, surfaces through the heartbeat probe (which
+// exercises the token).
+func realSignIn() (bool, string, string) {
 	cfg, err := config.Load()
 	if err != nil || !cfg.SignedIn() {
-		return false, ""
+		return false, "", ""
 	}
-	return true, cfg.Current().Email
+	prof := cfg.Current()
+	return true, prof.Email, prof.FirstName
+}
+
+// greetingName derives the first name shown in the signed-in greeting. It
+// prefers the profile's stored first name; failing that, the email's local part
+// — but ONLY when that's a single clean alphabetic token, so "lukas@…" → "Lukas"
+// while "lukas.wuttke@…", "l.w+tag@…", or "user123@…" fall through; failing
+// that, "" so the greeting drops the name gracefully (rendered without a comma).
+func greetingName(firstName, email string) string {
+	if n := strings.TrimSpace(firstName); n != "" {
+		return n
+	}
+	local, _, found := strings.Cut(email, "@")
+	if !found || local == "" {
+		return ""
+	}
+	for _, r := range local {
+		if !unicode.IsLetter(r) {
+			return ""
+		}
+	}
+	return capitalizeFirst(local)
+}
+
+// capitalizeFirst upper-cases the first rune of s, leaving the rest untouched
+// ("lukas" → "Lukas"). "" stays "" (never indexes an empty rune slice).
+func capitalizeFirst(s string) string {
+	r := []rune(s)
+	if len(r) == 0 {
+		return s
+	}
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }
 
 // realRememberedName is the active client's cached display name (set at
@@ -542,17 +602,20 @@ type menuBucket struct {
 
 // renderHome writes the status-aware home screen. Pure: no I/O, no clock — it's
 // a deterministic function of the model, which is what makes every state
-// table-testable.
+// table-testable. The layout is the locked design (cli#244): a two-blank-line
+// header, the greeting, a dim rule, the two honest status axes, the command
+// buckets, then a dim sign-off.
 func renderHome(p *ui.Printer, m homeModel) {
+	// ── header ── two blank lines above the greeting; below it a blank line, the
+	// rule, then a blank line before the status block.
+	p.Newline()
+	p.Newline()
+	p.Para(greeting(m))
+	p.Newline()
+	p.Hintf(homeRule)
 	p.Newline()
 
-	// Greeting: "your secure environment" only when one actually exists here.
-	switch m.state {
-	case homeOnline, homeRunning, homeStarting, homeOffline:
-		p.Para("Welcome to your secure environment for AI 👋")
-	default:
-		p.Para("Welcome to tracebloc — your secure environment for AI 👋")
-	}
+	// ── status: two axes (you · the machine), never fused ──
 
 	// Sign-in axis (you).
 	if m.state == homeNotSignedIn {
@@ -595,9 +658,14 @@ func renderHome(p *ui.Printer, m homeModel) {
 		p.WarnLine("No secure environment on this machine yet — run the installer to set one up.")
 	}
 
-	renderBuckets(p, m.inv, menuFor(m.state))
+	// ── command buckets ── two blank lines between the status block and the first
+	// section (Section leads with one blank; this Newline makes it two).
+	p.Newline()
+	renderBuckets(p, m.inv, menuFor(m))
 
-	// Closing.
+	// ── footer ── two blank lines between the last row and the tip; a trailing
+	// blank so the sign-off stands alone above the prompt.
+	p.Newline()
 	p.Newline()
 	if m.tbTip {
 		p.Hintf("tip · type  tb  instead of  tracebloc — either works")
@@ -606,15 +674,36 @@ func renderHome(p *ui.Printer, m homeModel) {
 		p.Hintf("Add --help to any command for the flags.")
 	}
 	p.Newline()
-	p.Hintf("──────────────────────────────")
-	p.Para("love from tracebloc 💚")
+	p.Hintf(homeRule)
+	p.Newline()
+	p.Hintf("love from tracebloc 💚") // dim, like the supporting text
+	p.Newline()
+}
+
+// greeting is the locked welcome line. States where a secure environment exists
+// greet the user by name ("… for AI, Lukas 👋"), dropping the name gracefully
+// when none could be derived; the not-signed-in and no-environment screens use
+// the brand greeting ("Welcome to tracebloc — …") instead, since there's no
+// environment here to call "yours".
+func greeting(m homeModel) string {
+	switch m.state {
+	case homeOnline, homeRunning, homeStarting, homeOffline:
+		if m.name != "" {
+			return fmt.Sprintf("Welcome to your secure environment for AI, %s 👋", m.name)
+		}
+		return "Welcome to your secure environment for AI 👋"
+	default:
+		return "Welcome to tracebloc — your secure environment for AI 👋"
+	}
 }
 
 // menuFor is the command buckets to show per state. Not-signed-in and no-env
 // stay deliberately lean (one actionable step); the environment states get the
-// full menu.
-func menuFor(state homeState) []menuBucket {
-	switch state {
+// full two-bucket menu. Offboarding (`delete`) lives under "Your secure
+// environment"; the `resources` row appears only when that command is actually
+// registered (m.hasResources) — see the field's note.
+func menuFor(m homeModel) []menuBucket {
+	switch m.state {
 	case homeNotSignedIn:
 		return []menuBucket{{
 			title: "Start here",
@@ -627,31 +716,33 @@ func menuFor(state homeState) []menuBucket {
 			title: "Your secure environment",
 			rows:  [][2]string{{doctorPath, "check the connection & diagnose issues"}},
 		}}
-	default: // online / running / offline — an environment exists here
+	default: // online / running / starting / offline — an environment exists here
+		env := make([][2]string, 0, 3)
+		if m.hasResources {
+			env = append(env, [2]string{"resources", "manage compute & memory"})
+		}
+		env = append(env,
+			[2]string{doctorPath, "check the connection & diagnose issues"},
+			[2]string{"delete", "remove tracebloc from this machine"},
+		)
 		return []menuBucket{
 			{
-				title: "Work with your data",
+				title: "Your data",
 				rows: [][2]string{
 					{"data ingest", "load a dataset into your secure environment"},
 					{"data list", "list your datasets"},
 					{"data delete", "remove a dataset"},
 				},
 			},
-			{
-				title: "Your secure environment",
-				rows:  [][2]string{{doctorPath, "check the connection & diagnose issues"}},
-			},
-			{
-				title: "Manage",
-				rows:  [][2]string{{"delete", "remove tracebloc from this machine"}},
-			},
+			{title: "Your secure environment", rows: env},
 		}
 	}
 }
 
-// renderBuckets prints each bucket as a Section + "· <inv> <cmd>  <description>"
-// rows, with the command column padded to a single width across ALL buckets so
-// the descriptions line up in one column.
+// renderBuckets prints each bucket as a Section title, a blank line, then one
+// MenuRow per command ("· <inv> <cmd>    <description>"), with the command
+// column padded to a single width across ALL buckets so the descriptions line
+// up in one column (commands normal, descriptions dim).
 func renderBuckets(p *ui.Printer, inv string, buckets []menuBucket) {
 	width := 0
 	for _, b := range buckets {
@@ -663,8 +754,9 @@ func renderBuckets(p *ui.Printer, inv string, buckets []menuBucket) {
 	}
 	for _, b := range buckets {
 		p.Section(b.title)
+		p.Newline() // blank line under the title
 		for _, r := range b.rows {
-			p.Infof("%-*s  %s", width, inv+" "+r[0], r[1])
+			p.MenuRow(width, inv+" "+r[0], r[1])
 		}
 	}
 }

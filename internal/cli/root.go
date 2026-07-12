@@ -88,6 +88,10 @@ Helm, no YAML, no kubectl needed.`,
 	root.AddCommand(newVersionCmd(info))
 	root.AddCommand(newIngestCmd())
 	root.AddCommand(newClusterCmd())
+	// Top-level `doctor` — the environment health sweep the home screen and the
+	// env-status lines point at. Shares its RunE with the hidden `cluster
+	// doctor` alias (see newDoctorCmd), so there's one diagnostic code path.
+	root.AddCommand(newDoctorCmd(false))
 	root.AddCommand(newDataCmd())
 	// RFC-0001 (backend#830): browser sign-in + client provisioning.
 	root.AddCommand(newLoginCmd())
@@ -108,11 +112,28 @@ Helm, no YAML, no kubectl needed.`,
 		if len(args) > 0 {
 			return cmd.Help() // an arg that wasn't a known subcommand
 		}
-		renderHomeScreen(cmd.Context(), printerFor(cmd))
+		// The home screen shows a `resources` row only when that command is
+		// actually wired on the root (#237 unmerged today → absent; it appears
+		// automatically once registered). Gate it on the live tree, never a
+		// hardcode, so we never advertise a command that isn't there.
+		renderHomeScreen(cmd.Context(), printerFor(cmd), hasTopLevelCommand(cmd.Root(), "resources"))
 		return nil
 	}
 
 	return root
+}
+
+// hasTopLevelCommand reports whether a command with the given name is registered
+// directly on the root. The home screen uses it to gate rows on commands that
+// may not be wired yet (e.g. `resources`, #237), so a row never names a
+// command that doesn't exist.
+func hasTopLevelCommand(cmd *cobra.Command, name string) bool {
+	for _, c := range cmd.Root().Commands() {
+		if c.Name() == name {
+			return true
+		}
+	}
+	return false
 }
 
 // runGroup is the RunE for a parent "group" command (data, cluster, auth,
