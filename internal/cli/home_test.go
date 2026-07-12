@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -482,6 +484,55 @@ func TestCollectProbes_BudgetExpiryKeepsBufferedResults(t *testing.T) {
 			t.Fatalf("round %d: completed beat result dropped: %v", i, beat)
 		}
 	}
+}
+
+// TestRealProbeEnv_OwnershipGate: with no active-client binding, the probe must
+// never go hunting for a release — the kubeconfig-default-namespace lookup and
+// the cluster-wide scan can both surface an UNRELATED client (a shared cluster,
+// a colleague's install), which the home screen would then greet as "your
+// secure environment". Unprovisioned ⇒ bare no-release (→ the honest no-env
+// screen), without touching the cluster; provisioned ⇒ the probe proceeds.
+func TestRealProbeEnv_OwnershipGate(t *testing.T) {
+	// Syntactically valid kubeconfig pointing at an unroutable TEST-NET address:
+	// loading succeeds, so only the ownership gate stops the probe before it
+	// dials — without the gate this run would end localUnreachable, not
+	// localNoRelease.
+	const kubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster: {server: "https://192.0.2.1:1"}
+contexts:
+- name: ctx
+  context: {cluster: c, user: u}
+current-context: ctx
+users:
+- name: u
+  user: {}
+`
+	t.Run("no active client never adopts a foreign release", func(t *testing.T) {
+		t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // nothing provisioned here
+		kc := filepath.Join(t.TempDir(), "kubeconfig")
+		if err := os.WriteFile(kc, []byte(kubeconfig), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("KUBECONFIG", kc)
+		ep := realProbeEnv(context.Background())
+		if ep.local != localNoRelease || ep.name != "" {
+			t.Fatalf("unprovisioned probe = %+v, want bare localNoRelease (the ownership gate)", ep)
+		}
+	})
+	t.Run("provisioned machines still probe the cluster", func(t *testing.T) {
+		writeActiveClientConfig(t, "munich-radiology", "Munich Radiology")
+		kc := filepath.Join(t.TempDir(), "kubeconfig")
+		if err := os.WriteFile(kc, []byte("not a kubeconfig"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("KUBECONFIG", kc)
+		if ep := realProbeEnv(context.Background()); ep.local != localUnreachable {
+			t.Fatalf("provisioned probe must proceed to the cluster (and fail as unreachable here), got %+v", ep)
+		}
+	})
 }
 
 // node builds a Ready (unless notReady) node with the given allocatable.

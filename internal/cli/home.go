@@ -346,6 +346,21 @@ func realProbeEnv(ctx context.Context) envProbe {
 	// the "provisioned ⇒ named offline" fallback lives in exactly one place.
 	opts := cluster.KubeconfigOptions{}
 	binding := bindActiveClientNamespace(&opts)
+	// OWNERSHIP GATE: no active-client binding ⇒ nothing was ever provisioned
+	// for this profile, so no release the kubeconfig can reach is honestly
+	// YOURS. Without the binding, discovery would fall back to the kubeconfig's
+	// default namespace and then the cluster-wide scan — either can surface an
+	// UNRELATED client (a shared cluster, a colleague's install), which this
+	// screen would then greet as "your secure environment". The data commands
+	// run that scan behind a visible retarget note and an explicit user action;
+	// a status screen has neither, and §7.5's rule (a miss must never silently
+	// retarget to some other client) applies doubly here. Report no-release —
+	// resolveHomeModel renders the honest no-env screen (or a named offline via
+	// the remembered-name fallback) — and skip the cluster I/O entirely, which
+	// also keeps the common unprovisioned re-entry instant.
+	if !binding.applied {
+		return envProbe{local: localNoRelease}
+	}
 	resolved, err := cluster.Load(opts)
 	if err != nil {
 		return envProbe{local: localUnreachable}
