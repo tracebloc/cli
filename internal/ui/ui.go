@@ -153,6 +153,30 @@ func (p *Printer) Infof(format string, a ...any) {
 	p.out("  %s %s\n", p.paint("·", color.Faint), fmt.Sprintf(format, a...))
 }
 
+// CheckLine, CrossLine, and WarnLine render the status-aware home screen's
+// two-axis state block ("Signed in as …", "Secure environment … · Online"),
+// each led by a colored glyph. They exist alongside Successf/Errorf/Warnf
+// (which use the heavier ✔/✖ and, for Warnf, a wider gap) because the home
+// screen's locked copy pins the lighter ✓/✗ glyphs and needs all three lines
+// single-spaced so they align in one column.
+
+// CheckLine prints an affirmative status line led by a green ✓.
+func (p *Printer) CheckLine(format string, a ...any) {
+	p.out("  %s %s\n", p.paint("✓", color.FgGreen), fmt.Sprintf(format, a...))
+}
+
+// CrossLine prints a negative status line led by a red ✗ (lighter and
+// non-bold, unlike Errorf's ✖) — e.g. "not signed in" or an offline environment.
+func (p *Printer) CrossLine(format string, a ...any) {
+	p.out("  %s %s\n", p.paint("✗", color.FgRed), fmt.Sprintf(format, a...))
+}
+
+// WarnLine prints a caution status line led by a yellow ⚠, single-spaced to
+// align with CheckLine/CrossLine (Warnf double-spaces for standalone warnings).
+func (p *Printer) WarnLine(format string, a ...any) {
+	p.out("  %s %s\n", p.paint("⚠", color.FgYellow), fmt.Sprintf(format, a...))
+}
+
 // Detailf prints an indented, dim step-detail line — but ONLY in verbose mode
 // (WithVerbose). Use for the streamed device-flow → provision → install trace
 // (§8.5 R-verbose) that would be noise by default; the quiet path skips it.

@@ -99,24 +99,16 @@ Helm, no YAML, no kubectl needed.`,
 	// so this removes tracebloc from the host and avoids colliding with `data delete`.
 	root.AddCommand(newDeleteCmd())
 
-	// Bare `tracebloc` (no subcommand) renders a friendly home screen
-	// instead of cobra's raw usage dump. Subcommands and --help are
-	// unaffected — cobra dispatches those before this RunE runs.
+	// Bare `tracebloc` (no subcommand) renders a status-aware home screen —
+	// where you stand (signed in? environment live?) then the commands —
+	// instead of cobra's raw usage dump. Subcommands and --help are unaffected:
+	// cobra dispatches those before this RunE runs. Detection is best-effort and
+	// time-bounded (see home.go); it never errors, so bare `tracebloc` exits 0.
 	root.RunE = func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			return cmd.Help() // an arg that wasn't a known subcommand
 		}
-		p := printerFor(cmd)
-		p.Banner("tracebloc", "connect this machine to tracebloc and manage its data")
-		p.Section("Get started")
-		p.Infof("tracebloc login                  — sign in to tracebloc (browser)")
-		p.Infof("tracebloc data ingest ./data     — stage a dataset into your client")
-		p.Infof("tracebloc data list              — datasets in the cluster")
-		p.Infof("tracebloc data delete <table>    — delete an ingested dataset")
-		p.Infof("tracebloc cluster doctor         — diagnose connection issues")
-		p.Infof("tracebloc delete                 — remove tracebloc from this machine")
-		p.Newline()
-		p.Hintf("Add --help to any command for the full flag list.")
+		renderHomeScreen(cmd.Context(), printerFor(cmd))
 		return nil
 	}
 
