@@ -163,6 +163,64 @@ func TestRun_PassesRequestFieldsThrough(t *testing.T) {
 	}
 }
 
+// TestRun_PrintsCorrelationId_GeneratedKey: the auto-generated
+// idempotency key doubles as the end-to-end correlation id
+// (backend#1028 item 3) — the same string becomes the Job's
+// TRACEBLOC_INGEST_CORRELATION_ID env, its ingestion-run label, and
+// the backend registration payload's correlation_id. Without this
+// line the customer has no copy of the one id that threads all
+// layers together.
+func TestRun_PrintsCorrelationId_GeneratedKey(t *testing.T) {
+	sub := &fakeSubmitter{
+		resp: &SubmitResponse{JobName: "j", Namespace: "ns"},
+	}
+	var out bytes.Buffer
+
+	_, err := Run(context.Background(), Options{
+		Submitter:        sub,
+		Client:           fake.NewClientset(),
+		IngestConfigYAML: "yaml",
+		Detach:           true,
+		Out:              &out,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sub.gotRequest == nil {
+		t.Fatal("submitter never called")
+	}
+	want := "Correlation id: " + sub.gotRequest.IdempotencyKey
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("output missing %q in:\n%s", want, out.String())
+	}
+}
+
+// TestRun_PrintsCorrelationId_OverrideAndReplay: an explicit
+// --idempotency-key override is echoed verbatim, and the line also
+// prints on the replay path — a replayed run is exactly when the
+// customer reaches for the id to find the already-running Job.
+func TestRun_PrintsCorrelationId_OverrideAndReplay(t *testing.T) {
+	sub := &fakeSubmitter{
+		resp: &SubmitResponse{JobName: "j", Namespace: "ns", Replay: true},
+	}
+	var out bytes.Buffer
+
+	_, err := Run(context.Background(), Options{
+		Submitter:        sub,
+		Client:           fake.NewClientset(),
+		IngestConfigYAML: "yaml",
+		IdempotencyKey:   "nightly-claims-2026.07",
+		Detach:           true,
+		Out:              &out,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), "Correlation id: nightly-claims-2026.07") {
+		t.Errorf("output missing correlation id line in:\n%s", out.String())
+	}
+}
+
 // TestRun_NilOutDefaultsToDiscard: callers passing nil Out
 // shouldn't panic. The orchestrator silently discards output.
 func TestRun_NilOutDefaultsToDiscard(t *testing.T) {
