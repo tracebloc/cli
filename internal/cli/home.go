@@ -686,9 +686,9 @@ func renderHome(p *ui.Printer, m homeModel) {
 		p.WarnLine("No secure environment on this machine yet — run the installer to set one up.")
 	}
 
-	// ── command buckets ── two blank lines between the status block and the first
-	// section (Section leads with one blank; this Newline makes it two).
-	p.Newline()
+	// ── command buckets ── two blank lines above EVERY section: renderBuckets
+	// emits a Newline before each Section (whose own leading blank makes two), so
+	// the status→first-section and inter-section gaps are identical.
 	renderBuckets(p, m.inv, menuFor(m))
 
 	// ── footer ── two blank lines between the last row and the tip; a trailing
@@ -767,10 +767,12 @@ func menuFor(m homeModel) []menuBucket {
 	}
 }
 
-// renderBuckets prints each bucket as a Section title, a blank line, then one
-// MenuRow per command ("· <inv> <cmd>    <description>"), with the command
-// column padded to a single width across ALL buckets so the descriptions line
-// up in one column (commands normal, descriptions dim).
+// renderBuckets prints each bucket as a leading blank line, a Section title,
+// another blank line, then one MenuRow per command ("· <inv> <cmd>
+// <description>") — the leading blank plus Section's own give two blank lines
+// above every section. The command column is padded to a single width across
+// ALL buckets so the descriptions line up in one column (commands normal,
+// descriptions dim).
 func renderBuckets(p *ui.Printer, inv string, buckets []menuBucket) {
 	width := 0
 	for _, b := range buckets {
@@ -781,6 +783,7 @@ func renderBuckets(p *ui.Printer, inv string, buckets []menuBucket) {
 		}
 	}
 	for _, b := range buckets {
+		p.Newline() // two blank lines above each section (this + Section's own leading blank)
 		p.Section(b.title)
 		p.Newline() // blank line under the title
 		for _, r := range b.rows {

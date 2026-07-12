@@ -665,6 +665,7 @@ func TestRenderHome_MatchesLockedDemo(t *testing.T) {
 		row("tb data list", "list your datasets"),
 		row("tb data delete", "remove a dataset"),
 		"",
+		"", // two blank lines above every section, not just the first
 		"  Your secure environment",
 		"",
 		row("tb resources", "manage compute & memory"),
