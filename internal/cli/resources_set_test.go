@@ -420,6 +420,30 @@ func TestWizard_CtrlCIsACleanCancel(t *testing.T) {
 	}
 }
 
+// TestSet_ConfirmCtrlCIsACleanCancel: the OTHER interrupt point — Ctrl-C at the
+// step-6 "Let each training run use up to …?" confirm (flags route, so the
+// wizard never runs) — must behave exactly like answering "No": exit 0, the
+// same "Cancelled" note, no helm mutation. A silent exit-0 here would let the
+// user believe the change went through.
+func TestSet_ConfirmCtrlCIsACleanCancel(t *testing.T) {
+	calls := fakeHelm(t)
+	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
+	// Flags set, no --yes, on a "terminal" (prompter present) → the only prompt
+	// reached is the final confirm, which the prompter interrupts.
+	err, out := runSet(t, cs, cancellingPrompter{}, setReq{cores: "4", coresSet: true})
+	if err != nil {
+		t.Fatalf("Ctrl-C at the confirm must be a clean cancel (nil error → exit 0), got: %v", err)
+	}
+	if !strings.Contains(out, "Cancelled — nothing was changed.") {
+		t.Errorf("cancel note missing — a silent success hides the abort:\n%s", out)
+	}
+	for _, c := range *calls {
+		if len(c) >= 3 && c[1] == "upgrade" && c[2] != "--help" {
+			t.Errorf("a cancelled confirm must not `helm upgrade`: %v", c)
+		}
+	}
+}
+
 // TestSet_CPUOnlyMachineIgnoresChartDefaultGPU: the chart stamps a default
 // GPU_REQUESTS on every install (CPU boxes included); a plain `--cores` change on
 // a GPU-less machine must NOT inherit that phantom GPU and fail the GPU fit-check.

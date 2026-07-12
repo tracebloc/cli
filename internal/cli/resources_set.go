@@ -243,6 +243,13 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 		p.PromptHint("tracebloc keeps about 1 core and 3 GiB for itself on top of this — it fits on this machine.")
 		proceed, cerr := pr.Confirm(fmt.Sprintf("Let each training run use up to %s?", perRunSize(desired)), true)
 		if cerr != nil {
+			// Ctrl-C here is the same user choice as answering "No": print the
+			// same note the decline below (and a wizard interrupt above) prints,
+			// and exit 0 — never a silent success that hides the abort.
+			if errors.Is(cerr, errInteractiveCancelled) {
+				p.Infof("Cancelled — nothing was changed.")
+				return nil
+			}
 			return mapClientErr(cerr)
 		}
 		if !proceed {
