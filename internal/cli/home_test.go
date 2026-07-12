@@ -84,16 +84,31 @@ func TestRenderHome_States(t *testing.T) {
 			absent: []string{"· Online"},
 		},
 		{
-			name: "offline points at the doctor with the invoked name",
+			// Fix 3: a not-Ready workload is "starting up", NOT "hasn't heard from
+			// it" (the heartbeat was never consulted). Distinct, honest line.
+			name: "starting up has its own line, not the heartbeat wording",
+			model: homeModel{
+				state: homeStarting, email: "a@b.io", envName: "acme-01",
+				inv: binTracebloc, fullMenu: true,
+			},
+			present: []string{
+				`Secure environment "acme-01" · starting up, not ready yet — run tracebloc cluster doctor`,
+			},
+			absent: []string{"· Online", "hasn't heard from it"},
+		},
+		{
+			name: "offline reads honestly for both causes, with the invoked name",
 			model: homeModel{
 				state: homeOffline, email: "a@b.io", envName: "acme-01",
 				inv: binTB, fullMenu: true,
 			},
 			present: []string{
-				`Secure environment "acme-01" · offline — run tb cluster doctor`,
+				`Secure environment "acme-01" · can't reach it from here — run tb cluster doctor`,
 				"tb data ingest", // examples echo the invoked name
 			},
-			absent: []string{"· Online", "tracebloc data ingest"},
+			// Not the bare "offline" (misleading for the reachable-cluster-wrong-context
+			// cause), and never a green Online.
+			absent: []string{"· offline", "· Online", "tracebloc data ingest"},
 		},
 		{
 			name:  "signed in, no environment nudges the installer",
@@ -153,15 +168,18 @@ func TestRenderHome_States(t *testing.T) {
 }
 
 // baseDeps is a fully-online, signed-in fake; tests override just the field
-// under test.
+// under test. rememberedName defaults to "" (this machine was never
+// provisioned), so a probe that returns no name degrades to homeNoEnv unless a
+// case opts into a remembered name.
 func baseDeps() homeDeps {
 	return homeDeps{
-		signIn:      func() (bool, string) { return true, "alice@acme.io" },
-		probeEnv:    func(context.Context) envProbe { return envProbe{local: localLive, name: "acme-01"} },
-		probeBeat:   func(context.Context) heartbeatState { return beatOnline },
-		invoked:     func() string { return binTracebloc },
-		tbAvailable: func() bool { return false },
-		budget:      2 * time.Second,
+		signIn:         func() (bool, string) { return true, "alice@acme.io" },
+		probeEnv:       func(context.Context) envProbe { return envProbe{local: localLive, name: "acme-01"} },
+		probeBeat:      func(context.Context) heartbeatState { return beatOnline },
+		rememberedName: func() string { return "" },
+		invoked:        func() string { return binTracebloc },
+		tbAvailable:    func() bool { return false },
+		budget:         2 * time.Second,
 	}
 }
 
@@ -197,14 +215,37 @@ func TestResolveHomeModel_States(t *testing.T) {
 			want:   homeRunning,
 		},
 		{
-			name: "workload degraded = running",
+			// Fix 3: a not-Ready workload is its own "starting" state, not running.
+			name: "workload degraded = starting",
 			mutate: func(d *homeDeps) {
 				d.probeEnv = func(context.Context) envProbe { return envProbe{local: localDegraded, name: "acme-01"} }
 			},
-			want: homeRunning,
+			want: homeStarting,
 		},
 		{
-			name: "cluster reachable, no release = no environment",
+			// Fix 1: reachable cluster that doesn't host this release, but the
+			// machine WAS provisioned (probe surfaced the name) → offline, NOT the
+			// "no environment / run the installer" lie.
+			name: "no release but provisioned (probe surfaced name) = offline",
+			mutate: func(d *homeDeps) {
+				d.probeEnv = func(context.Context) envProbe { return envProbe{local: localNoRelease, name: "acme-01"} }
+			},
+			want: homeOffline,
+		},
+		{
+			// Fix 1: same, but the name arrives from the remembered-name fallback
+			// (the probe returned no name) — the wrong-kube-context / runs-elsewhere
+			// case the sibling data commands handle via binding.explain.
+			name: "no release but provisioned (remembered name) = offline",
+			mutate: func(d *homeDeps) {
+				d.probeEnv = func(context.Context) envProbe { return envProbe{local: localNoRelease} }
+				d.rememberedName = func() string { return "acme-01" }
+			},
+			want: homeOffline,
+		},
+		{
+			// Unchanged: reachable, no release, and never provisioned → no env.
+			name: "no release and unprovisioned = no environment",
 			mutate: func(d *homeDeps) {
 				d.probeEnv = func(context.Context) envProbe { return envProbe{local: localNoRelease} }
 			},
@@ -236,6 +277,30 @@ func TestResolveHomeModel_States(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResolveHomeModel_ProvisionedNoReleaseKeepsName is the heart of Fix 1: a
+// reachable cluster that doesn't host this release, on a provisioned machine,
+// must land on a NAMED offline — not the nameless "no environment" screen —
+// whether the name came from the probe or the remembered-name fallback.
+func TestResolveHomeModel_ProvisionedNoReleaseKeepsName(t *testing.T) {
+	t.Run("name from the probe", func(t *testing.T) {
+		d := baseDeps()
+		d.probeEnv = func(context.Context) envProbe { return envProbe{local: localNoRelease, name: "acme-01"} }
+		m := resolveHomeModel(context.Background(), d)
+		if m.state != homeOffline || m.envName != "acme-01" {
+			t.Fatalf("got state %d name %q, want offline/acme-01", m.state, m.envName)
+		}
+	})
+	t.Run("name from the remembered fallback", func(t *testing.T) {
+		d := baseDeps()
+		d.probeEnv = func(context.Context) envProbe { return envProbe{local: localNoRelease} } // no name surfaced
+		d.rememberedName = func() string { return "acme-01" }
+		m := resolveHomeModel(context.Background(), d)
+		if m.state != homeOffline || m.envName != "acme-01" {
+			t.Fatalf("got state %d name %q, want offline/acme-01", m.state, m.envName)
+		}
+	})
 }
 
 // TestResolveHomeModel_PassesThroughFields checks the model carries email, name,
@@ -293,24 +358,33 @@ func TestResolveHomeModel_TbTip(t *testing.T) {
 func TestResolveHomeModel_SlowProbesDegradeFast(t *testing.T) {
 	const budget = 80 * time.Millisecond
 
-	t.Run("slow env probe → renders fast, not online", func(t *testing.T) {
+	// Fix 2: a probe that IGNORES its context (a kubeconfig exec-credential plugin
+	// like `aws eks get-token`) must not hold up the render, and a provisioned
+	// machine must degrade to a NAMED offline — never the "no environment" lie,
+	// never Online. Proves the collector bails on the budget without the probe's
+	// cooperation, and that the remembered name survives that path.
+	t.Run("context-ignoring env probe → named offline, within budget", func(t *testing.T) {
 		d := baseDeps()
 		d.budget = budget
-		d.probeEnv = func(ctx context.Context) envProbe {
-			select {
-			case <-time.After(5 * time.Second):
-				return envProbe{local: localLive, name: "acme-01"} // the "would be online" answer we must NOT wait for
-			case <-ctx.Done():
-				return envProbe{local: localUnreachable}
-			}
+		d.rememberedName = func() string { return "acme-01" } // this machine was provisioned
+		started := make(chan struct{})
+		d.probeEnv = func(context.Context) envProbe {
+			close(started)
+			time.Sleep(800 * time.Millisecond)                         // deliberately ignores ctx
+			return envProbe{local: localLive, name: "would-be-online"} // the answer we must NOT wait for
 		}
 		start := time.Now()
 		m := resolveHomeModel(context.Background(), d)
-		if elapsed := time.Since(start); elapsed > budget+400*time.Millisecond {
-			t.Fatalf("took %v, should degrade within ~budget (%v)", elapsed, budget)
+		elapsed := time.Since(start)
+		<-started // the probe really ran (its late result was abandoned)
+		if elapsed > budget+300*time.Millisecond {
+			t.Fatalf("took %v; must render at ~budget (%v) without waiting for the probe", elapsed, budget)
 		}
-		if m.state == homeOnline {
-			t.Fatalf("a slow env probe must not yield Online; got state %d", m.state)
+		if m.state != homeOffline {
+			t.Fatalf("provisioned machine whose probe timed out must be offline, got state %d", m.state)
+		}
+		if m.envName != "acme-01" {
+			t.Fatalf("remembered name must survive the timeout; got %q", m.envName)
 		}
 	})
 

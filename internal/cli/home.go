@@ -16,10 +16,13 @@ package cli
 //
 //   - Speed + robustness. Bare `tracebloc` runs constantly; the old screen did
 //     zero I/O. Detection here is best-effort and bounded: every probe is
-//     concurrent, each carries its own short timeout, and the whole thing is
-//     capped by homeDetectBudget so an unreachable cluster/backend still renders
-//     the right ⚠/✗ state fast. A probe that errors or times out degrades to the
-//     softer state; nothing here is ever fatal.
+//     concurrent, each carries its own short timeout, and homeDetectBudget caps
+//     the RENDER — the wall-clock we'll wait — not the probe goroutines. A probe
+//     that ignores its context (a kubeconfig exec-credential plugin like
+//     `aws eks get-token` is the realistic offender) can outlive the render; the
+//     buffered result channels just stop it from blocking or leaking, and we
+//     render the softer/remembered state at the budget. A probe that errors or
+//     times out degrades to the softer state; nothing here is ever fatal.
 //
 // Structure: resolveHomeModel runs the probes and returns a pure homeModel;
 // renderHome turns that model into output with no I/O. The split keeps rendering
@@ -75,8 +78,9 @@ const (
 	homeNotSignedIn homeState = iota // you're not signed in — minimal, sign in first
 	homeOnline                       // signed in, environment live AND heartbeating
 	homeRunning                      // signed in, environment live locally but heartbeat unconfirmed
-	homeOffline                      // signed in, environment set up here but unreachable/stopped
-	homeNoEnv                        // signed in, no environment on this machine
+	homeStarting                     // signed in, release present but its workload isn't Ready yet
+	homeOffline                      // signed in, provisioned, but the environment isn't reachable from here
+	homeNoEnv                        // signed in, no environment provisioned on this machine
 )
 
 // computeInfo is the machine's total schedulable capacity, summed across Ready
@@ -138,22 +142,28 @@ type envProbe struct {
 // implementations; tests inject fakes to drive every state, the honesty
 // fallback, and the timeout/degrade path without touching a real cluster.
 type homeDeps struct {
-	signIn      func() (signedIn bool, email string)
-	probeEnv    func(ctx context.Context) envProbe
-	probeBeat   func(ctx context.Context) heartbeatState
-	invoked     func() string
-	tbAvailable func() bool
-	budget      time.Duration
+	signIn    func() (signedIn bool, email string)
+	probeEnv  func(ctx context.Context) envProbe
+	probeBeat func(ctx context.Context) heartbeatState
+	// rememberedName is the active client's cached name (no network). It's the
+	// name we fall back on whenever the probe couldn't surface one — including
+	// the budget-timeout path, so a provisioned machine degrades to a *named*
+	// "offline", never to the "no environment / run the installer" lie.
+	rememberedName func() string
+	invoked        func() string
+	tbAvailable    func() bool
+	budget         time.Duration
 }
 
 func defaultHomeDeps() homeDeps {
 	return homeDeps{
-		signIn:      realSignIn,
-		probeEnv:    realProbeEnv,
-		probeBeat:   realHeartbeat,
-		invoked:     invokedName,
-		tbAvailable: tbAliasAvailable,
-		budget:      homeDetectBudget,
+		signIn:         realSignIn,
+		probeEnv:       realProbeEnv,
+		probeBeat:      realHeartbeat,
+		rememberedName: realRememberedName,
+		invoked:        invokedName,
+		tbAvailable:    tbAliasAvailable,
+		budget:         homeDetectBudget,
 	}
 }
 
@@ -178,6 +188,10 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 	if !signedIn {
 		return homeModel{state: homeNotSignedIn, inv: inv}
 	}
+
+	// The remembered client name (cached at provision time, no network). Read up
+	// front so it's available even on the budget-timeout path below.
+	remembered := d.rememberedName()
 
 	// Signed in: probe the environment and the heartbeat concurrently, both under
 	// one overall budget. Buffered result channels (cap 1) mean an abandoned probe
@@ -206,6 +220,14 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 		}
 	}
 
+	// Whenever the probe didn't surface a name — it timed out, couldn't reach the
+	// cluster, or reached one that doesn't host this release — fall back to the
+	// remembered name. This is what keeps a provisioned machine on a *named*
+	// offline line instead of the "no environment" lie, on every degrade path.
+	if env.name == "" {
+		env.name = remembered
+	}
+
 	m := homeModel{
 		email:      email,
 		inv:        inv,
@@ -226,18 +248,18 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 		}
 		m.fullMenu = true
 	case localDegraded:
-		// Workload present but not Ready → running, not Online.
-		m.state = homeRunning
+		// Release present but its workload isn't Ready — it's coming up, which is a
+		// different story from "live but tracebloc hasn't heard from it" (heartbeat
+		// was never consulted here). Its own honest line, still → cluster doctor.
+		m.state = homeStarting
 		m.fullMenu = true
-	case localNoRelease:
-		// Cluster reachable, nothing installed: there's genuinely no environment
-		// here right now, even if config remembers a past one.
-		m.state = homeNoEnv
-		m.envName = ""
-	case localUnreachable:
-		// Couldn't reach a cluster. If this machine was provisioned (the probe
-		// surfaced a remembered name) the environment exists but is unreachable →
-		// offline; otherwise there's simply nothing here.
+	case localNoRelease, localUnreachable:
+		// Either the cluster couldn't be reached, or it was reached but doesn't
+		// host this client's release (wrong kube-context, or the client runs on a
+		// cluster this kubeconfig doesn't point at — the sibling data commands
+		// explain this as "runs elsewhere"). If this machine was provisioned (a
+		// name is remembered), the environment exists but isn't reachable from here
+		// → offline; with nothing remembered, there's genuinely nothing here.
 		if env.name != "" {
 			m.state = homeOffline
 			m.fullMenu = true
@@ -266,6 +288,16 @@ func realSignIn() (bool, string) {
 	return true, cfg.Current().Email
 }
 
+// realRememberedName is the active client's cached display name (set at
+// `client create` time, RFC-0001 §7.3) — no network. Empty when this machine was
+// never provisioned, which is exactly the "no environment" signal.
+func realRememberedName() string {
+	if cfg, err := config.Load(); err == nil {
+		return cfg.Current().ActiveClientName
+	}
+	return ""
+}
+
 // realProbeEnv is the bounded cluster probe. It reuses the exact namespace
 // binding + discovery the data/cluster commands use, so the home screen reports
 // the very environment those commands would target. Best-effort throughout: any
@@ -274,42 +306,36 @@ func realProbeEnv(ctx context.Context) envProbe {
 	ctx, cancel := context.WithTimeout(ctx, homeProbeTimeout)
 	defer cancel()
 
-	// The name to fall back on when the cluster can't be reached but this machine
-	// was provisioned — cached at `client create` time, so it needs no network.
-	fallbackName := ""
-	if cfg, err := config.Load(); err == nil {
-		fallbackName = cfg.Current().ActiveClientName
-	}
-
+	// The name for a discovered release is set below; the unreachable / no-release
+	// returns leave it empty and let resolveHomeModel fill the remembered name, so
+	// the "provisioned ⇒ named offline" fallback lives in exactly one place.
 	opts := cluster.KubeconfigOptions{}
 	binding := bindActiveClientNamespace(&opts)
 	resolved, err := cluster.Load(opts)
 	if err != nil {
-		return envProbe{local: localUnreachable, name: fallbackName}
+		return envProbe{local: localUnreachable}
 	}
 	// Bound every API call so an unreachable API server can't hang the home
 	// screen (mirrors cluster.ClusterID's time-boxed best-effort read).
 	resolved.RestConfig.Timeout = homeProbeTimeout
 	cs, err := cluster.NewClientset(resolved)
 	if err != nil {
-		return envProbe{local: localUnreachable, name: fallbackName}
+		return envProbe{local: localUnreachable}
 	}
 
 	release, nsUsed, err := discoverRelease(ctx, nil, cs, resolved.Namespace, binding.allowScan())
 	if err != nil {
 		if errors.Is(err, cluster.ErrNoParentRelease) {
+			// Cluster reachable, but this release isn't in the resolved context.
+			// Provisioned ⇒ resolveHomeModel turns this into a named "offline".
 			return envProbe{local: localNoRelease}
 		}
 		// A list/RBAC/connect failure: we couldn't confirm what's here. Treat it
 		// as unreachable (→ offline if provisioned, else no-env).
-		return envProbe{local: localUnreachable, name: fallbackName}
+		return envProbe{local: localUnreachable}
 	}
 
-	name := release.ReleaseName
-	if name == "" {
-		name = fallbackName
-	}
-	ep := envProbe{name: name}
+	ep := envProbe{name: release.ReleaseName}
 	if jobsManagerReady(ctx, cs, nsUsed, release) {
 		ep.local = localLive
 	} else {
@@ -472,7 +498,7 @@ func renderHome(p *ui.Printer, m homeModel) {
 
 	// Greeting: "your secure environment" only when one actually exists here.
 	switch m.state {
-	case homeOnline, homeRunning, homeOffline:
+	case homeOnline, homeRunning, homeStarting, homeOffline:
 		p.Para("Welcome to your secure environment for AI 👋")
 	default:
 		p.Para("Welcome to tracebloc — your secure environment for AI 👋")
@@ -495,8 +521,15 @@ func renderHome(p *ui.Printer, m homeModel) {
 	case homeRunning:
 		p.WarnLine("Secure environment %q · running, but tracebloc hasn't heard from it — run %s %s",
 			m.envName, m.inv, doctorPath)
+	case homeStarting:
+		p.WarnLine("Secure environment %q · starting up, not ready yet — run %s %s",
+			m.envName, m.inv, doctorPath)
 	case homeOffline:
-		p.CrossLine("Secure environment %q · offline — run %s %s", m.envName, m.inv, doctorPath)
+		// One honest line for both causes: a stopped/unreachable cluster AND a
+		// reachable cluster that doesn't host this release from the current
+		// kube-context. "can't reach it from here" is true either way.
+		p.CrossLine("Secure environment %q · can't reach it from here — run %s %s",
+			m.envName, m.inv, doctorPath)
 	case homeNoEnv:
 		p.WarnLine("No secure environment on this machine yet — run the installer to set one up.")
 	}
