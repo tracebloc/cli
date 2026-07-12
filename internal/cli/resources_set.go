@@ -215,15 +215,21 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 		return err
 	}
 
-	// (4) Validate + fit-check. Never mutate on failure.
-	if verr := validateDesired(desired, node); verr != nil {
-		return verr
-	}
-
-	// (5) No-op: skip the apply (and the jobs-manager roll) when nothing changed.
+	// (4) No-op: skip the apply (and the jobs-manager roll) when nothing changed.
+	//     Checked BEFORE the fit validation: "Leave it as it is" (and flags that
+	//     merely restate the current ceiling) must stay a clean success even when
+	//     the machine has shrunk under an already-applied ceiling (smaller Docker
+	//     Desktop VM, lost node) — leaving things unchanged mutates nothing, so
+	//     there is nothing for the fit-check to protect. Sizing an actual CHANGE
+	//     is still validated below, before anything mutates.
 	if sameCeiling(desired, current) {
 		p.Successf("Each training run already uses up to %s — nothing to change.", perRunSize(desired))
 		return nil
+	}
+
+	// (5) Validate + fit-check. Never mutate on failure.
+	if verr := validateDesired(desired, node); verr != nil {
+		return verr
 	}
 
 	// (6) Confirm (unless --yes or --dry-run). One gate for both the flag and

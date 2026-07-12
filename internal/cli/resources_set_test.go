@@ -220,6 +220,59 @@ func TestSet_NoOpSkipsApply(t *testing.T) {
 	}
 }
 
+// TestSet_NoOpEvenWhenCurrentNoLongerFits: restating the ceiling that's already
+// applied must stay a clean no-op success even when the machine has SHRUNK under
+// it (smaller Docker Desktop VM, lost node) — the no-op check runs before the
+// fit validation, because leaving things unchanged mutates nothing. An actual
+// change on the same shrunken machine is still fit-checked.
+func TestSet_NoOpEvenWhenCurrentNoLongerFits(t *testing.T) {
+	// Node 4 CPU / 8 GiB, but the cluster already runs with cpu=8,memory=16Gi.
+	cur := map[string]string{"RESOURCE_LIMITS": "cpu=8,memory=16Gi"}
+
+	t.Run("flags restating the current ceiling", func(t *testing.T) {
+		calls := fakeHelm(t)
+		cs := csWith("4", "8Gi", cur)
+		err, out := runSet(t, cs, nil, setReq{cores: "8", memory: "16", coresSet: true, memSet: true, yes: true})
+		if err != nil {
+			t.Fatalf("unchanged ceiling must be a no-op even when it no longer fits, got: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "nothing to change") {
+			t.Errorf("no-op message missing:\n%s", out)
+		}
+		for _, c := range *calls {
+			if len(c) >= 3 && c[1] == "upgrade" && c[2] != "--help" {
+				t.Errorf("no-op must NOT call helm upgrade: %v", c)
+			}
+		}
+	})
+
+	t.Run("wizard leave-as-is", func(t *testing.T) {
+		calls := fakeHelm(t)
+		pr := &fakePrompter{answers: map[string]string{"How much may one training run use?": "Leave it as it is"}}
+		cs := csWith("4", "8Gi", cur)
+		err, out := runSet(t, cs, pr, setReq{})
+		if err != nil {
+			t.Fatalf("leave-as-is must be a no-op even when the current ceiling no longer fits, got: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "nothing to change") {
+			t.Errorf("no-op message missing:\n%s", out)
+		}
+		for _, c := range *calls {
+			if len(c) >= 3 && c[1] == "upgrade" && c[2] != "--help" {
+				t.Errorf("leave-as-is must NOT call helm upgrade: %v", c)
+			}
+		}
+	})
+
+	t.Run("an actual change is still fit-checked", func(t *testing.T) {
+		cs := csWith("4", "8Gi", cur)
+		err, _ := runSet(t, cs, nil, setReq{cores: "6", coresSet: true, yes: true})
+		if got := exitCode(t, err); got != 2 {
+			t.Fatalf("a changed, unfitting request must still exit 2, got %d (%v)", got, err)
+		}
+	})
+}
+
 // TestSet_DryRunAppliesNothing: --dry-run prints the plan and never shells helm.
 func TestSet_DryRunAppliesNothing(t *testing.T) {
 	calls := fakeHelm(t)
