@@ -626,14 +626,14 @@ func TestSanitizeInvoked(t *testing.T) {
 }
 
 // TestRenderHome_MatchesLockedDemo is the design sign-off: the signed-in /
-// Online screen must render byte-for-byte the LOCKED reference (cmd/hsdemo). The
-// expected text is reconstructed here from the reference's exact structure —
-// two-blank header, greeting-by-name, dim 30-col rule, the two status axes, the
-// two command buckets (command column padded to a single width, descriptions
-// dim), and the dim sign-off. MenuRow spacing is computed (not hand-typed) at
-// the same width the renderer uses, so the only thing under test is that the
-// renderer emits this exact sequence. Any drift in spacing, copy, glyphs, or
-// blank-line count fails here.
+// Online screen must render byte-for-byte the LOCKED reference layout. The
+// expected text is spelled out in full here (self-contained) from that locked
+// structure — two-blank header, greeting-by-name, dim 30-col rule, the two
+// status axes, the two command buckets (command column padded to a single
+// width, descriptions dim), and the dim sign-off. MenuRow spacing is computed
+// (not hand-typed) at the same width the renderer uses, so the only thing under
+// test is that the renderer emits this exact sequence. Any drift in spacing,
+// copy, glyphs, or blank-line count fails here.
 func TestRenderHome_MatchesLockedDemo(t *testing.T) {
 	// The locked example: signed in, Online, invoked as `tb`, a real alias so the
 	// tip shows, and a resources command registered — matching the demo's inputs.
@@ -687,26 +687,42 @@ func TestRenderHome_MatchesLockedDemo(t *testing.T) {
 	}
 }
 
-// TestGreetingName pins the name-derivation rule: profile first name wins;
-// otherwise a clean single-alpha email local-part, capitalized; otherwise "".
+// TestGreetingName pins the name derivation + sanitize rule: profile first name
+// wins, else a clean email local-part (capitalized). BOTH candidates must be a
+// single letters-only token no longer than greetingNameMax — multi-word,
+// control-char, interior-newline, over-long, or otherwise "dirty" candidates
+// yield "", keeping the locked greeting on exactly one line.
 func TestGreetingName(t *testing.T) {
-	cases := []struct{ firstName, email, want string }{
-		{"Lukas", "lukas@tracebloc.io", "Lukas"},  // profile first name wins outright
-		{"  Divya  ", "someone@else.io", "Divya"}, // trimmed, and beats the email
-		{"", "lukas@tracebloc.io", "Lukas"},       // email local-part, capitalized
-		{"", "alice@acme.io", "Alice"},            //
-		{"", "LUKAS@x.io", "LUKAS"},               // only the first rune is touched
-		{"", "lukas.wuttke@tracebloc.io", ""},     // dotted → not a single clean token
-		{"", "l.w+tag@x.io", ""},                  // punctuation → omit
-		{"", "user123@x.io", ""},                  // digits → omit
-		{"", "@nolocal.io", ""},                   // empty local part
-		{"", "noatsign", ""},                      // no @ at all
-		{"", "", ""},                              // nothing to derive from
+	cases := []struct {
+		name, firstName, email, want string
+	}{
+		{"profile first name wins outright", "Lukas", "lukas@tracebloc.io", "Lukas"},
+		{"profile name trimmed, beats the email", "  Divya  ", "someone@else.io", "Divya"},
+		{"clean email local-part, capitalized", "", "lukas@tracebloc.io", "Lukas"},
+		{"clean email local-part again", "", "alice@acme.io", "Alice"},
+		{"only the first rune is touched", "", "LUKAS@x.io", "LUKAS"},
+		{"dotted local-part is not one token", "", "lukas.wuttke@tracebloc.io", ""},
+		{"punctuation omits", "", "l.w+tag@x.io", ""},
+		{"digits omit", "", "user123@x.io", ""},
+		{"empty local-part omits", "", "@nolocal.io", ""},
+		{"no @ at all omits", "", "noatsign", ""},
+		{"nothing to derive from", "", "", ""},
+		// Bound + sanitize (cli#244 review): a candidate that isn't a single,
+		// clean, <= greetingNameMax letters token is dropped, never rendered.
+		{"over-long email local-part omits", "", strings.Repeat("a", 64) + "@x.io", ""},
+		{"over-long FirstName omits", strings.Repeat("A", greetingNameMax+1), "", ""},
+		{"FirstName exactly at the cap is used", strings.Repeat("A", greetingNameMax), "", strings.Repeat("A", greetingNameMax)},
+		{"interior newline in FirstName omits", "Lu\nkas", "", ""},
+		{"tab in FirstName omits", "Lu\tkas", "", ""},
+		{"control char in FirstName omits", "\x01Bad", "", ""},
+		{"multi-word FirstName omits", "Mary Anne", "", ""},
 	}
 	for _, c := range cases {
-		if got := greetingName(c.firstName, c.email); got != c.want {
-			t.Errorf("greetingName(%q, %q) = %q, want %q", c.firstName, c.email, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			if got := greetingName(c.firstName, c.email); got != c.want {
+				t.Errorf("greetingName(%q, %q) = %q, want %q", c.firstName, c.email, got, c.want)
+			}
+		})
 	}
 }
 
@@ -820,5 +836,60 @@ func TestDoctor_TopLevelSharesClusterDoctor(t *testing.T) {
 		if !strings.Contains(out, "Auth & config") || !strings.Contains(out, "not signed in") {
 			t.Errorf("%s output missing the shared diagnostic (auth section + not-signed-in):\n%s", label, out)
 		}
+	}
+}
+
+// TestRenderHome_GreetingStaysOneLine is the end-to-end guard for the sanitize
+// fix: a profile FirstName carrying an interior newline must never reach the
+// header — Para splits on '\n', which would break the locked single-line
+// greeting. Here neither the newline FirstName nor the punctuated email yields a
+// clean token, so the greeting is the intact nameless one-liner and the unsafe
+// bytes never appear.
+func TestRenderHome_GreetingStaysOneLine(t *testing.T) {
+	d := baseDeps()
+	d.signIn = func() (bool, string, string) { return true, "bad.local+tag@x.io", "Bad\nName" }
+	got := renderToString(resolveHomeModel(context.Background(), d))
+
+	// The full nameless greeting on one physical line (starts after a newline,
+	// ends at one, no interior break) — its exact presence proves the unsafe name
+	// was dropped rather than split across lines.
+	if !strings.Contains(got, "  Welcome to your secure environment for AI 👋\n") {
+		t.Fatalf("greeting must be the intact nameless one-liner (unsafe name dropped), got:\n%q", got)
+	}
+	if strings.Contains(got, "Bad") {
+		t.Fatalf("newline-bearing FirstName leaked into the render:\n%q", got)
+	}
+}
+
+// TestClusterCmd_DoctorIsHiddenAlias pins the hidden-alias decision directly (so
+// it's not only covered via the typo-suggestion test): `doctor` is registered
+// top-level AND visible, while `cluster doctor` still exists but is HIDDEN — the
+// alias keeps working without re-cluttering the `cluster` help with a duplicate.
+func TestClusterCmd_DoctorIsHiddenAlias(t *testing.T) {
+	root := NewRootCmd(BuildInfo{Version: "test"})
+
+	find := func(parent *cobra.Command, name string) *cobra.Command {
+		for _, c := range parent.Commands() {
+			if c.Name() == name {
+				return c
+			}
+		}
+		return nil
+	}
+
+	top := find(root, "doctor")
+	if top == nil || top.Hidden {
+		t.Fatalf("top-level `doctor` must be registered and visible (got %v)", top)
+	}
+	cluster := find(root, "cluster")
+	if cluster == nil {
+		t.Fatal("cluster command not found")
+	}
+	alias := find(cluster, "doctor")
+	if alias == nil {
+		t.Fatal("`cluster doctor` alias must still exist so existing usage keeps working")
+	}
+	if !alias.Hidden {
+		t.Error("`cluster doctor` must be HIDDEN — it's an alias of the top-level `doctor`")
 	}
 }

@@ -271,7 +271,7 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 	case localDegraded:
 		// Release present but its workload isn't Ready — it's coming up, which is a
 		// different story from "live but tracebloc hasn't heard from it" (heartbeat
-		// was never consulted here). Its own honest line, still → cluster doctor.
+		// was never consulted here). Its own honest line, still → doctor.
 		m.state = homeStarting
 		m.fullMenu = true
 	case localNoRelease, localUnreachable:
@@ -351,25 +351,53 @@ func realSignIn() (bool, string, string) {
 	return true, prof.Email, prof.FirstName
 }
 
+// greetingNameMax caps the greeting name, counted in runes (not bytes). A
+// candidate longer than this is dropped rather than stretch the locked
+// single-line header; it's generous enough for real first names.
+const greetingNameMax = 14
+
 // greetingName derives the first name shown in the signed-in greeting. It
-// prefers the profile's stored first name; failing that, the email's local part
-// — but ONLY when that's a single clean alphabetic token, so "lukas@…" → "Lukas"
-// while "lukas.wuttke@…", "l.w+tag@…", or "user123@…" fall through; failing
-// that, "" so the greeting drops the name gracefully (rendered without a comma).
+// prefers the profile's stored first name, then the email's local part, running
+// BOTH through cleanGreetingToken so only a safe, single, short token is used;
+// the email fallback is capitalized ("lukas@…" → "Lukas"). Anything that isn't a
+// clean token — multi-word, an interior newline, control chars, digits,
+// punctuation, or longer than greetingNameMax — yields "" so the greeting drops
+// the name (and its comma) gracefully.
 func greetingName(firstName, email string) string {
-	if n := strings.TrimSpace(firstName); n != "" {
+	if n := cleanGreetingToken(firstName); n != "" {
 		return n
 	}
 	local, _, found := strings.Cut(email, "@")
-	if !found || local == "" {
+	if !found {
 		return ""
 	}
-	for _, r := range local {
+	if n := cleanGreetingToken(local); n != "" {
+		return capitalizeFirst(n)
+	}
+	return ""
+}
+
+// cleanGreetingToken trims outer whitespace and returns s only if it's a single
+// clean token safe for the one-line header: a non-empty run of at most
+// greetingNameMax letters and nothing else. Interior whitespace or newlines
+// (which Para would split across lines), control characters, digits,
+// punctuation, multi-word names, and over-long tokens all return "" so the
+// caller omits the name.
+func cleanGreetingToken(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	n := 0
+	for _, r := range s {
 		if !unicode.IsLetter(r) {
 			return ""
 		}
+		if n++; n > greetingNameMax {
+			return ""
+		}
 	}
-	return capitalizeFirst(local)
+	return s
 }
 
 // capitalizeFirst upper-cases the first rune of s, leaving the rest untouched
