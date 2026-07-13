@@ -155,7 +155,7 @@ func authedClient() (*api.Client, *config.Config, error) {
 func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clientCreateOpts) (err error) {
 	// Always leave a full provision trace on disk, even on a quiet/headless run
 	// (RFC-0001 §8.5). On any failure, point at the (idempotent) resume command
-	// + `cluster doctor`, so a zero-prompt connect that breaks isn't a dead end.
+	// + `doctor`, so a zero-prompt connect that breaks isn't a dead end.
 	ilog, logPath := newInstallLog()
 	defer ilog.Close()
 	ilog.Logf("client create: name=%q location=%q", opts.name, opts.location)
@@ -165,7 +165,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 			p.Newline()
 			p.Hintf("Provisioning didn't complete. Re-running is safe — on the same cluster it adopts the existing client instead of minting a duplicate (idempotent):")
 			p.Hintf("    %s", resumeCommand(opts))
-			p.Hintf("Diagnose auth / cluster problems with: tracebloc cluster doctor")
+			p.Hintf("Diagnose auth / cluster problems with: tracebloc doctor")
 			if logPath != "" {
 				p.Hintf("Full log: %s", logPath)
 			}
@@ -527,7 +527,7 @@ func adoptLiveInClusterClient(
 				"couldn't check whether a tracebloc client is already running on this cluster (%w) — "+
 					"provisioning now could mint a duplicate that never deploys and locks the cluster to it. "+
 					"Re-run (if this was transient); if it persists, ensure your kubeconfig/context can list "+
-					"deployments and secrets across namespaces. Diagnose with `tracebloc cluster doctor`", err)}
+					"deployments and secrets across namespaces. Diagnose with `tracebloc doctor`", err)}
 		}
 		ilog.Logf("in-cluster client discovery skipped — cluster unreachable (non-fatal): %v", err)
 		return nil, false, nil
@@ -845,11 +845,11 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 			case lastState >= 0:
 				return &exitError{code: 1, err: fmt.Errorf(
 					"timed out after %s waiting for tracebloc to report this client online (last state: %s). "+
-						"Run `tracebloc cluster doctor` to diagnose, or re-run the installer.", timeout, clientStateLabel(lastState))}
+						"Run `tracebloc doctor` to diagnose, or re-run the installer.", timeout, clientStateLabel(lastState))}
 			default:
 				return &exitError{code: 1, err: fmt.Errorf(
 					"timed out after %s before tracebloc could confirm this client — retry, "+
-						"or run `tracebloc cluster doctor`.", timeout)}
+						"or run `tracebloc doctor`.", timeout)}
 			}
 		}
 		wait := clientStatusPollInterval

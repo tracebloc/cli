@@ -40,7 +40,10 @@ the wrong cluster).`,
 	}
 
 	cmd.AddCommand(newClusterInfoCmd())
-	cmd.AddCommand(newClusterDoctorCmd())
+	// `cluster doctor` stays as a hidden alias of the top-level `doctor` (both
+	// share one RunE — see newDoctorCmd) so existing docs / muscle memory keep
+	// working while the home screen points at the shorter top-level command.
+	cmd.AddCommand(newDoctorCmd(true))
 	return cmd
 }
 

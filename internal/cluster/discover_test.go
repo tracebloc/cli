@@ -186,7 +186,7 @@ func TestDiscoverParentRelease_NoReleaseFound(t *testing.T) {
 	// The error message has to be customer-actionable. Pin the
 	// key remediation phrase so a future refactor that loses it
 	// (or worse, replaces it with a stack trace) fails this test.
-	for _, want := range []string{"no tracebloc client found", "--namespace", "https://tracebloc.io/i.sh", "cluster doctor"} {
+	for _, want := range []string{"no tracebloc client found", "--namespace", "https://tracebloc.io/i.sh", "tracebloc doctor"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("expected error to mention %q, got: %s", want, err)
 		}

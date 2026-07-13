@@ -96,8 +96,8 @@ func TestClientCreate_FailurePrintsResumeAndWritesInstallLog(t *testing.T) {
 	if !strings.Contains(out.String(), "tracebloc client create --name 'My Client' --location DE") {
 		t.Errorf("missing / incorrect resume command:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "cluster doctor") {
-		t.Errorf("missing `cluster doctor` pointer:\n%s", out.String())
+	if !strings.Contains(out.String(), "tracebloc doctor") {
+		t.Errorf("missing `tracebloc doctor` pointer:\n%s", out.String())
 	}
 	// An install-<ts>.log is written, recording the failure.
 	logs, _ := filepath.Glob(filepath.Join(dir, "install-*.log"))

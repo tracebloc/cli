@@ -129,7 +129,7 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 				"If your client runs in another namespace, pass --namespace; "+
 				"if this cluster has no tracebloc client yet, run the installer: "+
 				"bash <(curl -fsSL https://tracebloc.io/i.sh). "+
-				"Diagnose with `tracebloc cluster doctor`.",
+				"Diagnose with `tracebloc doctor`.",
 			ErrNoParentRelease, namespace,
 		)
 	case 1:

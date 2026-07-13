@@ -136,10 +136,10 @@ func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 func checkReachable(release *cluster.ParentRelease, err error, ns string) Result {
 	const name = "Cluster reachable"
 	if err != nil {
-		// The discovery error's remediation tail points at cluster doctor —
-		// which is what's running. Strip it so doctor never tells the user
-		// to run doctor.
-		detail := strings.TrimSuffix(strings.TrimSpace(err.Error()), "Diagnose with `tracebloc cluster doctor`.")
+		// The discovery error's remediation tail points at doctor — which is
+		// what's running. Strip it so doctor never tells the user to run doctor.
+		// (Must match the exact suffix cluster.discover appends.)
+		detail := strings.TrimSuffix(strings.TrimSpace(err.Error()), "Diagnose with `tracebloc doctor`.")
 		return Result{
 			Name:   name,
 			Status: StatusFail,
