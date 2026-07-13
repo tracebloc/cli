@@ -232,11 +232,12 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 	//     Desktop VM, lost node) — leaving things unchanged mutates nothing, so
 	//     there is nothing for the fit-check to protect. Sizing an actual CHANGE
 	//     is still validated below, before anything mutates.
-	if sameCeiling(desired, current) {
-		if !phantomGPU {
-			p.Successf("Each training run already uses up to %s — nothing to change.", perRunSize(desired))
-			return nil
-		}
+	ceilingUnchanged := sameCeiling(desired, current)
+	if ceilingUnchanged && !phantomGPU {
+		p.Successf("Each training run already uses up to %s — nothing to change.", perRunSize(desired))
+		return nil
+	}
+	if ceilingUnchanged { // phantomGPU == true here
 		// CPU/memory budget is unchanged, but this GPU-less machine's cluster
 		// still requests a GPU (a stale chart default). Don't treat it as a
 		// clean no-op — fall through to persist so BuildEnvSpec's explicit-empty
@@ -245,9 +246,17 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 		p.Infof("Your CPU and memory budget is unchanged — but this machine has no GPU while the cluster still requests one, so I'll clear that stale GPU setting so runs can schedule.")
 	}
 
-	// (5) Validate + fit-check. Never mutate on failure.
-	if verr := validateDesired(desired, node); verr != nil {
-		return verr
+	// (5) Validate + fit-check — ONLY when the ceiling actually CHANGES. An
+	//     unchanged ceiling mutates nothing the fit-check protects (a machine
+	//     that shrank keeps whatever was already applied), and the phantom-GPU
+	//     cleanup only REMOVES a GPU request — so a machine that shrank under its
+	//     current ceiling must not block the cleanup with exit 2 (Bugbot #241:
+	//     "phantom GPU cleanup blocked by fit-check"). Sizing an actual CHANGE is
+	//     still validated; never mutate on failure.
+	if !ceilingUnchanged {
+		if verr := validateDesired(desired, node); verr != nil {
+			return verr
+		}
 	}
 
 	// (6) Confirm (unless --yes or --dry-run). One gate for both the flag and

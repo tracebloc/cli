@@ -513,6 +513,35 @@ func TestSet_PhantomGPUForcesPersistOnNoOpCeiling(t *testing.T) {
 	}
 }
 
+// TestSet_PhantomGPUCleanupNotBlockedByFitCheck: a GPU-less machine that has
+// SHRUNK under its current ceiling AND still carries a phantom GPU must still get
+// the cleanup — the unchanged-ceiling fit-check is skipped (an unchanged ceiling
+// mutates nothing to protect, and clearing the phantom only REMOVES a request),
+// so restating the now-unfitting ceiling persists the explicit-empty GPU rather
+// than exiting 2. Bugbot #241 flagged the earlier fix falling through to
+// validateDesired on the unchanged ceiling.
+func TestSet_PhantomGPUCleanupNotBlockedByFitCheck(t *testing.T) {
+	// Node 4 CPU / 8 GiB, but the cluster already runs cpu=8/memory=16Gi (shrunk)
+	// and carries the chart-default phantom GPU.
+	cs := csWith("4", "8Gi", map[string]string{
+		"RESOURCE_LIMITS": "cpu=8,memory=16Gi",
+		"GPU_REQUESTS":    "nvidia.com/gpu=1",
+		"GPU_LIMITS":      "nvidia.com/gpu=1",
+	})
+	err, out := runSet(t, cs, nil, setReq{cores: "8", memory: "16", coresSet: true, memSet: true, dryRun: true, yes: true})
+	if err != nil {
+		t.Fatalf("phantom cleanup on a shrunk machine must NOT be blocked by the fit-check, got: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "nothing to change") {
+		t.Errorf("phantom GPU must not be treated as a clean no-op:\n%s", out)
+	}
+	for _, want := range []string{`GPU_LIMITS: ""`, `GPU_REQUESTS: ""`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the shrunk-machine phantom cleanup must still write explicit no-GPU %q:\n%s", want, out)
+		}
+	}
+}
+
 // --- FIX 1: never run an unpinned upgrade -----------------------------------
 
 // TestSet_RefusesWhenChartVersionUnknown: when the release carries no
