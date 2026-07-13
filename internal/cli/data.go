@@ -635,9 +635,13 @@ collaborators can train against that table without ever seeing the raw files.`))
 		// not a misleading "unrecognized category". Supported categories were
 		// already caught above, so IsKnown here means known-but-unsupported.
 		spec, _ := push.Lookup(a.Spec.Category)
+		reason := ""
+		if spec.UnsupportedNote != "" {
+			reason = " (" + spec.UnsupportedNote + ")"
+		}
 		return &exitError{code: 2, err: fmt.Errorf(
-			"task %q isn't supported by the CLI yet (%s). Supported tasks: %s.",
-			a.Spec.Category, spec.UnsupportedNote, push.SupportedCategoriesList())}
+			"task %q isn't supported by the CLI yet%s. Supported tasks: %s.",
+			a.Spec.Category, reason, push.SupportedCategoriesList())}
 	default:
 		return &exitError{code: 2, err: fmt.Errorf(
 			"task %q isn't a recognized task. Supported tasks: %s.",
@@ -858,16 +862,18 @@ collaborators can train against that table without ever seeing the raw files.`))
 		// the registry's SelfSupervised flag (not a hardcoded id).
 	}
 
-	// 3b. Friendly missing-label pre-check (#214). Every tabular / time-series
-	//     task carries a label column (layout contract has_label_column=true for
-	//     the whole family). With no --label-column the synthesized spec's
-	//     `label` is an empty string, which trips the schema's label oneOf and
-	//     the raw validation below dumps an opaque "got object, want string" /
-	//     "minLength" pair. Intercept ONLY that specific missing case here — a
-	//     label that's present-but-not-in-the-CSV still flows to
-	//     runLocalPreflight's CheckLabelColumn, and every other schema error
-	//     still reaches the dump — and name the flag to fix instead.
-	if push.IsTabular(a.Spec.Category) && a.Spec.LabelColumn == "" {
+	// 3b. Friendly missing-label pre-check (#214). Tabular / time-series tasks
+	//     AND semantic_segmentation carry a required label column (the ingest
+	//     schema's allOf requires `label` for them). With no --label-column the
+	//     synthesized spec's `label` is an empty string, which trips the schema's
+	//     label oneOf and the raw validation below dumps an opaque "got object,
+	//     want string" / "minLength" pair. semseg is especially prone to this —
+	//     its per-image label reads as vestigial beside the pixel masks, so the
+	//     flag is easy to forget. Intercept ONLY that specific missing case here —
+	//     a label present-but-not-in-the-CSV still flows to runLocalPreflight's
+	//     CheckLabelColumn, and every other schema error still reaches the dump —
+	//     and name the flag to fix instead.
+	if (push.IsTabular(a.Spec.Category) || a.Spec.Category == "semantic_segmentation") && a.Spec.LabelColumn == "" {
 		msg := "this task needs a label column, but --label-column wasn't set — " +
 			"pass --label-column with the name of the target column in your data CSV"
 		if cols := sortedKeys(a.Spec.Schema); len(cols) > 0 {

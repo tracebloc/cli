@@ -448,6 +448,9 @@ func CheckMaskPairing(images, masks []string) error {
 	imgStems := make(map[string]bool, len(images))
 	for _, p := range images {
 		base := filepath.Base(p)
+		if strings.HasPrefix(base, ".") {
+			continue // hidden file (e.g. macOS AppleDouble ._x) — FilePairingValidator._stems skips these
+		}
 		imgStems[strings.TrimSuffix(base, filepath.Ext(base))] = true
 	}
 	// Strip the extension then the "_mask" suffix so a mask maps back to the
@@ -457,6 +460,9 @@ func CheckMaskPairing(images, masks []string) error {
 	var nonConforming []string
 	for _, p := range masks {
 		base := filepath.Base(p)
+		if strings.HasPrefix(base, ".") {
+			continue // hidden file — mirror the ingestor's _stems, so a stray ._x.png can't fake a mismatch
+		}
 		stem := strings.TrimSuffix(base, filepath.Ext(base))
 		if strings.HasSuffix(stem, "_mask") {
 			maskFor[strings.TrimSuffix(stem, "_mask")] = true
@@ -560,14 +566,20 @@ func CheckMaskIdColumn(csvPath string) error {
 			return fmt.Errorf("reading %s: %w", filepath.Base(csvPath), rerr)
 		}
 		row++
-		val := ""
+		// Mirror the ingestor's _is_empty EXACTLY: a cell is empty iff its RAW
+		// (untrimmed) value is an NA-sentinel token, OR it's whitespace-only /
+		// missing. Trimming BEFORE the sentinel test would treat a PADDED
+		// sentinel like " NULL " as empty — but pandas keeps the spaces
+		// (skipinitialspace=False), so it's a REAL value in-cluster. That
+		// over-rejection is the cli#218/#239 padded-NA parity trap.
+		raw := ""
 		if exact < len(rec) {
-			val = strings.TrimSpace(rec[exact])
+			raw = rec[exact]
 		}
-		if _, isNA := naSentinels[val]; isNA {
+		if _, isNA := naSentinels[raw]; isNA || strings.TrimSpace(raw) == "" {
 			emptyCount++
 			if len(emptyRows) < maxSample {
-				emptyRows = append(emptyRows, fmt.Sprintf("row %d", row))
+				emptyRows = append(emptyRows, fmt.Sprintf("data row %d", row))
 			}
 		}
 	}
@@ -1550,13 +1562,32 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		case "semantic_segmentation":
 			// images↔masks "_mask"-suffix pairing (FilePairingValidator preview)
 			// + the mask_id link-column contract (MaskIdColumnValidator preview,
-			// backend#816). Labels come from the masks, so semseg has no label
-			// column to check (the ingestor omits LabelColumnValidator too).
+			// backend#816) + the labels.csv rows↔images/ existence check (same
+			// file_transfer failed-record preview image_classification runs). We
+			// deliberately do NOT run CheckLabelColumn: semseg requires a `label`
+			// field, but the ingestor omits LabelColumnValidator for it (labels
+			// come from the masks), so verifying the column is in the CSV would
+			// over-reject a dataset the cluster accepts.
 			if err := CheckMaskPairing(layout.Images, layout.Sidecars["masks"]); err != nil {
 				return nil, dataProblem(err)
 			}
 			if err := CheckMaskIdColumn(layout.LabelsCSV); err != nil {
 				return nil, dataProblem(err)
+			}
+			missing, orphanFiles, cerr := CrossCheckLabels(layout.LabelsCSV, layout.Images, spec.Extension)
+			if cerr != nil {
+				return nil, dataProblem(cerr)
+			}
+			if len(missing) > 0 {
+				return nil, dataProblem(fmt.Errorf(
+					"%d labels.csv row(s) reference images that aren't in images/: %s. Those records "+
+						"would fail after the upload — fix the rows or add the files, then re-run.",
+					len(missing), TruncateList(missing, 5)))
+			}
+			if len(orphanFiles) > 0 {
+				notes = append(notes, fmt.Sprintf(
+					"Note: %d file(s) in images/ have no labels.csv row and won't be part of the dataset: %s",
+					len(orphanFiles), TruncateList(orphanFiles, 5)))
 			}
 		}
 

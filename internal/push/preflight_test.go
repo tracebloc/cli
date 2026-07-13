@@ -848,6 +848,11 @@ func TestCheckMaskPairing(t *testing.T) {
 			[]string{"masks/001_mask.png", "masks/002_mask.png"}, "without an image"},
 		{"non-conforming mask name (no _mask suffix)", []string{"images/001.jpg"},
 			[]string{"masks/001.png"}, "not named <image>_mask.png"},
+		// A hidden file (macOS AppleDouble ._x) must be ignored, mirroring the
+		// ingestor's _stems — else a stray ._stray.png fakes a mismatch and
+		// over-rejects a dataset the cluster accepts. Fails without the dotfile skip.
+		{"hidden file with no counterpart is ignored", []string{"images/001.jpg"},
+			[]string{"masks/001_mask.png", "masks/._stray.png"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -880,6 +885,10 @@ func TestCheckMaskIdColumn(t *testing.T) {
 		{"wrong case", "filename,Mask_Id\n001.jpg,001_mask\n", "wrong case"},
 		{"empty value on a row", "filename,mask_id\n001.jpg,001_mask\n002.jpg,\n", "empty"},
 		{"NA-sentinel value", "filename,mask_id\n001.jpg,NULL\n", "empty"},
+		// A PADDED NA token is a REAL value in-cluster (pandas keeps the spaces),
+		// so the CLI must not flag it empty — the cli#218/#239 parity trap. Fails
+		// if the scan trims before the naSentinels test.
+		{"padded NA token is a real value, not empty", "filename,mask_id\n001.jpg, NULL \n", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
