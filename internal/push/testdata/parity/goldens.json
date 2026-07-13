@@ -247,6 +247,10 @@
       ],
       "verdict": "reject"
     },
+    "tsc-numeric-label-na-sentinel": {
+      "errors": [],
+      "verdict": "accept"
+    },
     "tsc-ok": {
       "errors": [],
       "verdict": "accept"
