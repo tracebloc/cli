@@ -10,6 +10,22 @@ out (and where every live bug this project hit actually lived).
   stream** against a live Pod + PVC (the highest-risk, 0%-unit-covered
   path), verified by exec-ing back into the pod to confirm the bytes
   landed.
+- **`tracebloc delete` offboard teardown** (cli#140, `delete_e2e_test.go`):
+  - `TestE2E_RevokeUsesPostNotDelete` — a real HTTP round-trip against a
+    recording stub proving the credential is REVOKED via
+    `POST /edge-device/<id>/revoke/` and **never** a hard `DELETE` of the
+    row (the row is kept as history per RFC-0001 §7.10).
+  - `TestE2E_DeleteTeardown` — builds the real binary and runs
+    `tracebloc delete --yes --force` black-box against a throwaway **k3d**
+    cluster with a real Helm release, asserting the release is uninstalled,
+    the cluster is deleted, `~/.tracebloc` is wiped, and a foreign `tb`
+    alias is left in place (#171 guard). **Opt-in** via `TB_E2E_K3D=1` (CI
+    sets it) so it never clobbers a dev machine's `tracebloc` k3d cluster.
+    The black-box run is kept fully offline (egress through a dead proxy),
+    so the revoke exercises its best-effort transport-failure path; the
+    POST-not-DELETE contract a live backend enforces is covered by the stub
+    test above. **Not covered in CI:** the revoke against a live backend
+    (the actual server-side row-preserving revoke) — see the pre-prod FR.
 
 ## Running
 ```sh

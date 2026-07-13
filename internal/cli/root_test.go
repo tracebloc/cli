@@ -21,17 +21,24 @@ func TestRootCmd_HelpMentionsBinary(t *testing.T) {
 	}
 
 	got := out.String()
-	for _, want := range []string{"tracebloc", "version"} {
+	// `doctor` is now a top-level command (promoted from `cluster doctor`), so it
+	// must appear in the root help alongside the binary name + version.
+	for _, want := range []string{"tracebloc", "version", "doctor"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("expected help text to mention %q, got:\n%s", want, got)
 		}
 	}
 }
 
-// TestRootCmd_HomeScreen: a bare `tracebloc` (no subcommand) renders
-// the branded home screen pointing at the key commands, rather than
-// erroring or dumping raw usage.
+// TestRootCmd_HomeScreen: a bare `tracebloc` (no subcommand) renders the
+// status-aware home screen, rather than erroring or dumping raw usage. Pointed
+// at an empty config dir the machine reads as "not signed in", so this exercises
+// the real detection→render wiring end-to-end while staying hermetic: the
+// logged-out path does no cluster I/O, so it needs no kubeconfig and returns
+// instantly. (Per-state content is covered exhaustively in home_test.go.)
 func TestRootCmd_HomeScreen(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // no config.json ⇒ signed out
+
 	root := NewRootCmd(BuildInfo{Version: "test"})
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -41,9 +48,9 @@ func TestRootCmd_HomeScreen(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("bare root failed: %v\n%s", err, out.String())
 	}
-	for _, want := range []string{"tracebloc", "login", "data ingest", "data list", "data delete", "cluster doctor"} {
+	for _, want := range []string{"tracebloc", "Not signed in", "login"} {
 		if !strings.Contains(out.String(), want) {
-			t.Errorf("home screen missing %q:\n%s", want, out.String())
+			t.Errorf("not-signed-in home screen missing %q:\n%s", want, out.String())
 		}
 	}
 }

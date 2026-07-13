@@ -88,6 +88,10 @@ Helm, no YAML, no kubectl needed.`,
 	root.AddCommand(newVersionCmd(info))
 	root.AddCommand(newIngestCmd())
 	root.AddCommand(newClusterCmd())
+	// Top-level `doctor` — the environment health sweep the home screen and the
+	// env-status lines point at. Shares its RunE with the hidden `cluster
+	// doctor` alias (see newDoctorCmd), so there's one diagnostic code path.
+	root.AddCommand(newDoctorCmd(false))
 	root.AddCommand(newDataCmd())
 	// cli#143: one-knob view of how much of this machine tracebloc may use.
 	root.AddCommand(newResourcesCmd())
@@ -101,29 +105,37 @@ Helm, no YAML, no kubectl needed.`,
 	// so this removes tracebloc from the host and avoids colliding with `data delete`.
 	root.AddCommand(newDeleteCmd())
 
-	// Bare `tracebloc` (no subcommand) renders a friendly home screen
-	// instead of cobra's raw usage dump. Subcommands and --help are
-	// unaffected — cobra dispatches those before this RunE runs.
+	// Bare `tracebloc` (no subcommand) renders a status-aware home screen —
+	// where you stand (signed in? environment live?) then the commands —
+	// instead of cobra's raw usage dump. Subcommands and --help are unaffected:
+	// cobra dispatches those before this RunE runs. Detection is best-effort and
+	// time-bounded (see home.go); it never errors, so bare `tracebloc` exits 0.
 	root.RunE = func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			return cmd.Help() // an arg that wasn't a known subcommand
 		}
-		p := printerFor(cmd)
-		p.Banner("tracebloc", "connect this machine to tracebloc and manage its data")
-		p.Section("Get started")
-		p.Infof("tracebloc login                  — sign in to tracebloc (browser)")
-		p.Infof("tracebloc data ingest ./data     — stage a dataset into your client")
-		p.Infof("tracebloc data list              — datasets in the cluster")
-		p.Infof("tracebloc data delete <table>    — delete an ingested dataset")
-		p.Infof("tracebloc cluster doctor         — diagnose connection issues")
-		p.Infof("tracebloc resources              — how much of this machine tracebloc may use")
-		p.Infof("tracebloc delete                 — remove tracebloc from this machine")
-		p.Newline()
-		p.Hintf("Add --help to any command for the full flag list.")
+		// The home screen shows a `resources` row only when that command is
+		// actually wired on the root — gate on the live tree, never a hardcode,
+		// so we never advertise a command that isn't there. #237 (resources) is
+		// now merged, so the row renders; the gate keeps us honest if that changes.
+		renderHomeScreen(cmd.Context(), printerFor(cmd), hasTopLevelCommand(cmd.Root(), "resources"))
 		return nil
 	}
 
 	return root
+}
+
+// hasTopLevelCommand reports whether a command with the given name is registered
+// directly on the root. The home screen uses it to gate rows on commands that
+// may not be wired yet (e.g. `resources`, #237), so a row never names a
+// command that doesn't exist.
+func hasTopLevelCommand(cmd *cobra.Command, name string) bool {
+	for _, c := range cmd.Root().Commands() {
+		if c.Name() == name {
+			return true
+		}
+	}
+	return false
 }
 
 // runGroup is the RunE for a parent "group" command (data, cluster, auth,

@@ -432,8 +432,9 @@ func RenderSummary(p *ui.Printer, s *Summary) {
 	p.Field("success rate", fmt.Sprintf("%.1f%%", s.SuccessRate()))
 
 	p.Section("What's next")
-	p.Infof("View it in the dashboard: https://ai.tracebloc.io/metadata")
-	p.Hintf("Your dataset is ready for training jobs.")
+	p.Infof("Your data is registered as a dataset. View it at https://ai.tracebloc.io/metadata")
+	p.Infof("To train or benchmark models on it, create a use case at https://ai.tracebloc.io/my-use-cases")
+	p.Hintf("Pick this dataset when you set it up.")
 }
 
 // commaSep formats an int64 with thousands-separator commas to

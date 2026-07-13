@@ -9,6 +9,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -57,11 +58,49 @@ before the first ingest.`,
 		RunE:                       runGroup,
 		SuggestionsMinimumDistance: 2,
 	}
+	// Deprecation notices (#879): the data verb was renamed (dataset→data,
+	// push→ingest, rm→delete). The old spellings still work as aliases for one
+	// cycle, but an aliased invocation warns once on stderr. root.go has no
+	// PersistentPreRunE, so this — the closest hook for any `data <sub>` — is
+	// where we detect and warn; cobra passes the executed (leaf) command in.
+	cmd.PersistentPreRunE = func(leaf *cobra.Command, _ []string) error {
+		warnDeprecatedAlias(leaf, leaf.ErrOrStderr())
+		return nil
+	}
 	cmd.AddCommand(newDataIngestCmd())
 	cmd.AddCommand(newDataListCmd())
 	cmd.AddCommand(newDataDeleteCmd())
 	cmd.AddCommand(newIngestValidateCmd())
 	return cmd
+}
+
+// deprecatedAliasCanonical maps each deprecated command alias to the canonical
+// invocation to steer the user to. Keyed by the alias token; the value is the
+// full canonical form so the notice nudges the whole rename (e.g. a `push`
+// steers to `data ingest`, covering the dataset→data group rename too).
+var deprecatedAliasCanonical = map[string]string{
+	"dataset": "data",
+	"push":    "data ingest",
+	"rm":      "data delete",
+}
+
+// warnDeprecatedAlias prints a one-line deprecation notice to w when the executed
+// command was invoked through a deprecated alias. It reads cobra's exported
+// Command.CalledAs(), which reliably reports the alias for the EXECUTED command —
+// so `data push` / `dataset push` warn (leaf `ingest` called as `push`), `data
+// rm` / `dataset rm` warn, and a bare `dataset` warns (the `data` group has a
+// RunE, so it is the executed command). We intentionally do NOT chase a parent
+// group's alias for `dataset <canonical-verb>` (cobra doesn't expose an
+// ancestor's invoked-as name without reaching into its internals); the verb
+// notices already point at the full `data <verb>` form, which nudges the group
+// rename. Canonical invocations warn for nothing.
+func warnDeprecatedAlias(cmd *cobra.Command, w io.Writer) {
+	invoked := cmd.CalledAs()
+	if canonical, ok := deprecatedAliasCanonical[invoked]; ok {
+		_, _ = fmt.Fprintf(w,
+			"%q is deprecated and will be removed in a future release — use %q instead.\n",
+			invoked, canonical)
+	}
 }
 
 // newDataIngestCmd implements `tracebloc data ingest <dataset>`.
@@ -143,12 +182,17 @@ func newDataIngestCmd() *cobra.Command {
 		Use:     "ingest <dataset>",
 		Aliases: []string{"push"},
 		Short:   "Ingest a local dataset into your workspace",
-		Long: `Ingests a local dataset into your workspace's storage,
+		// The task COUNT and the text-family subdir names are derived from the
+		// registry / vendored layout contract (push.SupportedCategoryIDs +
+		// push.TextSidecarDir) rather than hardcoded, so the help can't drift
+		// from what the CLI actually supports (cli#215): the count used to read
+		// a stale "9", and the text example showed texts/ for every text task
+		// even though masked_language_modeling stages into sequences/.
+		Long: fmt.Sprintf(`Ingests a local dataset into your workspace's storage,
 submits the ingestion run, and follows it to completion (streaming
 progress + the final summary). Your data never leaves your own
-infrastructure. Supports 9 tasks (image classification,
-object/keypoint detection, text classification, masked language
-modeling, and the tabular / time-series family); pick one with --task.
+infrastructure. Supports %[1]d tasks across the image, text, and
+tabular / time-series families; pick one with --task.
 
 <dataset> is the data itself. What it looks like depends on the task:
 
@@ -170,11 +214,11 @@ modeling, and the tabular / time-series family); pick one with --task.
           ...
 
   text (classification, masked language modeling) — a folder with
-  labels.csv + a texts/ subfolder:
+  labels.csv + a %[2]s/ subfolder (masked language modeling uses %[3]s/):
 
       reviews/
         labels.csv             (required)
-        texts/                 (required)
+        %[2]s/                 (required — %[3]s/ for masked language modeling)
           001.txt
           ...
 
@@ -205,6 +249,9 @@ Exit codes:
   8   jobs-manager rejected the submit (4xx/5xx other than auth)
   9   ingestion Job exited non-zero, or completed with row-level
       failures the summary panel reports`,
+			len(push.SupportedCategoryIDs()),
+			push.TextSidecarDir("text_classification"),
+			push.TextSidecarDir("masked_language_modeling")),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var localPath string
@@ -229,6 +276,14 @@ Exit codes:
 			// unset task now drives the picker (TTY) or a clear error
 			// (non-interactive), never a silent image assumption.
 			taskSet := cmd.Flags().Changed("task") || cmd.Flags().Changed("category")
+			// Record whether --number-of-keypoints was explicitly passed, so
+			// the keypoint set-vs-unset message (#76b) can distinguish an
+			// explicit zero value from an unset flag (both look like the Go
+			// zero value in the spec).
+			changedFlags := map[string]bool{}
+			if cmd.Flags().Changed("number-of-keypoints") {
+				changedFlags["number-of-keypoints"] = true
+			}
 			// Guided mode: on a terminal (and unless --no-input), prompt
 			// for whatever's still missing. Off a TTY / with --no-input,
 			// prompter stays nil and runDataIngest keeps flag-only
@@ -272,18 +327,15 @@ Exit codes:
 					Interactive:    interactive,
 					Prompter:       pr,
 					TaskSet:        taskSet,
+					ChangedFlags:   changedFlags,
 					OutputJSON:     outputJSON,
 					JSONOut:        jsonOut,
 				})
 		},
 	}
 
-	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
-		"path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
-	cmd.Flags().StringVar(&contextOverride, "context", "",
-		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
-	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where your tracebloc client is installed")
+	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
+	addNamespaceFlag(cmd, &nsOverride, namespaceFlagUsage)
 
 	// Required spec flags. We DON'T mark them required-at-cobra-level
 	// because cobra's "required flag" error message is terse and
@@ -381,6 +433,15 @@ type runDataIngestArgs struct {
 	Prompter    prompter
 	TaskSet     bool
 
+	// ChangedFlags records which CLI flags were EXPLICITLY set
+	// (cmd.Flags().Changed), decoupling "was it passed" from "is its value
+	// non-zero" — the value alone can't tell `--number-of-keypoints 0` (an
+	// explicit, invalid value) from an unset flag (also 0). The RunE
+	// populates it for --number-of-keypoints; the keypoint set-vs-unset
+	// diagnostic (#76b) reads it. Nil in direct-construction tests that
+	// don't exercise that path.
+	ChangedFlags map[string]bool
+
 	// OutputJSON routes human output to stderr and emits a JSON result
 	// to JSONOut (stdout); set together by the RunE in --output-json
 	// mode (which also forces non-interactive).
@@ -392,6 +453,17 @@ type runDataIngestArgs struct {
 	Detach         bool
 	IdempotencyKey string
 	ImageDigest    string
+}
+
+// sortedKeys returns m's keys in sorted order — used to list a CSV's inferred
+// columns in the friendly missing-label message (#214) deterministically.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // expandHome expands a leading ~ (current user or ~user) to a home
@@ -713,8 +785,18 @@ collaborators can train against that table without ever seeing the raw files.`))
 	case push.IsImage(a.Spec.Category):
 		// keypoint_detection needs --number-of-keypoints (dataset-
 		// specific, no default). Catch it here with an actionable
-		// message rather than letting the ingestor fail mid-run.
+		// message rather than letting the ingestor fail mid-run. Split
+		// UNSET from SET-BUT-INVALID (#76b): a Go 0 could mean either, so
+		// key on whether the flag was passed (ChangedFlags). Unset → the
+		// "requires" nudge; set to a non-positive value → name the bad
+		// value so the user sees exactly what was rejected.
 		if a.Spec.Category == "keypoint_detection" && a.Spec.NumberOfKeypoints <= 0 {
+			if a.ChangedFlags["number-of-keypoints"] {
+				return &exitError{code: 2, err: fmt.Errorf(
+					"--number-of-keypoints must be a positive integer (got %d); "+
+						"it's the number of keypoints per sample (e.g. 17 for COCO pose)",
+					a.Spec.NumberOfKeypoints)}
+			}
 			return &exitError{code: 2, err: errors.New(
 				"keypoint_detection requires --number-of-keypoints (e.g. " +
 					"--number-of-keypoints 17); it's dataset-specific and has no default")}
@@ -775,6 +857,24 @@ collaborators can train against that table without ever seeing the raw files.`))
 		// modeling, seq2seq, embeddings) need neither a label nor a schema.
 		// buildText emits the label for exactly the supervised set, keyed on
 		// the registry's SelfSupervised flag (not a hardcoded id).
+	}
+
+	// 3b. Friendly missing-label pre-check (#214). Every tabular / time-series
+	//     task carries a label column (layout contract has_label_column=true for
+	//     the whole family). With no --label-column the synthesized spec's
+	//     `label` is an empty string, which trips the schema's label oneOf and
+	//     the raw validation below dumps an opaque "got object, want string" /
+	//     "minLength" pair. Intercept ONLY that specific missing case here — a
+	//     label that's present-but-not-in-the-CSV still flows to
+	//     runLocalPreflight's CheckLabelColumn, and every other schema error
+	//     still reaches the dump — and name the flag to fix instead.
+	if push.IsTabular(a.Spec.Category) && a.Spec.LabelColumn == "" {
+		msg := "this task needs a label column, but --label-column wasn't set — " +
+			"pass --label-column with the name of the target column in your data CSV"
+		if cols := sortedKeys(a.Spec.Schema); len(cols) > 0 {
+			msg += " (columns: " + strings.Join(cols, ", ") + ")"
+		}
+		return &exitError{code: 2, err: errors.New(msg)}
 	}
 
 	// 4. Synthesize the spec from flags + validate against schema.

@@ -14,16 +14,18 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// newClusterDoctorCmd implements `tracebloc cluster doctor` — the sibling of
-// `cluster info` that cluster.go's doc comment anticipated. Where `info`
-// answers "is the CLI pointing at the right cluster?", `doctor` answers "is
-// this running cluster healthy enough to run an experiment, and if not, what
-// do I fix?" — a read-only, post-install health sweep with remedies
-// (epic client-runtime#116, WS3).
+// newDoctorCmd builds the `doctor` command. The SAME command is registered two
+// ways: as the top-level `tracebloc doctor` (visible — the home screen and its
+// env-status lines point here), and, hidden, as `tracebloc cluster doctor` (its
+// original path, kept working so existing docs, muscle memory, and scripts don't
+// break). Pass hidden=true for the cluster-subtree alias. Both entry points
+// share one RunE (runClusterDoctor), so there is a single diagnostic code path.
 //
-// The three kubeconfig flags match `cluster info` exactly so muscle memory
-// carries over; all are zero-value-safe.
-func newClusterDoctorCmd() *cobra.Command {
+// It answers "is this running cluster healthy enough to run an experiment, and
+// if not, what do I fix?" — a read-only, post-install health sweep with remedies
+// (epic client-runtime#116, WS3). The three kubeconfig flags match `cluster
+// info` exactly so muscle memory carries over; all are zero-value-safe.
+func newDoctorCmd(hidden bool) *cobra.Command {
 	var (
 		kubeconfigPath  string
 		contextOverride string
@@ -31,8 +33,9 @@ func newClusterDoctorCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "doctor",
-		Short: "Diagnose a running tracebloc client cluster (✔/⚠/✖ health checks + remedies)",
+		Use:    "doctor",
+		Hidden: hidden,
+		Short:  "Diagnose a running tracebloc client cluster (✔/⚠/✖ health checks + remedies)",
 		Long: `Runs a read-only health sweep over the tracebloc client release in the
 configured cluster + namespace and prints a ✔/⚠/✖ line per check with a
 remedy for anything that isn't green:
@@ -61,12 +64,9 @@ Exit codes:
 		},
 	}
 
-	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
-		"path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
-	cmd.Flags().StringVar(&contextOverride, "context", "",
-		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
-	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where your tracebloc client is installed (default: the context's namespace, or 'default')")
+	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
+	addNamespaceFlag(cmd, &nsOverride,
+		"namespace where your tracebloc client is installed (default: your active client's namespace, else the context's)")
 
 	return cmd
 }
@@ -76,18 +76,27 @@ func runClusterDoctor(
 	p *ui.Printer,
 	kubeconfigPath, contextOverride, nsOverride string,
 ) error {
-	p.Banner("tracebloc", "cluster doctor")
+	p.Banner("tracebloc", "doctor")
 
 	// Auth / config checks run FIRST and don't need a cluster — so `doctor` can
 	// diagnose a failed provision (bad/expired token, wrong env, no active
 	// client) even before any cluster is reachable (RFC-0001 §8.5).
 	authStatus := runAuthChecks(ctx, p)
 
-	resolved, err := cluster.Load(cluster.KubeconfigOptions{
+	// Target the active client's namespace exactly like `cluster info`, the data
+	// commands, and the home screen: bind opts.Namespace to the cached active
+	// client when the user overrode neither --namespace nor --context. Without
+	// this, doctor checked only the kubeconfig default namespace — so a typical
+	// install whose client lives in its slug namespace could show one state on the
+	// home screen and a conflicting "no client here" from the on-screen `doctor`
+	// hint (Bugbot / review).
+	opts := cluster.KubeconfigOptions{
 		Path:      kubeconfigPath,
 		Context:   contextOverride,
 		Namespace: nsOverride,
-	})
+	}
+	bindActiveClientNamespace(&opts) // side-effect: defaults opts.Namespace to the active client's
+	resolved, err := cluster.Load(opts)
 	if err != nil {
 		// 3 = kubeconfig file/parse problem (same class as cluster info). The
 		// auth section above already ran; if IT also failed, escalate to 2 so

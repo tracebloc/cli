@@ -6,8 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/config"
@@ -151,5 +154,48 @@ func TestRunAuthChecks_426IsHardFailure(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "too old") || !strings.Contains(out.String(), "426") {
 		t.Errorf("426 should report a clear 'too old / upgrade' failure, got:\n%s", out.String())
+	}
+}
+
+// TestClusterDoctor_BindsActiveClientNamespace pins the review fix: with no
+// --namespace/--context, doctor must target the active client's cached namespace
+// (like `cluster info` and the home screen), not the kubeconfig default — else
+// the home screen and doctor can disagree about the same install. The server is
+// unroutable, so discovery falls back to the bound namespace; we assert doctor
+// reports THAT namespace. Mutation-proven: drop bindActiveClientNamespace and the
+// namespace becomes the kubeconfig default, failing this assertion.
+func TestClusterDoctor_BindsActiveClientNamespace(t *testing.T) {
+	writeActiveClientConfig(t, "munich-radiology", "Munich Radiology")
+	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // WhoAmI ok → auth healthy
+	})
+	// Valid kubeconfig at an unroutable TEST-NET address: loads fine, so the
+	// namespace resolves from the binding; the later cluster dial just fails.
+	const kubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster: {server: "https://192.0.2.1:1"}
+contexts:
+- name: ctx
+  context: {cluster: c, user: u}
+current-context: ctx
+users:
+- name: u
+  user: {}
+`
+	kc := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kc, []byte(kubeconfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Bound the context so doctor.Run's dial to the unroutable server can't hang
+	// the test (and CI) — we only assert the namespace resolved from the binding,
+	// which is printed before any cluster I/O.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	_ = runClusterDoctor(ctx, ui.New(&out), kc, "", "") // no ns/context override
+	if !strings.Contains(out.String(), "munich-radiology") {
+		t.Fatalf("doctor should target the active client's namespace (munich-radiology), got:\n%s", out.String())
 	}
 }

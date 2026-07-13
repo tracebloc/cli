@@ -58,14 +58,14 @@ func TestLoadMissingIsEmpty(t *testing.T) {
 func TestClear(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	_ = (&Config{CurrentEnv: "prod", Profiles: map[string]*Profile{"prod": {Token: "x"}}}).Save()
-	if err := Clear(); err != nil {
+	if err := clearAll(); err != nil {
 		t.Fatal(err)
 	}
 	if c, _ := Load(); c.SignedIn() {
-		t.Error("after Clear, should not be signed in")
+		t.Error("after clearAll, should not be signed in")
 	}
-	if err := Clear(); err != nil {
-		t.Errorf("Clear on a missing file should be nil, got %v", err)
+	if err := clearAll(); err != nil {
+		t.Errorf("clearAll on a missing file should be nil, got %v", err)
 	}
 }
 

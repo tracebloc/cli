@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -166,7 +167,7 @@ func (v *Validator) ValidateYAML(input []byte) (parsed map[string]any, errs []Va
 		// of the validator's traversal path.
 		var ve *jsonschema.ValidationError
 		if errors_as(err, &ve) {
-			errs = flattenValidationError(ve)
+			errs = suppressOneOfTypeNoise(flattenValidationError(ve))
 		} else {
 			// Defensive: shouldn't happen with current jsonschema/v6,
 			// but fall back to the raw error string rather than
@@ -176,6 +177,50 @@ func (v *Validator) ValidateYAML(input []byte) (parsed map[string]any, errs []Va
 	}
 
 	return asMap, errs, nil
+}
+
+// oneOfTypeMismatchRE matches the leaf message jsonschema emits when a oneOf
+// (or anyOf) alternative fails purely on type — e.g. "got object, want string"
+// / "got string, want object". These fire at the PARENT path (the `label`
+// node) while the alternative the user actually meant fails deeper (at
+// `label.policy`), so the parent line is noise once a more specific sibling
+// exists.
+var oneOfTypeMismatchRE = regexp.MustCompile(`^got \w+, want \w+$`)
+
+// suppressOneOfTypeNoise drops a parent-level "wrong type" error when a MORE
+// SPECIFIC error exists under the same path (#76c). Concretely: a bad
+// --label-policy makes the schema report both `label: got object, want string`
+// (the string-alternative of the label oneOf failing by type) and
+// `label.policy: value must be one of …` (the real problem); the first is
+// internal validator noise that confuses the customer. An error is suppressed
+// only when BOTH hold, so genuinely-different errors survive:
+//   - its message is a bare oneOf/anyOf type mismatch (oneOfTypeMismatchRE), and
+//   - another error's path is strictly nested under it (path == P, other == P+".…").
+//
+// A lone `label: got string, want object` (e.g. a regression task given a
+// string label, with no deeper error) has no nested sibling and is kept — so
+// the "object form required" diagnostic still surfaces.
+func suppressOneOfTypeNoise(errs []ValidationError) []ValidationError {
+	if len(errs) < 2 {
+		return errs
+	}
+	hasNestedUnder := func(path string) bool {
+		prefix := path + "."
+		for _, other := range errs {
+			if other.Path != path && strings.HasPrefix(other.Path, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	out := make([]ValidationError, 0, len(errs))
+	for _, e := range errs {
+		if oneOfTypeMismatchRE.MatchString(e.Message) && hasNestedUnder(e.Path) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // flattenValidationError walks the jsonschema error tree to produce
