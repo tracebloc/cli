@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	ktesting "k8s.io/client-go/testing"
 
 	"github.com/tracebloc/cli/internal/api"
@@ -29,7 +30,7 @@ func withClusterSeams(t *testing.T, cs kubernetes.Interface) {
 	origLoad, origCS := loadClusterFn, newClientsetFn
 	t.Cleanup(func() { loadClusterFn, newClientsetFn = origLoad, origCS })
 	loadClusterFn = func(cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
-		return &cluster.ResolvedConfig{Namespace: "default", Context: "test-ctx"}, nil
+		return &cluster.ResolvedConfig{Namespace: "default", Context: "test-ctx", RestConfig: &rest.Config{}}, nil
 	}
 	newClientsetFn = func(*cluster.ResolvedConfig) (kubernetes.Interface, error) { return cs, nil }
 }
