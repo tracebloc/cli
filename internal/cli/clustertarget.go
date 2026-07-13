@@ -35,6 +35,12 @@ var (
 	newClientsetFn = cluster.NewClientset
 )
 
+// resolveClusterTargetFn is a test seam over resolveClusterTarget so a command
+// test can inject a fully-resolved target (fake clientset + release + PVC)
+// without seeding the k8s objects discoverRelease / DiscoverSharedPVC look for.
+// Same fn-var seam pattern as loadClusterFn / listDatasetsFn.
+var resolveClusterTargetFn = resolveClusterTarget
+
 // clusterTarget bundles the cluster handles the data commands resolve from a
 // kubeconfig before doing any work: the resolved config, a clientset, the
 // parent tracebloc release, and — when asked — the shared data PVC.

@@ -1437,6 +1437,12 @@ func writePushErrorJSON(w io.Writer, sp push.SpecArgs, e error, code int) {
 // listDatasetsFn is a test seam over push.ListDatasets.
 var listDatasetsFn = push.ListDatasets
 
+// teardownFn is a test seam over push.Teardown (the destructive DROP TABLE +
+// file removal). Production points at the real Teardown; a test overrides it to
+// drive the clean and the partial-failure (table dropped, files remain → exit
+// 7) paths without a cluster.
+var teardownFn = push.Teardown
+
 // Test seams over the cluster-touching steps of runIngestionRun (#1009).
 // Production wires them to the real functions; a table test overrides them to
 // drive the classify → exit-code → JSON → reclaim matrix without a cluster
