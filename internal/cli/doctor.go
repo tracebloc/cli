@@ -66,7 +66,7 @@ Exit codes:
 
 	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
 	addNamespaceFlag(cmd, &nsOverride,
-		"namespace where your tracebloc client is installed (default: the context's namespace, or 'default')")
+		"namespace where your tracebloc client is installed (default: your active client's namespace, else the context's)")
 
 	return cmd
 }
@@ -83,11 +83,20 @@ func runClusterDoctor(
 	// client) even before any cluster is reachable (RFC-0001 §8.5).
 	authStatus := runAuthChecks(ctx, p)
 
-	resolved, err := cluster.Load(cluster.KubeconfigOptions{
+	// Target the active client's namespace exactly like `cluster info`, the data
+	// commands, and the home screen: bind opts.Namespace to the cached active
+	// client when the user overrode neither --namespace nor --context. Without
+	// this, doctor checked only the kubeconfig default namespace — so a typical
+	// install whose client lives in its slug namespace could show one state on the
+	// home screen and a conflicting "no client here" from the on-screen `doctor`
+	// hint (Bugbot / review).
+	opts := cluster.KubeconfigOptions{
 		Path:      kubeconfigPath,
 		Context:   contextOverride,
 		Namespace: nsOverride,
-	})
+	}
+	bindActiveClientNamespace(&opts) // side-effect: defaults opts.Namespace to the active client's
+	resolved, err := cluster.Load(opts)
 	if err != nil {
 		// 3 = kubeconfig file/parse problem (same class as cluster info). The
 		// auth section above already ran; if IT also failed, escalate to 2 so

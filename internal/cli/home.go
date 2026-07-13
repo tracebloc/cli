@@ -166,24 +166,28 @@ type homeDeps struct {
 	// wiring (renderHomeScreen) checks the real command tree; tests drive both
 	// sides.
 	hasResources func() bool
-	// rememberedName is the active client's cached name (no network). It's the
-	// name we fall back on whenever the probe couldn't surface one — including
-	// the budget-timeout path, so a provisioned machine degrades to a *named*
+	// rememberedClient reads the active client cached at provision time (no
+	// network) and reports BOTH whether this machine is provisioned and its
+	// display name. "provisioned" comes from the SAME signal the cluster probe's
+	// ownership gate uses (a cached active-client namespace), so the home screen
+	// and the probe never disagree about whether an environment exists. name is
+	// the label we fall back on whenever the probe couldn't surface one (incl. the
+	// budget-timeout path), so a provisioned machine degrades to a *named*
 	// "offline", never to the "no environment / run the installer" lie.
-	rememberedName func() string
-	invoked        func() string
-	tbAvailable    func() bool
-	budget         time.Duration
+	rememberedClient func() (provisioned bool, name string)
+	invoked          func() string
+	tbAvailable      func() bool
+	budget           time.Duration
 }
 
 func defaultHomeDeps() homeDeps {
 	return homeDeps{
-		signIn:         realSignIn,
-		probeEnv:       realProbeEnv,
-		probeBeat:      realHeartbeat,
-		rememberedName: realRememberedName,
-		invoked:        invokedName,
-		tbAvailable:    tbAliasAvailable,
+		signIn:           realSignIn,
+		probeEnv:         realProbeEnv,
+		probeBeat:        realHeartbeat,
+		rememberedClient: realRememberedClient,
+		invoked:          invokedName,
+		tbAvailable:      tbAliasAvailable,
 		// Safe default: assume `resources` isn't wired. renderHomeScreen
 		// overrides this from the real command tree; a test may too.
 		hasResources: func() bool { return false },
@@ -218,9 +222,10 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 		return homeModel{state: homeNotSignedIn, inv: inv}
 	}
 
-	// The remembered client name (cached at provision time, no network). Read up
-	// front so it's available even on the budget-timeout path below.
-	remembered := d.rememberedName()
+	// The active client cached at provision time (no network): whether this
+	// machine is provisioned, and its display name. Both are read up front so
+	// they're available even on the budget-timeout path below.
+	provisioned, remembered := d.rememberedClient()
 
 	// Signed in: probe the environment and the heartbeat concurrently, both under
 	// one overall budget. Buffered result channels (cap 1) mean an abandoned probe
@@ -278,10 +283,15 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 		// Either the cluster couldn't be reached, or it was reached but doesn't
 		// host this client's release (wrong kube-context, or the client runs on a
 		// cluster this kubeconfig doesn't point at — the sibling data commands
-		// explain this as "runs elsewhere"). If this machine was provisioned (a
-		// name is remembered), the environment exists but isn't reachable from here
-		// → offline; with nothing remembered, there's genuinely nothing here.
-		if env.name != "" {
+		// explain this as "runs elsewhere"). Offline vs. "no environment": it's an
+		// environment we just can't reach (offline) if EITHER this machine is
+		// PROVISIONED — a cached active-client namespace, the same signal the
+		// probe's ownership gate uses — OR the probe itself surfaced an environment
+		// name. Adding the provisioned test (not name alone) is the fix for a
+		// provisioned-but-unnamed profile that used to misread as "no environment /
+		// run the installer"; keeping the name test preserves the case where the
+		// probe surfaced a name without one being cached.
+		if provisioned || env.name != "" {
 			m.state = homeOffline
 			m.fullMenu = true
 		} else {
@@ -411,14 +421,24 @@ func capitalizeFirst(s string) string {
 	return string(r)
 }
 
-// realRememberedName is the active client's cached display name (set at
-// `client create` time, RFC-0001 §7.3) — no network. Empty when this machine was
-// never provisioned, which is exactly the "no environment" signal.
-func realRememberedName() string {
-	if cfg, err := config.Load(); err == nil {
-		return cfg.Current().ActiveClientName
+// realRememberedClient reads the active client cached at `client create` time
+// (RFC-0001 §7.3) — no network. provisioned is true when a client namespace is
+// cached: the SAME signal bindActiveClientNamespace / the probe's ownership gate
+// key on, so "is there an environment here?" is answered identically on the home
+// screen and in the probe. name is the friendly display, falling back to the
+// client ID so a provisioned-but-unnamed profile still renders a *named* offline
+// rather than being misread as "no environment".
+func realRememberedClient() (provisioned bool, name string) {
+	cfg, err := config.Load()
+	if err != nil {
+		return false, ""
 	}
-	return ""
+	p := cfg.Current()
+	name = p.ActiveClientName
+	if name == "" {
+		name = p.ActiveClientID
+	}
+	return p.ActiveClientNamespace != "", name
 }
 
 // realProbeEnv is the bounded cluster probe. It reuses the exact namespace

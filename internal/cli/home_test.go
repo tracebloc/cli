@@ -200,19 +200,19 @@ func TestRenderHome_States(t *testing.T) {
 }
 
 // baseDeps is a fully-online, signed-in fake; tests override just the field
-// under test. rememberedName defaults to "" (this machine was never
-// provisioned), so a probe that returns no name degrades to homeNoEnv unless a
-// case opts into a remembered name.
+// under test. rememberedClient defaults to (false, "") (this machine was never
+// provisioned), so a probe that returns no release degrades to homeNoEnv unless
+// a case opts into a provisioned client.
 func baseDeps() homeDeps {
 	return homeDeps{
-		signIn:         func() (bool, string, string) { return true, "alice@acme.io", "" },
-		probeEnv:       func(context.Context) envProbe { return envProbe{local: localLive, name: "acme-01"} },
-		probeBeat:      func(context.Context) heartbeatState { return beatOnline },
-		rememberedName: func() string { return "" },
-		invoked:        func() string { return binTracebloc },
-		tbAvailable:    func() bool { return false },
-		hasResources:   func() bool { return false },
-		budget:         2 * time.Second,
+		signIn:           func() (bool, string, string) { return true, "alice@acme.io", "" },
+		probeEnv:         func(context.Context) envProbe { return envProbe{local: localLive, name: "acme-01"} },
+		probeBeat:        func(context.Context) heartbeatState { return beatOnline },
+		rememberedClient: func() (bool, string) { return false, "" },
+		invoked:          func() string { return binTracebloc },
+		tbAvailable:      func() bool { return false },
+		hasResources:     func() bool { return false },
+		budget:           2 * time.Second,
 	}
 }
 
@@ -272,7 +272,20 @@ func TestResolveHomeModel_States(t *testing.T) {
 			name: "no release but provisioned (remembered name) = offline",
 			mutate: func(d *homeDeps) {
 				d.probeEnv = func(context.Context) envProbe { return envProbe{local: localNoRelease} }
-				d.rememberedName = func() string { return "acme-01" }
+				d.rememberedClient = func() (bool, string) { return true, "acme-01" }
+			},
+			want: homeOffline,
+		},
+		{
+			// Review #3: "provisioned" is a namespace signal, NOT a name one. A
+			// machine with a cached active-client namespace but no cached display
+			// name is still provisioned → offline, never homeNoEnv ("run the
+			// installer"). Mutation-proven: revert the classifier to `env.name != ""`
+			// and this case flips to homeNoEnv.
+			name: "provisioned but no cached name (namespace only) = offline",
+			mutate: func(d *homeDeps) {
+				d.probeEnv = func(context.Context) envProbe { return envProbe{local: localNoRelease} }
+				d.rememberedClient = func() (bool, string) { return true, "" } // provisioned, name not cached
 			},
 			want: homeOffline,
 		},
@@ -356,7 +369,7 @@ func TestResolveHomeModel_ProvisionedNoReleaseKeepsName(t *testing.T) {
 	t.Run("name from the remembered fallback", func(t *testing.T) {
 		d := baseDeps()
 		d.probeEnv = func(context.Context) envProbe { return envProbe{local: localNoRelease} } // no name surfaced
-		d.rememberedName = func() string { return "acme-01" }
+		d.rememberedClient = func() (bool, string) { return true, "acme-01" }
 		m := resolveHomeModel(context.Background(), d)
 		if m.state != homeOffline || m.envName != "acme-01" {
 			t.Fatalf("got state %d name %q, want offline/acme-01", m.state, m.envName)
@@ -427,7 +440,7 @@ func TestResolveHomeModel_SlowProbesDegradeFast(t *testing.T) {
 	t.Run("context-ignoring env probe → named offline, within budget", func(t *testing.T) {
 		d := baseDeps()
 		d.budget = budget
-		d.rememberedName = func() string { return "acme-01" } // this machine was provisioned
+		d.rememberedClient = func() (bool, string) { return true, "acme-01" } // this machine was provisioned
 		started := make(chan struct{})
 		d.probeEnv = func(context.Context) envProbe {
 			close(started)
@@ -776,24 +789,26 @@ func TestRenderHome_ResourcesRowGating(t *testing.T) {
 	})
 }
 
-// TestHasTopLevelCommand pins the command-tree gate that feeds hasResources: the
-// commands wired today are detected, `resources` is NOT (so the home row stays
-// absent until #237 lands), and adding one flips the gate — which is exactly how
-// the row will appear automatically once the command ships.
+// TestHasTopLevelCommand pins the command-tree gate that feeds hasResources:
+// commands wired on the root are detected — including `resources`, now that #237
+// has landed and root registers it — an unregistered name is not, and adding one
+// flips the gate, which is exactly how a gated row appears automatically once its
+// command ships.
 func TestHasTopLevelCommand(t *testing.T) {
 	root := NewRootCmd(BuildInfo{Version: "test"})
 
-	for _, name := range []string{"data", "cluster", "doctor", "delete"} {
+	for _, name := range []string{"data", "cluster", "doctor", "delete", "resources"} {
 		if !hasTopLevelCommand(root, name) {
 			t.Errorf("expected %q to be registered on the root", name)
 		}
 	}
-	if hasTopLevelCommand(root, "resources") {
-		t.Error("resources must not be wired yet — the home row would name a non-existent command")
+	const absent = "nonesuch"
+	if hasTopLevelCommand(root, absent) {
+		t.Errorf("%q must not be registered — the gate would name a non-existent command", absent)
 	}
-	root.AddCommand(&cobra.Command{Use: "resources"})
-	if !hasTopLevelCommand(root, "resources") {
-		t.Error("resources must be detected once registered, so the home row appears automatically")
+	root.AddCommand(&cobra.Command{Use: absent})
+	if !hasTopLevelCommand(root, absent) {
+		t.Errorf("%q must be detected once registered, so the gated row appears automatically", absent)
 	}
 }
 
