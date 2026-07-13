@@ -397,7 +397,17 @@ func runResourcesWizard(p *ui.Printer, pr prompter, node resources.Machine, curr
 		return resources.DeriveTraining(cpu, mem, "", resource.Quantity{}, false), nil
 	}
 
-	// (3) Choose an amount — bounded prompts so the answer always fits.
+	// (3) Choose an amount — bounded prompts so the answer always fits. If this
+	//     machine is too small to give a run even the minimum after tracebloc's
+	//     overhead (maxCores < 1 or maxGiB < 2), the bounds would be impossible
+	//     (e.g. "1–0"): every answer is rejected and the wizard can't complete
+	//     except by interrupting. Fail honestly instead (Bugbot #241).
+	if maxCores < 1 || maxGiB < 2 {
+		return resources.Training{}, &exitError{code: 2, err: fmt.Errorf(
+			"this machine is too small to choose an amount — after tracebloc's ~1 core and 3 GiB "+
+				"overhead it can offer a training run at most %d core(s) and %d GiB. Free up "+
+				"resources or use a larger machine.", maxCores, maxGiB)}
+	}
 	coresAns, err := pr.Input(
 		fmt.Sprintf("CPU cores for one run (1–%d)", maxCores),
 		"how many CPU cores a single training run may use",

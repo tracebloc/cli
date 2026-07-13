@@ -332,6 +332,28 @@ func TestWizard_ChooseAnAmount(t *testing.T) {
 	}
 }
 
+// TestWizard_ChooseAnAmountTooSmallMachine: on a machine too small to give a run
+// even the 1-core / 2-GiB minimum after tracebloc's overhead, the "Choose an
+// amount" path must NOT prompt an impossible range (e.g. "1–0") that rejects
+// every answer and traps the user — it fails honestly with exit 2. Bugbot #241.
+func TestWizard_ChooseAnAmountTooSmallMachine(t *testing.T) {
+	pr := &fakePrompter{
+		answers: map[string]string{"How much may one training run use?": "Choose an amount"},
+	}
+	// 1 CPU / 2 GiB node: after the ~1-core, ~3-GiB overhead, a run can have
+	// nothing — maxCores/maxGiB drop below the 1-core/2-GiB prompt floor.
+	cs := csWith("1", "2Gi", map[string]string{"RESOURCE_LIMITS": "cpu=1,memory=1Gi"})
+	var buf bytes.Buffer
+	err := applyResourcesSet(context.Background(), ui.New(&buf, ui.WithColor(false)), pr,
+		setTarget(cs), cluster.KubeconfigOptions{}, setReq{})
+	if got := exitCode(t, err); got != 2 {
+		t.Fatalf("too-small-machine 'Choose an amount' must exit 2 (not loop), got %d (%v)\n%s", got, err, buf.String())
+	}
+	if !strings.Contains(err.Error(), "too small") {
+		t.Errorf("expected an honest 'too small' message, got: %v", err)
+	}
+}
+
 // TestWizard_GPURowOmittedWhenNoGPU: the wizard header shows no GPU line on a
 // GPU-less machine, and the Select still preselects max.
 func TestWizard_GPURowOmittedWhenNoGPU(t *testing.T) {
