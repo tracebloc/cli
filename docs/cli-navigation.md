@@ -2,8 +2,8 @@
 
 **The single source of truth for how a user moves through the CLI.** Every command, decision point, and place a user can end up. Diagrams are [Mermaid](https://mermaid.js.org) — they render natively on GitHub and in the docs, and this file is version-controlled, so **edit this file + open a PR to change the map** (that PR is where we discuss flow changes).
 
-> **Basis:** `develop` @ `06f9d41`. Two things are marked distinctly:
-> - **`resources`** is on a feature branch (PRs #237 / #241), not yet on `develop` → drawn **dashed / "not shipped"**.
+> **Basis:** `develop` @ `27c5392`. Two things are marked distinctly:
+> - **`resources show`** has shipped to `develop` (#237) → drawn solid; **`resources set`** (#241) is still on a feature branch → drawn **dashed / "not shipped"**.
 > - The **status-aware home screen** (greeting + sign-in + environment) is a *proposed* redesign (see `home-screen-spec.md`); today's home screen is **stateless** (same for everyone). Proposed bits are dashed.
 
 **How to read it:** `{diamond}` = decision · `[box]` = step · `([rounded])` = where you end up · green = exit 0 · red = non-zero exit · grey dashed = hidden (installer/back-compat) · orange dashed = proposed / not-yet-shipped.
@@ -33,7 +33,8 @@ flowchart TD
   ENVC --> dv["data validate (local only, no cluster)"]
   ENVC --> ci["cluster info"]
   ENVC --> doc["doctor (a.k.a. cluster doctor today)"]
-  ENVC -.-> res["resources — show / set"]:::proposed
+  ENVC --> res["resources show"]
+  ENVC -.-> resset["resources set"]:::proposed
 
   classDef hidden fill:#eee,stroke:#999,stroke-dasharray:3 3,color:#666;
   classDef proposed fill:#fff5e6,stroke:#e0a24a,stroke-dasharray:5 5;
@@ -121,7 +122,7 @@ flowchart TD
 
 ---
 
-## 4. `resources` — show & set  *(feature branch #237/#241, not yet on `develop`)*
+## 4. `resources` — show & set  *(`show` shipped #237, on `develop`; `set` on feature branch #241, not yet on `develop`)*
 
 ```mermaid
 flowchart TD
@@ -185,6 +186,6 @@ flowchart TD
 
 1. **Home screen is stateless today.** The status-aware redesign (greeting + sign-in + environment + compute) in `home-screen-spec.md` is *proposed* — it's the target, not current behavior.
 2. **`delete` (offboard) exits 0 even on a *partial/degraded* teardown** — it warns but never returns non-zero, so a script can't detect an incomplete offboard. A dedicated non-zero "partial offboard" code would close this.
-3. **`resources` is unshipped on `develop`** (feature branch). Merges via #237 (show) → #241 (set).
+3. **`resources set` is unshipped on `develop`.** `show` shipped via #237 (now on `develop`); `set` lands via #241 (still on a feature branch).
 4. **`cluster doctor` → `tb doctor`** rename is decided (home-screen spec); the map already shows `doctor`. `cluster info`'s home (stay under `cluster`, or also promote) is open.
 5. Terminology in the live copy (client / cluster / `<table>`) is pre-cleanup; the map uses the agreed target words (secure environment, etc.). The rename wave aligns the code later.
