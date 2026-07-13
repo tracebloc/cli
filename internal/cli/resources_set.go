@@ -196,6 +196,16 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 	// there. On a machine with no GPU the effective GPU is none: normalize it away
 	// so a plain `--cores` change doesn't inherit a phantom GPU and then fail the
 	// GPU fit-check (or trigger a spurious no-op miss) on a GPU-less host.
+	//
+	// A GPU-less machine whose cluster STILL carries that chart-default
+	// GPU_REQUESTS is a "phantom GPU": jobs-manager reads any non-empty value as
+	// a GPU cluster (client-runtime `_gpu_available_from_env` treats ONLY an
+	// explicit-empty value as "no GPU"), so training pods request a nonexistent
+	// nvidia.com/gpu — unschedulable, forcing a GPU→CPU fallback with a false GPU
+	// heartbeat. Capture it BEFORE normalizing HasGPU away, so an otherwise-no-op
+	// still writes the explicit-empty override that clears it (persistCeiling →
+	// BuildEnvSpec → NoGPUEnvValue). (Bugbot #241; runtime behavior confirmed.)
+	phantomGPU := current.HasGPU && !machineHasGPU
 	if !machineHasGPU {
 		current.HasGPU = false
 	}
@@ -223,8 +233,16 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 	//     there is nothing for the fit-check to protect. Sizing an actual CHANGE
 	//     is still validated below, before anything mutates.
 	if sameCeiling(desired, current) {
-		p.Successf("Each training run already uses up to %s — nothing to change.", perRunSize(desired))
-		return nil
+		if !phantomGPU {
+			p.Successf("Each training run already uses up to %s — nothing to change.", perRunSize(desired))
+			return nil
+		}
+		// CPU/memory budget is unchanged, but this GPU-less machine's cluster
+		// still requests a GPU (a stale chart default). Don't treat it as a
+		// clean no-op — fall through to persist so BuildEnvSpec's explicit-empty
+		// GPU override lands and clears it; otherwise runs stay unschedulable /
+		// fall back to CPU while the heartbeat keeps advertising a GPU.
+		p.Infof("Your CPU and memory budget is unchanged — but this machine has no GPU while the cluster still requests one, so I'll clear that stale GPU setting so runs can schedule.")
 	}
 
 	// (5) Validate + fit-check. Never mutate on failure.

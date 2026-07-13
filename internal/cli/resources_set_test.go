@@ -478,6 +478,41 @@ func TestSet_CPUOnlyMachineIgnoresChartDefaultGPU(t *testing.T) {
 	}
 }
 
+// TestSet_PhantomGPUForcesPersistOnNoOpCeiling: on a GPU-less machine whose
+// cluster still carries the chart-default phantom GPU, merely RESTATING the
+// current CPU/memory ceiling (an otherwise-clean no-op) must NOT short-circuit —
+// `set` still persists so BuildEnvSpec's explicit no-GPU override clears the
+// phantom, else jobs-manager keeps requesting a nonexistent nvidia.com/gpu
+// (unschedulable + false GPU heartbeat). Bugbot #241 flagged the no-op path
+// skipping this fix; the change path is covered above.
+func TestSet_PhantomGPUForcesPersistOnNoOpCeiling(t *testing.T) {
+	// GPU-less node; env carries the chart-default phantom GPU + a ceiling we
+	// then restate exactly (cores=4/memory=16 == current).
+	cs := csWith("8", "32Gi", map[string]string{
+		"RESOURCE_LIMITS": "cpu=4,memory=16Gi",
+		"GPU_REQUESTS":    "nvidia.com/gpu=1",
+		"GPU_LIMITS":      "nvidia.com/gpu=1",
+	})
+	err, out := runSet(t, cs, nil, setReq{cores: "4", memory: "16", coresSet: true, memSet: true, dryRun: true, yes: true})
+	if err != nil {
+		t.Fatalf("phantom-GPU restatement must persist the cleanup, got: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "nothing to change") {
+		t.Errorf("phantom GPU must NOT be treated as a clean no-op:\n%s", out)
+	}
+	if !strings.Contains(out, "no GPU while the cluster still requests one") {
+		t.Errorf("expected the phantom-cleanup note explaining why we persist an unchanged ceiling:\n%s", out)
+	}
+	if strings.Contains(out, "nvidia.com/gpu") {
+		t.Errorf("must not re-write the phantom GPU:\n%s", out)
+	}
+	for _, want := range []string{`GPU_LIMITS: ""`, `GPU_REQUESTS: ""`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the no-op path must still write explicit no-GPU %q to clear the phantom:\n%s", want, out)
+		}
+	}
+}
+
 // --- FIX 1: never run an unpinned upgrade -----------------------------------
 
 // TestSet_RefusesWhenChartVersionUnknown: when the release carries no
