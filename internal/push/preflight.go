@@ -436,6 +436,151 @@ func CheckAnnotationPairing(images, annotations []string) error {
 		strings.Join(parts, "; "))
 }
 
+// CheckMaskPairing previews the ingestor's FilePairingValidator for
+// semantic_segmentation (modalities/validators.py, sidecar_suffix="_mask"):
+// every image must have a PNG mask named "<image-stem>_mask.png" in masks/ and
+// vice versa. The ingestor strips the documented "_mask" suffix (#196) from
+// mask stems before matching, so image_001.jpg pairs with image_001_mask.png;
+// a mask NOT carrying the suffix can't pair and is a non-conforming orphan. A
+// mismatch in any direction fails in-cluster after the upload.
+func CheckMaskPairing(images, masks []string) error {
+	const maxListed = 5
+	imgStems := make(map[string]bool, len(images))
+	for _, p := range images {
+		base := filepath.Base(p)
+		imgStems[strings.TrimSuffix(base, filepath.Ext(base))] = true
+	}
+	// Strip the extension then the "_mask" suffix so a mask maps back to the
+	// image stem it pairs with; a mask stem without the suffix is kept as a
+	// non-conforming orphan (mirrors the validator's extra_orphans).
+	maskFor := make(map[string]bool, len(masks))
+	var nonConforming []string
+	for _, p := range masks {
+		base := filepath.Base(p)
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		if strings.HasSuffix(stem, "_mask") {
+			maskFor[strings.TrimSuffix(stem, "_mask")] = true
+		} else {
+			nonConforming = append(nonConforming, base)
+		}
+	}
+	var noMask, noImg []string
+	for s := range imgStems {
+		if !maskFor[s] {
+			noMask = append(noMask, s)
+		}
+	}
+	for s := range maskFor {
+		if !imgStems[s] {
+			noImg = append(noImg, s+"_mask")
+		}
+	}
+	if len(noMask) == 0 && len(noImg) == 0 && len(nonConforming) == 0 {
+		return nil
+	}
+	sort.Strings(noMask)
+	sort.Strings(noImg)
+	sort.Strings(nonConforming)
+	var parts []string
+	if len(noMask) > 0 {
+		parts = append(parts, fmt.Sprintf("%d image(s) without a mask (%s)",
+			len(noMask), TruncateList(noMask, maxListed)))
+	}
+	if len(noImg) > 0 {
+		parts = append(parts, fmt.Sprintf("%d mask(s) without an image (%s)",
+			len(noImg), TruncateList(noImg, maxListed)))
+	}
+	if len(nonConforming) > 0 {
+		parts = append(parts, fmt.Sprintf("%d mask(s) not named <image>_mask.png (%s)",
+			len(nonConforming), TruncateList(nonConforming, maxListed)))
+	}
+	return fmt.Errorf(
+		"images/ and masks/ don't pair up: %s. Every image needs a same-named "+
+			"\"<image>_mask.png\" in masks/ (and vice versa) — the cluster rejects mismatches "+
+			"after the upload.",
+		strings.Join(parts, "; "))
+}
+
+// CheckMaskIdColumn previews the ingestor's MaskIdColumnValidator
+// (validators/mask_id_validator.py, backend#816) for semantic_segmentation: the
+// manifest must DECLARE a mask_id column AND POPULATE it on every row. The
+// training client resolves each mask file from this column with no naming-
+// convention fallback, so an undeclared or empty mask_id becomes a late, opaque
+// FileNotFoundError at train time. The name is the exact lowercase "mask_id"
+// (the stored table keys on it verbatim; a different-case column stores nothing
+// the client can read), so a case variant gets a rename hint, not a silent pass.
+func CheckMaskIdColumn(csvPath string) error {
+	const maskIDColumn = "mask_id"
+	header, err := ReadCSVHeader(csvPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
+	}
+	exact := -1
+	for i, c := range header {
+		if c == maskIDColumn {
+			exact = i
+			break
+		}
+	}
+	if exact == -1 {
+		// Distinguish a wrong-case/whitespace variant (rename) from truly absent
+		// (add), mirroring the ingestor's undeclared-vs-miscased split.
+		if v := matchColumnIndex(header, maskIDColumn); v >= 0 {
+			return fmt.Errorf(
+				"semantic_segmentation needs a %q column in %s, but found %q (wrong case). "+
+					"Rename it to exactly %q — the training client reads that column to locate each mask.",
+				maskIDColumn, filepath.Base(csvPath), header[v], maskIDColumn)
+		}
+		return fmt.Errorf(
+			"semantic_segmentation needs a %q column in %s (columns: %s) linking each image to its "+
+				"mask file. Add it — the training client reads it to locate each mask.",
+			maskIDColumn, filepath.Base(csvPath), strings.Join(header, ", "))
+	}
+	// Populated on every row? Mirror the ingestor's NA-sentinel-aware empty scan
+	// (a missing cell counts as empty), keeping a bounded sample of row numbers.
+	r, closer, err := openCSVReader(csvPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
+	}
+	defer func() { _ = closer.Close() }()
+	if _, err := r.Read(); err != nil {
+		return nil // no header/rows — CheckHasDataRows owns that diagnostic
+	}
+	const maxSample = 5
+	var emptyRows []string
+	emptyCount, row := 0, 0
+	for {
+		rec, rerr := r.Read()
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			// Fail closed on a mid-read error rather than pass a partial scan
+			// (matches CrossCheckLabels / #221).
+			return fmt.Errorf("reading %s: %w", filepath.Base(csvPath), rerr)
+		}
+		row++
+		val := ""
+		if exact < len(rec) {
+			val = strings.TrimSpace(rec[exact])
+		}
+		if _, isNA := naSentinels[val]; isNA {
+			emptyCount++
+			if len(emptyRows) < maxSample {
+				emptyRows = append(emptyRows, fmt.Sprintf("row %d", row))
+			}
+		}
+	}
+	if emptyCount > 0 {
+		return fmt.Errorf(
+			"%d row(s) in %s have an empty %q (e.g. %s). Every row must name its mask file — an "+
+				"empty value makes the training client derive a garbage filename and fail. Fill in "+
+				"%q or drop those rows, then re-run.",
+			emptyCount, filepath.Base(csvPath), maskIDColumn, strings.Join(emptyRows, ", "), maskIDColumn)
+	}
+	return nil
+}
+
 // TruncateList joins up to max items, appending "… and N more" past that.
 func TruncateList(items []string, max int) string {
 	if len(items) <= max {
@@ -1400,6 +1545,17 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		case "object_detection":
 			// images↔annotations stem pairing (FilePairingValidator preview).
 			if err := CheckAnnotationPairing(layout.Images, layout.Sidecars["annotations"]); err != nil {
+				return nil, dataProblem(err)
+			}
+		case "semantic_segmentation":
+			// images↔masks "_mask"-suffix pairing (FilePairingValidator preview)
+			// + the mask_id link-column contract (MaskIdColumnValidator preview,
+			// backend#816). Labels come from the masks, so semseg has no label
+			// column to check (the ingestor omits LabelColumnValidator too).
+			if err := CheckMaskPairing(layout.Images, layout.Sidecars["masks"]); err != nil {
+				return nil, dataProblem(err)
+			}
+			if err := CheckMaskIdColumn(layout.LabelsCSV); err != nil {
 				return nil, dataProblem(err)
 			}
 		}

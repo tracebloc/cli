@@ -38,41 +38,32 @@ func TestRegistryKnownCategories(t *testing.T) {
 
 func TestSupportedCategories(t *testing.T) {
 	got := SupportedCategoryIDs()
-	// RFC-0002 phase 4 wired the 5 text tasks (token/sentence-pair
-	// classification, causal LM, seq2seq, embeddings) and backend#1054 WS2
-	// added time_series_classification, so 15 of the 16 categories are
-	// pushable; only semantic_segmentation remains pending.
-	if len(got) != 15 {
-		t.Fatalf("SupportedCategoryIDs() len = %d, want 15: %v", len(got), got)
+	// RFC-0002 phase 4 wired the last pending category — semantic_segmentation
+	// (#182; its blockers landed — di#358 shipped the ingestor's mask_id
+	// require-and-enforce in v0.7.0, and backend#816 closed). So ALL 16 schema
+	// categories are pushable now, none gated out.
+	if len(got) != 16 {
+		t.Fatalf("SupportedCategoryIDs() len = %d, want 16: %v", len(got), got)
 	}
 	for _, id := range got {
 		if !IsCLISupported(id) {
 			t.Errorf("SupportedCategoryIDs returned %q but IsCLISupported is false", id)
 		}
 	}
-	// semantic_segmentation is the sole known-but-not-yet-pushable category
-	// (awaiting the ingestor's mask_id link column + training sign-off,
-	// backend#816); it must stay gated out and explain why.
-	for _, id := range []string{"semantic_segmentation"} {
-		if !IsKnown(id) {
-			t.Errorf("%s should be known", id)
-		}
-		if IsCLISupported(id) {
-			t.Errorf("%s should not be CLI-supported yet", id)
-		}
-		if spec, _ := Lookup(id); spec.UnsupportedNote == "" {
-			t.Errorf("%s should carry an UnsupportedNote", id)
-		}
-	}
-	// The 5 newly-wired text tasks must now be pushable AND carry no stale
-	// pending note (the picker only greys out categories with a note).
-	for _, id := range []string{"token_classification", "sentence_pair_classification", "causal_language_modeling", "seq2seq", "embeddings"} {
+	// Every known category is now CLI-supported AND carries no stale pending
+	// note (the picker only greys out categories with an UnsupportedNote).
+	for _, id := range allCategoryIDs() {
 		if !IsCLISupported(id) {
-			t.Errorf("%s should be CLI-supported after phase 4", id)
+			t.Errorf("%s should be CLI-supported (every category is wired now)", id)
 		}
 		if spec, _ := Lookup(id); spec.UnsupportedNote != "" {
 			t.Errorf("%s is supported but still carries an UnsupportedNote: %q", id, spec.UnsupportedNote)
 		}
+	}
+	// semantic_segmentation specifically — the phase-4 finale (#182) — must be
+	// pushable now, closing out the known-but-pending set.
+	if !IsCLISupported("semantic_segmentation") {
+		t.Error("semantic_segmentation should be CLI-supported after #182")
 	}
 }
 

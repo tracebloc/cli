@@ -133,9 +133,9 @@ func newDataIngestCmd() *cobra.Command {
 		contextOverride string
 		nsOverride      string
 
-		// Ingest-spec flags. image_classification + the tabular /
-		// time-series family are supported today; text + detection +
-		// segmentation land in later increments.
+		// Ingest-spec flags. All schema task categories are CLI-supported now
+		// (image classification / detection / segmentation / keypoint, the full
+		// text family, and the tabular / time-series family).
 		//
 		// --name/--task are the canonical flags (#180); --table/--category
 		// stay on as hidden deprecated aliases so existing scripts keep
@@ -612,12 +612,10 @@ collaborators can train against that table without ever seeing the raw files.`))
 	// 2. Category gate. Runs BEFORE schema validation so an
 	//    unsupported category gets a clear, actionable CLI message
 	//    rather than the schema's terse enum / missing-property error.
-	//    Supported today: image_classification + the tabular /
-	//    time-series family. The other image categories need sidecar
-	//    (annotation/mask) staging the CLI doesn't do yet, and the
-	//    text family needs a texts/sequences dir — both land in later
-	//    increments. A typo'd category also lands here with a clear
-	//    list rather than the schema's 11-option enum dump.
+	//    Every schema task category is CLI-supported now; this gate stays as
+	//    defensive routing so a future known-but-not-yet-wired category gets a
+	//    clear per-category message, and a typo'd category gets the supported
+	//    list rather than the schema's raw enum dump.
 	switch {
 	case a.Spec.Category == "":
 		// No task chosen. In guided mode the picker already filled this;
@@ -631,10 +629,9 @@ collaborators can train against that table without ever seeing the raw files.`))
 	case push.IsCLISupported(a.Spec.Category):
 		// supported
 	case push.IsKnown(a.Spec.Category):
-		// A recognized category data ingest doesn't implement yet — today just
-		// semantic_segmentation (awaiting the ingestor's mask_id link column +
-		// training sign-off, backend#816). Routed here (not the default branch)
-		// so the user gets the registry's per-category pending-support reason,
+		// A recognized category the CLI doesn't implement yet. None today — every
+		// schema category is wired — but kept as defensive routing so a future
+		// known-but-unsupported category gets the registry's per-category reason,
 		// not a misleading "unrecognized category". Supported categories were
 		// already caught above, so IsKnown here means known-but-unsupported.
 		spec, _ := push.Lookup(a.Spec.Category)
@@ -716,6 +713,8 @@ collaborators can train against that table without ever seeing the raw files.`))
 		layout, err = push.DiscoverText(a.Spec.Category, a.LocalPath)
 	case a.Spec.Category == "object_detection":
 		layout, err = push.DiscoverObjectDetection(a.LocalPath)
+	case a.Spec.Category == "semantic_segmentation":
+		layout, err = push.DiscoverSemanticSegmentation(a.LocalPath)
 	default:
 		// image_classification + keypoint_detection: labels.csv + images/.
 		layout, err = push.Discover(a.LocalPath)
@@ -1317,6 +1316,9 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 		p.Field("images", imagesVal)
 		if anns := layout.Sidecars["annotations"]; len(anns) > 0 {
 			p.Field("annotations", fmt.Sprintf("%d files", len(anns)))
+		}
+		if masks := layout.Sidecars["masks"]; len(masks) > 0 {
+			p.Field("masks", fmt.Sprintf("%d files", len(masks)))
 		}
 	}
 	p.Field("total size", push.HumanBytes(layout.TotalBytes))
