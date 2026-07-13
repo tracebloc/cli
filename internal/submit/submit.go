@@ -127,6 +127,14 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		p.Successf("Submitted — tracebloc is validating your data and loading it into the table.")
 	}
 
+	// One greppable id across every layer (backend#1028 item 3): this key
+	// becomes the ingestor Job's TRACEBLOC_INGEST_CORRELATION_ID env and
+	// its tracebloc.io/ingestion-run label, shows up in the ingestor's
+	// log next to its per-process ingestor_id, and reaches the backend
+	// inside the dataset registration payload. Printed on every path
+	// (fresh and replay) — it's the thread support asks for.
+	p.Hintf("Correlation id: %s", req.IdempotencyKey)
+
 	if opts.Detach {
 		// --detach: report and bail. The run continues in the cluster;
 		// there is no CLI re-attach verb yet, so the honest way back is
