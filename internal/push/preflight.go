@@ -789,12 +789,18 @@ func CheckSequenceSchemaColumns(schema map[string]string, g GroupingSpec) error 
 // CheckHasDataRows this guarantees every sequence has >= 1 real row and at
 // least one sequence exists at all.
 //
-// NA sentinels count as null: the ingestor loads the column with pandas,
-// whose NA parsing turns "NA"/"null"/… into NaN before the validator's
-// isna() probe — mirrored here via naSentinels (the ingestor's
-// coercion.NA_SENTINELS). The column is resolved with the shared
-// case-/whitespace-insensitive rule (#340). An absent column benign-skips
-// (returns 0, nil): that is CheckSequenceSchemaColumns' /
+// NA sentinels count as null: SequenceGroupValidator plain-reads the column
+// with pandas (keep_default_na=True) and computes null as
+// `ids.isna() | (ids.astype(str).str.strip() == "")`, so the faithful null
+// set is pandas' DEFAULT NA tokens (STR_NA_VALUES — matched on the RAW cell,
+// since pandas tokenises NA before stripping) UNION whitespace-only cells —
+// NOT the curated coercion.NA_SENTINELS. Mirrored here via pandasDefaultNA
+// plus a TrimSpace=="" clause (cli#239): the coercion set the label checks use
+// wrongly drops lowercase "none" (which pandas KEEPS → a real id, so the old
+// naSentinels probe was a false REJECT, the dangerous direction) and lacks
+// "#NA" (which pandas drops to NaN → null, an under-reject). The column is
+// resolved with the shared case-/whitespace-insensitive rule (#340). An absent
+// column benign-skips (returns 0, nil): that is CheckSequenceSchemaColumns' /
 // CheckSchemaColumns' diagnostic, not this one's.
 //
 // sequences is the count of distinct non-null ids — the dataset's SAMPLE
@@ -841,18 +847,28 @@ func sequenceScanFrom(r *csv.Reader, groupColumn string) (sequences int, nullErr
 			return 0, nil, err // caller wraps with the filename and fails closed
 		}
 		rowNum++
-		v := ""
+		raw := ""
 		if len(rec) > col {
-			v = strings.TrimSpace(rec[col])
+			raw = rec[col] // RAW: pandas tokenises NA pre-strip and groups the key verbatim
 		}
-		if _, isNA := naSentinels[v]; isNA {
+		// Null iff the raw cell is a pandas DEFAULT NA token OR whitespace-only —
+		// SequenceGroupValidator's `isna() | (astype(str).str.strip() == "")` over
+		// a plain read_csv (cli#239). "" is already in pandasDefaultNA, so the
+		// TrimSpace clause only adds genuine whitespace-only cells; and a padded
+		// token (" NA ") is a REAL id in-cluster, so matching the raw (not the
+		// trimmed) cell is what keeps parity.
+		_, isNA := pandasDefaultNA[raw]
+		if isNA || strings.TrimSpace(raw) == "" {
 			nullCount++
 			if firstNullRow == 0 {
 				firstNullRow = rowNum
 			}
 			continue
 		}
-		distinct[v] = true
+		// Distinct sequences count the RAW id — pandas groups the object key
+		// verbatim (" p1 " and "p1" are two sequences), consistent with the
+		// grouped previews (labelConstantViolation / perGroupTimeViolation).
+		distinct[raw] = true
 	}
 	if nullCount > 0 {
 		return len(distinct), fmt.Errorf(

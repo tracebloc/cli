@@ -241,6 +241,10 @@
       ],
       "verdict": "reject"
     },
+    "tsc-none-sequence-id": {
+      "errors": [],
+      "verdict": "accept"
+    },
     "tsc-null-sequence-id": {
       "errors": [
         "SequenceGroupValidator: Sequence column 'sequence_id' contains 2 null/empty value(s) at rows [1, 3]. Every timestep row must carry the id of the sequence it belongs to."
