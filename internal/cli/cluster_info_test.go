@@ -117,6 +117,13 @@ func TestRunClusterInfo_TokenRequestWithExpiry(t *testing.T) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
+	// Mutation guard: with a server ExpiresAt set we take the FIRST switch arm
+	// (show the authoritative remaining lifetime), NOT the requested-lifetime
+	// fallback — both arms print the "expires in" label, so this negative
+	// assertion is what actually distinguishes them.
+	if strings.Contains(out, "requested; server may cap shorter") {
+		t.Errorf("with a server ExpiresAt, must not fall back to the requested-lifetime arm:\n%s", out)
+	}
 	if strings.Contains(out, "tok-abcdef") {
 		t.Errorf("the raw token must never be printed:\n%s", out)
 	}
