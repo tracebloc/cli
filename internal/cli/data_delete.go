@@ -105,6 +105,15 @@ func runDataDelete(ctx context.Context, a runDataDeleteArgs) error {
 the cluster and deletes the dataset's files on the shared storage. It can't be
 undone — re-ingesting the data is the only way back.`)
 
+	// 0. Empty-arg guard with a DELETE-appropriate message (#76a). delete
+	//    takes the dataset as a POSITIONAL arg, so an empty one must not fall
+	//    through to ValidateTableName's "set --name" text (that flag belongs to
+	//    `data ingest`, not here). ExactArgs(1) still accepts an explicit "".
+	if a.Table == "" {
+		return &exitError{code: 2, err: errors.New(
+			"dataset name is required — pass it as an argument: tracebloc data delete <dataset>")}
+	}
+
 	// 1. Validate the name before we build any PVC path from it
 	//    (push.PlanTeardown panics on an unsafe name by design).
 	if err := push.ValidateTableName(a.Table); err != nil {
