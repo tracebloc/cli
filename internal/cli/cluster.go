@@ -104,11 +104,8 @@ Exit codes:
 		},
 	}
 
-	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
-		"path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
-	cmd.Flags().StringVar(&contextOverride, "context", "",
-		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
-	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
+	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
+	addNamespaceFlag(cmd, &nsOverride,
 		"namespace where your tracebloc client is installed (default: the context's namespace, or 'default')")
 	cmd.Flags().Int64Var(&tokenExpiry, "token-expiry-seconds", 600,
 		"requested SA token expiration in seconds (default 600 = 10 min; ignored for static-secret fallback)")

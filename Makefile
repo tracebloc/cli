@@ -12,10 +12,17 @@ GO            ?= go
 GOLANGCI_LINT ?= golangci-lint
 PKGS          := ./...
 
+# Pinned lint/analysis tool versions (reproducibility — no more @latest drift).
+# Keep these in lockstep with .github/workflows/build.yml. Bump deliberately.
+ERRCHECK_VERSION    ?= v1.20.0
+INEFFASSIGN_VERSION ?= v0.2.0
+MISSPELL_VERSION    ?= v0.3.4
+DEADCODE_VERSION    ?= v0.48.0
+
 # ---- top-level targets -------------------------------------------
 
 .PHONY: ci
-ci: vet test lint fmt-check schema-check
+ci: vet test lint fmt-check schema-check deadcode
 	@echo "==> ci: all green"
 
 .PHONY: build
@@ -55,9 +62,21 @@ test-integration:
 # available for a richer local pass.
 .PHONY: lint
 lint:
-	$(GO) run github.com/kisielk/errcheck@latest ./...
-	$(GO) run github.com/gordonklaus/ineffassign@latest ./...
-	$(GO) run github.com/client9/misspell/cmd/misspell@latest -error .
+	$(GO) run github.com/kisielk/errcheck@$(ERRCHECK_VERSION) ./...
+	$(GO) run github.com/gordonklaus/ineffassign@$(INEFFASSIGN_VERSION) ./...
+	$(GO) run github.com/client9/misspell/cmd/misspell@$(MISSPELL_VERSION) -error .
+
+# deadcode: reachability scan from the CLI entrypoint (~5s). ADVISORY for now
+# (non-blocking) — it prints unreachable funcs but never fails the build. The
+# module still carries pre-existing dead-ish funcs that are unsafe to delete
+# blindly: Stringer methods (Status.String, JobOutcome.String) reached only via
+# fmt reflection that static analysis can't see, plus test-only parity harnesses
+# (ReadLabelValues, inferColumnType — di#349). Flip to blocking once that
+# backlog is cleared. Tracked in tracebloc/cli#6 / #127.
+.PHONY: deadcode
+deadcode:
+	@echo "==> deadcode (advisory): unreachable funcs from ./cmd/tracebloc"
+	@$(GO) run golang.org/x/tools/cmd/deadcode@$(DEADCODE_VERSION) ./cmd/tracebloc || true
 
 .PHONY: lint-full
 lint-full:

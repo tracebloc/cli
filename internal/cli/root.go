@@ -93,6 +93,8 @@ Helm, no YAML, no kubectl needed.`,
 	// doctor` alias (see newDoctorCmd), so there's one diagnostic code path.
 	root.AddCommand(newDoctorCmd(false))
 	root.AddCommand(newDataCmd())
+	// cli#143: one-knob view of how much of this machine tracebloc may use.
+	root.AddCommand(newResourcesCmd())
 	// RFC-0001 (backend#830): browser sign-in + client provisioning.
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newLogoutCmd())
@@ -113,9 +115,9 @@ Helm, no YAML, no kubectl needed.`,
 			return cmd.Help() // an arg that wasn't a known subcommand
 		}
 		// The home screen shows a `resources` row only when that command is
-		// actually wired on the root (#237 unmerged today → absent; it appears
-		// automatically once registered). Gate it on the live tree, never a
-		// hardcode, so we never advertise a command that isn't there.
+		// actually wired on the root — gate on the live tree, never a hardcode,
+		// so we never advertise a command that isn't there. #237 (resources) is
+		// now merged, so the row renders; the gate keeps us honest if that changes.
 		renderHomeScreen(cmd.Context(), printerFor(cmd), hasTopLevelCommand(cmd.Root(), "resources"))
 		return nil
 	}

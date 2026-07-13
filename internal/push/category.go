@@ -298,8 +298,9 @@ func SupportedCategoryIDs() []string {
 	return ids
 }
 
-// AllCategoryIDs returns every recognized category id, in registry order.
-func AllCategoryIDs() []string {
+// allCategoryIDs returns every recognized category id, in registry order.
+// Unexported: only the same-package registry test consumes it.
+func allCategoryIDs() []string {
 	ids := make([]string, 0, len(categoryRegistry))
 	for _, c := range categoryRegistry {
 		ids = append(ids, c.ID)

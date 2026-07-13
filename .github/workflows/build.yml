@@ -108,15 +108,15 @@ jobs:
       # were errcheck-catchable; gofmt -s drift was a recurring
       # nit). Going back to the action when #6 has a strategy.
 
-      # Tool versions are unpinned (@latest) because older tagged
-      # releases pulled stale golang.org/x/tools that fail to build
-      # against current Go ("invalid array length -delta * delta").
-      # Pinning is preferable for reproducibility but waiting on the
-      # upstream tools to ship newer tags. Track in #6.
+      # Tool versions are pinned for reproducibility (was @latest, which
+      # drifted — see #127). The current tags build cleanly against this
+      # module's Go floor; the old "stale x/tools breaks the build" worry
+      # is gone now that these tools ship newer tags. Keep these in lockstep
+      # with the *_VERSION vars in the Makefile. Bump deliberately.
 
       - name: errcheck
         run: |
-          go install github.com/kisielk/errcheck@latest
+          go install github.com/kisielk/errcheck@v1.20.0
           errcheck ./...
 
       - name: gofmt -s
@@ -131,13 +131,27 @@ jobs:
 
       - name: ineffassign
         run: |
-          go install github.com/gordonklaus/ineffassign@latest
+          go install github.com/gordonklaus/ineffassign@v0.2.0
           ineffassign ./...
 
       - name: misspell
         run: |
-          go install github.com/client9/misspell/cmd/misspell@latest
+          go install github.com/client9/misspell/cmd/misspell@v0.3.4
           misspell -error .
+
+      # deadcode: reachability scan from the CLI entrypoint (~5s). ADVISORY
+      # (continue-on-error) for now — it reports unreachable funcs but does not
+      # fail the job. The module still carries pre-existing dead-ish funcs that
+      # are unsafe to delete blindly: Stringer methods (Status.String,
+      # JobOutcome.String) reached only via fmt reflection that static analysis
+      # can't see, plus test-only parity harnesses (ReadLabelValues,
+      # inferColumnType — di#349). Flip to blocking once that backlog is
+      # cleared. Tracked in #6 / #127.
+      - name: deadcode (advisory)
+        continue-on-error: true
+        run: |
+          go install golang.org/x/tools/cmd/deadcode@v0.48.0
+          deadcode ./cmd/tracebloc
 
   build:
     timeout-minutes: 20

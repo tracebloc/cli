@@ -104,7 +104,7 @@ func TestHTTPSubmitter_4xxSurfacesBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("Submit returned nil on 4xx")
 	}
-	if !IsSubmitError(err) {
+	if !isSubmitError(err) {
 		t.Errorf("err is not *SubmitError: %T", err)
 	}
 	for _, want := range []string{"HTTP 422", "missing required field 'intent'"} {
@@ -160,7 +160,7 @@ func TestHTTPSubmitter_5xxNotAuthError(t *testing.T) {
 	if IsAuthError(err) {
 		t.Errorf("IsAuthError(500) = true, want false")
 	}
-	if !IsSubmitError(err) {
+	if !isSubmitError(err) {
 		t.Errorf("err is not *SubmitError: %T", err)
 	}
 }

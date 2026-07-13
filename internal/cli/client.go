@@ -86,9 +86,8 @@ func newClientCreateCmd() *cobra.Command {
 		"client name (default: $TRACEBLOC_CLIENT_NAME, else auto-generated <firstname>-NN; shown on your dashboard + carbon reports)")
 	cmd.Flags().StringVar(&location, "location", os.Getenv("TRACEBLOC_CLIENT_LOCATION"),
 		"optional location zone for carbon reporting, e.g. DE (default: $TRACEBLOC_CLIENT_LOCATION; omitted if unset)")
-	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
-		"path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config) — read to anchor the client to this cluster")
-	cmd.Flags().StringVar(&contextOverride, "context", "",
+	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride,
+		"path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config) — read to anchor the client to this cluster",
 		"kubeconfig context for the target cluster (default: current-context)")
 	cmd.Flags().StringVar(&credentialFile, "credential-file", "",
 		"write the machine credential to this path (mode 0600, sourceable env) instead of printing it — for the installer to feed the chart (never shown on the terminal)")

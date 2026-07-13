@@ -86,6 +86,66 @@ label: image_label
 	}
 }
 
+// TestIngestValidate_BogusSchemaTypeExitsTwo pins cli#213 on the `data
+// validate` path: the jsonschema types every schema value as a bare string, so
+// a bogus SQL type used to pass validate (false green) and only fail
+// in-cluster. `data validate` now previews the ingestor's accepted-type set and
+// flags it, anchored at schema.<column>.
+func TestIngestValidate_BogusSchemaTypeExitsTwo(t *testing.T) {
+	path := writeTmpYAML(t, `
+apiVersion: tracebloc.io/v1
+kind: IngestConfig
+table: t
+intent: train
+category: tabular_classification
+csv: /data/data.csv
+schema:
+  age: INT
+  bad: BANANA
+label: churned
+`)
+	code, _, stderr := execIngestValidate(t, path)
+	if code != 2 {
+		t.Fatalf("expected exit 2 for a bogus schema type, got %d\nstderr:\n%s", code, stderr)
+	}
+	for _, want := range []string{"schema.bad", "supported SQL type"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("expected stderr to mention %q, got:\n%s", want, stderr)
+		}
+	}
+	// A valid type on the same doc must NOT be flagged.
+	if strings.Contains(stderr, "schema.age") {
+		t.Errorf("a valid type (age: INT) should not be flagged; stderr:\n%s", stderr)
+	}
+}
+
+// TestIngestValidate_ValidSchemaTypesOK: a doc whose types are all accepted
+// (including a two-arg DECIMAL and the non-inferable DOUBLE) validates clean —
+// the type preview must not over-reject.
+func TestIngestValidate_ValidSchemaTypesOK(t *testing.T) {
+	path := writeTmpYAML(t, `
+apiVersion: tracebloc.io/v1
+kind: IngestConfig
+table: t
+intent: train
+category: tabular_classification
+schema:
+  age: INT
+  price: DECIMAL(10,2)
+  ratio: DOUBLE
+  name: VARCHAR(255)
+csv: /data/data.csv
+label: churned
+`)
+	code, stdout, stderr := execIngestValidate(t, path)
+	if code != 0 {
+		t.Fatalf("expected exit 0 for all-valid types, got %d\nstderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "ok") {
+		t.Errorf("expected 'ok' on stdout, got: %q", stdout)
+	}
+}
+
 func TestIngestValidate_UnreadableFileExitsThree(t *testing.T) {
 	// Distinct exit code (3) for file-level problems (missing,
 	// permission-denied, etc.) — separates from schema violations
