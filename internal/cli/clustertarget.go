@@ -24,6 +24,17 @@ type noParentReleaseError struct{ err error }
 func (e *noParentReleaseError) Error() string { return e.err.Error() }
 func (e *noParentReleaseError) Unwrap() error { return e.err }
 
+// loadClusterFn / newClientsetFn are the kubeconfig-load + clientset-build
+// seams resolveClusterTarget goes through. Production points them at the real
+// cluster helpers; tests inject a fake ResolvedConfig + fake.NewSimpleClientset
+// so the discovery + exit-code contract can be exercised without a real
+// kubeconfig or apiserver. Same fn-var seam pattern used across this package
+// (listDatasetsFn, mintIngestorTokenFn, …).
+var (
+	loadClusterFn  = cluster.Load
+	newClientsetFn = cluster.NewClientset
+)
+
 // clusterTarget bundles the cluster handles the data commands resolve from a
 // kubeconfig before doing any work: the resolved config, a clientset, the
 // parent tracebloc release, and — when asked — the shared data PVC.
@@ -45,11 +56,11 @@ type clusterTarget struct {
 // contract (2/3 escalation, with discovery reported as a check Result rather
 // than a hard error).
 func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, b activeClientBinding, needPVC bool) (*clusterTarget, error) {
-	resolved, err := cluster.Load(opts)
+	resolved, err := loadClusterFn(opts)
 	if err != nil {
 		return nil, &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
 	}
-	cs, err := cluster.NewClientset(resolved)
+	cs, err := newClientsetFn(resolved)
 	if err != nil {
 		return nil, &exitError{code: 3, err: err}
 	}
@@ -95,8 +106,25 @@ func discoverRelease(ctx context.Context, p *ui.Printer, cs kubernetes.Interface
 		return release, namespace, err
 	}
 	found, scanErr := cluster.FindClientNamespaces(ctx, cs)
-	if scanErr != nil || len(found) == 0 {
+	if scanErr != nil {
+		// The scan itself couldn't run (e.g. RBAC forbids the cluster-wide
+		// list — a different problem than "not provisioned"). Keep the
+		// original per-namespace discovery error rather than claiming the
+		// machine has no client.
 		return nil, namespace, err
+	}
+	if len(found) == 0 {
+		// The scan SUCCEEDED and turned up nothing: the cluster the kubeconfig
+		// reaches genuinely hosts no tracebloc client. Return a §7.10
+		// "this machine isn't provisioned" message rather than the bare
+		// per-namespace miss, which read like a namespace hunt. Still wraps
+		// ErrNoParentRelease so errors.Is stays true and resolveClusterTarget
+		// keeps mapping it to noParentReleaseError / exit 4.
+		return nil, namespace, fmt.Errorf(
+			"%w on the cluster your kubeconfig points at — if this machine should "+
+				"have one, run the installer to provision it; otherwise point at the "+
+				"right cluster with --context/--namespace",
+			cluster.ErrNoParentRelease)
 	}
 	if len(found) > 1 {
 		return nil, namespace, fmt.Errorf(
