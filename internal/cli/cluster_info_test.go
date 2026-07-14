@@ -145,6 +145,12 @@ func TestRunClusterInfo_TokenRequestNoServerExpiry(t *testing.T) {
 	if !strings.Contains(out, "requested; server may cap shorter") {
 		t.Errorf("no-server-timestamp arm should show the requested-lifetime note:\n%s", out)
 	}
+	// And it must render the REQUESTED lifetime itself (600s → 10m0s), not just
+	// the note — mutation guard on `time.Duration(ExpirationSeconds) * time.Second`
+	// (a `*`→`/` mutant would display ~0s while the note still printed).
+	if !strings.Contains(out, "10m0s") {
+		t.Errorf("arm-2 should render the requested lifetime (600s = 10m0s):\n%s", out)
+	}
 }
 
 // Static-secret fallback (TokenRequest forbidden → recoverable): the third/default
