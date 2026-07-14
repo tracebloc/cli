@@ -129,6 +129,20 @@ jobs:
             exit 1
           fi
 
+      # goimports -local: enforce the stdlib / third-party / our-own import
+      # grouping that .golangci.yml's local-prefixes already declares. gofmt
+      # doesn't check grouping, so drift accumulated silently until now.
+      - name: goimports -local
+        run: |
+          go install golang.org/x/tools/cmd/goimports@v0.48.0
+          drift="$(goimports -local github.com/tracebloc/cli -l .)"
+          if [ -n "$drift" ]; then
+            echo "::error::goimports (import grouping) drift in:"
+            echo "$drift" | sed 's/^/    /'
+            echo "::error::run \`make fmt\` to fix"
+            exit 1
+          fi
+
       - name: ineffassign
         run: |
           go install github.com/gordonklaus/ineffassign@v0.2.0

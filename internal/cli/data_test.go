@@ -1,22 +1,25 @@
 package cli
 
 import (
-	"github.com/tracebloc/cli/internal/push"
-	"github.com/tracebloc/cli/internal/ui"
 	"image"
 	"image/png"
+
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	"github.com/tracebloc/cli/internal/push"
+	"github.com/tracebloc/cli/internal/ui"
 
 	"bytes"
 	"context"
 	"errors"
-	"github.com/tracebloc/cli/internal/cluster"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/tracebloc/cli/internal/cluster"
 )
 
 // imgcLayout drops a minimum-viable image_classification directory
