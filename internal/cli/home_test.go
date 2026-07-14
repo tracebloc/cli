@@ -381,6 +381,24 @@ func TestResolveHomeModel_PrefersRememberedNameOverReleaseName(t *testing.T) {
 	}
 }
 
+// TestResolveHomeModel_LeftoverNameNoNamespaceIsNoEnv guards the offline-vs-no-env
+// classifier against the display-name override: a leftover ActiveClientName/ID
+// with NO cached namespace (provisioned=false) is NOT a reachable environment and
+// must fall through to the no-env installer path, not Offline. The split keys off
+// the namespace + the PROBE's own surfaced name — never the remembered label that
+// resolveHomeModel writes onto env.name for display. Mutation guard: classify on
+// env.name (post-override) instead of probeNamedEnv and this flips to homeOffline.
+func TestResolveHomeModel_LeftoverNameNoNamespaceIsNoEnv(t *testing.T) {
+	d := baseDeps()
+	d.probeEnv = func(context.Context) envProbe { return envProbe{local: localNoRelease} } // probe surfaced no name
+	// Not provisioned (no cached namespace), but a stale client id lingers in config.
+	d.rememberedClient = func() (bool, string) { return false, "stale-id" }
+	m := resolveHomeModel(context.Background(), d)
+	if m.state != homeNoEnv {
+		t.Fatalf("leftover name without a cached namespace must be homeNoEnv (installer path), got state %d (envName %q)", m.state, m.envName)
+	}
+}
+
 // TestResolveHomeModel_PassesThroughFields checks the model carries email, name,
 // and compute from the probes into the render input.
 func TestResolveHomeModel_PassesThroughFields(t *testing.T) {
