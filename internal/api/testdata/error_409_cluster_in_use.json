@@ -1,0 +1,9 @@
+{
+  "body": {
+    "cluster_id": "contract-cluster-uid-0091",
+    "error": "cluster_in_use",
+    "holder_client_id": 1,
+    "holder_name": "contract-client-91"
+  },
+  "status": 409
+}

@@ -1,0 +1,11 @@
+{
+  "body": {
+    "device_code": "PINNED_DEVICE_CODE",
+    "expires_in": 900,
+    "interval": 5,
+    "user_code": "AAAA-BBBB",
+    "verification_uri": "https://dev.tracebloc.io/activate",
+    "verification_uri_complete": "https://dev.tracebloc.io/activate?code=AAAA-BBBB"
+  },
+  "status": 200
+}

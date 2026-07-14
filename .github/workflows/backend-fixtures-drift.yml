@@ -1,0 +1,54 @@
+name: Backend fixtures drift
+
+# Verifies the vendored backend response-shape fixtures
+# (internal/api/testdata/*.json) match tracebloc/backend at the PINNED ref
+# (scripts/.backend-ref), not a floating branch. The fixtures are REAL
+# serialized responses for the nine endpoints internal/api/client.go decodes
+# (generated + shape-asserted by backend CI); internal/api's contract test
+# replays them through the CLI's real decode paths, so a renamed backend
+# field can't silently decode to a zero value (backend#1106 WS-D.2, cli#291).
+#
+# Pinning stops an unrelated backend commit from redding every open CLI PR;
+# adopting upstream shapes is a deliberate SHA bump + re-sync — the same
+# model as build.yml's schema-drift job (backend#1009).
+#
+# A dedicated workflow file (not a build.yml job) because it needs a secret
+# the build jobs don't: tracebloc/backend is PRIVATE, and this repo's default
+# GITHUB_TOKEN cannot read it. The check needs BACKEND_CONTRACTS_TOKEN — a
+# read-only (Contents: read) token for tracebloc/backend, set as a repo or
+# org Actions secret. Until that secret exists the job SKIPS with a warning
+# instead of failing: the gate is inert, not red (same activation model as
+# the public PII gate's denylist secret).
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-fixtures-drift-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fixtures-drift:
+    timeout-minutes: 10
+    name: Backend fixtures drift check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: scripts/sync-backend-fixtures.sh --check
+        env:
+          BACKEND_CONTRACTS_TOKEN: ${{ secrets.BACKEND_CONTRACTS_TOKEN }}
+        run: |
+          if [ -z "$BACKEND_CONTRACTS_TOKEN" ]; then
+            echo "::warning::BACKEND_CONTRACTS_TOKEN is not set — skipping the backend fixtures drift check." \
+              "Add a read-only (Contents: read) token for tracebloc/backend as a repo/org Actions secret to activate this gate."
+            exit 0
+          fi
+          ./scripts/sync-backend-fixtures.sh --check

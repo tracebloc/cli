@@ -1,0 +1,15 @@
+{
+  "body": {
+    "account": "contract-account",
+    "account_id": 1,
+    "email": "contract-admin@contract.example",
+    "first_name": "Contract Admin",
+    "is_account_admin": false,
+    "is_password_changed": true,
+    "last_name": "",
+    "profile_image": null,
+    "type": "DS",
+    "user_id": 1
+  },
+  "status": 200
+}
