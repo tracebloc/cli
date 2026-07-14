@@ -362,6 +362,25 @@ func TestResolveHomeModel_ProvisionedNoReleaseKeepsName(t *testing.T) {
 	})
 }
 
+// TestResolveHomeModel_PrefersRememberedNameOverReleaseName pins the fix for the
+// state-dependent env label: realProbeEnv surfaces the Helm RELEASE name (e.g.
+// "tracebloc") when a release is found, but the offline paths surface no name and
+// fall back to the remembered CLIENT name (e.g. "acme-01"). Without preferring
+// remembered, the same environment reads "tracebloc" Online but "acme-01"
+// Offline. A provisioned machine must show the remembered name in every state.
+// Mutation guard: revert to `if env.name == ""` and this flips to "tracebloc".
+func TestResolveHomeModel_PrefersRememberedNameOverReleaseName(t *testing.T) {
+	d := baseDeps()
+	d.rememberedClient = func() (bool, string) { return true, "acme-01" } // friendly client name
+	// The probe found a release and surfaced its Helm RELEASE name — NOT the
+	// friendly client name (this is what realProbeEnv actually returns).
+	d.probeEnv = func(context.Context) envProbe { return envProbe{local: localLive, name: "tracebloc"} }
+	m := resolveHomeModel(context.Background(), d)
+	if m.envName != "acme-01" {
+		t.Fatalf("online env name = %q, want the remembered client name %q (not the Helm release name)", m.envName, "acme-01")
+	}
+}
+
 // TestResolveHomeModel_PassesThroughFields checks the model carries email, name,
 // and compute from the probes into the render input.
 func TestResolveHomeModel_PassesThroughFields(t *testing.T) {
