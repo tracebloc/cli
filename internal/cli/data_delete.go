@@ -126,7 +126,7 @@ undone — re-ingesting the data is the only way back.`)
 	//    running teardown against a cluster with no tracebloc install.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTarget(ctx, a.Printer, opts, binding, true)
+	target, err := resolveClusterTargetFn(ctx, a.Printer, opts, binding, true)
 	if err != nil {
 		return binding.explain(err)
 	}
@@ -198,7 +198,7 @@ undone — re-ingesting the data is the only way back.`)
 	//    files on any volume type — including hostPath, where fsGroup is
 	//    a no-op (tracebloc/client#259).
 	p.Infof("Removing in-cluster artifacts…")
-	res, err := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
+	res, err := teardownFn(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
 		Namespace:          resolved.Namespace,
 		PVCClaimName:       pvc.ClaimName,
 		PVCMountPath:       pvc.MountPath,
