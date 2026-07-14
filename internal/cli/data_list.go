@@ -115,7 +115,7 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	}
 	resolved, cs, release := target.Resolved, target.Clientset, target.Release
 
-	tables, err := push.ListDatasets(ctx, cs, resolved.RestConfig, resolved.Namespace)
+	tables, err := listDatasetsFn(ctx, cs, resolved.RestConfig, resolved.Namespace)
 	if err != nil {
 		return &exitError{code: 7, err: err}
 	}
