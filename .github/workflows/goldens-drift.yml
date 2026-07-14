@@ -74,13 +74,43 @@ jobs:
         # a CROSS_REPO_READ_TOKEN secret the checkout would hard-fail every PR
         # touching internal/push/** — instead, skip the check with a loud
         # warning telling the admin exactly what to create.
+        #
+        # Prefer the least-privilege PAT when it's set AND actually works, but
+        # a set-but-invalid PAT (expired / wrong scope) must NOT strand the
+        # check: fall back to the default token before giving up, so a broken
+        # secret can't silently skip drift while the repo is still public. Only
+        # skip-with-warning when BOTH tokens fail. The `use_pat` output tells
+        # the checkout which token the probe validated, keeping the two in sync.
         env:
           CROSS_REPO_READ_TOKEN: ${{ secrets.CROSS_REPO_READ_TOKEN }}
           FALLBACK_TOKEN: ${{ github.token }}
         run: |
-          token="${CROSS_REPO_READ_TOKEN:-$FALLBACK_TOKEN}"
-          if git ls-remote "https://x-access-token:${token}@github.com/tracebloc/data-ingestors.git" HEAD >/dev/null 2>&1; then
+          probe() {
+            # Read-only reachability check — no clone, no working-tree writes.
+            git ls-remote "https://x-access-token:${1}@github.com/tracebloc/data-ingestors.git" HEAD >/dev/null 2>&1
+          }
+
+          ok=false
+          use_pat=false
+
+          if [ -n "$CROSS_REPO_READ_TOKEN" ]; then
+            if probe "$CROSS_REPO_READ_TOKEN"; then
+              ok=true
+              use_pat=true
+            else
+              echo "::warning::CROSS_REPO_READ_TOKEN is set but tracebloc/data-ingestors is not readable with it (expired or wrong scope) — falling back to the default workflow token."
+            fi
+          fi
+
+          if [ "$ok" != "true" ]; then
+            if probe "$FALLBACK_TOKEN"; then
+              ok=true
+            fi
+          fi
+
+          if [ "$ok" = "true" ]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "use_pat=$use_pat" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
             echo "::warning::tracebloc/data-ingestors is not readable with the available tokens — goldens-drift check SKIPPED. If the repo has been made private, create the org secret CROSS_REPO_READ_TOKEN (fine-grained PAT, contents:read on tracebloc/data-ingestors)."
@@ -93,9 +123,11 @@ jobs:
           repository: tracebloc/data-ingestors
           ref: ${{ steps.pin.outputs.ref }}
           path: data-ingestors
-          # Prefer the cross-repo secret when it exists (needed only if the
-          # repo goes private); the default token suffices while it's public.
-          token: ${{ secrets.CROSS_REPO_READ_TOKEN || github.token }}
+          # Use exactly the token the probe validated: the PAT only when the
+          # probe confirmed it works (use_pat), else the default token (which
+          # the probe then confirmed). This keeps checkout in lockstep with the
+          # probe so a set-but-invalid PAT can't hard-fail a reachable repo.
+          token: ${{ steps.access.outputs.use_pat == 'true' && secrets.CROSS_REPO_READ_TOKEN || github.token }}
 
       - name: Set up Python
         if: steps.access.outputs.ok == 'true'
