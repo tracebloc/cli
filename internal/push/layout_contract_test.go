@@ -63,6 +63,35 @@ func TestRegistryMirrorsLayoutContract(t *testing.T) {
 // contract's primary_subdir for every text task — the directory the CLI stages
 // into has to be the one the ingestor reads (texts/ for every text task but
 // MLM, which uses sequences/).
+// TestSemsegSidecarMirrorsContract pins the semseg sidecar facts the Go code
+// hardcodes — "masks"/pngExtensions (image_extras.go), the mask_id link column
+// (preflight.go CheckMaskIdColumn), and spec["schema"]={mask_id} (spec.go) — to
+// the vendored layout contract, which the ingestor owns (RFC-0002 Principle 6).
+// If the ingestor renames the link column or changes the mask subdir/glob, this
+// fails rather than the CLI silently emitting and checking the stale name.
+func TestSemsegSidecarMirrorsContract(t *testing.T) {
+	layout, ok := LayoutFor("semantic_segmentation")
+	if !ok {
+		t.Fatal("semantic_segmentation missing from layout.v1.json")
+	}
+	if len(layout.Sidecars) != 1 {
+		t.Fatalf("semseg sidecars = %d, want 1", len(layout.Sidecars))
+	}
+	sc := layout.Sidecars[0]
+	if sc.Subdir != "masks" {
+		t.Errorf(`sidecar subdir = %q, want "masks" (hardcoded in image_extras.go/spec.go)`, sc.Subdir)
+	}
+	if sc.Glob != "*.png" {
+		t.Errorf(`sidecar glob = %q, want "*.png" (pngExtensions in image_extras.go)`, sc.Glob)
+	}
+	if sc.LinkColumn == nil || *sc.LinkColumn != "mask_id" {
+		t.Errorf(`sidecar link_column = %v, want "mask_id" (maskIDColumn in preflight.go, schema key in spec.go)`, sc.LinkColumn)
+	}
+	if !sc.Required {
+		t.Error("semseg masks sidecar should be required=true")
+	}
+}
+
 func TestTextSidecarDirMirrorsContract(t *testing.T) {
 	for _, c := range categoryRegistry {
 		if c.Family != FamilyText {

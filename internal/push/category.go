@@ -132,13 +132,14 @@ var categoryRegistry = []CategorySpec{
 		Blurb: "label how two texts relate"},
 	{ID: "embeddings", Family: FamilyText, Label: "Embeddings", CLISupported: true, SelfSupervised: true,
 		Blurb: "learn vector representations from text pairs"},
-	// semantic_segmentation stays CLI-pending: di#136 (mask sidecar) shipped,
-	// but the ingestor doesn't yet populate the mask_id link column the
-	// contract requires, and the training-side sign-off is tracked in
-	// backend#816. Wire it once those land (RFC-0002 phase 4 follow-up).
-	{ID: "semantic_segmentation", Family: FamilyImage, Label: "Semantic segmentation", CLISupported: false, IsClassification: true,
-		Blurb:           "label every pixel in an image",
-		UnsupportedNote: "schema-recognized; awaiting the ingestor's mask_id link column + training sign-off (backend#816)"},
+	// semantic_segmentation: images/ + one PNG mask per image in masks/, linked
+	// by the manifest's mask_id column (backend#816 contract). Wired in RFC-0002
+	// phase 4 (#182) now that its blockers landed — di#358 shipped the ingestor's
+	// require-and-enforce mask_id validator (ingestor v0.7.0) and backend#816
+	// closed. The CLI stages the masks/ sidecar, declares mask_id in the schema,
+	// and previews the images↔masks (_mask-suffix) pairing + the mask_id contract.
+	{ID: "semantic_segmentation", Family: FamilyImage, Label: "Semantic segmentation", CLISupported: true, IsClassification: true,
+		Blurb: "label every pixel in an image"},
 }
 
 // categoryByID indexes the registry for O(1) lookup, built once.

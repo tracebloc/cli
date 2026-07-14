@@ -181,6 +181,47 @@ func TestBuild_WithTargetSize_PassesSchema(t *testing.T) {
 	}
 }
 
+// TestBuild_SemanticSegmentation pins the semseg spec emission (#182). The
+// mask_id schema declaration is the backend#816 crux — an undeclared mask_id is
+// dropped and the training client then can't locate masks — so a mutation that
+// drops spec["schema"], renames spec["masks"], or changes the SQL type must fail
+// here rather than silently ship. The spec must also validate against the schema.
+func TestBuild_SemanticSegmentation(t *testing.T) {
+	spec := SpecArgs{
+		Table:       "tumors_train",
+		Category:    "semantic_segmentation",
+		Intent:      "train",
+		LabelColumn: "image_label",
+		Extension:   ".jpg",
+		TargetSize:  []int{256, 256},
+	}.Build()
+
+	if s, _ := spec["masks"].(string); !strings.HasSuffix(s, "masks/") {
+		t.Errorf(`spec["masks"] = %#v, want a path ending in "masks/" (Build prepends the staging prefix)`, spec["masks"])
+	}
+	sch, ok := spec["schema"].(map[string]string)
+	if !ok || sch["mask_id"] != "VARCHAR(255)" {
+		t.Fatalf(`spec["schema"] = %#v, want {mask_id: VARCHAR(255)} (backend#816 declaration)`, spec["schema"])
+	}
+
+	specBytes, err := yaml.Marshal(spec)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	v, err := schema.NewV1Validator()
+	if err != nil {
+		t.Fatalf("NewV1Validator: %v", err)
+	}
+	_, errs, parseErr := v.ValidateYAML(specBytes)
+	if parseErr != nil {
+		t.Fatalf("ValidateYAML parse error on our own output: %v\n%s", parseErr, specBytes)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("semseg spec failed schema validation: %s\nspec:\n%s",
+			schema.FormatErrors(errs), specBytes)
+	}
+}
+
 // TestBuild_WithMinSize_PassesSchema pins the #183 plumbing: when the
 // customer overrides the minimum-image-size floor (--min-size →
 // SpecArgs.MinSize), Build emits spec.file_options.min_size as

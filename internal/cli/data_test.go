@@ -87,15 +87,13 @@ func execDataIngest(t *testing.T, args []string) (exitCode int, stdout, stderr s
 // TestDataIngest_UnsupportedCategory_ExitsTwo: the CLI-side category
 // gate runs before schema validation so a customer who passes a
 // not-yet-supported category gets an actionable message (exit 2)
-// rather than the schema's confusing missing-property error. Today's
-// supported set is image_classification + the tabular / time-series
-// family; the other image categories (which need annotation/mask
-// sidecar staging), the text family, and nonsense values are gated
-// out here. Bugbot review-on-self caught the missing gate on PR-a.
+// rather than the schema's confusing missing-property error. Every schema
+// category is CLI-supported now, so only a dead/removed category
+// (instance_segmentation) or a nonsense value is gated out here. Bugbot
+// review-on-self caught the missing gate on PR-a.
 func TestDataIngest_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	root := imgcLayout(t)
 	for _, badCategory := range []string{
-		"semantic_segmentation",     // known but pending (awaiting mask_id + training sign-off, backend#816)
 		"instance_segmentation",     // dead — removed from the registry (#1005), now unrecognized
 		"definitely-not-a-category", // nonsense; gate catches this too
 	} {
@@ -114,36 +112,11 @@ func TestDataIngest_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	}
 }
 
-// TestDataIngest_KnownUnsupportedCategory_PendingNote pins the Bugbot fix
-// (v0.4.0 RC): a registry-known but CLI-unsupported category
-// (semantic_segmentation — the sole remaining one after phase 4) must get the
-// registry's pending-support note, not the misleading "isn't a recognized task
-// category" message. execDataIngest discards the error and SilenceErrors
-// swallows it, so run the command here and inspect the returned error directly.
-func TestDataIngest_KnownUnsupportedCategory_PendingNote(t *testing.T) {
-	root := imgcLayout(t)
-	rootCmd := NewRootCmd(BuildInfo{Version: "test"})
-	rootCmd.SetOut(&bytes.Buffer{})
-	rootCmd.SetErr(&bytes.Buffer{})
-	rootCmd.SetArgs([]string{"data", "ingest",
-		"--kubeconfig=/tmp/tracebloc-cli-test-nonexistent-" + t.Name(),
-		root, "--name=t1", "--task=semantic_segmentation",
-		"--intent=train", "--label-column=label"})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatal("expected an error for a known-but-unsupported task")
-	}
-	if got := ExitCodeFromError(err); got != 2 {
-		t.Fatalf("exit code = %d, want 2", got)
-	}
-	msg := err.Error()
-	if strings.Contains(msg, "isn't a recognized task") {
-		t.Errorf("known task misrouted to the unrecognized-task branch:\n%s", msg)
-	}
-	if !strings.Contains(msg, "isn't supported by the CLI yet") {
-		t.Errorf("want the registry pending-support note, got:\n%s", msg)
-	}
-}
+// (Removed) TestDataIngest_KnownUnsupportedCategory_PendingNote pinned the
+// pending-support routing for a known-but-CLI-unsupported category. Every schema
+// category is wired now (#182 closed semantic_segmentation), so there is no such
+// category to exercise it; the defensive IsKnown branch in data.go stays for a
+// future one.
 
 // TestDataIngest_TraversalTableName_ExitsTwo is the security
 // regression pin at the CLI layer. --name=../../etc must be

@@ -828,3 +828,81 @@ func TestOpenCSVReader_LazyQuotesMatchesPandas(t *testing.T) {
 			v.Found, v.RowCount, v.Classes)
 	}
 }
+
+// TestCheckMaskPairing mirrors the ingestor's FilePairingValidator for
+// semantic_segmentation (sidecar_suffix="_mask"): images↔masks pair by
+// <image>_mask.png; a gap in either direction, or a mask not carrying the
+// suffix, is reported.
+func TestCheckMaskPairing(t *testing.T) {
+	cases := []struct {
+		name    string
+		images  []string
+		masks   []string
+		wantErr string // substring; "" = no error
+	}{
+		{"paired", []string{"images/001.jpg", "images/002.jpg"},
+			[]string{"masks/001_mask.png", "masks/002_mask.png"}, ""},
+		{"image without mask", []string{"images/001.jpg", "images/002.jpg"},
+			[]string{"masks/001_mask.png"}, "without a mask"},
+		{"mask without image", []string{"images/001.jpg"},
+			[]string{"masks/001_mask.png", "masks/002_mask.png"}, "without an image"},
+		{"non-conforming mask name (no _mask suffix)", []string{"images/001.jpg"},
+			[]string{"masks/001.png"}, "not named <image>_mask.png"},
+		// A hidden file (macOS AppleDouble ._x) must be ignored, mirroring the
+		// ingestor's _stems — else a stray ._stray.png fakes a mismatch and
+		// over-rejects a dataset the cluster accepts. Fails without the dotfile skip.
+		{"hidden file with no counterpart is ignored", []string{"images/001.jpg"},
+			[]string{"masks/001_mask.png", "masks/._stray.png"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckMaskPairing(tc.images, tc.masks)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want nil, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestCheckMaskIdColumn mirrors the ingestor's MaskIdColumnValidator
+// (backend#816): the manifest must declare an exact-lowercase mask_id column and
+// populate it on every row (NA-sentinel-aware); a wrong-case column gets a
+// rename hint, an absent one an add hint.
+func TestCheckMaskIdColumn(t *testing.T) {
+	cases := []struct {
+		name    string
+		csv     string
+		wantErr string
+	}{
+		{"valid", "image_label,filename,mask_id\ncat,001.jpg,001_mask\n", ""},
+		{"missing column", "image_label,filename\ncat,001.jpg\n", `needs a "mask_id" column`},
+		{"wrong case", "filename,Mask_Id\n001.jpg,001_mask\n", "wrong case"},
+		{"empty value on a row", "filename,mask_id\n001.jpg,001_mask\n002.jpg,\n", "empty"},
+		{"NA-sentinel value", "filename,mask_id\n001.jpg,NULL\n", "empty"},
+		// A PADDED NA token is a REAL value in-cluster (pandas keeps the spaces),
+		// so the CLI must not flag it empty — the cli#218/#239 parity trap. Fails
+		// if the scan trims before the naSentinels test.
+		{"padded NA token is a real value, not empty", "filename,mask_id\n001.jpg, NULL \n", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeTmp(t, "labels.csv", []byte(tc.csv))
+			err := CheckMaskIdColumn(p)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want nil, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
