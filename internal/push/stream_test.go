@@ -28,6 +28,10 @@ type fakeExecutor struct {
 	// "tar: no space left on device" style remote-side failure).
 	stderrToReturn []byte
 
+	// What to write back to the caller as stdout (e.g. the mysql query
+	// result ListDatasets parses). Nil for the tar-stream callers.
+	stdoutToReturn []byte
+
 	// What to return as the exec error (simulates a 4xx/5xx from
 	// the apiserver, a network drop, etc.).
 	errToReturn error
@@ -43,7 +47,7 @@ func (f *fakeExecutor) Exec(
 	_ context.Context,
 	ns, pod, container string,
 	cmd []string,
-	stdin io.Reader, _ io.Writer, stderr io.Writer,
+	stdin io.Reader, stdout, stderr io.Writer,
 ) error {
 	f.gotNS, f.gotPod, f.gotContainer = ns, pod, container
 	f.gotCmd = cmd
@@ -51,6 +55,9 @@ func (f *fakeExecutor) Exec(
 	if stdin != nil && (f.drainBeforeReturn || f.errToReturn == nil) {
 		b, _ := io.ReadAll(stdin)
 		f.gotStdin = b
+	}
+	if len(f.stdoutToReturn) > 0 && stdout != nil {
+		_, _ = stdout.Write(f.stdoutToReturn)
 	}
 	if len(f.stderrToReturn) > 0 && stderr != nil {
 		_, _ = stderr.Write(f.stderrToReturn)

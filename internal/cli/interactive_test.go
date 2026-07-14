@@ -335,10 +335,10 @@ func TestPickTask_FamilyScoped(t *testing.T) {
 	}
 }
 
-// TestPickTask_ImagePending: semantic_segmentation is the sole remaining
-// CLI-pending task, so the image picker still renders a greyed "Not yet in the
-// CLI" section with its backend#816 reason.
-func TestPickTask_ImagePending(t *testing.T) {
+// TestPickTask_ImageAllAvailable: after #182 wired semantic_segmentation, every
+// image task is available in the CLI, so the image picker lists them all under
+// "Available now:" with no greyed "Not yet in the CLI" pending section.
+func TestPickTask_ImageAllAvailable(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Which task?": "Image classification"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
@@ -349,12 +349,16 @@ func TestPickTask_ImagePending(t *testing.T) {
 	for _, want := range []string{
 		"Available now:",
 		"Image classification",
-		"Not yet in the CLI:",
-		"semantic_segmentation",
-		"backend#816", // the UnsupportedNote reason
+		"Semantic segmentation", // now selectable, no longer pending
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("image picker missing %q:\n%s", want, out)
+		}
+	}
+	// No pending section and no stale backend#816 note now that semseg is wired.
+	for _, unwanted := range []string{"Not yet in the CLI", "backend#816"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("image picker still shows pending content %q:\n%s", unwanted, out)
 		}
 	}
 }

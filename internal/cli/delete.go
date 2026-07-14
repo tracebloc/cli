@@ -91,11 +91,10 @@ and are erased. Not undoable.`,
 		"uninstall the software but keep ~/.tracebloc (local config + on-host datasets)")
 	cmd.Flags().BoolVar(&o.force, "force", false,
 		"offboard even if tracebloc still reports this client online")
-	cmd.Flags().StringVar(&o.kubeconfigPath, "kubeconfig", "",
-		"path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config)")
-	cmd.Flags().StringVar(&o.contextOverride, "context", "",
+	addKubeconfigFlags(cmd, &o.kubeconfigPath, &o.contextOverride,
+		"path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config)",
 		"kubeconfig context for the target cluster (default: current-context)")
-	cmd.Flags().StringVarP(&o.namespace, "namespace", "n", "",
+	addNamespaceFlag(cmd, &o.namespace,
 		"namespace of this machine's tracebloc release (default: the active client's namespace)")
 	return cmd
 }

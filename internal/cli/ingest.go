@@ -3,10 +3,12 @@ package cli
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/schema"
 )
 
@@ -91,10 +93,18 @@ func runIngestValidate(cmd *cobra.Command, args []string) error {
 		return &exitError{code: 2, err: fmt.Errorf("loading embedded schema: %w", err)}
 	}
 
-	_, violations, parseErr := v.ValidateYAML(body)
+	doc, violations, parseErr := v.ValidateYAML(body)
 	if parseErr != nil {
 		return &exitError{code: 3, err: fmt.Errorf("%s: %w", path, parseErr)}
 	}
+
+	// The jsonschema types every `schema` value as a bare string, so a bogus
+	// SQL type (e.g. {age: BANANA}) passes it — a false green that only fails
+	// in-cluster at CREATE TABLE. `data validate` is a local preview of what
+	// the cluster accepts, so mirror the ingestor's accepted-type set here too
+	// (cli#213), reusing the SAME push.ValidateSchemaType the --schema flag
+	// path uses so the two can't diverge.
+	violations = append(violations, schemaTypeViolations(doc)...)
 
 	if len(violations) == 0 {
 		// Explicit discard: Fprintf returns an error when the
@@ -117,6 +127,42 @@ func runIngestValidate(cmd *cobra.Command, args []string) error {
 		path, len(violations), plural(len(violations)))
 	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), schema.FormatErrors(violations))
 	return &exitError{code: 2, err: nil} // err==nil so cobra doesn't print "Error: ..." on top
+}
+
+// schemaTypeViolations previews the ingestor's accepted-SQL-type check over a
+// parsed ingest doc's `schema` block (cli#213). It returns one ValidationError
+// per column whose declared type the ingestor would reject, anchored at
+// "schema.<column>" so it renders in the same JSON-pointer format as every
+// other violation. A missing / non-map schema, or a non-string value, is left
+// to the jsonschema layer — this only adds the type-vocabulary check the
+// schema itself can't express.
+func schemaTypeViolations(doc map[string]any) []schema.ValidationError {
+	if doc == nil {
+		return nil
+	}
+	sch, ok := doc["schema"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	cols := make([]string, 0, len(sch))
+	for col := range sch {
+		cols = append(cols, col)
+	}
+	sort.Strings(cols) // deterministic order (FormatErrors re-sorts, but keep it stable)
+	var out []schema.ValidationError
+	for _, col := range cols {
+		typ, ok := sch[col].(string)
+		if !ok {
+			continue
+		}
+		if err := push.ValidateSchemaType(col, typ); err != nil {
+			out = append(out, schema.ValidationError{
+				Path:    "schema." + col,
+				Message: err.Error(),
+			})
+		}
+	}
+	return out
 }
 
 func plural(n int) string {

@@ -508,6 +508,48 @@ func TestCheckSequenceRows(t *testing.T) {
 	if _, err := CheckSequenceRows(noCol, g); err != nil {
 		t.Errorf("missing column must benign-skip: %v", err)
 	}
+
+	// The null set is pandas' DEFAULT NA tokens (STR_NA_VALUES, raw-matched) ∪
+	// whitespace-only — SequenceGroupValidator's plain read_csv, NOT the curated
+	// coercion.NA_SENTINELS the label checks use (cli#239). Each boundary below
+	// was ground-truthed against the real validator's
+	// `isna() | (astype(str).str.strip()=="")`.
+
+	// 'none' (lowercase) is in coercion.NA_SENTINELS but NOT in STR_NA_VALUES,
+	// so pandas keeps it → a REAL id → ACCEPT. Before the fix the trim+naSentinels
+	// probe saw it as null and REJECTED (the dangerous over-reject). Reverting
+	// sequenceScanFrom to naSentinels flips this to reject — mutation proof.
+	// Parity twin: cases/tsc-none-sequence-id.
+	none := writeTmp(t, "none.csv", []byte("sequence_id,timestamp,label\nnone,1,a\nnone,2,a\np2,1,b\n"))
+	if seqs, err := CheckSequenceRows(none, g); err != nil || seqs != 2 {
+		t.Errorf("'none' is not a pandas NA token → a real id; must accept with 2 sequences: seqs=%d err=%v", seqs, err)
+	}
+
+	// '#NA' is in STR_NA_VALUES but NOT in coercion.NA_SENTINELS, so pandas
+	// drops it to NaN (null) while the pre-fix probe MISSED it (the under-reject
+	// direction). Must now reject.
+	hashNA := writeTmp(t, "hashna.csv", []byte("sequence_id,timestamp,label\np1,1,a\n#NA,2,b\n"))
+	if _, err := CheckSequenceRows(hashNA, g); err == nil {
+		t.Error("'#NA' is a pandas default NA token → a null id; must be rejected")
+	}
+
+	// A whitespace-only id is null via the .str.strip()=="" clause (a non-NA
+	// object cell that strips to empty). "" is already in pandasDefaultNA, so this
+	// clause is what catches genuine whitespace — a guard that it wasn't lost when
+	// the raw-cell trim was dropped.
+	ws := writeTmp(t, "ws.csv", []byte("sequence_id,timestamp,label\np1,1,a\n\"   \",2,b\n"))
+	if _, err := CheckSequenceRows(ws, g); err == nil {
+		t.Error("a whitespace-only sequence id must be rejected (str.strip()=='' clause)")
+	}
+
+	// A PADDED sentinel (' NA ') is NOT a pandas NA token: pandas tokenises NA on
+	// the raw field (skipinitialspace defaults False), so ' NA ' is a REAL id
+	// in-cluster. Matching the raw (not trimmed) cell keeps parity; the pre-fix
+	// trim made it null (over-reject).
+	padded := writeTmp(t, "padded.csv", []byte("sequence_id,timestamp,label\n\" NA \",1,a\n\" NA \",2,a\np2,1,b\n"))
+	if seqs, err := CheckSequenceRows(padded, g); err != nil || seqs != 2 {
+		t.Errorf("padded ' NA ' is a real id in-cluster (raw NA match); must accept with 2 sequences: seqs=%d err=%v", seqs, err)
+	}
 }
 
 // TestPreflightDataset_SequenceGrouped locks the dispatch-level wiring for the
@@ -580,6 +622,147 @@ func TestPreflightDataset_SequenceGrouped(t *testing.T) {
 	}
 }
 
+// TestCheckTSCGroupIntegrity previews the two grouped time_series_classification
+// validators di#359 added (cli#218): one label per sequence
+// (LabelConstantWithinGroupValidator) and per-group ascending time order
+// (PerGroupTimeOrderedValidator). Each row of a table asserts the exact
+// over/under-reject boundary the ingestor draws.
+func TestCheckTSCGroupIntegrity(t *testing.T) {
+	const g, lab, tc = "sequence_id", "label", "timestamp"
+	numeric := map[string]string{"sequence_id": "VARCHAR(64)", "timestamp": "INT", "label": "INT"}
+	dateTyped := map[string]string{"sequence_id": "VARCHAR(64)", "timestamp": "TIMESTAMP", "label": "INT"}
+
+	cases := []struct {
+		name       string
+		csv        string
+		schema     map[string]string
+		wantReject bool
+		wantSubstr string // required substring when rejecting
+	}{
+		{
+			name:   "clean-multi-sequence",
+			csv:    "sequence_id,timestamp,label\np1,1,0\np1,2,0\np2,1,1\np2,2,1\n",
+			schema: numeric,
+		},
+		{
+			name:       "label-flip-mid-sequence",
+			csv:        "sequence_id,timestamp,label\np1,1,0\np1,2,1\np2,1,0\n",
+			schema:     numeric,
+			wantReject: true,
+			wantSubstr: "change their",
+		},
+		{
+			name:   "single-row-group-not-flagged",
+			csv:    "sequence_id,timestamp,label\np1,1,0\np2,1,1\n",
+			schema: numeric,
+			// each sequence has exactly one row → one label, one timestamp:
+			// never a flip, never out of order.
+		},
+		{
+			name:       "per-group-unsorted-timestamps",
+			csv:        "sequence_id,timestamp,label\np1,3,1\np1,1,1\np1,2,1\np2,1,0\n",
+			schema:     numeric,
+			wantReject: true,
+			wantSubstr: "out-of-order",
+		},
+		{
+			name:   "ties-are-non-decreasing-ok",
+			csv:    "sequence_id,timestamp,label\np1,1,0\np1,1,0\np1,2,0\np2,1,1\n",
+			schema: numeric, // equal successive timestamps are allowed (monotonic non-decreasing)
+		},
+		{
+			name:   "interleaved-each-sorted-ok",
+			csv:    "sequence_id,timestamp,label\np1,1,0\np2,1,1\np1,2,0\np2,2,1\n",
+			schema: numeric, // interleaving sequences is fine; order is per-sequence only
+		},
+		{
+			name:   "numeric-label-collapse-not-a-flip",
+			csv:    "sequence_id,timestamp,label\np1,1,1\np1,2,1.0\np2,1,0\n",
+			schema: numeric, // "1" and "1.0" under a numeric column are ONE value
+		},
+		{
+			name: "pandas-default-na-sentinel-keeps-label-numeric",
+			// p3's sole label "#NA" is a pandas DEFAULT NA token (STR_NA_VALUES)
+			// but NOT in the curated coercion.NA_SENTINELS. The ingestor plain-
+			// reads the file, so pandas drops it to NaN and the label column is
+			// all-numeric — p1's "1"/"1.0" collapse to one value (no flip), so
+			// the ingestor ACCEPTS. Before cli#218 the CLI mirrored the coercion
+			// set, saw "#NA" as a distinct string, read the column as object, and
+			// flagged p1 as a false mid-sequence flip. This pins the accept —
+			// reverting naSentinels->pandasDefaultNA makes it fail (mutation
+			// proof). Parity twin: cases/tsc-numeric-label-na-sentinel.
+			csv:    "sequence_id,timestamp,label\np1,1,1\np1,2,1.0\np2,1,2\np2,2,2\np3,1,#NA\n",
+			schema: numeric,
+		},
+		{
+			name: "padded-object-label-flip-still-rejected",
+			// object (non-numeric) label column: pandas keeps whitespace on
+			// object cells, so " a" and "a" are DISTINCT values — p1 genuinely
+			// flips. Pins that dropping the cell-trim (cli#218) did not weaken a
+			// real object-label rejection.
+			csv:        "sequence_id,timestamp,label\np1,1, a\np1,2,a\np2,1,b\n",
+			schema:     numeric,
+			wantReject: true,
+			wantSubstr: "change their",
+		},
+		{
+			name:       "null-label-mid-sequence-is-a-flip",
+			csv:        "sequence_id,timestamp,label\np1,1,1\np1,2,\np2,1,0\n",
+			schema:     numeric, // {1, null} within p1 → nunique(dropna=False) = 2
+			wantReject: true,
+			wantSubstr: "change their",
+		},
+		{
+			name:       "invalid-numeric-timestamp",
+			csv:        "sequence_id,timestamp,label\np1,1,0\np1,x,0\np2,1,1\n",
+			schema:     numeric,
+			wantReject: true,
+			wantSubstr: "missing/invalid",
+		},
+		{
+			name: "null-id-rows-dropped-from-grouping",
+			// the null-id row carries a different label + out-of-order time,
+			// but dropna=True excludes it — CheckSequenceRows owns null ids,
+			// so THIS check must not fire on it.
+			csv:    "sequence_id,timestamp,label\np1,1,0\n,9,1\np1,2,0\np2,1,1\n",
+			schema: numeric,
+		},
+		{
+			name: "date-typed-unsorted-benign-skip",
+			// a TIMESTAMP-typed time column that is genuinely unsorted: the
+			// numeric branch is not selected, and the CLI deliberately does
+			// NOT preview the date branch (documented under-preview, cli#218)
+			// — so it must NOT reject here (safe direction).
+			csv:    "sequence_id,timestamp,label\np1,2026-01-02,0\np1,2026-01-01,0\np2,2026-01-01,1\n",
+			schema: dateTyped,
+		},
+		{
+			name: "absent-columns-benign-skip",
+			// no sequence_id column at all → the schema/sequence checks own
+			// that diagnostic; this check benign-skips (returns nil).
+			csv:    "timestamp,label\n1,0\n2,1\n",
+			schema: numeric,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := writeTmp(t, "data.csv", []byte(c.csv))
+			err := CheckTSCGroupIntegrity(p, g, lab, tc, c.schema)
+			if c.wantReject {
+				if err == nil {
+					t.Fatalf("expected reject, got accept")
+				}
+				if c.wantSubstr != "" && !strings.Contains(err.Error(), c.wantSubstr) {
+					t.Errorf("error missing %q: %v", c.wantSubstr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("expected accept, got reject: %v", err)
+			}
+		})
+	}
+}
+
 // TestLabelColumnValuesFrom_ReadErrorFailsClosed: a mid-scan read error on the
 // label column must abort with an error (fail closed) rather than return a
 // PARTIAL class set — a truncated count would false-reject good data or pass a
@@ -643,5 +826,83 @@ func TestOpenCSVReader_LazyQuotesMatchesPandas(t *testing.T) {
 	if !v.Found || v.RowCount != 3 || len(v.Classes) != 2 {
 		t.Errorf("bare-quote CSV misread: Found=%v RowCount=%d classes=%v (want 3 rows, 2 classes)",
 			v.Found, v.RowCount, v.Classes)
+	}
+}
+
+// TestCheckMaskPairing mirrors the ingestor's FilePairingValidator for
+// semantic_segmentation (sidecar_suffix="_mask"): images↔masks pair by
+// <image>_mask.png; a gap in either direction, or a mask not carrying the
+// suffix, is reported.
+func TestCheckMaskPairing(t *testing.T) {
+	cases := []struct {
+		name    string
+		images  []string
+		masks   []string
+		wantErr string // substring; "" = no error
+	}{
+		{"paired", []string{"images/001.jpg", "images/002.jpg"},
+			[]string{"masks/001_mask.png", "masks/002_mask.png"}, ""},
+		{"image without mask", []string{"images/001.jpg", "images/002.jpg"},
+			[]string{"masks/001_mask.png"}, "without a mask"},
+		{"mask without image", []string{"images/001.jpg"},
+			[]string{"masks/001_mask.png", "masks/002_mask.png"}, "without an image"},
+		{"non-conforming mask name (no _mask suffix)", []string{"images/001.jpg"},
+			[]string{"masks/001.png"}, "not named <image>_mask.png"},
+		// A hidden file (macOS AppleDouble ._x) must be ignored, mirroring the
+		// ingestor's _stems — else a stray ._stray.png fakes a mismatch and
+		// over-rejects a dataset the cluster accepts. Fails without the dotfile skip.
+		{"hidden file with no counterpart is ignored", []string{"images/001.jpg"},
+			[]string{"masks/001_mask.png", "masks/._stray.png"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckMaskPairing(tc.images, tc.masks)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want nil, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestCheckMaskIdColumn mirrors the ingestor's MaskIdColumnValidator
+// (backend#816): the manifest must declare an exact-lowercase mask_id column and
+// populate it on every row (NA-sentinel-aware); a wrong-case column gets a
+// rename hint, an absent one an add hint.
+func TestCheckMaskIdColumn(t *testing.T) {
+	cases := []struct {
+		name    string
+		csv     string
+		wantErr string
+	}{
+		{"valid", "image_label,filename,mask_id\ncat,001.jpg,001_mask\n", ""},
+		{"missing column", "image_label,filename\ncat,001.jpg\n", `needs a "mask_id" column`},
+		{"wrong case", "filename,Mask_Id\n001.jpg,001_mask\n", "wrong case"},
+		{"empty value on a row", "filename,mask_id\n001.jpg,001_mask\n002.jpg,\n", "empty"},
+		{"NA-sentinel value", "filename,mask_id\n001.jpg,NULL\n", "empty"},
+		// A PADDED NA token is a REAL value in-cluster (pandas keeps the spaces),
+		// so the CLI must not flag it empty — the cli#218/#239 parity trap. Fails
+		// if the scan trims before the naSentinels test.
+		{"padded NA token is a real value, not empty", "filename,mask_id\n001.jpg, NULL \n", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeTmp(t, "labels.csv", []byte(tc.csv))
+			err := CheckMaskIdColumn(p)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want nil, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
 	}
 }

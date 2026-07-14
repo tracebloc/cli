@@ -14,6 +14,7 @@ import (
 	"github.com/tracebloc/cli/internal/cluster"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -86,15 +87,13 @@ func execDataIngest(t *testing.T, args []string) (exitCode int, stdout, stderr s
 // TestDataIngest_UnsupportedCategory_ExitsTwo: the CLI-side category
 // gate runs before schema validation so a customer who passes a
 // not-yet-supported category gets an actionable message (exit 2)
-// rather than the schema's confusing missing-property error. Today's
-// supported set is image_classification + the tabular / time-series
-// family; the other image categories (which need annotation/mask
-// sidecar staging), the text family, and nonsense values are gated
-// out here. Bugbot review-on-self caught the missing gate on PR-a.
+// rather than the schema's confusing missing-property error. Every schema
+// category is CLI-supported now, so only a dead/removed category
+// (instance_segmentation) or a nonsense value is gated out here. Bugbot
+// review-on-self caught the missing gate on PR-a.
 func TestDataIngest_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	root := imgcLayout(t)
 	for _, badCategory := range []string{
-		"semantic_segmentation",     // known but pending (awaiting mask_id + training sign-off, backend#816)
 		"instance_segmentation",     // dead — removed from the registry (#1005), now unrecognized
 		"definitely-not-a-category", // nonsense; gate catches this too
 	} {
@@ -113,36 +112,11 @@ func TestDataIngest_UnsupportedCategory_ExitsTwo(t *testing.T) {
 	}
 }
 
-// TestDataIngest_KnownUnsupportedCategory_PendingNote pins the Bugbot fix
-// (v0.4.0 RC): a registry-known but CLI-unsupported category
-// (semantic_segmentation — the sole remaining one after phase 4) must get the
-// registry's pending-support note, not the misleading "isn't a recognized task
-// category" message. execDataIngest discards the error and SilenceErrors
-// swallows it, so run the command here and inspect the returned error directly.
-func TestDataIngest_KnownUnsupportedCategory_PendingNote(t *testing.T) {
-	root := imgcLayout(t)
-	rootCmd := NewRootCmd(BuildInfo{Version: "test"})
-	rootCmd.SetOut(&bytes.Buffer{})
-	rootCmd.SetErr(&bytes.Buffer{})
-	rootCmd.SetArgs([]string{"data", "ingest",
-		"--kubeconfig=/tmp/tracebloc-cli-test-nonexistent-" + t.Name(),
-		root, "--name=t1", "--task=semantic_segmentation",
-		"--intent=train", "--label-column=label"})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatal("expected an error for a known-but-unsupported task")
-	}
-	if got := ExitCodeFromError(err); got != 2 {
-		t.Fatalf("exit code = %d, want 2", got)
-	}
-	msg := err.Error()
-	if strings.Contains(msg, "isn't a recognized task") {
-		t.Errorf("known task misrouted to the unrecognized-task branch:\n%s", msg)
-	}
-	if !strings.Contains(msg, "isn't supported by the CLI yet") {
-		t.Errorf("want the registry pending-support note, got:\n%s", msg)
-	}
-}
+// (Removed) TestDataIngest_KnownUnsupportedCategory_PendingNote pinned the
+// pending-support routing for a known-but-CLI-unsupported category. Every schema
+// category is wired now (#182 closed semantic_segmentation), so there is no such
+// category to exercise it; the defensive IsKnown branch in data.go stays for a
+// future one.
 
 // TestDataIngest_TraversalTableName_ExitsTwo is the security
 // regression pin at the CLI layer. --name=../../etc must be
@@ -659,5 +633,108 @@ func TestDataIngest_ScopedFlag_OnCorrectTask_NotRejected(t *testing.T) {
 	})
 	if code == 2 {
 		t.Fatal("--number-of-keypoints on keypoint_detection must not be rejected as a wrong-task flag")
+	}
+}
+
+// TestDataIngestHelp_DerivedTaskCountAndMLMSubdir pins cli#215: the task COUNT
+// in the ingest help is derived from the registry (not a stale hardcoded "9"),
+// and the text example reflects the layout contract — masked_language_modeling
+// stages into sequences/, not texts/.
+func TestDataIngestHelp_DerivedTaskCountAndMLMSubdir(t *testing.T) {
+	long := newDataIngestCmd().Long
+	n := len(push.SupportedCategoryIDs())
+	want := "Supports " + strconv.Itoa(n) + " tasks"
+	if !strings.Contains(long, want) {
+		t.Errorf("help should derive the task count (%q); got:\n%s", want, long)
+	}
+	if n != 9 && strings.Contains(long, "Supports 9 tasks") {
+		t.Error("help still carries the stale hardcoded 'Supports 9 tasks'")
+	}
+	if !strings.Contains(long, "sequences/") {
+		t.Errorf("help example should show sequences/ for masked language modeling; got:\n%s", long)
+	}
+}
+
+// TestDataIngest_TabularMissingLabel_Friendly pins cli#214: a tabular task with
+// no --label-column gets the friendly flag-naming message (listing the CSV's
+// columns), NOT the raw label-oneOf schema dump.
+func TestDataIngest_TabularMissingLabel_Friendly(t *testing.T) {
+	root := tabularDir(t)
+	var buf bytes.Buffer
+	err := runDataIngest(context.Background(), &buf, &buf, runDataIngestArgs{
+		LocalPath: root,
+		Spec:      push.SpecArgs{Table: "t", Category: "tabular_classification", Intent: "train"},
+		Printer:   ui.New(&buf, ui.WithColor(false)),
+	})
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("err = %v, want *exitError code 2", err)
+	}
+	msg := ee.Error()
+	if !strings.Contains(msg, "--label-column") {
+		t.Errorf("message should name --label-column; got: %q", msg)
+	}
+	for _, noise := range []string{"want string", "want object", "failed schema validation", "oneOf"} {
+		if strings.Contains(msg, noise) {
+			t.Errorf("message should be friendly, not the raw schema dump (contained %q); got: %q", noise, msg)
+		}
+	}
+	if !strings.Contains(msg, "churned") {
+		t.Errorf("message should list the CSV columns to guide the fix; got: %q", msg)
+	}
+}
+
+// TestDataDelete_EmptyArg_Friendly pins cli#76a: `data delete ""` (a positional
+// arg) must give a delete-appropriate message pointing at the argument, NOT the
+// shared ValidateTableName "--name" text (that flag belongs to `data ingest`).
+func TestDataDelete_EmptyArg_Friendly(t *testing.T) {
+	var buf bytes.Buffer
+	err := runDataDelete(context.Background(), runDataDeleteArgs{
+		Table:   "",
+		Printer: ui.New(&buf, ui.WithColor(false)),
+	})
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("err = %v, want *exitError code 2", err)
+	}
+	msg := ee.Error()
+	if !strings.Contains(msg, "tracebloc data delete <dataset>") {
+		t.Errorf("delete empty-arg message should point at the positional arg; got: %q", msg)
+	}
+	if strings.Contains(msg, "--name") {
+		t.Errorf("delete path must NOT point at --name; got: %q", msg)
+	}
+}
+
+// TestDataIngest_KeypointNumberSetVsUnset pins cli#76b: --number-of-keypoints
+// unset gets the "requires" nudge, while an explicit non-positive value gets a
+// distinct "must be a positive integer (got N)" message that names the value —
+// the two cases can't be told apart by the Go zero value alone.
+func TestDataIngest_KeypointNumberSetVsUnset(t *testing.T) {
+	root := imgcLayout(t)
+	run := func(changed map[string]bool, n int) *exitError {
+		t.Helper()
+		var buf bytes.Buffer
+		err := runDataIngest(context.Background(), &buf, &buf, runDataIngestArgs{
+			LocalPath: root,
+			Spec: push.SpecArgs{
+				Table: "t", Category: "keypoint_detection", Intent: "train",
+				LabelColumn: "label", NumberOfKeypoints: n,
+			},
+			ChangedFlags: changed,
+			Printer:      ui.New(&buf, ui.WithColor(false)),
+		})
+		var ee *exitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("expected *exitError, got %v", err)
+		}
+		return ee
+	}
+	if ee := run(nil, 0); ee.Code() != 2 || !strings.Contains(ee.Error(), "requires --number-of-keypoints") {
+		t.Errorf("unset: got code=%d msg=%q, want exit 2 + 'requires --number-of-keypoints'", ee.Code(), ee.Error())
+	}
+	if ee := run(map[string]bool{"number-of-keypoints": true}, 0); ee.Code() != 2 ||
+		!strings.Contains(ee.Error(), "must be a positive integer (got 0)") {
+		t.Errorf("explicit 0: got code=%d msg=%q, want exit 2 + 'must be a positive integer (got 0)'", ee.Code(), ee.Error())
 	}
 }

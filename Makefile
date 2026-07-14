@@ -12,10 +12,17 @@ GO            ?= go
 GOLANGCI_LINT ?= golangci-lint
 PKGS          := ./...
 
+# Pinned lint/analysis tool versions (reproducibility — no more @latest drift).
+# Keep these in lockstep with .github/workflows/build.yml. Bump deliberately.
+ERRCHECK_VERSION    ?= v1.20.0
+INEFFASSIGN_VERSION ?= v0.2.0
+MISSPELL_VERSION    ?= v0.3.4
+DEADCODE_VERSION    ?= v0.48.0
+
 # ---- top-level targets -------------------------------------------
 
 .PHONY: ci
-ci: vet test lint fmt-check schema-check
+ci: vet test lint fmt-check schema-check deadcode
 	@echo "==> ci: all green"
 
 .PHONY: build
@@ -46,6 +53,41 @@ test:
 test-integration:
 	$(GO) test -tags integration -count=1 -timeout 10m -v ./test/integration/...
 
+# ---- merged coverage (unit + integration) ------------------------
+# The real-cluster I/O seams — cluster.NewClientset, push.SPDYExecutor.Exec,
+# submit.PortForwardJobsManager, cluster.DiscoverInClusterClient — are 0% in the
+# unit suite BY DESIGN; the integration suite (kind, e2e.yml) is what exercises
+# them. These targets merge BOTH into one honest per-package picture using the
+# built-in `go tool covdata` (no external merger needed). `cover` runs anywhere;
+# `cover-integration` needs a reachable cluster; `cover-merge` combines whichever
+# data dirs exist and prints per-package + total. Used by e2e.yml so submit /
+# cluster reflect the coverage the e2e suite already provides.
+COVERDIR ?= .coverdata
+
+# cover: honest own-coverage per package (NO -coverpkg, so a package instruments
+# only itself — no transitive cross-package inflation). The integration run keeps
+# -coverpkg so it can credit the internal packages its tests exercise; the merge
+# is the union of the two.
+.PHONY: cover
+cover:
+	@mkdir -p $(COVERDIR)/unit
+	$(GO) test -count=1 -cover $(PKGS) -args -test.gocoverdir="$(CURDIR)/$(COVERDIR)/unit"
+
+.PHONY: cover-integration
+cover-integration:
+	@mkdir -p $(COVERDIR)/int
+	$(GO) test -tags integration -count=1 -timeout 10m -cover -coverpkg=$(PKGS) ./test/integration/... -args -test.gocoverdir="$(CURDIR)/$(COVERDIR)/int"
+
+.PHONY: cover-merge
+cover-merge:
+	@dirs="$$(ls -d $(COVERDIR)/unit $(COVERDIR)/int 2>/dev/null | paste -sd, -)"; \
+	if [ -z "$$dirs" ]; then echo "no coverage data — run \`make cover\` and/or \`make cover-integration\` first"; exit 1; fi; \
+	echo "==> merged coverage from: $$dirs"; \
+	$(GO) tool covdata percent -i="$$dirs"; \
+	$(GO) tool covdata textfmt -i="$$dirs" -o=$(COVERDIR)/merged.txt; \
+	echo "==> overall (unit union integration):"; \
+	$(GO) tool cover -func=$(COVERDIR)/merged.txt | tail -1
+
 # Lint set matched to .github/workflows/build.yml's lint job: errcheck +
 # ineffassign + misspell (gofmt -s is `fmt-check`, go vet is `vet`).
 # golangci-lint-action is disabled in CI pending tracebloc/cli#6 — so
@@ -55,9 +97,21 @@ test-integration:
 # available for a richer local pass.
 .PHONY: lint
 lint:
-	$(GO) run github.com/kisielk/errcheck@latest ./...
-	$(GO) run github.com/gordonklaus/ineffassign@latest ./...
-	$(GO) run github.com/client9/misspell/cmd/misspell@latest -error .
+	$(GO) run github.com/kisielk/errcheck@$(ERRCHECK_VERSION) ./...
+	$(GO) run github.com/gordonklaus/ineffassign@$(INEFFASSIGN_VERSION) ./...
+	$(GO) run github.com/client9/misspell/cmd/misspell@$(MISSPELL_VERSION) -error .
+
+# deadcode: reachability scan from the CLI entrypoint (~5s). ADVISORY for now
+# (non-blocking) — it prints unreachable funcs but never fails the build. The
+# module still carries pre-existing dead-ish funcs that are unsafe to delete
+# blindly: Stringer methods (Status.String, JobOutcome.String) reached only via
+# fmt reflection that static analysis can't see, plus test-only parity harnesses
+# (ReadLabelValues, inferColumnType — di#349). Flip to blocking once that
+# backlog is cleared. Tracked in tracebloc/cli#6 / #127.
+.PHONY: deadcode
+deadcode:
+	@echo "==> deadcode (advisory): unreachable funcs from ./cmd/tracebloc"
+	@$(GO) run golang.org/x/tools/cmd/deadcode@$(DEADCODE_VERSION) ./cmd/tracebloc || true
 
 .PHONY: lint-full
 lint-full:
@@ -95,4 +149,4 @@ schema-sync:
 
 .PHONY: clean
 clean:
-	rm -rf tracebloc dist/ coverage.out coverage.html
+	rm -rf tracebloc dist/ coverage.out coverage.html $(COVERDIR)

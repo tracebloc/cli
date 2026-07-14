@@ -74,6 +74,14 @@ type Result struct {
 	Watch *WatchResult
 }
 
+// watchJobFn is a test seam over WatchJob (the non-detach watch loop). Production
+// runs the real cluster watch; tests inject a canned *WatchResult (or error) so
+// Run's non-detach path — the WatchError wrap, the per-DetachReason switch, and
+// the summary-render branch — is exercisable without a live Job to watch. Every
+// pre-existing Run test set Detach:true and never reached here (coverage
+// root-cause #4). The watch mechanics themselves are tested in watch_test.go.
+var watchJobFn = WatchJob
+
 // Run is the Phase 4 top-level entrypoint. Steps:
 //
 //  1. BuildRequest from the YAML + flags
@@ -127,6 +135,14 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		p.Successf("Submitted — tracebloc is validating your data and loading it into the table.")
 	}
 
+	// One greppable id across every layer (backend#1028 item 3): this key
+	// becomes the ingestor Job's TRACEBLOC_INGEST_CORRELATION_ID env and
+	// its tracebloc.io/ingestion-run label, shows up in the ingestor's
+	// log next to its per-process ingestor_id, and reaches the backend
+	// inside the dataset registration payload. Printed on every path
+	// (fresh and replay) — it's the thread support asks for.
+	p.Hintf("Correlation id: %s", req.IdempotencyKey)
+
 	if opts.Detach {
 		// --detach: report and bail. The run continues in the cluster;
 		// there is no CLI re-attach verb yet, so the honest way back is
@@ -140,7 +156,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	// signal.NotifyContext); a Ctrl-C during the watch produces
 	// Outcome=Detached + the reconnect hint below. WatchJob renders its
 	// own start spinner + "Ingestion started" header via p.
-	wr, err := WatchJob(ctx, opts.Client, resp.Namespace, resp.JobName, opts.Out, p)
+	wr, err := watchJobFn(ctx, opts.Client, resp.Namespace, resp.JobName, opts.Out, p)
 	if err != nil {
 		// Tag as WatchError so the orchestrator picks the
 		// ingest-flavored exit code (9), not the submit-flavored

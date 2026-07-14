@@ -268,6 +268,104 @@ label: churned
 	}
 }
 
+// TestValidate_SuppressesOneOfTypeNoise pins cli#76c: a bad --label-policy
+// makes the label oneOf report BOTH the real "label.policy: value must be one
+// of …" and the internal "label: got object, want string" (the string
+// alternative failing by type). The parent-level type line is noise once the
+// deeper, specific error exists, so ValidateYAML drops it — but a lone parent
+// type mismatch (regression given a string label, no deeper error) is kept.
+func TestValidate_SuppressesOneOfTypeNoise(t *testing.T) {
+	v := mustValidator(t)
+
+	// Bad policy: the specific label.policy error survives; the sibling
+	// "label: got object, want string" noise is suppressed.
+	_, errs, perr := v.ValidateYAML([]byte(`
+apiVersion: tracebloc.io/v1
+kind: IngestConfig
+table: t
+intent: train
+category: tabular_regression
+csv: /data/houses.csv
+schema:
+  price: FLOAT
+label:
+  column: price
+  policy: nonsense
+`))
+	if perr != nil {
+		t.Fatalf("parse: %v", perr)
+	}
+	var sawPolicy, sawNoise bool
+	for _, e := range errs {
+		if e.Path == "label.policy" {
+			sawPolicy = true
+		}
+		if e.Path == "label" && oneOfTypeMismatchRE.MatchString(e.Message) {
+			sawNoise = true
+		}
+	}
+	if !sawPolicy {
+		t.Errorf("expected the specific label.policy error to survive; got:\n%s", FormatErrors(errs))
+	}
+	if sawNoise {
+		t.Errorf("the parent-level 'label: got object, want string' noise should be suppressed; got:\n%s", FormatErrors(errs))
+	}
+
+	// A regression task given a plain string label has ONLY the parent type
+	// mismatch (no deeper error) — it must be KEPT so "object form required"
+	// still surfaces.
+	_, errs2, perr := v.ValidateYAML([]byte(`
+apiVersion: tracebloc.io/v1
+kind: IngestConfig
+table: t
+intent: train
+category: tabular_regression
+csv: /data/houses.csv
+schema:
+  price: FLOAT
+label: price
+`))
+	if perr != nil {
+		t.Fatalf("parse: %v", perr)
+	}
+	keptLabel := false
+	for _, e := range errs2 {
+		if e.Path == "label" {
+			keptLabel = true
+		}
+	}
+	if !keptLabel {
+		t.Errorf("a lone parent-level label type mismatch must be kept; got:\n%s", FormatErrors(errs2))
+	}
+}
+
+// TestSuppressOneOfTypeNoise unit-tests the filter directly, decoupled from the
+// live schema, so the prefix/regex rule is pinned independently.
+func TestSuppressOneOfTypeNoise(t *testing.T) {
+	in := []ValidationError{
+		{Path: "label", Message: "got object, want string"},
+		{Path: "label.policy", Message: "value must be one of 'passthrough', 'bucket'"},
+		{Path: "table", Message: "got number, want string"}, // no child → kept
+	}
+	out := suppressOneOfTypeNoise(in)
+	for _, e := range out {
+		if e.Path == "label" && oneOfTypeMismatchRE.MatchString(e.Message) {
+			t.Errorf("label noise should be dropped (label.policy present); got %+v", out)
+		}
+	}
+	var sawTable, sawPolicy bool
+	for _, e := range out {
+		sawTable = sawTable || e.Path == "table"
+		sawPolicy = sawPolicy || e.Path == "label.policy"
+	}
+	if !sawTable {
+		t.Errorf("a type mismatch with NO nested sibling must be kept; got %+v", out)
+	}
+	if !sawPolicy {
+		t.Errorf("the specific nested error must be kept; got %+v", out)
+	}
+}
+
 // Parse-level failures (vs schema violations) need a separate
 // failure mode so callers can render them differently in the UI —
 // "your file isn't YAML" vs "your file is YAML but doesn't match

@@ -309,6 +309,15 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 	if a.Category == "object_detection" {
 		spec["annotations"] = path.Join(prefix, "annotations") + "/"
 	}
+	if a.Category == "semantic_segmentation" {
+		spec["masks"] = path.Join(prefix, "masks") + "/"
+		// Declare the mask_id link column so the ingestor STORES it: an
+		// undeclared mask_id is silently dropped and the training client then
+		// can't locate masks (backend#816). VARCHAR(255) + this top-level
+		// schema key match the canonical example spec
+		// (data-ingestors/examples/yaml/semantic_segmentation.yaml).
+		spec["schema"] = map[string]string{"mask_id": "VARCHAR(255)"}
+	}
 
 	// file_options carries the per-file conventions the ingestor's
 	// validators read: the detected extension (all categories in the

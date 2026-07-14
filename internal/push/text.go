@@ -67,8 +67,8 @@ func DiscoverText(category, rootDir string) (*LocalLayout, error) {
 	if labelsStat.IsDir() {
 		return nil, fmt.Errorf("%q is a directory, not a file", labelsPath)
 	}
-	if labelsStat.Size() > MaxSingleFileBytes {
-		return nil, sizeError("labels.csv", labelsStat.Size(), MaxSingleFileBytes)
+	if err := checkFileSize("labels.csv", labelsStat.Size()); err != nil {
+		return nil, err
 	}
 	layout.LabelsCSV = labelsPath
 	layout.TotalBytes += labelsStat.Size()
@@ -290,8 +290,8 @@ func discoverSidecarFiles(root, dirName string, exts map[string]struct{}) ([]str
 		if err := rejectSymlink(info, filepath.Join(dirName, entry.Name())); err != nil {
 			return nil, 0, err
 		}
-		if info.Size() > MaxSingleFileBytes {
-			return nil, 0, sizeError(filepath.Join(dirName, entry.Name()), info.Size(), MaxSingleFileBytes)
+		if err := checkFileSize(filepath.Join(dirName, entry.Name()), info.Size()); err != nil {
+			return nil, 0, err
 		}
 		files = append(files, filepath.Join(dir, entry.Name()))
 		total += info.Size()

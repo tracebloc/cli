@@ -40,7 +40,10 @@ the wrong cluster).`,
 	}
 
 	cmd.AddCommand(newClusterInfoCmd())
-	cmd.AddCommand(newClusterDoctorCmd())
+	// `cluster doctor` stays as a hidden alias of the top-level `doctor` (both
+	// share one RunE — see newDoctorCmd) so existing docs / muscle memory keep
+	// working while the home screen points at the shorter top-level command.
+	cmd.AddCommand(newDoctorCmd(true))
 	return cmd
 }
 
@@ -101,11 +104,8 @@ Exit codes:
 		},
 	}
 
-	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
-		"path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
-	cmd.Flags().StringVar(&contextOverride, "context", "",
-		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
-	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
+	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
+	addNamespaceFlag(cmd, &nsOverride,
 		"namespace where your tracebloc client is installed (default: the context's namespace, or 'default')")
 	cmd.Flags().Int64Var(&tokenExpiry, "token-expiry-seconds", 600,
 		"requested SA token expiration in seconds (default 600 = 10 min; ignored for static-secret fallback)")
@@ -131,7 +131,11 @@ func runClusterInfo(
 		Namespace: nsOverride,
 	}
 	binding := bindActiveClientNamespace(&opts)
-	resolved, err := cluster.Load(opts)
+	// Through the loadClusterFn/newClientsetFn seams (not cluster.Load /
+	// cluster.NewClientset directly) so the post-discovery path — token minting,
+	// the expiry switch, the install-print block — is testable without a real
+	// kubeconfig or apiserver, exactly like resolveClusterTarget.
+	resolved, err := loadClusterFn(opts)
 	if err != nil {
 		// Kubeconfig errors are exit-code-3 territory (file/parse
 		// problem, same conceptual class as `ingest validate`'s
@@ -139,7 +143,7 @@ func runClusterInfo(
 		return &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
 	}
 
-	cs, err := cluster.NewClientset(resolved)
+	cs, err := newClientsetFn(resolved)
 	if err != nil {
 		return &exitError{code: 3, err: err}
 	}

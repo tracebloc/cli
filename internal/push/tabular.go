@@ -208,8 +208,8 @@ func DiscoverTabular(rootDir string) (*LocalLayout, error) {
 	if err := rejectSymlink(info, csvName); err != nil {
 		return nil, err
 	}
-	if info.Size() > MaxSingleFileBytes {
-		return nil, sizeError(csvName, info.Size(), MaxSingleFileBytes)
+	if err := checkFileSize(csvName, info.Size()); err != nil {
+		return nil, err
 	}
 
 	layout := &LocalLayout{Root: root, LabelsCSV: csvPath, TotalBytes: info.Size()}
@@ -222,15 +222,113 @@ func DiscoverTabular(rootDir string) (*LocalLayout, error) {
 	return layout, nil
 }
 
+// acceptedSQLBaseTypes is the CLI's mirror of the ONLY SQL types the ingestor
+// accepts in an explicit schema — the keys of data-ingestors'
+// database.py::MySQLDatabase._get_sqlalchemy_type type_mapping (di#349). That
+// function is the SOURCE OF TRUTH: it upper/strip-normalizes the declared
+// type, takes the base before "(", and raises ValueError("Unsupported MySQL
+// type…") for anything not in this set — so a type outside it fails the
+// in-cluster CREATE TABLE. Mirror it here so `data validate` / `data ingest
+// --schema` reject the same tokens locally instead of a false green that only
+// fails after the upload (cli#213). Keep in lock-step with the upstream map;
+// do NOT narrow it to the --schema help shortlist (which lists only the
+// inferable types), or the CLI would reject valid types the ingestor accepts.
+var acceptedSQLBaseTypes = map[string]struct{}{
+	"VARCHAR": {}, "CHAR": {}, "TEXT": {},
+	"INT": {}, "INTEGER": {}, "TINYINT": {}, "SMALLINT": {}, "MEDIUMINT": {}, "BIGINT": {},
+	"FLOAT": {}, "DOUBLE": {}, "DECIMAL": {}, "NUMERIC": {},
+	"BOOLEAN": {}, "BOOL": {},
+	"DATE": {}, "DATETIME": {}, "TIMESTAMP": {}, "TIME": {},
+	"BLOB": {}, "LONGBLOB": {},
+}
+
+// sqlBaseType extracts the base type the ingestor keys on, byte-for-byte with
+// database.py's `mysql_type.upper().strip().split("(")[0].split()[0]`: upper +
+// trim, drop any "(...)" length/precision suffix, then take the FIRST
+// whitespace-separated token (so "INT UNSIGNED" → "INT", matching the
+// ingestor's lenient handling of trailing modifiers). Empty when the token has
+// no leading identifier.
+func sqlBaseType(typ string) string {
+	u := strings.ToUpper(strings.TrimSpace(typ))
+	if i := strings.IndexByte(u, '('); i >= 0 {
+		u = u[:i]
+	}
+	fields := strings.Fields(u)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// ValidateSchemaType rejects a schema TYPE token whose base type isn't one the
+// ingestor accepts (see acceptedSQLBaseTypes). This is a faithful mirror of a
+// CONFIRMED in-cluster rejection, not a CLI-invented rule, so rejecting here is
+// Principle-6-safe: the ingestor's _get_sqlalchemy_type raises on exactly these
+// tokens. A recognized base with a malformed length (e.g. VARCHAR(x)) is left
+// to the ingestor — its parser tolerates a bad "(…)" by dropping it — so the
+// CLI only gates the base type, the part with a closed accepted set. Exported
+// so BOTH the --schema flag path (ParseSchema) and the `data validate` YAML
+// path (which reads a hand-authored schema block) preview the same rejection.
+func ValidateSchemaType(col, typ string) error {
+	base := sqlBaseType(typ)
+	if _, ok := acceptedSQLBaseTypes[base]; ok {
+		return nil
+	}
+	return fmt.Errorf(
+		"schema type %q for column %q isn't a supported SQL type — the ingestor would "+
+			"reject it in-cluster. Supported types: %s (with optional length/precision, "+
+			"e.g. VARCHAR(255), DECIMAL(10,2))",
+		typ, col, sortedSQLTypes())
+}
+
+// sortedSQLTypes renders the accepted base types sorted, for error messages —
+// matching the ingestor, which prints sorted(type_mapping.keys()).
+func sortedSQLTypes() string {
+	types := make([]string, 0, len(acceptedSQLBaseTypes))
+	for t := range acceptedSQLBaseTypes {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	return strings.Join(types, ", ")
+}
+
+// splitSchemaEntries splits a --schema value on the commas that SEPARATE
+// entries, ignoring commas nested inside a type's "(…)" — so a two-arg type the
+// ingestor accepts, DECIMAL(10,2) / NUMERIC(p,s), stays one entry instead of
+// being torn into "DECIMAL(10" + "2)". Without this the CLI rejected a type the
+// cluster ingests fine (the inverse of the cli#213 false-green), so tracking
+// paren depth keeps the split in lock-step with what a whole type token is.
+func splitSchemaEntries(s string) []string {
+	var entries []string
+	depth, start := 0, 0
+	for i, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				entries = append(entries, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	entries = append(entries, s[start:])
+	return entries
+}
+
 // ParseSchema parses a --schema flag value of the form
-// "col:TYPE,col:TYPE,..." into a column→type map. Types are passed
-// through verbatim (the ingestor validates them against the SQL types
-// it supports: INT, BIGINT, FLOAT, BOOLEAN, DATE, DATETIME,
-// TIMESTAMP, TIME, TEXT, VARCHAR(n), ...). Whitespace around tokens
-// is trimmed.
+// "col:TYPE,col:TYPE,..." into a column→type map. Each TYPE token is
+// validated LOCALLY against the ingestor's accepted SQL types
+// (acceptedSQLBaseTypes, mirroring database.py) so a bogus type is caught
+// here instead of after the upload (cli#213). Whitespace around tokens is
+// trimmed.
 func ParseSchema(s string) (map[string]string, error) {
 	out := map[string]string{}
-	for _, pair := range strings.Split(s, ",") {
+	for _, pair := range splitSchemaEntries(s) {
 		pair = strings.TrimSpace(pair)
 		if pair == "" {
 			continue
@@ -240,6 +338,9 @@ func ParseSchema(s string) (map[string]string, error) {
 		if !ok || col == "" || typ == "" {
 			return nil, fmt.Errorf(
 				"schema entry %q must be col:TYPE (e.g. age:INT,price:FLOAT)", pair)
+		}
+		if err := ValidateSchemaType(col, typ); err != nil {
+			return nil, err
 		}
 		out[col] = typ
 	}

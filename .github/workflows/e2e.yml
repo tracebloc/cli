@@ -51,5 +51,55 @@ jobs:
       - name: Create kind cluster
         uses: helm/kind-action@v1.10.0
 
-      - name: Integration tests
-        run: make test-integration
+      # Run the unit suite + the integration suite each under coverage, then merge
+      # them (go tool covdata). The merge credits the real-cluster I/O seams —
+      # cluster.NewClientset, push.SPDYExecutor.Exec, submit.PortForwardJobsManager,
+      # cluster.DiscoverInClusterClient — which are 0% in the unit suite by design
+      # but exercised here, so submit/cluster reflect their true coverage.
+      # cover-integration IS the integration gate: it fails the job if a test fails.
+      - name: Unit coverage
+        run: make cover
+
+      - name: Integration tests (under coverage)
+        run: make cover-integration
+
+      - name: Merged coverage — credits the real-cluster I/O seams
+        run: make cover-merge
+
+  # Offboard teardown e2e (cli#140): builds the real `tracebloc` binary and runs
+  # `tracebloc delete --yes --force` black-box against a throwaway k3d cluster
+  # with a real Helm release installed, asserting the offboard REVOKES (not
+  # deletes) the credential, uninstalls the release, deletes the k3d cluster,
+  # wipes ~/.tracebloc, and leaves a foreign `tb` alias in place (#171). k3d —
+  # not kind — because the CLI's teardown shells out to `k3d cluster delete`.
+  delete-teardown:
+    timeout-minutes: 20
+    name: Offboard teardown (k3d)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # k3d (the cluster the CLI tears down) + helm (the release it uninstalls).
+      # docker is preinstalled on ubuntu-latest. The test creates the throwaway
+      # cluster itself, so only the binaries are needed here.
+      - name: Install k3d
+        run: curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/v5.7.4/install.sh | TAG=v5.7.4 bash
+
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Offboard teardown e2e
+        env:
+          TB_E2E_K3D: "1"
+        run: go test -tags integration -count=1 -timeout 15m -v -run 'TestE2E_Delete|TestE2E_Revoke' ./test/integration/...

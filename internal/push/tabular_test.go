@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -289,6 +290,80 @@ func TestParseSchema(t *testing.T) {
 	for _, bad := range []string{"", "age", "age:", ":INT", "age=INT"} {
 		if _, err := ParseSchema(bad); err == nil {
 			t.Errorf("ParseSchema(%q) = nil error, want rejection", bad)
+		}
+	}
+}
+
+// TestParseSchema_TypeValidation pins cli#213: a --schema TYPE token whose base
+// type isn't one the ingestor's database.py::_get_sqlalchemy_type accepts is
+// rejected LOCALLY (no false green that only fails in-cluster), while every
+// accepted type — including case variants, length/precision suffixes, and the
+// non-inferable types the help shortlist omits — passes.
+func TestParseSchema_TypeValidation(t *testing.T) {
+	accepted := []string{
+		"a:INT", "a:integer", "a:BigInt", "a:TINYINT", "a:SMALLINT", "a:MEDIUMINT",
+		"a:FLOAT", "a:DOUBLE", "a:DECIMAL(10,2)", "a:NUMERIC(8,3)",
+		"a:BOOLEAN", "a:BOOL", "a:DATE", "a:DATETIME", "a:TIMESTAMP", "a:TIME",
+		"a:VARCHAR(255)", "a:char(3)", "a:TEXT", "a:BLOB", "a:LONGBLOB",
+		// Trailing modifier: the ingestor keys on the FIRST token, so this is accepted.
+		"a:INT UNSIGNED",
+	}
+	for _, ok := range accepted {
+		if _, err := ParseSchema(ok); err != nil {
+			t.Errorf("ParseSchema(%q) = %v, want accepted", ok, err)
+		}
+	}
+
+	for _, bad := range []string{"a:BANANA", "a:STRING", "a:INTT", "a:VARCHR(10)", "a:number"} {
+		_, err := ParseSchema(bad)
+		if err == nil {
+			t.Errorf("ParseSchema(%q) = nil error, want a bogus-type rejection", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "supported SQL type") {
+			t.Errorf("ParseSchema(%q) error = %q, want it to name the unsupported type", bad, err)
+		}
+	}
+
+	// A malformed length on a RECOGNIZED base is left to the ingestor (its
+	// parser drops a bad "(…)"), so the CLI accepts the base rather than
+	// inventing a stricter rule than the ingestor (Principle 6).
+	if _, err := ParseSchema("a:VARCHAR(x)"); err != nil {
+		t.Errorf("ParseSchema(VARCHAR(x)) = %v, want accepted (base VARCHAR is valid; the ingestor tolerates a bad length)", err)
+	}
+
+	// The comma inside DECIMAL(p,s) must NOT split the entry — a two-arg type
+	// the ingestor accepts has to survive alongside other columns.
+	got, err := ParseSchema("price:DECIMAL(10,2),qty:INT,name:VARCHAR(50)")
+	if err != nil {
+		t.Fatalf("ParseSchema with DECIMAL(10,2) = %v, want accepted", err)
+	}
+	want := map[string]string{"price": "DECIMAL(10,2)", "qty": "INT", "name": "VARCHAR(50)"}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("ParseSchema[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("ParseSchema len = %d, want %d (%v)", len(got), len(want), got)
+	}
+}
+
+// TestSQLBaseType mirrors database.py's base extraction
+// (upper().strip().split("(")[0].split()[0]) so the accepted-type gate keys on
+// exactly what the ingestor keys on.
+func TestSQLBaseType(t *testing.T) {
+	cases := map[string]string{
+		"int":            "INT",
+		"  VarChar(255)": "VARCHAR",
+		"DECIMAL(10, 2)": "DECIMAL",
+		"INT UNSIGNED":   "INT",
+		"":               "",
+		"   ":            "",
+	}
+	for in, want := range cases {
+		if got := sqlBaseType(in); got != want {
+			t.Errorf("sqlBaseType(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

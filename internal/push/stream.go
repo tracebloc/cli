@@ -451,11 +451,10 @@ func writeTarFile(tw *tar.Writer, src, dst string) (int64, error) {
 		// keeps the security property locally enforceable.
 		return 0, fmt.Errorf("refusing to stream symbolic link %q (defense-in-depth; should have been rejected by Discover)", src)
 	}
-	if st.Size() > MaxSingleFileBytes {
-		// Stream-time recheck of the single-file cap. Discover
-		// caught this in pre-flight; if we see it again here, the
-		// file grew between then and now.
-		return 0, sizeError(dst, st.Size(), MaxSingleFileBytes)
+	// Stream-time recheck of the single-file cap. Discover caught this in
+	// pre-flight; if we see it again here, the file grew between then and now.
+	if err := checkFileSize(dst, st.Size()); err != nil {
+		return 0, err
 	}
 	hdr := &tar.Header{
 		Name:     dst,

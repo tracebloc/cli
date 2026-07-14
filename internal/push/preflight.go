@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -435,6 +436,163 @@ func CheckAnnotationPairing(images, annotations []string) error {
 		strings.Join(parts, "; "))
 }
 
+// CheckMaskPairing previews the ingestor's FilePairingValidator for
+// semantic_segmentation (modalities/validators.py, sidecar_suffix="_mask"):
+// every image must have a PNG mask named "<image-stem>_mask.png" in masks/ and
+// vice versa. The ingestor strips the documented "_mask" suffix (#196) from
+// mask stems before matching, so image_001.jpg pairs with image_001_mask.png;
+// a mask NOT carrying the suffix can't pair and is a non-conforming orphan. A
+// mismatch in any direction fails in-cluster after the upload.
+func CheckMaskPairing(images, masks []string) error {
+	const maxListed = 5
+	imgStems := make(map[string]bool, len(images))
+	for _, p := range images {
+		base := filepath.Base(p)
+		if strings.HasPrefix(base, ".") {
+			continue // hidden file (e.g. macOS AppleDouble ._x) — FilePairingValidator._stems skips these
+		}
+		imgStems[strings.TrimSuffix(base, filepath.Ext(base))] = true
+	}
+	// Strip the extension then the "_mask" suffix so a mask maps back to the
+	// image stem it pairs with; a mask stem without the suffix is kept as a
+	// non-conforming orphan (mirrors the validator's extra_orphans).
+	maskFor := make(map[string]bool, len(masks))
+	var nonConforming []string
+	for _, p := range masks {
+		base := filepath.Base(p)
+		if strings.HasPrefix(base, ".") {
+			continue // hidden file — mirror the ingestor's _stems, so a stray ._x.png can't fake a mismatch
+		}
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		if strings.HasSuffix(stem, "_mask") {
+			maskFor[strings.TrimSuffix(stem, "_mask")] = true
+		} else {
+			nonConforming = append(nonConforming, base)
+		}
+	}
+	var noMask, noImg []string
+	for s := range imgStems {
+		if !maskFor[s] {
+			noMask = append(noMask, s)
+		}
+	}
+	for s := range maskFor {
+		if !imgStems[s] {
+			noImg = append(noImg, s+"_mask")
+		}
+	}
+	if len(noMask) == 0 && len(noImg) == 0 && len(nonConforming) == 0 {
+		return nil
+	}
+	sort.Strings(noMask)
+	sort.Strings(noImg)
+	sort.Strings(nonConforming)
+	var parts []string
+	if len(noMask) > 0 {
+		parts = append(parts, fmt.Sprintf("%d image(s) without a mask (%s)",
+			len(noMask), TruncateList(noMask, maxListed)))
+	}
+	if len(noImg) > 0 {
+		parts = append(parts, fmt.Sprintf("%d mask(s) without an image (%s)",
+			len(noImg), TruncateList(noImg, maxListed)))
+	}
+	if len(nonConforming) > 0 {
+		parts = append(parts, fmt.Sprintf("%d mask(s) not named <image>_mask.png (%s)",
+			len(nonConforming), TruncateList(nonConforming, maxListed)))
+	}
+	return fmt.Errorf(
+		"images/ and masks/ don't pair up: %s. Every image needs a same-named "+
+			"\"<image>_mask.png\" in masks/ (and vice versa) — the cluster rejects mismatches "+
+			"after the upload.",
+		strings.Join(parts, "; "))
+}
+
+// CheckMaskIdColumn previews the ingestor's MaskIdColumnValidator
+// (validators/mask_id_validator.py, backend#816) for semantic_segmentation: the
+// manifest must DECLARE a mask_id column AND POPULATE it on every row. The
+// training client resolves each mask file from this column with no naming-
+// convention fallback, so an undeclared or empty mask_id becomes a late, opaque
+// FileNotFoundError at train time. The name is the exact lowercase "mask_id"
+// (the stored table keys on it verbatim; a different-case column stores nothing
+// the client can read), so a case variant gets a rename hint, not a silent pass.
+func CheckMaskIdColumn(csvPath string) error {
+	const maskIDColumn = "mask_id"
+	header, err := ReadCSVHeader(csvPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
+	}
+	exact := -1
+	for i, c := range header {
+		if c == maskIDColumn {
+			exact = i
+			break
+		}
+	}
+	if exact == -1 {
+		// Distinguish a wrong-case/whitespace variant (rename) from truly absent
+		// (add), mirroring the ingestor's undeclared-vs-miscased split.
+		if v := matchColumnIndex(header, maskIDColumn); v >= 0 {
+			return fmt.Errorf(
+				"semantic_segmentation needs a %q column in %s, but found %q (wrong case). "+
+					"Rename it to exactly %q — the training client reads that column to locate each mask.",
+				maskIDColumn, filepath.Base(csvPath), header[v], maskIDColumn)
+		}
+		return fmt.Errorf(
+			"semantic_segmentation needs a %q column in %s (columns: %s) linking each image to its "+
+				"mask file. Add it — the training client reads it to locate each mask.",
+			maskIDColumn, filepath.Base(csvPath), strings.Join(header, ", "))
+	}
+	// Populated on every row? Mirror the ingestor's NA-sentinel-aware empty scan
+	// (a missing cell counts as empty), keeping a bounded sample of row numbers.
+	r, closer, err := openCSVReader(csvPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
+	}
+	defer func() { _ = closer.Close() }()
+	if _, err := r.Read(); err != nil {
+		return nil // no header/rows — CheckHasDataRows owns that diagnostic
+	}
+	const maxSample = 5
+	var emptyRows []string
+	emptyCount, row := 0, 0
+	for {
+		rec, rerr := r.Read()
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			// Fail closed on a mid-read error rather than pass a partial scan
+			// (matches CrossCheckLabels / #221).
+			return fmt.Errorf("reading %s: %w", filepath.Base(csvPath), rerr)
+		}
+		row++
+		// Mirror the ingestor's _is_empty EXACTLY: a cell is empty iff its RAW
+		// (untrimmed) value is an NA-sentinel token, OR it's whitespace-only /
+		// missing. Trimming BEFORE the sentinel test would treat a PADDED
+		// sentinel like " NULL " as empty — but pandas keeps the spaces
+		// (skipinitialspace=False), so it's a REAL value in-cluster. That
+		// over-rejection is the cli#218/#239 padded-NA parity trap.
+		raw := ""
+		if exact < len(rec) {
+			raw = rec[exact]
+		}
+		if _, isNA := naSentinels[raw]; isNA || strings.TrimSpace(raw) == "" {
+			emptyCount++
+			if len(emptyRows) < maxSample {
+				emptyRows = append(emptyRows, fmt.Sprintf("data row %d", row))
+			}
+		}
+	}
+	if emptyCount > 0 {
+		return fmt.Errorf(
+			"%d row(s) in %s have an empty %q (e.g. %s). Every row must name its mask file — an "+
+				"empty value makes the training client derive a garbage filename and fail. Fill in "+
+				"%q or drop those rows, then re-run.",
+			emptyCount, filepath.Base(csvPath), maskIDColumn, strings.Join(emptyRows, ", "), maskIDColumn)
+	}
+	return nil
+}
+
 // TruncateList joins up to max items, appending "… and N more" past that.
 func TruncateList(items []string, max int) string {
 	if len(items) <= max {
@@ -643,9 +801,55 @@ func CheckCSVEncoding(path string) error {
 // naSentinels mirrors the ingestor's coercion.NA_SENTINELS: values pandas
 // drops to NaN for SCHEMA-TYPED columns (tabular labels), and therefore
 // values the in-cluster LabelDiversityValidator does not count as classes.
+// This is the CURATED set the ingestor applies via build_csv_na_values with
+// keep_default_na=False — NOT pandas' global default set. Use it only where
+// the in-cluster read pins na_values to coercion.NA_SENTINELS (the
+// LabelDiversityValidator label-column read). Plain-read_csv paths use
+// pandasDefaultNA instead.
 var naSentinels = map[string]struct{}{
 	"": {}, "NA": {}, "N/A": {}, "n/a": {}, "NULL": {}, "null": {},
 	"None": {}, "none": {}, "NaN": {}, "nan": {}, "<NA>": {}, "#N/A": {},
+}
+
+// pandasDefaultNA is pandas' GLOBAL default NA token set —
+// pandas._libs.parsers.STR_NA_VALUES, verbatim at the pinned data-ingestors
+// pandas ref (3.0.3). The grouped time_series_classification validators
+// di#359 added (LabelConstantWithinGroupValidator, PerGroupTimeOrderedValidator)
+// load the file with a PLAIN pd.read_csv (keep_default_na=True, no na_values),
+// so their label-numeric-collapse and sequence-id dropna see EXACTLY this set —
+// not the curated coercion.NA_SENTINELS. The two differ materially: the default
+// set adds '#NA', '#N/A N/A', the IEEE spellings ('-nan', '-NaN', '1.#IND',
+// '-1.#IND', '1.#QNAN', '-1.#QNAN') and drops the lowercase 'none'. Mirroring
+// coercion.NA_SENTINELS here (the pre-fix bug) OVER-rejected: a label column
+// that pandas reads as all-numeric (a default sentinel collapsing to NaN, so
+// "1"/"1.0" don't flip) was seen by the CLI as a mixed object column and
+// flagged as a false mid-sequence flip — rejecting a dataset the ingestor
+// accepts (cli#218 parity fix). Membership is matched on the RAW cell: pandas
+// tokenises NA before stripping, so " NA " (padded) is NOT NA in-cluster.
+//
+// Keep this a byte-for-byte copy of STR_NA_VALUES; re-confirm on a pandas bump:
+//
+//	python -c "from pandas._libs.parsers import STR_NA_VALUES; print(sorted(STR_NA_VALUES))"
+var pandasDefaultNA = map[string]struct{}{
+	"":         {},
+	"#N/A":     {},
+	"#N/A N/A": {},
+	"#NA":      {},
+	"-1.#IND":  {},
+	"-1.#QNAN": {},
+	"-NaN":     {},
+	"-nan":     {},
+	"1.#IND":   {},
+	"1.#QNAN":  {},
+	"<NA>":     {},
+	"N/A":      {},
+	"NA":       {},
+	"NULL":     {},
+	"NaN":      {},
+	"None":     {},
+	"n/a":      {},
+	"nan":      {},
+	"null":     {},
 }
 
 // labelSchemaType resolves the label column's declared SQL type from the
@@ -742,12 +946,18 @@ func CheckSequenceSchemaColumns(schema map[string]string, g GroupingSpec) error 
 // CheckHasDataRows this guarantees every sequence has >= 1 real row and at
 // least one sequence exists at all.
 //
-// NA sentinels count as null: the ingestor loads the column with pandas,
-// whose NA parsing turns "NA"/"null"/… into NaN before the validator's
-// isna() probe — mirrored here via naSentinels (the ingestor's
-// coercion.NA_SENTINELS). The column is resolved with the shared
-// case-/whitespace-insensitive rule (#340). An absent column benign-skips
-// (returns 0, nil): that is CheckSequenceSchemaColumns' /
+// NA sentinels count as null: SequenceGroupValidator plain-reads the column
+// with pandas (keep_default_na=True) and computes null as
+// `ids.isna() | (ids.astype(str).str.strip() == "")`, so the faithful null
+// set is pandas' DEFAULT NA tokens (STR_NA_VALUES — matched on the RAW cell,
+// since pandas tokenises NA before stripping) UNION whitespace-only cells —
+// NOT the curated coercion.NA_SENTINELS. Mirrored here via pandasDefaultNA
+// plus a TrimSpace=="" clause (cli#239): the coercion set the label checks use
+// wrongly drops lowercase "none" (which pandas KEEPS → a real id, so the old
+// naSentinels probe was a false REJECT, the dangerous direction) and lacks
+// "#NA" (which pandas drops to NaN → null, an under-reject). The column is
+// resolved with the shared case-/whitespace-insensitive rule (#340). An absent
+// column benign-skips (returns 0, nil): that is CheckSequenceSchemaColumns' /
 // CheckSchemaColumns' diagnostic, not this one's.
 //
 // sequences is the count of distinct non-null ids — the dataset's SAMPLE
@@ -794,18 +1004,28 @@ func sequenceScanFrom(r *csv.Reader, groupColumn string) (sequences int, nullErr
 			return 0, nil, err // caller wraps with the filename and fails closed
 		}
 		rowNum++
-		v := ""
+		raw := ""
 		if len(rec) > col {
-			v = strings.TrimSpace(rec[col])
+			raw = rec[col] // RAW: pandas tokenises NA pre-strip and groups the key verbatim
 		}
-		if _, isNA := naSentinels[v]; isNA {
+		// Null iff the raw cell is a pandas DEFAULT NA token OR whitespace-only —
+		// SequenceGroupValidator's `isna() | (astype(str).str.strip() == "")` over
+		// a plain read_csv (cli#239). "" is already in pandasDefaultNA, so the
+		// TrimSpace clause only adds genuine whitespace-only cells; and a padded
+		// token (" NA ") is a REAL id in-cluster, so matching the raw (not the
+		// trimmed) cell is what keeps parity.
+		_, isNA := pandasDefaultNA[raw]
+		if isNA || strings.TrimSpace(raw) == "" {
 			nullCount++
 			if firstNullRow == 0 {
 				firstNullRow = rowNum
 			}
 			continue
 		}
-		distinct[v] = true
+		// Distinct sequences count the RAW id — pandas groups the object key
+		// verbatim (" p1 " and "p1" are two sequences), consistent with the
+		// grouped previews (labelConstantViolation / perGroupTimeViolation).
+		distinct[raw] = true
 	}
 	if nullCount > 0 {
 		return len(distinct), fmt.Errorf(
@@ -815,6 +1035,346 @@ func sequenceScanFrom(r *csv.Reader, groupColumn string) (sequences int, nullErr
 			groupColumn, nullCount, firstNullRow), nil
 	}
 	return len(distinct), nil, nil
+}
+
+// tscRow is one data row's cells relevant to the grouped time_series_
+// classification previews, gathered in a SINGLE pass over the CSV (the
+// ingestor's grouped validators load the whole file too — a whole-group check
+// is safe pre-ingest, data-ingestors #359 T15). Cells are stored RAW
+// (un-trimmed): the grouped validators plain-read_csv with skipinitialspace
+// defaulting False, so pandas keeps surrounding whitespace on object columns
+// and groupby keys (" p1 " and "p1" are DISTINCT sequences), and matches NA
+// tokens against the raw cell (" NA " is not NA). The numeric-collapse / numeric
+// -time paths trim only inside the parse attempt, mirroring pandas' numeric
+// coercion, which DOES tolerate surrounding whitespace (" 1" -> 1). A cell
+// absent because the row is shorter than a resolved column reads as "" — which
+// pandas treats as NaN, i.e. an NA sentinel here.
+type tscRow struct {
+	seq   string // raw sequence_id cell
+	label string // raw label cell
+	time  string // raw timestamp cell
+	row   int    // 1-based data-row number (for human-readable refs)
+}
+
+// scanTSCRows reads csvPath once and returns every data row's sequence_id,
+// label, and timestamp cells (RAW, un-trimmed — see tscRow), plus whether each
+// column resolved in the header. Columns resolve case-/whitespace-insensitively
+// (the ingestor's resolve_column rule, via matchColumnIndex). A benign miss
+// (unreadable file or no header) returns no rows and all-false found flags;
+// only a mid-scan read failure is a non-nil error (the caller fails closed,
+// matching CheckSequenceRows / #221).
+func scanTSCRows(csvPath, groupColumn, labelColumn, timeColumn string) (rows []tscRow, groupFound, labelFound, timeFound bool, err error) {
+	r, closer, oerr := openCSVReader(csvPath)
+	if oerr != nil {
+		return nil, false, false, false, nil // unreadable — another check's diagnostic
+	}
+	defer func() { _ = closer.Close() }()
+	header, herr := r.Read()
+	if herr != nil {
+		return nil, false, false, false, nil // no header — benign
+	}
+	gi := matchColumnIndex(header, groupColumn)
+	li := matchColumnIndex(header, labelColumn)
+	ti := matchColumnIndex(header, timeColumn)
+	groupFound, labelFound, timeFound = gi >= 0, li >= 0, ti >= 0
+	cell := func(rec []string, idx int) string {
+		if idx < 0 || len(rec) <= idx {
+			return "" // pandas reads a missing field as NaN — "" is an NA token
+		}
+		return rec[idx] // RAW — pandas keeps whitespace on object cols / group keys
+	}
+	rowNum := 0
+	for {
+		rec, rerr := r.Read()
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			return nil, groupFound, labelFound, timeFound, rerr // caller wraps + fails closed
+		}
+		rowNum++
+		rows = append(rows, tscRow{
+			seq:   cell(rec, gi),
+			label: cell(rec, li),
+			time:  cell(rec, ti),
+			row:   rowNum,
+		})
+	}
+	return rows, groupFound, labelFound, timeFound, nil
+}
+
+// CheckTSCGroupIntegrity previews the two grouped time_series_classification
+// validators data-ingestors #359 added, in ONE pass over the CSV and in the
+// ingestor's factory order: LabelConstantWithinGroupValidator, then
+// PerGroupTimeOrderedValidator. These are the checks the presence/null-id
+// previews above (CheckSequenceSchemaColumns / CheckSequenceRows) don't cover —
+// so before cli#218 a mid-sequence label flip or per-group unsorted timestamps
+// passed the local dry-run and were rejected only in-cluster after the upload.
+//
+// STRICTLY grouped-scoped: the sole caller gates on GroupingFor's grouping
+// trait, so no non-grouped category runs this. That matters for deployment
+// safety — time_series_classification is develop-ahead (di#359 is NOT in the
+// deployed v0.7.0 ingestor), so this can only ever preview a develop-ingestor
+// rule for a develop-only category; a non-TSC dataset is completely unaffected
+// and the CLI can never out-strict a deployed non-grouped path.
+//
+// A mid-read failure fails closed (wrapped with the filename). Absent columns
+// benign-skip per check — the schema / sequence / label checks own those.
+func CheckTSCGroupIntegrity(csvPath, groupColumn, labelColumn, timeColumn string, schema map[string]string) error {
+	rows, groupFound, labelFound, timeFound, err := scanTSCRows(csvPath, groupColumn, labelColumn, timeColumn)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", filepath.Base(csvPath), err)
+	}
+	if e := labelConstantViolation(rows, groupFound, labelFound, groupColumn, labelColumn); e != nil {
+		return e
+	}
+	return perGroupTimeViolation(rows, groupFound, timeFound, groupColumn, timeColumn, schema)
+}
+
+// labelConstantViolation previews LabelConstantWithinGroupValidator
+// (label_constant_within_group_validator.py): time-series classification
+// assigns ONE label per sequence, so every timestep row of a sequence_id must
+// repeat the same label value. Mirrors the ingestor exactly:
+//   - rows group by sequence_id with null ids DROPPED (pandas groupby
+//     dropna=True — a null-id row belongs to no sequence and is
+//     CheckSequenceRows' rejection, not this one's);
+//   - a sequence offends when its label takes more than one DISTINCT value,
+//     counting a null/empty label as its own value (nunique(dropna=False));
+//   - numeric-looking labels collapse the way the pandas column dtype does —
+//     ONLY when EVERY non-null label cell is numeric ("1" and "1.0" are then
+//     one value, not a false flip); a mixed/object column compares exact
+//     strings.
+//
+// NA membership uses pandasDefaultNA (STR_NA_VALUES), not the curated
+// coercion set: LabelConstantWithinGroupValidator plain-reads the file
+// (keep_default_na=True), so the column collapses to numeric whenever the only
+// non-numeric cells are default sentinels. Matched on the raw cell (pandas
+// tokenises NA pre-strip). Numeric collapse compares float64; pure-integer
+// pandas columns are int64, so two DISTINCT integers past 2^53 would collapse
+// here (float rounding) and miss a real flip — an UNDER-reject (safe) confined
+// to astronomically large integer class labels (rare enough to accept per
+// cli#218; revisit with big.Int if real class ids ever exceed 2^53).
+//
+// An absent sequence_id or label column benign-skips.
+func labelConstantViolation(rows []tscRow, groupFound, labelFound bool, groupColumn, labelColumn string) error {
+	if !groupFound || !labelFound {
+		return nil // another check's diagnostic
+	}
+	// pandas dtype inference: the column collapses numerics only if EVERY
+	// non-null cell parses as a number (else it is an object column — exact
+	// strings). NA cells are ignored for the dtype decision (an int column
+	// with a NaN is still numeric/float in pandas). Whitespace is trimmed only
+	// for the numeric test: pandas' numeric coercion tolerates surrounding
+	// space (" 1" -> 1), but object comparison keeps it (see below).
+	numeric := true
+	for _, r := range rows {
+		if _, isNA := pandasDefaultNA[r.label]; isNA {
+			continue
+		}
+		if !isNumericCell(strings.TrimSpace(r.label)) {
+			numeric = false
+			break
+		}
+	}
+	canon := func(v string) string {
+		if _, isNA := pandasDefaultNA[v]; isNA {
+			return "\x00NA" // null is its OWN value (nunique dropna=False)
+		}
+		if numeric {
+			if fv, e := strconv.ParseFloat(strings.TrimSpace(v), 64); e == nil {
+				return strconv.FormatFloat(fv, 'g', -1, 64)
+			}
+		}
+		return v // object column: pandas keeps the raw string (whitespace and all)
+	}
+	type acc struct {
+		values   map[string]struct{}
+		firstRow int
+	}
+	seen := map[string]*acc{}
+	var order []string // first-seen sequence order → stable row refs
+	for _, r := range rows {
+		if _, isNA := pandasDefaultNA[r.seq]; isNA {
+			continue // dropna=True (pandas default NA on the raw group key)
+		}
+		a := seen[r.seq]
+		if a == nil {
+			a = &acc{values: map[string]struct{}{}, firstRow: r.row}
+			seen[r.seq] = a
+			order = append(order, r.seq)
+		}
+		a.values[canon(r.label)] = struct{}{}
+	}
+	var offenderRows []int
+	for _, s := range order {
+		if len(seen[s].values) > 1 {
+			offenderRows = append(offenderRows, seen[s].firstRow)
+		}
+	}
+	if len(offenderRows) == 0 {
+		return nil
+	}
+	sort.Ints(offenderRows)
+	shown, extra := offenderRows, ""
+	if len(shown) > 5 {
+		extra = fmt.Sprintf(" (+%d more)", len(shown)-5)
+		shown = shown[:5]
+	}
+	return fmt.Errorf(
+		"%d sequence(s) grouped by %q change their %q value mid-sequence (first offending "+
+			"sequences start at data row(s) %v%s). Time-series classification assigns ONE label "+
+			"per sequence: every row of a sequence must repeat the same label value. The cluster "+
+			"rejects this after the upload — fix the labels and re-run.",
+		len(offenderRows), groupColumn, labelColumn, shown, extra)
+}
+
+// perGroupTimeViolation previews PerGroupTimeOrderedValidator
+// (per_group_time_ordered_validator.py): timestep rows must be sorted
+// ascending (monotonic NON-decreasing — equal successive values are allowed)
+// by the time column WITHIN each sequence; interleaving sequences is fine.
+//
+// The ingestor branches on the SCHEMA's declared type for the time column
+// (_declared_base_type): a numeric step index (INT/FLOAT/…) is parsed with
+// pd.to_numeric(coerce); a TIMESTAMP/date type is parsed with pandas'
+// permissive "mixed"-format parser plus a locale-ambiguity guard. This preview
+// mirrors the NUMERIC branch faithfully. It deliberately does NOT preview the
+// TIMESTAMP/date branch: reproducing pandas' "mixed" date parsing + the
+// day-first/month-first ambiguity guard in Go would risk REJECTING a date the
+// cluster accepts (the dangerous direction — a burned local run, the inverse
+// of what preflight is for), so the date-typed ordering stays a documented
+// under-preview gap (cli#218) — safe because it only ever under-rejects.
+//
+// An absent sequence_id or time column benign-skips.
+func perGroupTimeViolation(rows []tscRow, groupFound, timeFound bool, groupColumn, timeColumn string, schema map[string]string) error {
+	if !groupFound || !timeFound {
+		return nil
+	}
+	if !isNumericTimeColumn(schema, timeColumn) {
+		return nil // TIMESTAMP/date branch — documented under-preview (see doc)
+	}
+	// pd.to_numeric(errors="coerce"): a cell that is not a finite number
+	// becomes NaN → invalid. Every timestep needs a valid position to order it
+	// within its sequence. The invalid tally spans ALL rows (matching the
+	// ingestor's whole-column invalid_mask), not just grouped ones.
+	parsed := make([]float64, len(rows))
+	valid := make([]bool, len(rows))
+	var invalidRows []int
+	for i, r := range rows {
+		f, ok := parseNumericTime(r.time)
+		parsed[i], valid[i] = f, ok
+		if !ok {
+			invalidRows = append(invalidRows, r.row)
+		}
+	}
+	if len(invalidRows) > 0 {
+		sort.Ints(invalidRows)
+		shown, extra := invalidRows, ""
+		if len(shown) > 5 {
+			extra = fmt.Sprintf(" (+%d more)", len(shown)-5)
+			shown = shown[:5]
+		}
+		return fmt.Errorf(
+			"the time column %q has %d missing/invalid value(s) (first at data row(s) %v%s). "+
+				"Every timestep row needs a valid value to order it within its sequence — the "+
+				"cluster rejects this after the upload; fix the values and re-run.",
+			timeColumn, len(invalidRows), shown, extra)
+	}
+	// Per-group monotonic non-decreasing over the valid rows in file order,
+	// null-id rows dropped (dropna=True). A strict decrease vs the previous
+	// in-group value flags the sequence (mirrors is_monotonic_increasing being
+	// false ⟺ some diff < 0); the reported row is that first decrease.
+	type gstate struct {
+		last       float64
+		hasLast    bool
+		badRow     int
+		outOfOrder bool
+	}
+	states := map[string]*gstate{}
+	var order []string
+	for i, r := range rows {
+		if _, isNA := pandasDefaultNA[r.seq]; isNA {
+			continue // dropna=True (pandas default NA on the raw group key)
+		}
+		g := states[r.seq]
+		if g == nil {
+			g = &gstate{}
+			states[r.seq] = g
+			order = append(order, r.seq)
+		}
+		if g.hasLast && parsed[i] < g.last && !g.outOfOrder {
+			g.outOfOrder = true
+			g.badRow = r.row
+		}
+		g.last = parsed[i]
+		g.hasLast = true
+	}
+	var badRows []int
+	for _, s := range order {
+		if states[s].outOfOrder {
+			badRows = append(badRows, states[s].badRow)
+		}
+	}
+	if len(badRows) == 0 {
+		return nil
+	}
+	sort.Ints(badRows)
+	shown, extra := badRows, ""
+	if len(shown) > 5 {
+		extra = fmt.Sprintf(" (+%d more)", len(shown)-5)
+		shown = shown[:5]
+	}
+	return fmt.Errorf(
+		"%d sequence(s) grouped by %q have out-of-order %q values (first offending data row(s) "+
+			"%v%s). Timestep rows must be sorted ascending by %q within each sequence — sort each "+
+			"sequence and re-run. Interleaving different sequences is fine; ordering is only "+
+			"checked within a sequence. The cluster rejects this after the upload.",
+		len(badRows), groupColumn, timeColumn, shown, extra, timeColumn)
+}
+
+// isNumericCell reports whether v parses as a finite number — the pandas
+// numeric-dtype test used to decide label-value collapse.
+func isNumericCell(v string) bool {
+	f, err := strconv.ParseFloat(v, 64)
+	return err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
+}
+
+// parseNumericTime mirrors pd.to_numeric(errors="coerce") for the time column:
+// a parseable finite (or ±inf, which pandas keeps) number is valid; a NaN
+// result or a parse failure (empty/NA/non-numeric) is invalid. The raw cell is
+// trimmed first — pd.to_numeric tolerates surrounding whitespace (" 1" -> 1),
+// so a padded step index must not read as invalid (which would over-reject).
+func parseNumericTime(v string) (float64, bool) {
+	f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil || math.IsNaN(f) {
+		return 0, false
+	}
+	return f, true
+}
+
+// isNumericTimeColumn reports whether the schema declares the time column as a
+// numeric step-index type — the branch selector in
+// PerGroupTimeOrderedValidator._declared_base_type / _NUMERIC_BASE_TYPES. No
+// declared type resolves to the TIMESTAMP/date branch (returns false), which
+// this preview does not check (see perGroupTimeViolation's doc).
+func isNumericTimeColumn(schema map[string]string, timeColumn string) bool {
+	t, ok := labelSchemaType(schema, timeColumn) // generic case-insensitive schema-type resolve
+	if !ok {
+		return false
+	}
+	base := strings.ToUpper(strings.TrimSpace(t))
+	if i := strings.IndexByte(base, '('); i >= 0 {
+		base = base[:i]
+	}
+	base = strings.TrimSpace(base)
+	if j := strings.IndexAny(base, " \t"); j >= 0 {
+		base = base[:j] // "INT UNSIGNED" → INT (mirrors .split()[0])
+	}
+	switch base {
+	case "INT", "INTEGER", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT",
+		"FLOAT", "DOUBLE", "DECIMAL", "NUMERIC":
+		return true
+	}
+	return false
 }
 
 // PreflightProblem is a preflight rejection. BadFlag marks problems whose
@@ -882,6 +1442,15 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 			}
 			seqs, err := CheckSequenceRows(layout.LabelsCSV, g.GroupColumn)
 			if err != nil {
+				return nil, dataProblem(err)
+			}
+			// Grouped-integrity previews (cli#218): one label per sequence
+			// (LabelConstantWithinGroupValidator) and per-sequence ascending
+			// time order (PerGroupTimeOrderedValidator) — the two grouped
+			// validators di#359 added that the presence/null-id checks above
+			// don't cover. Runs after the null-id check, before label
+			// diversity, mirroring the ingestor's factory order.
+			if err := CheckTSCGroupIntegrity(layout.LabelsCSV, g.GroupColumn, spec.LabelColumn, g.TimeColumn, spec.Schema); err != nil {
 				return nil, dataProblem(err)
 			}
 			if seqs > 0 {
@@ -989,6 +1558,36 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 			// images↔annotations stem pairing (FilePairingValidator preview).
 			if err := CheckAnnotationPairing(layout.Images, layout.Sidecars["annotations"]); err != nil {
 				return nil, dataProblem(err)
+			}
+		case "semantic_segmentation":
+			// images↔masks "_mask"-suffix pairing (FilePairingValidator preview)
+			// + the mask_id link-column contract (MaskIdColumnValidator preview,
+			// backend#816) + the labels.csv rows↔images/ existence check (same
+			// file_transfer failed-record preview image_classification runs). We
+			// deliberately do NOT run CheckLabelColumn: semseg requires a `label`
+			// field, but the ingestor omits LabelColumnValidator for it (labels
+			// come from the masks), so verifying the column is in the CSV would
+			// over-reject a dataset the cluster accepts.
+			if err := CheckMaskPairing(layout.Images, layout.Sidecars["masks"]); err != nil {
+				return nil, dataProblem(err)
+			}
+			if err := CheckMaskIdColumn(layout.LabelsCSV); err != nil {
+				return nil, dataProblem(err)
+			}
+			missing, orphanFiles, cerr := CrossCheckLabels(layout.LabelsCSV, layout.Images, spec.Extension)
+			if cerr != nil {
+				return nil, dataProblem(cerr)
+			}
+			if len(missing) > 0 {
+				return nil, dataProblem(fmt.Errorf(
+					"%d labels.csv row(s) reference images that aren't in images/: %s. Those records "+
+						"would fail after the upload — fix the rows or add the files, then re-run.",
+					len(missing), TruncateList(missing, 5)))
+			}
+			if len(orphanFiles) > 0 {
+				notes = append(notes, fmt.Sprintf(
+					"Note: %d file(s) in images/ have no labels.csv row and won't be part of the dataset: %s",
+					len(orphanFiles), TruncateList(orphanFiles, 5)))
 			}
 		}
 

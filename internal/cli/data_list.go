@@ -76,12 +76,8 @@ Exit codes:
 		},
 	}
 
-	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
-		"path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
-	cmd.Flags().StringVar(&contextOverride, "context", "",
-		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
-	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where your tracebloc client is installed")
+	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
+	addNamespaceFlag(cmd, &nsOverride, namespaceFlagUsage)
 	cmd.Flags().BoolVar(&outputJSON, "output-json", false,
 		"emit the dataset list as JSON on stdout (human output → stderr)")
 
@@ -119,7 +115,7 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	}
 	resolved, cs, release := target.Resolved, target.Clientset, target.Release
 
-	tables, err := push.ListDatasets(ctx, cs, resolved.RestConfig, resolved.Namespace)
+	tables, err := listDatasetsFn(ctx, cs, resolved.RestConfig, resolved.Namespace)
 	if err != nil {
 		return &exitError{code: 7, err: err}
 	}

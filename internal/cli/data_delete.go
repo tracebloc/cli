@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/push"
@@ -58,7 +60,9 @@ Exit codes:
   0  artifacts removed (or --dry-run, or the user declined)
   2  invalid table name
   3  kubeconfig error, or refused (no confirmation off a terminal)
-  4  cluster reachable but no tracebloc client / shared storage missing
+  4  cluster reachable but no tracebloc client / shared storage missing,
+     or the client's dataset list couldn't be read (can't confirm the target)
+  5  no dataset by that name on this client (nothing to delete)
   7  teardown failed mid-flight (table drop or PVC rm errored)`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -80,12 +84,8 @@ Exit codes:
 		},
 	}
 
-	cmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
-		"path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
-	cmd.Flags().StringVar(&contextOverride, "context", "",
-		"name of the kubeconfig context to use (default: kubeconfig's current-context)")
-	cmd.Flags().StringVarP(&nsOverride, "namespace", "n", "",
-		"namespace where your tracebloc client is installed")
+	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
+	addNamespaceFlag(cmd, &nsOverride, namespaceFlagUsage)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"show what would be deleted without deleting anything")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false,
@@ -105,6 +105,15 @@ func runDataDelete(ctx context.Context, a runDataDeleteArgs) error {
 the cluster and deletes the dataset's files on the shared storage. It can't be
 undone — re-ingesting the data is the only way back.`)
 
+	// 0. Empty-arg guard with a DELETE-appropriate message (#76a). delete
+	//    takes the dataset as a POSITIONAL arg, so an empty one must not fall
+	//    through to ValidateTableName's "set --name" text (that flag belongs to
+	//    `data ingest`, not here). ExactArgs(1) still accepts an explicit "".
+	if a.Table == "" {
+		return &exitError{code: 2, err: errors.New(
+			"dataset name is required — pass it as an argument: tracebloc data delete <dataset>")}
+	}
+
 	// 1. Validate the name before we build any PVC path from it
 	//    (push.PlanTeardown panics on an unsafe name by design).
 	if err := push.ValidateTableName(a.Table); err != nil {
@@ -117,15 +126,29 @@ undone — re-ingesting the data is the only way back.`)
 	//    running teardown against a cluster with no tracebloc install.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTarget(ctx, a.Printer, opts, binding, true)
+	target, err := resolveClusterTargetFn(ctx, a.Printer, opts, binding, true)
 	if err != nil {
 		return binding.explain(err)
 	}
 	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
 
+	// 3. Resolve the requested name against the datasets actually on the
+	//    client — case-INSENSITIVELY, the same EqualFold match `data ingest`'s
+	//    destination guard uses (destTableExists / listDatasetsFn). The
+	//    teardown itself (DROP TABLE / rm) is case-SENSITIVE on the cluster, so
+	//    `data delete Churn` for a table named `churn` used to drop nothing and
+	//    still exit 0 — a silent no-op that read as a successful delete
+	//    (backend#1027). We tear down the REAL spelling from here on, and fail
+	//    CLOSED (never exit 0) if the name isn't there or the list can't be
+	//    read: a destructive, unrecoverable delete must confirm its target.
+	matched, err := resolveDeleteTarget(ctx, cs, resolved, a.Table)
+	if err != nil {
+		return err
+	}
+
 	// 4. Show exactly what will be deleted — the customer's last look
 	//    before destructive, unrecoverable work.
-	plan := push.PlanTeardown(a.Table)
+	plan := push.PlanTeardown(matched)
 
 	p.Section("Target")
 	p.Field("context", resolved.Context)
@@ -155,7 +178,7 @@ undone — re-ingesting the data is the only way back.`)
 				"refusing to delete without confirmation: pass --yes or run on a terminal")}
 		}
 		p.PromptHint("This drops the table and removes the files listed above — there's no undo. Pass --yes next time to skip this prompt.")
-		ok, err := a.Prompter.Confirm(fmt.Sprintf("Delete %q and its files?", a.Table), false)
+		ok, err := a.Prompter.Confirm(fmt.Sprintf("Delete %q and its files?", matched), false)
 		if err != nil {
 			if errors.Is(err, errInteractiveCancelled) {
 				p.Infof("Cancelled — nothing was deleted.")
@@ -175,11 +198,11 @@ undone — re-ingesting the data is the only way back.`)
 	//    files on any volume type — including hostPath, where fsGroup is
 	//    a no-op (tracebloc/client#259).
 	p.Infof("Removing in-cluster artifacts…")
-	res, err := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
+	res, err := teardownFn(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
 		Namespace:          resolved.Namespace,
 		PVCClaimName:       pvc.ClaimName,
 		PVCMountPath:       pvc.MountPath,
-		Table:              a.Table,
+		Table:              matched,
 		ServiceAccountName: release.IngestorSAName,
 		// Image left empty → push.DefaultStagePodImage (alpine; has rm).
 	})
@@ -192,7 +215,7 @@ undone — re-ingesting the data is the only way back.`)
 			return &exitError{code: 7, err: fmt.Errorf(
 				"teardown incomplete — the table %s.%s was dropped, but removing its files failed: %w; "+
 					"re-run `tracebloc data delete %s`, or delete the leftover staging dirs on the node",
-				plan.Database, plan.Table, err, a.Table)}
+				plan.Database, plan.Table, err, matched)}
 		}
 		return &exitError{code: 7, err: fmt.Errorf("teardown failed: %w", err)}
 	}
@@ -201,4 +224,46 @@ undone — re-ingesting the data is the only way back.`)
 	p.Successf("Deleted %s.%s and %d PVC path(s).", plan.Database, plan.Table, len(res.RemovedPaths))
 	p.Infof("The dataset's catalog metadata is kept as a record on tracebloc, marked unavailable — never removed.")
 	return nil
+}
+
+// resolveDeleteTarget maps the user-supplied dataset name onto the REAL
+// spelling of a dataset that actually exists on the client, matching
+// case-INSENSITIVELY exactly as `data ingest`'s destination guard does
+// (see destTableExists — same listDatasetsFn seam, same strings.EqualFold).
+// It exists because the teardown is case-SENSITIVE on the cluster: DROP TABLE
+// / rm against a mis-cased name removes nothing yet still succeeds, so
+// `data delete Churn` for a table named `churn` used to be a silent no-op that
+// exited 0 (backend#1027). The caller tears down the returned name, never the
+// raw flag.
+//
+// Unlike the ingest guard — which fails OPEN, because the in-cluster duplicate
+// check still backstops it — a destructive, unrecoverable delete fails CLOSED:
+//   - listing the datasets errored  → exit 4 (cluster reachable but we can't
+//     confirm what's there; refuse rather than delete blind).
+//   - no dataset matches (any case) → exit 5 (nothing to delete), naming what
+//     IS on the client so the caller can fix the spelling.
+func resolveDeleteTarget(ctx context.Context, cs kubernetes.Interface, resolved *cluster.ResolvedConfig, requested string) (string, error) {
+	names, err := listDatasetsFn(ctx, cs, resolved.RestConfig, resolved.Namespace)
+	if err != nil {
+		return "", &exitError{code: 4, err: fmt.Errorf(
+			"can't confirm %q exists on this client — refusing to delete without "+
+				"confirming the target first: %w", requested, err)}
+	}
+	for _, n := range names {
+		if strings.EqualFold(n, requested) {
+			return n, nil
+		}
+	}
+	return "", &exitError{code: 5, err: fmt.Errorf(
+		"no dataset named %q on this client%s", requested, availableHint(names))}
+}
+
+// availableHint renders the "here's what IS on the client" tail of a
+// not-found delete error, so a mis-typed name (case now resolves on its own)
+// is easy to correct.
+func availableHint(names []string) string {
+	if len(names) == 0 {
+		return " — this client has no ingested datasets"
+	}
+	return fmt.Sprintf(" (datasets on this client: %s)", strings.Join(names, ", "))
 }

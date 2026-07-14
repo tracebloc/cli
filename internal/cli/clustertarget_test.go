@@ -9,13 +9,83 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
+	ktesting "k8s.io/client-go/testing"
 
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/ui"
 )
+
+// withClusterSeams points resolveClusterTarget's kubeconfig-load + clientset
+// seams at a fixed ResolvedConfig (namespace "default") and the given fake
+// clientset, so the discovery + exit-code contract can be exercised without a
+// real kubeconfig or apiserver. It restores the originals on cleanup.
+func withClusterSeams(t *testing.T, cs kubernetes.Interface) {
+	t.Helper()
+	origLoad, origCS := loadClusterFn, newClientsetFn
+	t.Cleanup(func() { loadClusterFn, newClientsetFn = origLoad, origCS })
+	loadClusterFn = func(cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+		return &cluster.ResolvedConfig{Namespace: "default", Context: "test-ctx", RestConfig: &rest.Config{}}, nil
+	}
+	newClientsetFn = func(*cluster.ResolvedConfig) (kubernetes.Interface, error) { return cs, nil }
+}
+
+// A reached cluster that hosts no tracebloc client anywhere must surface the
+// §7.10 "this machine isn't provisioned" guidance at exit 4, still
+// errors.Is-identifiable as ErrNoParentRelease and mapped to *noParentReleaseError.
+func TestResolveClusterTarget_NoClient_InstallerMessageExit4(t *testing.T) {
+	withClusterSeams(t, fake.NewSimpleClientset()) // empty cluster
+	_, err := resolveClusterTarget(context.Background(), nil,
+		cluster.KubeconfigOptions{}, activeClientBinding{}, true)
+	if err == nil {
+		t.Fatal("expected an error when the cluster hosts no client")
+	}
+	if got := ExitCodeFromError(err); got != 4 {
+		t.Fatalf("exit code = %d, want 4", got)
+	}
+	if !errors.Is(err, cluster.ErrNoParentRelease) {
+		t.Errorf("error should stay errors.Is(ErrNoParentRelease): %v", err)
+	}
+	var npr *noParentReleaseError
+	if !errors.As(err, &npr) {
+		t.Errorf("no-client miss should map to *noParentReleaseError, got %T", err)
+	}
+	for _, want := range []string{"run the installer", "--context/--namespace", "kubeconfig points at"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message missing %q:\n%s", want, err.Error())
+		}
+	}
+}
+
+// Regression: the >1 branch is untouched — several clients still get the
+// "pick one with --namespace" message (exit 4), NOT the installer rewrite.
+func TestResolveClusterTarget_MultipleClients_PickOneExit4(t *testing.T) {
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("alpha"), jmDep("beta")))
+	_, err := resolveClusterTarget(context.Background(), nil,
+		cluster.KubeconfigOptions{}, activeClientBinding{}, true)
+	if err == nil {
+		t.Fatal("expected an error when multiple clients are present")
+	}
+	if got := ExitCodeFromError(err); got != 4 {
+		t.Fatalf("exit code = %d, want 4", got)
+	}
+	if !errors.Is(err, cluster.ErrNoParentRelease) {
+		t.Errorf("expected ErrNoParentRelease, got: %v", err)
+	}
+	for _, want := range []string{"alpha", "beta", "--namespace"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("pick-one message missing %q:\n%s", want, err.Error())
+		}
+	}
+	if strings.Contains(err.Error(), "run the installer") {
+		t.Errorf("multi-client branch must not be rewritten to the installer message:\n%s", err.Error())
+	}
+}
 
 func TestSetActiveClient_CachesNamespaceAndName(t *testing.T) {
 	p := &config.Profile{}
@@ -192,8 +262,12 @@ func TestDiscoverRelease_NoScanWhenExplicit(t *testing.T) {
 	}
 }
 
-func TestDiscoverRelease_ScanFindsNothingKeepsOriginalError(t *testing.T) {
-	cs := fake.NewSimpleClientset() // empty cluster
+// A successful scan that finds NO client anywhere means this machine isn't
+// provisioned — the error must say so (§7.10: run the installer / point
+// elsewhere) rather than read like a namespace hunt, while still wrapping
+// ErrNoParentRelease so the exit-4 mapping holds.
+func TestDiscoverRelease_ScanFindsNothing_InstallerGuidance(t *testing.T) {
+	cs := fake.NewSimpleClientset() // empty cluster — scan succeeds, finds nothing
 	_, _, err := discoverRelease(context.Background(), nil, cs, "default", true)
 	if err == nil {
 		t.Fatal("expected an error on an empty cluster")
@@ -201,9 +275,48 @@ func TestDiscoverRelease_ScanFindsNothingKeepsOriginalError(t *testing.T) {
 	if !errors.Is(err, cluster.ErrNoParentRelease) {
 		t.Errorf("expected ErrNoParentRelease, got: %v", err)
 	}
+	for _, want := range []string{
+		"on the cluster your kubeconfig points at",
+		"run the installer",
+		"--context/--namespace",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message missing %q, got: %s", want, err.Error())
+		}
+	}
 	// The no-client error must stay customer-actionable without Helm.
 	if strings.Contains(err.Error(), "helm") {
 		t.Errorf("error must not tell customers to run helm: %s", err)
+	}
+}
+
+// When the cluster-wide scan itself can't run (e.g. RBAC forbids a cluster-scope
+// list), that's a DIFFERENT problem than "not provisioned" — keep the original
+// per-namespace discovery error rather than the "run the installer" rewrite.
+func TestDiscoverRelease_ScanUnavailable_KeepsOriginalError(t *testing.T) {
+	cs := fake.NewSimpleClientset() // no client in "default" → ErrNoParentRelease there
+	// Fail only the cluster-wide (NamespaceAll) list the scan issues; the
+	// namespaced discovery list in "default" still succeeds.
+	cs.PrependReactor("list", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() == metav1.NamespaceAll {
+			return true, nil, errors.New("forbidden: cannot list deployments at the cluster scope")
+		}
+		return false, nil, nil
+	})
+	_, _, err := discoverRelease(context.Background(), nil, cs, "default", true)
+	if err == nil {
+		t.Fatal("expected an error when the scan can't run")
+	}
+	if !errors.Is(err, cluster.ErrNoParentRelease) {
+		t.Errorf("expected ErrNoParentRelease, got: %v", err)
+	}
+	// It must stay the ORIGINAL namespace-scoped discovery error, NOT the
+	// machine-not-provisioned rewrite (which only fires on a clean empty scan).
+	if !strings.Contains(err.Error(), `namespace "default"`) {
+		t.Errorf("scan-unavailable case should keep the namespaced discovery error, got: %s", err)
+	}
+	if strings.Contains(err.Error(), "on the cluster your kubeconfig points at") {
+		t.Errorf("scan-unavailable must NOT be rewritten to the installer message, got: %s", err)
 	}
 }
 
