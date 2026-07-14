@@ -10,8 +10,13 @@
 # The floors are a RATCHET: set just under the current numbers, and bumped UP
 # as coverage improves — never silently down. Lowering a floor must be a
 # deliberate, reviewed edit here (with a reason), not a side effect of deleting
-# tests. Current (develop, 2026-07-14): internal/cli 82.9%, internal/submit
-# 80.4%, internal/push 89.0%, internal/cluster 78.5%.
+# tests. Current (develop, 2026-07-14, ubuntu CI runner): internal/cli 82.9%,
+# internal/submit 80.4%, internal/push 89.0%, internal/cluster 74.6%.
+#
+# NOTE: internal/cluster measures higher on a dev machine with a real
+# ~/.kube/config (78.5% on macOS) than on the bare CI runner (74.6%) — the
+# kubeconfig-resolution paths only execute where one exists. Floors must be
+# set against the CI number, since that's where the gate runs.
 #
 # Usage: scripts/coverage-floor.sh   (run from the repo root)
 #
@@ -24,7 +29,7 @@ FLOORS="
 internal/cli:80
 internal/submit:78
 internal/push:87
-internal/cluster:75
+internal/cluster:73
 "
 
 status=0
