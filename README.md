@@ -10,7 +10,7 @@ The customer-facing CLI for the tracebloc declarative ingestion path. Wraps the 
 
 `data ingest` covers **15 of 16 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `text_classification`, `token_classification`, `sentence_pair_classification`, `masked_language_modeling`, `causal_language_modeling`, `seq2seq`, `embeddings`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, `time_series_classification`, and `time_to_event_prediction`. `semantic_segmentation` is pending mask-sidecar support upstream ([data-ingestors#136](https://github.com/tracebloc/data-ingestors/issues/136)).
 
-The release pipeline ships [`v0.3.0`](https://github.com/tracebloc/cli/releases/latest) as **cosign-signed, multi-arch binaries** — Linux (`amd64`, `arm64`, `386`, `arm`), macOS (`amd64`, `arm64`), and Windows (`amd64`, `arm64`) — each with `SHA256SUMS` and the install scripts. Install via [Customer experience](#customer-experience) or [build from source](#building-from-source). (A Homebrew tap and the `install.tracebloc.io` vanity URL are later follow-ups; the GitHub release URL serves installs today.)
+The release pipeline ships [`v0.3.0`](https://github.com/tracebloc/cli/releases/latest) as **cosign-signed, multi-arch binaries** — Linux (`amd64`, `arm64`, `386`, `arm`), macOS (`amd64`, `arm64`), and Windows (`amd64`, `arm64`) — each with `SHA256SUMS` and the install scripts. GitHub releases plus the cosign-verified `install.sh` are the install path — see [Customer experience](#customer-experience) or [build from source](#building-from-source).
 
 The Helm chart remains a sibling interface for the Kubernetes-native workflow: `helm install tracebloc/ingestor --set-file ingestConfig=./ingest.yaml` (see the chart's [README](https://github.com/tracebloc/client/blob/develop/ingestor/README.md)).
 
@@ -113,7 +113,7 @@ All v0.1 phases are merged:
 | 2 | [#150](https://github.com/tracebloc/client/issues/150) | Cluster discovery + ingestor SA token via TokenRequest | ✅ |
 | 3 | [#151](https://github.com/tracebloc/client/issues/151) | Stage data into the shared PVC via ephemeral Pod | ✅ |
 | 4 | [#152](https://github.com/tracebloc/client/issues/152) | Submit to jobs-manager + watch ingestor Job + summary | ✅ |
-| 5 | [#153](https://github.com/tracebloc/client/issues/153) | GitHub Releases + install.sh distribution (Homebrew tap deferred) | ✅ — [`v0.1.0`](https://github.com/tracebloc/cli/releases/tag/v0.1.0) released (stable, 8-platform) |
+| 5 | [#153](https://github.com/tracebloc/client/issues/153) | GitHub Releases + install.sh distribution (Homebrew tap dropped — [#299](https://github.com/tracebloc/cli/issues/299)) | ✅ — [`v0.1.0`](https://github.com/tracebloc/cli/releases/tag/v0.1.0) released (stable, 8-platform) |
 
 Beyond the original phases, `data ingest` was widened from image-classification-only to 9 of 10 modalities, and the test suite gained unit-coverage wins plus a kind-based integration harness for the real-I/O seams.
 
