@@ -12,6 +12,17 @@ import (
 // that the family predicates + the supported set all derive from it, so a
 // future edit can't reintroduce the "5 of 9" drift (cli#74).
 
+// allCategoryIDs returns every recognized category id, in registry order.
+// Test-local: production code iterates categoryRegistry directly, so this
+// lives here to keep the shipped binary free of test-only helpers (#281).
+func allCategoryIDs() []string {
+	ids := make([]string, 0, len(categoryRegistry))
+	for _, c := range categoryRegistry {
+		ids = append(ids, c.ID)
+	}
+	return ids
+}
+
 func TestRegistryKnownCategories(t *testing.T) {
 	want := []string{
 		"image_classification", "object_detection", "keypoint_detection",

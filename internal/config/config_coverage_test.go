@@ -9,7 +9,7 @@ import (
 
 // clearHomeAndConfigDir removes every source of a config dir so Dir()/Path()
 // fail — the lever that covers the error-propagation branches of Dir, Path,
-// Load, Save and clearAll (os.UserHomeDir errors when $HOME is empty).
+// Load and Save (os.UserHomeDir errors when $HOME is empty).
 func clearHomeAndConfigDir(t *testing.T) {
 	t.Helper()
 	t.Setenv("TRACEBLOC_CONFIG_DIR", "")
@@ -147,11 +147,4 @@ func TestSave_ErrorBranches(t *testing.T) {
 			t.Error("Save must fail when the rename target is a non-empty directory")
 		}
 	})
-}
-
-func TestClearAll_HomeError(t *testing.T) {
-	clearHomeAndConfigDir(t)
-	if err := clearAll(); err == nil {
-		t.Error("clearAll() must propagate Path()'s error")
-	}
 }

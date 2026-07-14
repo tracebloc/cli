@@ -299,16 +299,6 @@ func SupportedCategoryIDs() []string {
 	return ids
 }
 
-// allCategoryIDs returns every recognized category id, in registry order.
-// Unexported: only the same-package registry test consumes it.
-func allCategoryIDs() []string {
-	ids := make([]string, 0, len(categoryRegistry))
-	for _, c := range categoryRegistry {
-		ids = append(ids, c.ID)
-	}
-	return ids
-}
-
 // SupportedCategoriesList is the comma-joined supported ids, for help text
 // and gate error messages.
 func SupportedCategoriesList() string { return strings.Join(SupportedCategoryIDs(), ", ") }

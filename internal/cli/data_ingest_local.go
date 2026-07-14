@@ -4,6 +4,7 @@
 // path-existence-first guard, the local dataset summary, and the
 // preflight that previews the ingestor's validators on the local data.
 // Moved verbatim from data.go (cli#282, cli#283) — behavior unchanged.
+
 package cli
 
 import (

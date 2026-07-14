@@ -165,7 +165,7 @@ func MachineGPU(m Machine) (name corev1.ResourceName, count int64, ok bool) {
 func BelowCoreFloor(cpu resource.Quantity) bool { return cpu.MilliValue() < minRunCPUMilli }
 func BelowMemFloor(mem resource.Quantity) bool  { return mem.Value() < minRunMemBytes }
 
-// Cores / MemGiB are the floor values as user-facing strings, for error messages.
+// CoreFloorText / MemFloorText are the floor values as user-facing strings, for error messages.
 func CoreFloorText() string { return "1 core" }
 func MemFloorText() string  { return "2 GiB" }
 

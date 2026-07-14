@@ -129,6 +129,20 @@ jobs:
             exit 1
           fi
 
+      # goimports -local: enforce the stdlib / third-party / our-own import
+      # grouping that .golangci.yml's local-prefixes already declares. gofmt
+      # doesn't check grouping, so drift accumulated silently until now.
+      - name: goimports -local
+        run: |
+          go install golang.org/x/tools/cmd/goimports@v0.48.0
+          drift="$(goimports -local github.com/tracebloc/cli -l .)"
+          if [ -n "$drift" ]; then
+            echo "::error::goimports (import grouping) drift in:"
+            echo "$drift" | sed 's/^/    /'
+            echo "::error::run \`make fmt\` to fix"
+            exit 1
+          fi
+
       - name: ineffassign
         run: |
           go install github.com/gordonklaus/ineffassign@v0.2.0
@@ -139,19 +153,26 @@ jobs:
           go install github.com/client9/misspell/cmd/misspell@v0.3.4
           misspell -error .
 
-      # deadcode: reachability scan from the CLI entrypoint (~5s). ADVISORY
-      # (continue-on-error) for now — it reports unreachable funcs but does not
-      # fail the job. The module still carries pre-existing dead-ish funcs that
-      # are unsafe to delete blindly: Stringer methods (Status.String,
-      # JobOutcome.String) reached only via fmt reflection that static analysis
-      # can't see, plus test-only parity harnesses (ReadLabelValues,
-      # inferColumnType — di#349). Flip to blocking once that backlog is
-      # cleared. Tracked in #6 / #127.
-      - name: deadcode (advisory)
-        continue-on-error: true
+      # staticcheck (standalone, pinned): the full `all` suite minus ST1005.
+      # ST1005 (error-string style) flags ~58 customer-visible error strings
+      # that need a deliberate wording review — follow-up to #279, not a
+      # mechanical sweep. The old golangci-lint OOM story does not apply to
+      # the standalone binary: full run is ~12s wall on this module.
+      - name: staticcheck
         run: |
-          go install golang.org/x/tools/cmd/deadcode@v0.48.0
-          deadcode ./cmd/tracebloc
+          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          staticcheck -checks all,-ST1005 ./...
+
+      # deadcode: BLOCKING reachability scan from the CLI entrypoint (~5s).
+      # The four legit unreachables — Stringer methods (Status.String,
+      # JobOutcome.String) reached only via fmt reflection that static
+      # analysis can't see, plus the di#349 test-only parity harnesses
+      # (ReadLabelValues, inferColumnType) — are declared with reasons in
+      # scripts/deadcode-allowlist.txt. Anything else unreachable fails the
+      # job (#281 flipped this from advisory/continue-on-error). Tool version
+      # pinned inside the script; DEADCODE_VERSION overrides.
+      - name: deadcode
+        run: ./scripts/deadcode-check.sh
 
       - name: File budget (line-count ratchet)
         # Per-file line ceilings; they only ratchet DOWN — raising one is a
