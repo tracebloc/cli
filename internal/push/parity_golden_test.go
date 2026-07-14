@@ -138,6 +138,7 @@ func runGoPreflight(t *testing.T, c parityCase) string {
 		Root:      dir,
 		LabelsCSV: filepath.Join(dir, c.CSV),
 		Images:    listImages(t, dir),
+		Sidecars:  listSidecars(t, dir),
 	}
 	spec := SpecArgs{
 		Category:    c.Category,
@@ -177,6 +178,41 @@ func listImages(t *testing.T, dir string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// listSidecars maps each sidecar directory in a case (any subdir that isn't
+// images/ — annotations/, masks/, texts/, sequences/) to its files, mirroring
+// how the production Discover populates LocalLayout.Sidecars. Without this the
+// object_detection / semantic_segmentation pairing previews would see an empty
+// sidecar set and reject every case (cli#288).
+func listSidecars(t *testing.T, dir string) map[string][]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecars := make(map[string][]string)
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == "images" {
+			continue
+		}
+		files, err := os.ReadDir(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, f := range files {
+			if !f.IsDir() {
+				out = append(out, filepath.Join(dir, e.Name(), f.Name()))
+			}
+		}
+		sort.Strings(out)
+		sidecars[e.Name()] = out
+	}
+	if len(sidecars) == 0 {
+		return nil
+	}
+	return sidecars
 }
 
 func mustLoad(t *testing.T, path string, into any) {
