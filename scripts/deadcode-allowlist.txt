@@ -1,0 +1,17 @@
+# Deadcode allowlist — the only unreachable-from-main findings the gate
+# tolerates (scripts/deadcode-check.sh, cli#281). Every entry needs a reason.
+#
+# Format: "<file>: <func>" — deadcode's output with :line:col stripped, so
+# ordinary edits that shift lines don't red the gate. Adding an entry here is
+# a deliberate, reviewed act; prefer deleting the code.
+#
+# Stringer methods: reached only via fmt's reflection-driven %v/%s dispatch,
+# which static reachability analysis can't see. Genuinely used.
+internal/doctor/doctor.go: Status.String
+internal/submit/watch.go: JobOutcome.String
+# Test-only parity harnesses (di#349): mirror the ingestor's label reading /
+# type inference so the parity tests can diff CLI vs ingestor behavior. They
+# must live in production source (the tests compare against real package
+# code), so they are unreachable from main by design.
+internal/push/preflight.go: ReadLabelValues
+internal/push/tabular.go: inferColumnType

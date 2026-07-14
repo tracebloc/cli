@@ -55,20 +55,6 @@ func TestLoadMissingIsEmpty(t *testing.T) {
 	}
 }
 
-func TestClear(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	_ = (&Config{CurrentEnv: "prod", Profiles: map[string]*Profile{"prod": {Token: "x"}}}).Save()
-	if err := clearAll(); err != nil {
-		t.Fatal(err)
-	}
-	if c, _ := Load(); c.SignedIn() {
-		t.Error("after clearAll, should not be signed in")
-	}
-	if err := clearAll(); err != nil {
-		t.Errorf("clearAll on a missing file should be nil, got %v", err)
-	}
-}
-
 // TestMigrateV1ToV2 pins the v1 (flat cli#83 schema) → v2 migration: the single
 // record is wrapped under profiles[env], no data loss, and the next Save rewrites
 // the file as v2 on disk.

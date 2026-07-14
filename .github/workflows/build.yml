@@ -163,19 +163,16 @@ jobs:
           go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
           staticcheck -checks all,-ST1005 ./...
 
-      # deadcode: reachability scan from the CLI entrypoint (~5s). ADVISORY
-      # (continue-on-error) for now — it reports unreachable funcs but does not
-      # fail the job. The module still carries pre-existing dead-ish funcs that
-      # are unsafe to delete blindly: Stringer methods (Status.String,
-      # JobOutcome.String) reached only via fmt reflection that static analysis
-      # can't see, plus test-only parity harnesses (ReadLabelValues,
-      # inferColumnType — di#349). Flip to blocking once that backlog is
-      # cleared. Tracked in #6 / #127.
-      - name: deadcode (advisory)
-        continue-on-error: true
-        run: |
-          go install golang.org/x/tools/cmd/deadcode@v0.48.0
-          deadcode ./cmd/tracebloc
+      # deadcode: BLOCKING reachability scan from the CLI entrypoint (~5s).
+      # The four legit unreachables — Stringer methods (Status.String,
+      # JobOutcome.String) reached only via fmt reflection that static
+      # analysis can't see, plus the di#349 test-only parity harnesses
+      # (ReadLabelValues, inferColumnType) — are declared with reasons in
+      # scripts/deadcode-allowlist.txt. Anything else unreachable fails the
+      # job (#281 flipped this from advisory/continue-on-error). Tool version
+      # pinned inside the script; DEADCODE_VERSION overrides.
+      - name: deadcode
+        run: ./scripts/deadcode-check.sh
 
   govulncheck:
     timeout-minutes: 10

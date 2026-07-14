@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -183,13 +182,4 @@ func (e *SubmitError) Error() string {
 	// {"detail": "..."}) which is the actionable part.
 	return fmt.Sprintf("jobs-manager %s returned HTTP %d: %s",
 		e.Endpoint, e.StatusCode, strings.TrimSpace(e.Body))
-}
-
-// isSubmitError reports whether err is a *SubmitError. Convenience
-// for the orchestrator's exit-code mapping; errors.As would also
-// work but this reads cleaner at the branch site. Unexported: only
-// same-package tests reference it today.
-func isSubmitError(err error) bool {
-	var se *SubmitError
-	return errors.As(err, &se)
 }
