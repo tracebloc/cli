@@ -1,0 +1,120 @@
+name: Goldens drift
+
+# Validator-goldens drift check (cli#287, epic backend#1106 WS-C.2).
+#
+# internal/push/testdata/parity/goldens.json pins the verdicts (and value-level
+# reads) of the REAL data-ingestors validators over the parity corpus, and
+# parity_golden_test.go asserts the CLI's local preflight agrees case-by-case.
+# Until this job, the goldens were regenerated only by hand — a change to the
+# corpus, the generator, or the pin could land with stale goldens and CI would
+# stay green (the wired-into-no-CI hole).
+#
+# This job checks out tracebloc/data-ingestors at the PINNED ref
+# (scripts/.data-ingestors-ref — never a floating branch, so an unrelated
+# upstream commit can't red every open CLI PR, backend#1009), runs the real
+# validators over the corpus, and fails when the committed goldens diverge.
+#
+# Cross-repo access: data-ingestors is currently PUBLIC, so the default
+# workflow token is enough (same as the install-path-persist.yml precedent,
+# cli#62, which checks out tracebloc/client with no extra secret). If the repo
+# is ever made private, create an org-level secret CROSS_REPO_READ_TOKEN (a
+# fine-grained PAT with contents:read on tracebloc/data-ingestors) — this
+# workflow already prefers it when present, and skips WITH A WARNING (rather
+# than hard-failing every PR) when the repo is unreachable with the tokens
+# available.
+#
+# Runs on PRs that touch the mirrored surface (internal/push/**, the pin, the
+# sync harness) + a weekly cron as a backstop for drift introduced outside
+# those paths + manual dispatch.
+
+on:
+  pull_request:
+    paths:
+      - 'internal/push/**'
+      - 'scripts/.data-ingestors-ref'
+      - 'scripts/sync-validator-goldens.sh'
+      - 'scripts/gen-validator-goldens.py'
+      - '.github/workflows/goldens-drift.yml'
+  schedule:
+    - cron: '30 5 * * 1'   # weekly, Monday 05:30 UTC — offset from stale-backlog's Monday 00:00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: goldens-drift-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  goldens-drift:
+    timeout-minutes: 15
+    name: Validator goldens vs data-ingestors @ pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the data-ingestors pin
+        id: pin
+        # First non-comment, non-blank line of the ref file — the same rule
+        # scripts/sync-schema.sh applies. Fail loudly on an empty/missing ref:
+        # a silently-defaulted ref would check against the wrong upstream.
+        run: |
+          ref="$(grep -vE '^[[:space:]]*(#|$)' scripts/.data-ingestors-ref | head -1 | tr -d '[:space:]')"
+          if [ -z "$ref" ]; then
+            echo "::error::scripts/.data-ingestors-ref contains no ref"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Probe data-ingestors readability
+        id: access
+        # data-ingestors is public today, so this always succeeds with the
+        # default token. The probe exists for the day it goes private: without
+        # a CROSS_REPO_READ_TOKEN secret the checkout would hard-fail every PR
+        # touching internal/push/** — instead, skip the check with a loud
+        # warning telling the admin exactly what to create.
+        env:
+          CROSS_REPO_READ_TOKEN: ${{ secrets.CROSS_REPO_READ_TOKEN }}
+          FALLBACK_TOKEN: ${{ github.token }}
+        run: |
+          token="${CROSS_REPO_READ_TOKEN:-$FALLBACK_TOKEN}"
+          if git ls-remote "https://x-access-token:${token}@github.com/tracebloc/data-ingestors.git" HEAD >/dev/null 2>&1; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::tracebloc/data-ingestors is not readable with the available tokens — goldens-drift check SKIPPED. If the repo has been made private, create the org secret CROSS_REPO_READ_TOKEN (fine-grained PAT, contents:read on tracebloc/data-ingestors)."
+          fi
+
+      - name: Checkout tracebloc/data-ingestors @ pin
+        if: steps.access.outputs.ok == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: tracebloc/data-ingestors
+          ref: ${{ steps.pin.outputs.ref }}
+          path: data-ingestors
+          # Prefer the cross-repo secret when it exists (needed only if the
+          # repo goes private); the default token suffices while it's public.
+          token: ${{ secrets.CROSS_REPO_READ_TOKEN || github.token }}
+
+      - name: Set up Python
+        if: steps.access.outputs.ok == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # matches data-ingestors' own CI
+          cache: pip
+          cache-dependency-path: data-ingestors/requirements.txt
+
+      - name: Install the ingestor's runtime dependencies
+        if: steps.access.outputs.ok == 'true'
+        # The generator drives the REAL validators + read path, whose import
+        # chain needs more than pandas+Pillow (sqlalchemy, tenacity, ijson, …).
+        # Install the ingestor's own requirements.txt — all light, pure-python
+        # wheels — so an upstream dependency change can't break this job.
+        run: pip install -r data-ingestors/requirements.txt
+
+      - name: scripts/sync-validator-goldens.sh --check
+        if: steps.access.outputs.ok == 'true'
+        env:
+          DATA_INGESTORS_DIR: ${{ github.workspace }}/data-ingestors
+        run: ./scripts/sync-validator-goldens.sh --check
