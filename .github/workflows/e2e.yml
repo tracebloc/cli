@@ -7,11 +7,20 @@ name: Integration (e2e)
 # 0% in unit coverage — this is where every live bug actually lived).
 #
 # Heavy (kind boot + image pulls), so it does NOT run on every PR:
+#   - on every push to develop
 #   - nightly (schedule)
 #   - manual (workflow_dispatch)
 #   - on a PR only when it carries the `e2e` label
+#
+# The push trigger exists because scheduled workflows always execute the
+# DEFAULT branch's tree (main), which trails develop by dozens of commits —
+# discovery_e2e_test.go, delete_e2e_test.go, and the delete-teardown job
+# don't exist on main, so the nightly never actually ran them (#293).
+# Running on develop pushes exercises the tree the tests were written for.
 
 on:
+  push:
+    branches: [develop]
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
