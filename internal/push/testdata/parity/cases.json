@@ -158,7 +158,7 @@
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "reject",
-      "note": "DELIBERATE divergence (deployment parity, #348): 16x16 images are below the 32x32 default floor, so the pinned ingestor (develop, di#348/#356) rejects. But the CLI must NOT block by default — the DEPLOYED ingestor (v0.5.7/v0.6.0) has NO floor and ingests these fine, so a default local reject would block an ingest the live cluster accepts (the inverse of tabular-bom, whose reject mirrors a real deployed rejection). The CLI previews the floor ONLY when --min-size is set (see imgc-min-size-override). Flip this to reject and default the preview floor once di#348 ships to prod. Flagged for follow-up."
+      "note": "DELIBERATE divergence (deployment parity, #348): 16x16 images are below the 32x32 default floor, so the pinned ingestor (develop, di#348/#356) rejects. But the CLI must NOT block by default \u2014 the DEPLOYED ingestor (v0.5.7/v0.6.0) has NO floor and ingests these fine, so a default local reject would block an ingest the live cluster accepts (the inverse of tabular-bom, whose reject mirrors a real deployed rejection). The CLI previews the floor ONLY when --min-size is set (see imgc-min-size-override). Flip this to reject and default the preview floor once di#348 ships to prod. Flagged for follow-up."
     },
     {
       "name": "imgc-min-size-override",
@@ -176,7 +176,7 @@
       ],
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "the --min-size override, cross-checked end-to-end (#348; closes the parity gap where min_size was representable on neither side). 24x40 images (W,H) with an explicit min_size [16,32] pass on BOTH sides — but the DEFAULT 32x32 floor would reject them (W=24<32), so this proves the override is actually read (not silently the default) and its [W,H] orientation is honored (a swapped [32,16] would reject on W=24<32). target_size matches the images, so the floor override is the sole discriminator.",
+      "note": "the --min-size override, cross-checked end-to-end (#348; closes the parity gap where min_size was representable on neither side). 24x40 images (W,H) with an explicit min_size [16,32] pass on BOTH sides \u2014 but the DEFAULT 32x32 floor would reject them (W=24<32), so this proves the override is actually read (not silently the default) and its [W,H] orientation is honored (a swapped [32,16] would reject on W=24<32). target_size matches the images, so the floor override is the sole discriminator.",
       "value_parity": true
     },
     {
@@ -474,6 +474,373 @@
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
       "note": "OVER-REJECT regression pin (cli#218). p3's only label '#NA' is a pandas DEFAULT NA token (STR_NA_VALUES) but NOT in the curated coercion.NA_SENTINELS. LabelConstantWithinGroupValidator plain-reads the file, so pandas drops '#NA' to NaN and the label column is all-numeric -> p1's '1' and '1.0' collapse to one value (no flip) -> ACCEPT. Before the fix the CLI mirrored the coercion set, saw '#NA' as a distinct string, read the column as object, and flagged p1 as a false mid-sequence flip -> false REJECT. The Go preview now uses pandasDefaultNA for the grouped checks and accepts. (LabelDiversity reads with keep_default_na=False so '#NA' stays a literal class alongside 1/1.0/2 -> >=2 classes, still accepted.)"
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "objdet-ok",
+      "category": "object_detection",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "object_detection happy path: paired images/annotations (valid Pascal VOC), filename-referenced manifest. Labels come from the XML, so the CSV has no label column \u2014 LabelDiversityValidator benign-skips on both sides."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "objdet-missing-annotation",
+      "category": "object_detection",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "b.jpg has no b.xml: FilePairingValidator rejects in-cluster; CheckAnnotationPairing previews the image-without-annotation direction."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "objdet-orphan-annotation",
+      "category": "object_detection",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "c.xml has no c.jpg: FilePairingValidator rejects orphan sidecars; CheckAnnotationPairing previews the annotation-without-image direction."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "objdet-bad-xml",
+      "category": "object_detection",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DOCUMENTED under-preview: a.xml is malformed Pascal VOC (no <size>, inverted bndbox) \u2014 PascalVOCXMLValidator rejects in-cluster, but the CLI has no XML-content mirror, so the failure surfaces post-upload. Candidate for a future CheckVOCAnnotations preview."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "semseg-ok",
+      "category": "semantic_segmentation",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "semantic_segmentation happy path: <stem>_mask.png pairing, 32x32 PNG masks (Mask Resolution Validator reads them), populated mask_id column. No label column \u2014 labels come from the masks; LabelDiversityValidator benign-skips on both sides."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "semseg-missing-mask",
+      "category": "semantic_segmentation",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "b.jpg has no b_mask.png: FilePairingValidator (sidecar_suffix=_mask) rejects; CheckMaskPairing previews the image-without-mask direction."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "semseg-badname-mask",
+      "category": "semantic_segmentation",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "b.png doesn't carry the _mask suffix: the ingestor keeps it as a non-conforming orphan AND reports b.jpg mask-less; CheckMaskPairing previews both (the #196 naming convention)."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "semseg-missing-mask-id",
+      "category": "semantic_segmentation",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "accept",
+      "note": "DELIBERATE divergence AT THIS PIN (7b4ecac, the di#359 merge): the manifest has no mask_id column. The CLI previews the backend#816 contract (CheckMaskIdColumn) \u2014 without mask_id the training client can't resolve masks and fails late. The PINNED ingestor predates di#358's MaskIdColumnValidator, so its preflight accepts. Flip ingestor_verdict to reject when the pin bumps past di#358 (cli#286 pin-bump); the goldens regen will flag exactly this case."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "kp-ok",
+      "category": "keypoint_detection",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "keypoint_detection happy path: filename + Annotation/Visibility JSON columns, 2 keypoints in-bounds with non-degenerate bbox, visibility 0/1 with matching keys. No label column (labels come from annotations) \u2014 LabelDiversityValidator benign-skips on both sides. num_keypoints is undeclared, matching an ingest without number_of_keypoints (the count check is skipped)."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        64,
+        64
+      ],
+      "csv": "labels.csv",
+      "name": "kp-res-mismatch",
+      "category": "keypoint_detection",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "32x32 images with target [64,64]: ImageResolutionValidator rejects, and the CLI's ValidateImages previews it \u2014 pins that the image-family common mirror covers keypoint_detection, not just image_classification."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "kp-bad-annotation",
+      "category": "keypoint_detection",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DOCUMENTED under-preview: row 1's Annotation cell isn't JSON \u2014 KeypointAnnotationValidator rejects in-cluster, but the CLI has no keypoint-annotation mirror, so the failure surfaces post-upload. Candidate for a future keypoint JSON preview."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "text-clf-label-uniform",
+      "category": "text_classification",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "single-class text dataset: LabelDiversityValidator (is_classification wiring) rejects; CheckLabelDiversity previews it via the registry's IsClassification gate for the text family."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "token-clf-ok",
+      "category": "token_classification",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "value_parity": true,
+      "note": "token_classification happy path: one IOB2 tag per whitespace token (BIOLabelValidator). NOT is_classification \u2014 no diversity gate on either side (BIO tag strings aren't class labels)."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "token-clf-label-missing",
+      "category": "token_classification",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "no label column: BIOLabelValidator rejects the missing column in-cluster (token_classification has no LabelColumnValidator); the CLI previews it with the same CheckLabelColumn gate every supervised text task gets."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "token-clf-bad-bio",
+      "category": "token_classification",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DOCUMENTED under-preview: 'PERSON' isn't an IOB2 tag \u2014 BIOLabelValidator rejects in-cluster, but the CLI has no BIO-format mirror, so the failure surfaces post-upload. Candidate for a future BIO preview."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "sentpair-ok",
+      "category": "sentence_pair_classification",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "value_parity": true,
+      "note": "sentence_pair_classification happy path: each .txt is exactly text_a<TAB>text_b (SentencePairValidator), class label in the CSV, 2 classes."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "sentpair-label-uniform",
+      "category": "sentence_pair_classification",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "single-class pair dataset: LabelDiversityValidator rejects (sentence_pair_classification is is_classification); CheckLabelDiversity previews via the registry gate \u2014 pins that the preview isn't hardcoded to text_classification."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "sentpair-malformed",
+      "category": "sentence_pair_classification",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DOCUMENTED under-preview: a.txt has no tab (not a text_a<TAB>text_b pair) \u2014 SentencePairValidator rejects in-cluster; the CLI has no per-file structure mirror, so the failure surfaces post-upload."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "mlm-ok",
+      "category": "masked_language_modeling",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "masked_language_modeling happy path: self-supervised (no label column anywhere), sequences/ sidecar dir (the one text task staging from sequences/, not texts/). Pins the self-supervised dispatch: no label checks fire on either side."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "mlm-missing-files",
+      "category": "masked_language_modeling",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DOCUMENTED under-preview: every referenced sequence file is absent (an unreferenced z.txt keeps FileTypeValidator satisfied) \u2014 IngestableRecordsValidator rejects the zero-ingestable-records manifest in-cluster; the CLI has no text-family file cross-check (CrossCheckLabels is image-only), so the failure surfaces post-upload."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "clm-ok",
+      "category": "causal_language_modeling",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "causal_language_modeling happy path: raw prose AND a prompt<TAB>completion file \u2014 the record_format is a convention (enforced=False), so BOTH shapes must pass on both sides (a structural reject here would be an over-reject bug)."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "seq2seq-ok",
+      "category": "seq2seq",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "seq2seq happy path: source<TAB>target files, self-supervised (no label column), staged from texts/."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "emb-ok",
+      "category": "embeddings",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "embeddings happy path: one anchor<TAB>positive pair AND one anchor<TAB>positive<TAB>negative triplet \u2014 ContrastivePairsValidator allows exactly these two shapes, so both must pass."
+    },
+    {
+      "extension": ".txt",
+      "csv": "labels.csv",
+      "name": "emb-malformed",
+      "category": "embeddings",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DOCUMENTED under-preview: a.txt is a single field (no tab) \u2014 ContrastivePairsValidator rejects in-cluster; the CLI has no per-file structure mirror, so the failure surfaces post-upload."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tabreg-ok",
+      "category": "tabular_regression",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "tabular_regression happy path: numeric target, inferred schema on both sides."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tabreg-label-uniform",
+      "category": "tabular_regression",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "OVER-REJECT guard: every label identical. Regression is NOT is_classification, so no LabelDiversityValidator fires in-cluster \u2014 and the CLI's IsClassification gate must skip too. A hardcoded category check that ran diversity here would falsely reject a valid regression dataset."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tabreg-label-missing",
+      "category": "tabular_regression",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "accept",
+      "note": "DELIBERATE divergence (the tabular-label-missing twin for regression): the ingestor's preflight has no LabelColumnValidator for tabular_regression \u2014 the failure only fires at READ time (full-schema check, after table creation, orphaning it). The CLI previews the read-time rule (cli#69)."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tsf-ok",
+      "category": "time_series_forecasting",
+      "label_column": "label",
+      "schema": {
+        "timestamp": "TIMESTAMP",
+        "value": "FLOAT",
+        "label": "FLOAT"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "time_series_forecasting happy path: TIMESTAMP-typed timestamp column, ISO dates ascending and in the past, numeric features/target \u2014 passes TimeFormat/TimeOrdered/TimeBeforeToday/NumericColumns + DataValidator(schema minus timestamp)."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tsf-unsorted-time",
+      "category": "time_series_forecasting",
+      "label_column": "label",
+      "schema": {
+        "timestamp": "TIMESTAMP",
+        "value": "FLOAT",
+        "label": "FLOAT"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DOCUMENTED under-preview: rows out of chronological order \u2014 the GLOBAL TimeOrderedValidator rejects in-cluster, but the CLI only previews the grouped per-sequence variant (CheckTSCGroupIntegrity, TSC-only); TSF's whole-file ordering has no mirror, so the failure surfaces post-upload."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tsf-missing-timestamp",
+      "category": "time_series_forecasting",
+      "label_column": "label",
+      "schema": {
+        "step": "INT",
+        "value": "FLOAT",
+        "label": "FLOAT"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DOCUMENTED under-preview: no fixed 'timestamp' column \u2014 TimeFormatValidator rejects the schema in-cluster, but the CLI's preflight has no TSF fixed-timestamp mirror (CheckSequenceSchemaColumns covers only grouped TSC columns), so the failure surfaces post-upload. Candidate: extend the fixed-column preview to TSF."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tte-ok",
+      "category": "time_to_event_prediction",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "time_to_event_prediction happy path: exact 'time' column, numeric and non-negative (0.0 is legal) \u2014 TimeToEventValidator passes; inferred schema on both sides."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tte-negative-time",
+      "category": "time_to_event_prediction",
+      "label_column": "label",
+      "cli_verdict": "accept",
+      "ingestor_verdict": "reject",
+      "note": "DOCUMENTED under-preview: a negative 'time' value \u2014 TimeToEventValidator rejects in-cluster, but the CLI has no TTE time-column mirror, so the failure surfaces post-upload. Candidate for a future TTE preview."
     }
   ]
 }
