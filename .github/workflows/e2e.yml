@@ -51,8 +51,20 @@ jobs:
       - name: Create kind cluster
         uses: helm/kind-action@v1.10.0
 
-      - name: Integration tests
-        run: make test-integration
+      # Run the unit suite + the integration suite each under coverage, then merge
+      # them (go tool covdata). The merge credits the real-cluster I/O seams —
+      # cluster.NewClientset, push.SPDYExecutor.Exec, submit.PortForwardJobsManager,
+      # cluster.DiscoverInClusterClient — which are 0% in the unit suite by design
+      # but exercised here, so submit/cluster reflect their true coverage.
+      # cover-integration IS the integration gate: it fails the job if a test fails.
+      - name: Unit coverage
+        run: make cover
+
+      - name: Integration tests (under coverage)
+        run: make cover-integration
+
+      - name: Merged coverage — credits the real-cluster I/O seams
+        run: make cover-merge
 
   # Offboard teardown e2e (cli#140): builds the real `tracebloc` binary and runs
   # `tracebloc delete --yes --force` black-box against a throwaway k3d cluster
