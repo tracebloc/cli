@@ -19,6 +19,86 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
+// connectIngestTarget is the cluster half of `data ingest`'s pre-flight:
+// resolve the kubeconfig and discover the parent release + shared PVC
+// (steps 5–7), then run the destination-table guard (8a). Extracted
+// verbatim from runDataIngest (cli#283) — step order, output, and exit
+// codes unchanged.
+//
+// The folded replace decision can set a.Overwrite (interactive "replace
+// it?" answered yes); the caller's teardown step keys on that, exactly as
+// before. cancelled=true with a nil err is the user declining the replace
+// prompt: the caller exits 0, nothing ingested. existingTable is the
+// EXISTING table's exact spelling ("" when absent) — any teardown must act
+// on it, not on the flag's casing.
+func connectIngestTarget(ctx context.Context, a *runDataIngestArgs) (target *clusterTarget, existingTable string, cancelled bool, err error) {
+	// 5. Cluster discovery — same kubeconfig path as `cluster info`.
+	//    Errors mirror that command's exit-code contract (3 for
+	//    kubeconfig, 4 for missing release) so behaviour is
+	//    consistent across pre-flight commands.
+	// Connecting to the workspace + discovering its shared storage is
+	// Kubernetes plumbing (release / PVC / jobs-manager) the happy path keeps
+	// quiet — it's no longer a numbered step (RFC-0002 §6), and --verbose adds
+	// the release/PVC detail below. But the discovery itself is several blocking
+	// apiserver round-trips (kubeconfig load, release + PVC discovery, then the
+	// destination-exists check), so it still needs a visible status line — no
+	// silent wait on the happy path (RFC-0002 "progress on every wait").
+	// A plain line, not a spinner: discoverRelease can print its own
+	// namespace-fallback note mid-call, and a spinner's \r redraw would clobber
+	// it. ALL the logic below (discovery + the exit-6 destination guard) is
+	// unchanged; only the presentation moved.
+	a.Printer.Infof("Connecting to your workspace…")
+	// 6. PVC discovery (needPVC) confirms the chart's shared-data PVC is
+	//    Bound before we waste time provisioning a Pod that can't mount it.
+	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
+	binding := bindActiveClientNamespace(&opts)
+	target, err = resolveClusterTarget(ctx, a.Printer, opts, binding, true)
+	if err != nil {
+		return nil, "", false, binding.explain(err)
+	}
+	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
+	// release.IngestorSAName is discovered from the ingestionAuthz ConfigMap by
+	// DiscoverParentRelease (#7) and flows into the stage/teardown pods + the
+	// jobs-manager token mint below — no --ingestor-sa override.
+
+	// 7. Under --verbose, show what we found on the cluster; the happy path
+	//    keeps this Kubernetes detail hidden (printClusterSummary is a no-op
+	//    without --verbose).
+	printClusterSummary(a.Printer, release, pvc)
+
+	// 8a. Destination guard (cli#70, P4-lite): re-ingesting an existing
+	//     table used to stage EVERYTHING and then fail the in-cluster Job
+	//     on the ingestor's duplicate check — a full upload burned to learn
+	//     the table exists. One cheap read heads that off. The check fails
+	//     open (dim note) — the ingestor still refuses duplicates, so a
+	//     broken check can't cause silent data loss.
+	existingTable, checkNote := destTableExists(ctx, cs, resolved, a.Spec.Table)
+	if checkNote != "" {
+		a.Printer.Hintf("%s", checkNote)
+	}
+	tableExists := existingTable != ""
+	if tableExists && !a.Overwrite {
+		// Folded decision (RFC-0002): in interactive mode a pre-existing table
+		// is a question, not a wall. Prompt to replace it; a "no" cancels
+		// cleanly (exit 0). Non-interactive (or --output-json / --no-input)
+		// still hard-fails exit 6 — a script must opt in with --overwrite.
+		proceed, aerr := existingTableAction(a, existingTable)
+		if aerr != nil {
+			return nil, "", false, aerr
+		}
+		if !proceed {
+			a.Printer.Infof("Cancelled — %q was left as-is; nothing was ingested.", existingTable)
+			return nil, "", true, nil
+		}
+		a.Overwrite = true
+	}
+	if tableExists && a.Overwrite {
+		a.Printer.Warnf("Table %q already exists — replacing it (table + files).", existingTable)
+	}
+
+	return target, existingTable, false, nil
+}
+
 // runIngestionRun is the money path's outcome tail. It mints the ingestor
 // token, port-forwards to jobs-manager, POSTs the run, classifies the result
 // into a status + process exit code (kept in lockstep by classifyPushOutcome),
