@@ -14,6 +14,14 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
+// doctorRunFn is a test seam over doctor.Run (the cluster-side health sweep).
+// Production runs the real checks; tests inject a fixed []doctor.Result so
+// runClusterDoctor's render loop (the ✓/⚠/✖ switch + remedy hints) and its
+// overall-verdict switch can be exercised with a controlled OK/Warn/Fail mix,
+// without standing up a fake cluster that happens to produce that exact mix
+// (the per-check logic has its own tests in internal/doctor).
+var doctorRunFn = doctor.Run
+
 // newDoctorCmd builds the `doctor` command. The SAME command is registered two
 // ways: as the top-level `tracebloc doctor` (visible — the home screen and its
 // env-status lines point here), and, hidden, as `tracebloc cluster doctor` (its
@@ -96,7 +104,10 @@ func runClusterDoctor(
 		Namespace: nsOverride,
 	}
 	bindActiveClientNamespace(&opts) // side-effect: defaults opts.Namespace to the active client's
-	resolved, err := cluster.Load(opts)
+	// Through the loadClusterFn/newClientsetFn seams (like cluster info and the
+	// data commands) so the cluster half — the Checks render loop and the verdict
+	// switch — is testable with a fake clientset instead of only a real kubeconfig.
+	resolved, err := loadClusterFn(opts)
 	if err != nil {
 		// 3 = kubeconfig file/parse problem (same class as cluster info). The
 		// auth section above already ran; if IT also failed, escalate to 2 so
@@ -107,7 +118,7 @@ func runClusterDoctor(
 		return &exitError{code: kubeconfigExitCode(authStatus), err: nil}
 	}
 
-	cs, err := cluster.NewClientset(resolved)
+	cs, err := newClientsetFn(resolved)
 	if err != nil {
 		p.Section("Cluster")
 		p.Errorf("Kubeconfig — %v", err)
@@ -119,7 +130,7 @@ func runClusterDoctor(
 	p.Field("server", resolved.ServerURL)
 	p.Field("namespace", resolved.Namespace)
 
-	results := doctor.Run(ctx, cs, doctor.Options{Namespace: resolved.Namespace})
+	results := doctorRunFn(ctx, cs, doctor.Options{Namespace: resolved.Namespace})
 
 	p.Section("Checks")
 	for _, r := range results {

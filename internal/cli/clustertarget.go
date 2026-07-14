@@ -25,11 +25,12 @@ func (e *noParentReleaseError) Error() string { return e.err.Error() }
 func (e *noParentReleaseError) Unwrap() error { return e.err }
 
 // loadClusterFn / newClientsetFn are the kubeconfig-load + clientset-build
-// seams resolveClusterTarget goes through. Production points them at the real
-// cluster helpers; tests inject a fake ResolvedConfig + fake.NewSimpleClientset
-// so the discovery + exit-code contract can be exercised without a real
-// kubeconfig or apiserver. Same fn-var seam pattern used across this package
-// (listDatasetsFn, mintIngestorTokenFn, …).
+// seams every command that reaches a cluster goes through — resolveClusterTarget
+// (data ingest/list/delete), runClusterInfo, and runClusterDoctor. Production
+// points them at the real cluster helpers; tests inject a fake ResolvedConfig +
+// fake.NewSimpleClientset so the discovery + exit-code contract can be exercised
+// without a real kubeconfig or apiserver. Same fn-var seam pattern used across
+// this package (listDatasetsFn, doctorRunFn, …).
 var (
 	loadClusterFn  = cluster.Load
 	newClientsetFn = cluster.NewClientset

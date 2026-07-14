@@ -131,7 +131,11 @@ func runClusterInfo(
 		Namespace: nsOverride,
 	}
 	binding := bindActiveClientNamespace(&opts)
-	resolved, err := cluster.Load(opts)
+	// Through the loadClusterFn/newClientsetFn seams (not cluster.Load /
+	// cluster.NewClientset directly) so the post-discovery path — token minting,
+	// the expiry switch, the install-print block — is testable without a real
+	// kubeconfig or apiserver, exactly like resolveClusterTarget.
+	resolved, err := loadClusterFn(opts)
 	if err != nil {
 		// Kubeconfig errors are exit-code-3 territory (file/parse
 		// problem, same conceptual class as `ingest validate`'s
@@ -139,7 +143,7 @@ func runClusterInfo(
 		return &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
 	}
 
-	cs, err := cluster.NewClientset(resolved)
+	cs, err := newClientsetFn(resolved)
 	if err != nil {
 		return &exitError{code: 3, err: err}
 	}
