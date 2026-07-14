@@ -249,6 +249,13 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 
 	env, beat := collectProbes(bctx, envCh, beatCh)
 
+	// Whether the PROBE itself surfaced an environment name — the signal the
+	// offline-vs-no-env classifier keys on (alongside `provisioned`). Captured
+	// BEFORE the display-name override below: otherwise a remembered client label
+	// left in config without a cached namespace would masquerade as a
+	// probe-surfaced environment and flip the no-env installer path to Offline.
+	probeNamedEnv := env.name != ""
+
 	// The environment's display name is the remembered client name (e.g.
 	// "acme-01") — the friendly, per-client identity provisioned on this machine.
 	// Prefer it over whatever the probe surfaced, which is the Helm RELEASE name
@@ -300,12 +307,15 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 		// explain this as "runs elsewhere"). Offline vs. "no environment": it's an
 		// environment we just can't reach (offline) if EITHER this machine is
 		// PROVISIONED — a cached active-client namespace, the same signal the
-		// probe's ownership gate uses — OR the probe itself surfaced an environment
+		// probe's ownership gate uses — OR the PROBE itself surfaced an environment
 		// name. Adding the provisioned test (not name alone) is the fix for a
 		// provisioned-but-unnamed profile that used to misread as "no environment /
-		// run the installer"; keeping the name test preserves the case where the
-		// probe surfaced a name without one being cached.
-		if provisioned || env.name != "" {
+		// run the installer"; keeping the probe-name test preserves the case where
+		// the probe surfaced a name without one being cached. It must be the
+		// probe's own name (probeNamedEnv), NOT the post-override env.name — a
+		// remembered display label with no cached namespace is not evidence of a
+		// reachable environment and must fall through to the installer path.
+		if provisioned || probeNamedEnv {
 			m.state = homeOffline
 			m.fullMenu = true
 		} else {
