@@ -25,14 +25,14 @@ func classifyPushOutcome(res *submit.Result, err error) (string, *exitError) {
 	if err != nil {
 		switch {
 		case submit.IsAuthError(err):
-			return "auth_error", &exitError{code: 5, err: err}
+			return "auth_error", &exitError{code: exitAuth, err: err}
 		case submit.IsWatchError(err):
 			// jobs-manager accepted the run; the cluster is doing the
 			// work, the CLI just couldn't follow along — ingest-side
 			// (exit 9), not submit-side (8).
-			return "watch_error", &exitError{code: 9, err: err}
+			return "watch_error", &exitError{code: exitIngestFailed, err: err}
 		default:
-			return "submit_error", &exitError{code: 8, err: err}
+			return "submit_error", &exitError{code: exitSubmitFailed, err: err}
 		}
 	}
 	// --detach (no watch) or SIGINT-mid-watch: success; cluster runs on.
@@ -41,16 +41,16 @@ func classifyPushOutcome(res *submit.Result, err error) (string, *exitError) {
 	}
 	switch res.Watch.Outcome {
 	case submit.JobOutcomeFailed:
-		return "failed", &exitError{code: 9, err: errors.New("ingestion Job exited non-zero — see logs above")}
+		return "failed", &exitError{code: exitIngestFailed, err: errors.New("ingestion Job exited non-zero — see logs above")}
 	case submit.JobOutcomeUnknown:
-		return "unknown", &exitError{code: 9, err: errors.New(
+		return "unknown", &exitError{code: exitIngestFailed, err: errors.New(
 			"ingestion Job's final status couldn't be determined within the watch window — " +
 				"check `kubectl get job -n " + res.Submit.Namespace + " " + res.Submit.JobName + "` for the outcome")}
 	case submit.JobOutcomeSucceeded:
 		// Job exited 0, but rows can still have failed — exit 9, and the
 		// JSON status must say so, NOT "succeeded". (Bugbot #38.)
 		if res.Watch.Summary != nil && res.Watch.Summary.HasFailures() {
-			return "completed_with_failures", &exitError{code: 9, err: errors.New(
+			return "completed_with_failures", &exitError{code: exitIngestFailed, err: errors.New(
 				"ingestion Job completed but the summary reports failures — see panel above")}
 		}
 		return "succeeded", nil

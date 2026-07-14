@@ -181,7 +181,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 
 	client, cfg, err := authedClient()
 	if err != nil {
-		return &exitError{code: 1, err: err}
+		return &exitError{code: exitFailure, err: err}
 	}
 	ilog.Logf("authenticated; provisioning against the signed-in account")
 
@@ -233,9 +233,9 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 			// upgrade signal verbatim instead of framing it as a transient outage.
 			var ue *api.UpgradeRequiredError
 			if errors.As(listErr, &ue) {
-				return &exitError{code: 1, err: ue}
+				return &exitError{code: exitFailure, err: ue}
 			}
-			return &exitError{code: 1, err: fmt.Errorf(
+			return &exitError{code: exitFailure, err: fmt.Errorf(
 				"couldn't reach the backend to choose a unique client name (%v) — retry, "+
 					"or pass --name explicitly", listErr)}
 		}
@@ -305,7 +305,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		}
 		namespace, derr := slug.Derive(name, existing, "client-"+randHex(4))
 		if derr != nil {
-			return &exitError{code: 1, err: derr}
+			return &exitError{code: exitFailure, err: derr}
 		}
 
 		if pr != nil && !opts.yes {
@@ -333,12 +333,12 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 				// (would leak a credential) from an idempotent adopt (safe). Fail closed,
 				// but name the real cause: a retry once the backend is reachable will
 				// adopt an existing client without any flag.
-				return &exitError{code: 1, err: fmt.Errorf(
+				return &exitError{code: exitFailure, err: fmt.Errorf(
 					"couldn't read the account's client list to tell whether this cluster is new "+
 						"or already registered (%v) — retry when the backend is reachable (a re-run "+
 						"adopts an existing client), or pass --yes/--credential-file to provision now", listErr)}
 			}
-			return &exitError{code: 1, err: errors.New(
+			return &exitError{code: exitFailure, err: errors.New(
 				"refusing to provision non-interactively without confirmation — pass --yes to " +
 					"confirm, and --credential-file to write the credential to a file instead of stdout")}
 		}
@@ -366,10 +366,10 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 					// A 409 on POST /edge-device/ is a cross-account cluster_conflict
 					// (R6) or a same-account cluster_in_use; conflictMessage picks the
 					// right guidance (and names the owner when the backend supplies it).
-					return &exitError{code: 1, err: errors.New(conflictMessage(ae))}
+					return &exitError{code: exitFailure, err: errors.New(conflictMessage(ae))}
 				}
 			}
-			return &exitError{code: 1, err: cerr}
+			return &exitError{code: exitFailure, err: cerr}
 		}
 	}
 
@@ -399,7 +399,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 				"TB_NAMESPACE=" + pc.Namespace,
 				"TRACEBLOC_CLIENT_ADOPTED=1",
 			}); werr != nil {
-				return &exitError{code: 1, err: werr}
+				return &exitError{code: exitFailure, err: werr}
 			}
 			p.Hintf("Wrote client id + namespace to %s (no new credential — the existing one stands).", opts.credentialFile)
 		}
@@ -424,7 +424,7 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		}); werr != nil {
 			// The credential is the only copy — a write failure must be fatal, not a
 			// silent drop (the installer would have nothing to connect with).
-			return &exitError{code: 1, err: werr}
+			return &exitError{code: exitFailure, err: werr}
 		}
 		p.Hintf("Credential written to %s (mode 0600, not shown). This machine is set to enroll as client %d.", opts.credentialFile, pc.ID)
 	} else {
@@ -523,7 +523,7 @@ func adoptLiveInClusterClient(
 		// create — that mint stamps no anchor, so it can't orphan one.
 		if clusterID != "" {
 			ilog.Logf("in-cluster client discovery failed on a reachable cluster (failing closed): %v", err)
-			return nil, false, &exitError{code: 1, err: fmt.Errorf(
+			return nil, false, &exitError{code: exitFailure, err: fmt.Errorf(
 				"couldn't check whether a tracebloc client is already running on this cluster (%w) — "+
 					"provisioning now could mint a duplicate that never deploys and locks the cluster to it. "+
 					"Re-run (if this was transient); if it persists, ensure your kubeconfig/context can list "+
@@ -541,7 +541,7 @@ func adoptLiveInClusterClient(
 	// listed we can't verify ownership, so fail closed (re-run) rather than mint a
 	// duplicate (orphan) or adopt across accounts.
 	if listErr != nil {
-		return nil, false, &exitError{code: 1, err: fmt.Errorf(
+		return nil, false, &exitError{code: exitFailure, err: fmt.Errorf(
 			"a tracebloc client is already running on this cluster, but listing your account to verify ownership failed (%w) — re-run once tracebloc is reachable, or resolve manually", listErr)}
 	}
 
@@ -559,7 +559,7 @@ func adoptLiveInClusterClient(
 		// Live here, but not in the signed-in account — adopting it would be a silent
 		// cross-account takeover. Refuse (mirrors the create 409, R6).
 		ilog.Logf("live client %s not in this account — refusing cross-account adopt", live.ClientID)
-		return nil, false, &exitError{code: 1, err: errors.New(crossAccountConflictMsg)}
+		return nil, false, &exitError{code: exitFailure, err: errors.New(crossAccountConflictMsg)}
 	}
 
 	switch {
@@ -584,11 +584,11 @@ func adoptLiveInClusterClient(
 				// naming the owner) or a same-account live sibling (cluster_in_use).
 				// Fix #2's same-account reclaim means this no longer fires for a stale
 				// same-account holder — that path now succeeds (200).
-				return nil, false, &exitError{code: 1, err: errors.New(conflictMessage(ae))}
+				return nil, false, &exitError{code: exitFailure, err: errors.New(conflictMessage(ae))}
 			case errors.As(perr, &ae) && ae.StatusCode == http.StatusForbidden:
 				return nil, false, askAnAdmin(ctx, p, apiClient, "provision a client", "provisioning")
 			}
-			return nil, false, &exitError{code: 1, err: fmt.Errorf("backfilling the cluster anchor onto the existing client: %w", perr)}
+			return nil, false, &exitError{code: exitFailure, err: fmt.Errorf("backfilling the cluster anchor onto the existing client: %w", perr)}
 		}
 		ilog.Logf("backfilled cluster_id onto client id=%d", owner.ID)
 		owner = patched
@@ -596,7 +596,7 @@ func adoptLiveInClusterClient(
 		// The live client is anchored to a DIFFERENT cluster than the one we're
 		// pointed at — the kubeconfig and the in-cluster client disagree. Don't
 		// re-anchor (write-once); surface it rather than guess.
-		return nil, false, &exitError{code: 1, err: fmt.Errorf(
+		return nil, false, &exitError{code: exitFailure, err: fmt.Errorf(
 			"the client running in this namespace is anchored to a different cluster (%s) than --kubeconfig/--context points at (%s) — check you're targeting the right cluster",
 			owner.ClusterID, clusterID)}
 	}
@@ -703,17 +703,17 @@ func askAnAdmin(ctx context.Context, p *ui.Printer, client *api.Client, action, 
 			p.Field(label, a.Email)
 		}
 	}
-	return &exitError{code: 1, err: fmt.Errorf("%s requires CLIENT_WRITE permission", capability)}
+	return &exitError{code: exitFailure, err: fmt.Errorf("%s requires CLIENT_WRITE permission", capability)}
 }
 
 func runClientList(ctx context.Context, p *ui.Printer) error {
 	client, cfg, err := authedClient()
 	if err != nil {
-		return &exitError{code: 1, err: err}
+		return &exitError{code: exitFailure, err: err}
 	}
 	clients, err := client.ListClients(ctx)
 	if err != nil {
-		return &exitError{code: 1, err: err}
+		return &exitError{code: exitFailure, err: err}
 	}
 	if len(clients) == 0 {
 		p.Hintf("No clients yet. Run `tracebloc client create`.")
@@ -750,7 +750,7 @@ timeout elapses (non-zero), to confirm the client connected after setup.`,
 			// --timeout only governs the --wait poll; accepting it alone would be a
 			// silent no-op, so reject it rather than mislead.
 			if cmd.Flags().Changed("timeout") && !wait {
-				return &exitError{code: 1, err: errors.New("--timeout has no effect without --wait")}
+				return &exitError{code: exitFailure, err: errors.New("--timeout has no effect without --wait")}
 			}
 			return runClientStatus(cmd.Context(), printerFor(cmd), wait, timeout)
 		},
@@ -768,11 +768,11 @@ const clientStatusPollInterval = 3 * time.Second
 func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time.Duration) error {
 	client, cfg, err := authedClient()
 	if err != nil {
-		return &exitError{code: 1, err: err}
+		return &exitError{code: exitFailure, err: err}
 	}
 	active := cfg.Current().ActiveClientID
 	if active == "" {
-		return &exitError{code: 1, err: errors.New(
+		return &exitError{code: exitFailure, err: errors.New(
 			"no active client on this machine — run `tracebloc client create` (or re-run the installer) first")}
 	}
 
@@ -780,10 +780,10 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 	if !wait {
 		st, found, lerr := lookupClientStatus(ctx, client, active)
 		if lerr != nil {
-			return &exitError{code: 1, err: lerr}
+			return &exitError{code: exitFailure, err: lerr}
 		}
 		if !found {
-			return &exitError{code: 1, err: fmt.Errorf(
+			return &exitError{code: exitFailure, err: fmt.Errorf(
 				"active client %s isn't in your account — run `tracebloc client create` "+
 					"(or re-run the installer) to provision this machine", active)}
 		}
@@ -807,19 +807,19 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 		switch {
 		case errors.As(lerr, &ue):
 			// 426 (CLI too old) won't recover by waiting — surface the upgrade signal.
-			return &exitError{code: 1, err: lerr}
+			return &exitError{code: exitFailure, err: lerr}
 		case errors.As(lerr, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden):
 			// A revoked/expired/forbidden token (401/403) won't recover by waiting —
 			// the client itself may be online. Fail fast, point at sign-in. Note 429
 			// and 5xx stay transient (below): those DO recover on retry.
-			return &exitError{code: 1, err: errors.New(
+			return &exitError{code: exitFailure, err: errors.New(
 				"tracebloc rejected your credentials while waiting — run `tracebloc login`, then retry")}
 		case lerr != nil:
 			lastErr = lerr // transient (5xx / 429 / network) — keep waiting, remember why
 		case !found:
 			// The active client isn't in the account (deleted / wrong account) — no
 			// amount of waiting surfaces it. Fail fast, matching the one-shot path.
-			return &exitError{code: 1, err: fmt.Errorf(
+			return &exitError{code: exitFailure, err: fmt.Errorf(
 				"active client %s isn't in your account — run `tracebloc client create` "+
 					"(or re-run the installer) to provision this machine", active)}
 		case st == clientStatusOnline:
@@ -839,15 +839,15 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 		if remaining <= 0 {
 			switch {
 			case lastErr != nil:
-				return &exitError{code: 1, err: fmt.Errorf(
+				return &exitError{code: exitFailure, err: fmt.Errorf(
 					"timed out after %s waiting for tracebloc to report this client online; "+
 						"the last status check failed: %v", timeout, lastErr)}
 			case lastState >= 0:
-				return &exitError{code: 1, err: fmt.Errorf(
+				return &exitError{code: exitFailure, err: fmt.Errorf(
 					"timed out after %s waiting for tracebloc to report this client online (last state: %s). "+
 						"Run `tracebloc doctor` to diagnose, or re-run the installer.", timeout, clientStateLabel(lastState))}
 			default:
-				return &exitError{code: 1, err: fmt.Errorf(
+				return &exitError{code: exitFailure, err: fmt.Errorf(
 					"timed out after %s before tracebloc could confirm this client — retry, "+
 						"or run `tracebloc doctor`.", timeout)}
 			}
@@ -858,7 +858,7 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 		}
 		select {
 		case <-ctx.Done():
-			return &exitError{code: 130} // Ctrl-C: exit quietly (no "Error: context canceled")
+			return &exitError{code: exitInterrupted} // Ctrl-C: exit quietly (no "Error: context canceled")
 		case <-pollAfter(wait):
 		}
 	}
@@ -1016,7 +1016,7 @@ func mapClientErr(err error) error {
 	if errors.Is(err, errInteractiveCancelled) {
 		return nil
 	}
-	return &exitError{code: 1, err: err}
+	return &exitError{code: exitFailure, err: err}
 }
 
 // randHex returns nbytes of crypto-random data hex-encoded.

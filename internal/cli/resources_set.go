@@ -179,11 +179,11 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 	//     sum across nodes — mirrors `cluster doctor`'s node-fit.
 	nodes, nerr := target.Clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if nerr != nil {
-		return &exitError{code: 3, err: fmt.Errorf("couldn't read this machine's capacity: %w", nerr)}
+		return &exitError{code: exitLocalEnv, err: fmt.Errorf("couldn't read this machine's capacity: %w", nerr)}
 	}
 	node, ok := resources.LargestReadyNode(nodes.Items)
 	if !ok {
-		return &exitError{code: 3, err: fmt.Errorf("no Ready node on this machine to size a training run against")}
+		return &exitError{code: exitLocalEnv, err: fmt.Errorf("no Ready node on this machine to size a training run against")}
 	}
 	machineGPUName, machineGPUCount, machineHasGPU := resources.MachineGPU(node)
 
@@ -263,7 +263,7 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 	//     wizard paths; --dry-run mutates nothing so it never needs confirming.
 	if !req.yes && !req.dryRun {
 		if pr == nil {
-			return &exitError{code: 1, err: fmt.Errorf(
+			return &exitError{code: exitFailure, err: fmt.Errorf(
 				"refusing to change the ceiling without confirmation: pass --yes, or run on a terminal")}
 		}
 		p.Newline()
@@ -403,7 +403,7 @@ func runResourcesWizard(p *ui.Printer, pr prompter, node resources.Machine, curr
 	//     (e.g. "1–0"): every answer is rejected and the wizard can't complete
 	//     except by interrupting. Fail honestly instead (Bugbot #241).
 	if maxCores < 1 || maxGiB < 2 {
-		return resources.Training{}, &exitError{code: 2, err: fmt.Errorf(
+		return resources.Training{}, &exitError{code: exitBadInput, err: fmt.Errorf(
 			"this machine is too small to choose an amount — after tracebloc's ~1 core and 3 GiB "+
 				"overhead it can offer a training run at most %d core(s) and %d GiB. Free up "+
 				"resources or use a larger machine.", maxCores, maxGiB)}
@@ -510,7 +510,7 @@ func persistCeiling(ctx context.Context, p *ui.Printer, target *clusterTarget, o
 	// override uses a local chart (no remote pull, no version to pin), so it's
 	// exempt — mirroring the same exemption in helm.Upgrade.
 	if chartPathOverride() == "" && strings.TrimSpace(target.Release.ChartVersion) == "" {
-		return &exitError{code: 1, err: fmt.Errorf(
+		return &exitError{code: exitFailure, err: fmt.Errorf(
 			"couldn't determine the installed client chart version (the release is missing " +
 				"its helm.sh/chart version label), so the upgrade can't be pinned to it. Refusing " +
 				"to change resources with an unpinned upgrade — it would pull the latest chart and " +
@@ -531,7 +531,7 @@ func persistCeiling(ctx context.Context, p *ui.Printer, target *clusterTarget, o
 	}
 	plan, err := helm.Upgrade(ctx, params)
 	if err != nil {
-		return &exitError{code: 1, err: err}
+		return &exitError{code: exitFailure, err: err}
 	}
 
 	if dryRun {
@@ -568,7 +568,7 @@ func persistCeiling(ctx context.Context, p *ui.Printer, target *clusterTarget, o
 // err is non-nil so it isn't silent). Every user-facing "that won't work" path
 // funnels through here so the exit code stays consistent.
 func validationError(msg string) error {
-	return &exitError{code: 2, err: fmt.Errorf("%s", msg)}
+	return &exitError{code: exitBadInput, err: fmt.Errorf("%s", msg)}
 }
 
 // perRunSize renders a ceiling the way the user reads it: "4 CPU · 16 GiB · 1 GPU".

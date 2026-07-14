@@ -159,7 +159,7 @@ func runClusterDoctor(
 		p.Hintf("For deeper triage, send tracebloc a support bundle: ./install-k8s.sh --diagnose")
 		// Silent (err == nil): the per-check lines above already explained it,
 		// so main() shouldn't print a redundant "Error:" line.
-		return &exitError{code: 2, err: nil}
+		return &exitError{code: exitChecksFailed, err: nil}
 	case doctor.StatusWarn:
 		p.Warnf("Completed with warnings — review the ⚠ items above.")
 		return nil
@@ -252,7 +252,7 @@ func worseStatus(a, b doctor.Status) doctor.Status {
 // token isn't masked behind a kubeconfig-only exit code (Bugbot).
 func kubeconfigExitCode(authStatus doctor.Status) int {
 	if authStatus == doctor.StatusFail {
-		return 2
+		return exitChecksFailed
 	}
-	return 3
+	return exitLocalEnv
 }
