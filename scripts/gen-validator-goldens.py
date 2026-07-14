@@ -152,6 +152,19 @@ def run_case(case):
                     schema = {}
             options["schema"] = schema
             options["full_schema"] = schema
+        elif case["category"] == "semantic_segmentation":
+            # semseg declares the masks sidecar's mask_id link column in the
+            # schema it sends to the ingestor (spec.go: buildSpec sets
+            # schema={"mask_id": "VARCHAR(255)"}). data-ingestors #358's
+            # MaskIdColumnValidator REQUIRES that declaration — an undeclared
+            # mask_id is dropped at ingest, so the stored table lacks it and the
+            # training client raises FileNotFoundError. The harness must drive
+            # the validators with the SAME schema the CLI sends, or every semseg
+            # case is spuriously rejected on the mask_id contract. An explicit
+            # per-case schema still wins (e.g. a case that deliberately omits
+            # mask_id to exercise the reject path).
+            options["schema"] = case.get("schema", {"mask_id": "VARCHAR(255)"})
+            options["full_schema"] = options["schema"]
 
         errors = []
         try:

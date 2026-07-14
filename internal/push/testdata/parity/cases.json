@@ -584,8 +584,8 @@
       "category": "semantic_segmentation",
       "label_column": "label",
       "cli_verdict": "reject",
-      "ingestor_verdict": "accept",
-      "note": "DELIBERATE divergence AT THIS PIN (7b4ecac, the di#359 merge): the manifest has no mask_id column. The CLI previews the backend#816 contract (CheckMaskIdColumn) \u2014 without mask_id the training client can't resolve masks and fails late. The PINNED ingestor predates di#358's MaskIdColumnValidator, so its preflight accepts. Flip ingestor_verdict to reject when the pin bumps past di#358 (cli#286 pin-bump); the goldens regen will flag exactly this case."
+      "ingestor_verdict": "reject",
+      "note": "The manifest has no mask_id column. The CLI previews the backend#816 contract (CheckMaskIdColumn) and rejects; the pinned ingestor now includes di#358's MaskIdColumnValidator (adopted via the cli#286 pin-bump), so its preflight also rejects an undeclared mask_id. Both sides agree \u2014 reject."
     },
     {
       "extension": ".jpg",

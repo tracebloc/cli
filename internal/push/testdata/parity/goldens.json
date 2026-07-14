@@ -223,8 +223,10 @@
       "verdict": "reject"
     },
     "semseg-missing-mask-id": {
-      "errors": [],
-      "verdict": "accept"
+      "errors": [
+        "MaskIdColumnValidator: Required column 'mask_id' not found in semantic-segmentation manifest CSV header (columns: filename). The training client reads 'mask_id' to locate each mask file (backend#816) \u2014 without it, every mask lookup raises FileNotFoundError at train time. Add a 'mask_id' column mapping each row to its mask filename. See templates/semantic_segmentation/ for the layout."
+      ],
+      "verdict": "reject"
     },
     "semseg-ok": {
       "errors": [],
