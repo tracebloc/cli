@@ -23,7 +23,7 @@ GOVULNCHECK_VERSION ?= v1.1.4
 # ---- top-level targets -------------------------------------------
 
 .PHONY: ci
-ci: vet test lint fmt-check schema-check vulncheck deadcode
+ci: vet test lint fmt-check schema-check vulncheck file-budget deadcode
 	@echo "==> ci: all green"
 
 .PHONY: build
@@ -154,6 +154,14 @@ schema-check:
 .PHONY: schema-sync
 schema-sync:
 	./scripts/sync-schema.sh
+
+# file-budget: per-file line ceilings (ratchet down only — raising one is a
+# reviewed edit to scripts/file-budget.sh). Keeps the next 1500-line data.go
+# from growing quietly (backend#1106 WS-B). Also enforced by build.yml's
+# lint job, keeping the "make ci green => CI green" invariant.
+.PHONY: file-budget
+file-budget:
+	./scripts/file-budget.sh
 
 # ---- cleanup -----------------------------------------------------
 

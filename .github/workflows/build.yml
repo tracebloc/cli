@@ -153,6 +153,12 @@ jobs:
           go install golang.org/x/tools/cmd/deadcode@v0.48.0
           deadcode ./cmd/tracebloc
 
+      - name: File budget (line-count ratchet)
+        # Per-file line ceilings; they only ratchet DOWN — raising one is a
+        # deliberate, reviewed edit to scripts/file-budget.sh. Keeps the next
+        # 1500-line data.go from growing quietly (backend#1106 WS-B).
+        run: ./scripts/file-budget.sh
+
   govulncheck:
     timeout-minutes: 10
     name: govulncheck
