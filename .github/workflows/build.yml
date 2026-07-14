@@ -153,6 +153,31 @@ jobs:
           go install golang.org/x/tools/cmd/deadcode@v0.48.0
           deadcode ./cmd/tracebloc
 
+  govulncheck:
+    timeout-minutes: 10
+    name: govulncheck
+    # Reachability-scans the module for known vulnerabilities (stdlib +
+    # deps) on every PR and push. This is a customer-installed binary —
+    # 6 reachable CVEs shipped in v0.8.0 before this gate existed (#276).
+    # Pinned version, same rationale as the lint tools above; keep in
+    # lockstep with GOVULNCHECK_VERSION in the Makefile and the copy of
+    # this job in vulncheck.yml (the weekly cron that catches CVEs
+    # published between PRs). Bump deliberately.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: govulncheck ./...
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+
   build:
     timeout-minutes: 20
     name: Build (${{ matrix.os }}/${{ matrix.arch }})
