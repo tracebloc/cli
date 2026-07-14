@@ -94,7 +94,7 @@ func TestListClients_Pagination(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		page++
 		if page == 1 {
-			fmt.Fprintf(w, `{"results":[{"id":1,"first_name":"a"}],"next":%q}`,
+			_, _ = fmt.Fprintf(w, `{"results":[{"id":1,"first_name":"a"}],"next":%q}`,
 				"http://"+r.Host+"/edge-device/?page=2")
 			return
 		}
