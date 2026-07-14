@@ -694,9 +694,17 @@ func renderHome(p *ui.Printer, m homeModel) {
 
 	// Secure-environment axis (the machine) — a separate line, never fused with
 	// sign-in.
+	//
+	// Env label. A provisioned machine can reach an offline (or degraded) state
+	// with no cached display name — namespace known, name not — so render a clean
+	// nameless line rather than an empty-quoted `Secure environment ""`.
+	envLabel := "Secure environment"
+	if m.envName != "" {
+		envLabel = fmt.Sprintf("Secure environment %q", m.envName)
+	}
 	switch m.state {
 	case homeOnline:
-		p.CheckLine("Secure environment %q · Online%s", m.envName, computeParen(m))
+		p.CheckLine("%s · Online%s", envLabel, computeParen(m))
 	case homeRunning:
 		// Two honest flavors of running, split by what we actually KNOW.
 		// Backend positively reported not-online (offline/pending): "hasn't
@@ -705,21 +713,21 @@ func renderHome(p *ui.Printer, m homeModel) {
 		// don't claim tracebloc's view — it may be heartbeating fine while only
 		// our probe failed — say we couldn't confirm.
 		if m.confirmedNotOnline {
-			p.WarnLine("Secure environment %q · running, but tracebloc hasn't heard from it — run %s %s",
-				m.envName, m.inv, doctorPath)
+			p.WarnLine("%s · running, but tracebloc hasn't heard from it — run %s %s",
+				envLabel, m.inv, doctorPath)
 		} else {
-			p.WarnLine("Secure environment %q · running — couldn't confirm it's connected to tracebloc — run %s %s",
-				m.envName, m.inv, doctorPath)
+			p.WarnLine("%s · running — couldn't confirm it's connected to tracebloc — run %s %s",
+				envLabel, m.inv, doctorPath)
 		}
 	case homeStarting:
-		p.WarnLine("Secure environment %q · starting up, not ready yet — run %s %s",
-			m.envName, m.inv, doctorPath)
+		p.WarnLine("%s · starting up, not ready yet — run %s %s",
+			envLabel, m.inv, doctorPath)
 	case homeOffline:
 		// One honest line for both causes: a stopped/unreachable cluster AND a
 		// reachable cluster that doesn't host this release from the current
 		// kube-context. "can't reach it from here" is true either way.
-		p.CrossLine("Secure environment %q · can't reach it from here — run %s %s",
-			m.envName, m.inv, doctorPath)
+		p.CrossLine("%s · can't reach it from here — run %s %s",
+			envLabel, m.inv, doctorPath)
 	case homeNoEnv:
 		p.WarnLine("No secure environment on this machine yet — run the installer to set one up.")
 	}
