@@ -58,7 +58,35 @@ jobs:
             echo "::error::scripts/.data-ingestors-ref contains no ref"
             exit 1
           fi
+          # Shape guard (mirrors chart-drift.yml): SHA / branch / tag characters
+          # only and no "..", so a malformed pin fails here with a clear error
+          # instead of an opaque failure deep in git / actions-checkout.
+          if ! printf '%s' "$ref" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || printf '%s' "$ref" | grep -q '\.\.'; then
+            echo "::error file=scripts/.data-ingestors-ref::invalid ref shape: $ref"
+            exit 1
+          fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Select the data-ingestors read token
+        id: access
+        # data-ingestors is public today, so github.token suffices. Prefer the
+        # least-privilege CROSS_REPO_READ_TOKEN when it is set AND actually
+        # works, but a set-but-invalid PAT (expired / wrong scope) must fall back
+        # to the default token rather than red this advisory canary for an infra
+        # misconfig — the same reachability probe goldens-drift.yml uses, kept in
+        # lockstep with the checkout below via the use_pat output.
+        env:
+          CROSS_REPO_READ_TOKEN: ${{ secrets.CROSS_REPO_READ_TOKEN }}
+        run: |
+          use_pat=false
+          if [ -n "$CROSS_REPO_READ_TOKEN" ]; then
+            if git ls-remote "https://x-access-token:${CROSS_REPO_READ_TOKEN}@github.com/tracebloc/data-ingestors.git" HEAD >/dev/null 2>&1; then
+              use_pat=true
+            else
+              echo "::warning::CROSS_REPO_READ_TOKEN is set but tracebloc/data-ingestors is not readable with it (expired or wrong scope) — falling back to the default workflow token."
+            fi
+          fi
+          echo "use_pat=$use_pat" >> "$GITHUB_OUTPUT"
 
       - name: Checkout tracebloc/data-ingestors @ develop HEAD
         uses: actions/checkout@v4
@@ -68,7 +96,11 @@ jobs:
           path: data-ingestors
           # Full history so the pin SHA is present for the pin-vs-HEAD diff.
           fetch-depth: 0
-          token: ${{ secrets.CROSS_REPO_READ_TOKEN || github.token }}
+          # Exactly the token the probe validated: the PAT only when use_pat
+          # confirmed it works, else the default token — so a set-but-invalid
+          # PAT falls back instead of hard-failing a checkout the public repo
+          # would otherwise allow.
+          token: ${{ steps.access.outputs.use_pat == 'true' && secrets.CROSS_REPO_READ_TOKEN || github.token }}
 
       - name: Diff the mirrored validator surface, pin vs HEAD
         id: srcdiff

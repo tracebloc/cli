@@ -65,6 +65,13 @@ jobs:
             echo "::error::scripts/.data-ingestors-ref contains no ref"
             exit 1
           fi
+          # Shape guard (mirrors chart-drift.yml): SHA / branch / tag characters
+          # only and no "..", so a malformed pin fails here with a clear error
+          # instead of an opaque failure deep in git / actions-checkout.
+          if ! printf '%s' "$ref" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || printf '%s' "$ref" | grep -q '\.\.'; then
+            echo "::error file=scripts/.data-ingestors-ref::invalid ref shape: $ref"
+            exit 1
+          fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Probe data-ingestors readability
