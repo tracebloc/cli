@@ -318,6 +318,20 @@ func rejectSymlink(info os.FileInfo, relPath string) error {
 		relPath)
 }
 
+// checkFileSize returns a sizeError when size exceeds the single-file cap
+// (MaxSingleFileBytes), else nil. It centralizes the identical
+// `size > MaxSingleFileBytes` guard that the stream, tabular, and text paths
+// each repeated, so the boundary lives in exactly one place — and can be
+// asserted at the exact cap in a unit test without materializing a
+// MaxSingleFileBytes-sized (500 MB) fixture. The cap is `>` not `>=`: a file of
+// exactly MaxSingleFileBytes is allowed.
+func checkFileSize(relPath string, size int64) error {
+	if size > MaxSingleFileBytes {
+		return sizeError(relPath, size, MaxSingleFileBytes)
+	}
+	return nil
+}
+
 // sizeError builds the over-the-single-file-cap error with the same
 // human-readable framing as the total-cap branch above. Centralized
 // so the message stays consistent if we tune the wording later.
