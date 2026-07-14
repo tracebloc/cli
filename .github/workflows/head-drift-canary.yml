@@ -140,22 +140,38 @@ jobs:
         id: goldens
         # Same harness the goldens-drift job runs against the PIN, pointed at
         # HEAD instead. Failure here must not red the run — capture the verdict
-        # and let the reporting step raise the issue.
+        # and let the reporting step raise the issue. Distinguish the script's
+        # exit codes so a HARNESS failure (deps / DATA_INGESTORS_DIR / generator
+        # crash → exit 2) is reported as "could not evaluate", NOT as a
+        # verdict/value DRIFT (exit 3): parity was never evaluated, so calling it
+        # drift would send someone down the pin-bump playbook for an infra bug.
         env:
           DATA_INGESTORS_DIR: ${{ github.workspace }}/data-ingestors
         run: |
-          if ./scripts/sync-validator-goldens.sh --check >goldens-out.txt 2>&1; then
-            echo "drift=false" >> "$GITHUB_OUTPUT"
-            echo "goldens check vs HEAD: in sync"
-          else
-            echo "drift=true" >> "$GITHUB_OUTPUT"
-            echo "goldens check vs HEAD: DRIFT"
-          fi
+          rc=0
+          ./scripts/sync-validator-goldens.sh --check >goldens-out.txt 2>&1 || rc=$?
+          case "$rc" in
+            0)
+              echo "drift=false"    >> "$GITHUB_OUTPUT"
+              echo "evaluated=true" >> "$GITHUB_OUTPUT"
+              echo "goldens check vs HEAD: in sync" ;;
+            3)
+              echo "drift=true"     >> "$GITHUB_OUTPUT"
+              echo "evaluated=true" >> "$GITHUB_OUTPUT"
+              echo "goldens check vs HEAD: DRIFT" ;;
+            *)
+              # Exit 2 (harness error) or any unexpected non-zero: parity was
+              # never evaluated. Not drift — surface it truthfully.
+              echo "drift=false"     >> "$GITHUB_OUTPUT"
+              echo "evaluated=false" >> "$GITHUB_OUTPUT"
+              echo "goldens check vs HEAD: HARNESS ERROR (exit $rc) — parity NOT evaluated" ;;
+          esac
           tail -n 20 goldens-out.txt || true
 
       - name: Open or update the tracking issue
         if: >-
           steps.goldens.outputs.drift == 'true' ||
+          steps.goldens.outputs.evaluated == 'false' ||
           steps.srcdiff.outputs.changed != '' ||
           steps.srcdiff.outputs.pin_reachable == 'false'
         env:
@@ -165,9 +181,25 @@ jobs:
           HEAD_SHA: ${{ steps.srcdiff.outputs.head_sha }}
           PIN_REACHABLE: ${{ steps.srcdiff.outputs.pin_reachable }}
           GOLDENS_DRIFT: ${{ steps.goldens.outputs.drift }}
+          GOLDENS_EVALUATED: ${{ steps.goldens.outputs.evaluated }}
           CHANGED: ${{ steps.srcdiff.outputs.changed }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          if [ "$GOLDENS_DRIFT" = "true" ]; then
+            goldens_cell='DRIFT — verdicts/values changed'
+          elif [ "$GOLDENS_EVALUATED" = "false" ]; then
+            goldens_cell='could not evaluate — harness error (deps / DATA_INGESTORS_DIR / generator); parity NOT checked this run'
+          else
+            goldens_cell='in sync'
+          fi
+          # pin_actionable = there is a real pin/drift signal the pin-bump
+          # playbook addresses. A harness-only failure (evaluated=false with no
+          # source diff and a reachable pin) must NOT push the pin-bump path.
+          if [ "$GOLDENS_DRIFT" = "true" ] || [ -n "$CHANGED" ] || [ "$PIN_REACHABLE" = "false" ]; then
+            pin_actionable=true
+          else
+            pin_actionable=false
+          fi
           # shellcheck disable=SC2016  # single-quoted printf formats carry markdown backticks, not expansions
           {
             printf '<!-- head-drift-canary -->\n'
@@ -175,30 +207,46 @@ jobs:
             printf '| | |\n|---|---|\n'
             printf '| pin (`scripts/.data-ingestors-ref`) | `%s` |\n' "$PIN"
             printf '| data-ingestors develop HEAD | `%s` |\n' "$HEAD_SHA"
-            printf '| goldens check vs HEAD | %s |\n' "$([ "$GOLDENS_DRIFT" = "true" ] && echo 'DRIFT — verdicts/values changed' || echo 'in sync')"
+            printf '| goldens check vs HEAD | %s |\n' "$goldens_cell"
             printf '| pin reachable from HEAD | %s |\n\n' "${PIN_REACHABLE:-unknown}"
             if [ "$PIN_REACHABLE" = "false" ]; then
               printf '**The pinned SHA is not reachable in the upstream clone** — upstream history was rewritten or the ref file is wrong. Fix the pin first.\n\n'
+            fi
+            if [ "$GOLDENS_EVALUATED" = "false" ]; then
+              printf '**The goldens check could not run at HEAD** (harness error — missing deps, bad `DATA_INGESTORS_DIR`, or a generator crash). Parity was NOT evaluated this run, so goldens drift at HEAD is unverified — see the canary run logs. What to do is in the footer below.\n\n'
             fi
             if [ -n "$CHANGED" ]; then
               printf '**Mirrored validator source files changed between pin and HEAD** (may include verdict-neutral changes with no corpus case yet — the di#365 class):\n\n```\n'
               printf '%s\n' "$CHANGED"
               printf '```\n\n'
             fi
-            printf '**Playbook** (pin-bump doctrine, backend#1009 / cli#286 shape): bump `scripts/.data-ingestors-ref` to the new HEAD, run `scripts/sync-schema.sh` + `scripts/sync-validator-goldens.sh`, adopt/audit the intervening upstream changes in the `internal/push` mirror, and ship the regenerated goldens in the same PR.\n\n'
-            printf '_Advisory only — this canary never blocks CI. Close this issue when the pin bump lands._\n'
+            if [ "$pin_actionable" = "true" ]; then
+              printf '**Playbook** (pin-bump doctrine, backend#1009 / cli#286 shape): bump `scripts/.data-ingestors-ref` to the new HEAD, run `scripts/sync-schema.sh` + `scripts/sync-validator-goldens.sh`, adopt/audit the intervening upstream changes in the `internal/push` mirror, and ship the regenerated goldens in the same PR.\n\n'
+              printf '_Advisory only — this canary never blocks CI. Close this issue when the pin bump lands._\n'
+            else
+              printf '_Advisory only — this canary never blocks CI. No drift or source change this run — only the goldens harness failed to run. Fix the harness (see run logs); close this issue once the next canary run is clean. Do NOT bump the pin for this._\n'
+            fi
           } > body.md
           gh label create head-drift-canary --repo "$REPO" --force \
             --description "auto-filed by head-drift-canary.yml (cli#289)" --color D93F0B
           existing="$(gh issue list --repo "$REPO" --label head-drift-canary --state open \
             --json number --jq '.[0].number // empty')"
+          # Title reflects the CURRENT signal; refresh it on every run so a
+          # persistent issue's title (and board grouping) never lags the latest
+          # failure mode when only the body is updated.
+          if [ "$pin_actionable" = "true" ]; then
+            title="data-ingestors HEAD has drifted from the CLI's pin (canary)"
+          else
+            title="data-ingestors HEAD-drift canary could not run (harness error)"
+          fi
           if [ -n "$existing" ]; then
             echo "updating existing tracking issue #$existing"
+            gh issue edit "$existing" --repo "$REPO" --title "$title"
             gh issue comment "$existing" --repo "$REPO" --body-file body.md
           else
             echo "opening new tracking issue"
             gh issue create --repo "$REPO" \
-              --title "data-ingestors HEAD has drifted from the CLI's pin (canary)" \
+              --title "$title" \
               --body-file body.md \
               --label head-drift-canary
           fi
@@ -206,6 +254,7 @@ jobs:
       - name: All clear
         if: >-
           steps.goldens.outputs.drift != 'true' &&
+          steps.goldens.outputs.evaluated == 'true' &&
           steps.srcdiff.outputs.changed == '' &&
           steps.srcdiff.outputs.pin_reachable == 'true'
         env:
