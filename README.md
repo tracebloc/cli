@@ -6,7 +6,7 @@ The customer-facing CLI for tracebloc: sign in, provision this machine as a clie
 
 ## Status
 
-**v0.8.0 is the latest release** — the latest stable [release](https://github.com/tracebloc/cli/releases/latest), cut from `develop`. The binary covers the whole client lifecycle (this table describes `develop`, the tree this README lives on):
+**v0.9.1 is the latest release** — the latest stable [release](https://github.com/tracebloc/cli/releases/latest), cut from `develop`. The binary covers the whole client lifecycle (this table describes `develop`, the tree this README lives on):
 
 | Area | Commands |
 |---|---|
@@ -16,7 +16,7 @@ The customer-facing CLI for tracebloc: sign in, provision this machine as a clie
 | Environment | `cluster info`, `doctor` (✔/⚠/✖ health checks + remedies) |
 | Meta | `version`, `completion`, and the status-aware home screen — run bare `tracebloc` (or its alias `tb`) |
 
-Landed on `develop` after the v0.8.0 cut (ships with the next release): `resources` / `resources set`, the status-aware home screen, top-level `doctor` (v0.8.0 has it as `cluster doctor`), and `semantic_segmentation` support. The full navigation map — every command, decision point, and exit path — lives in [`docs/cli-navigation.md`](docs/cli-navigation.md).
+Shipped in v0.9.0, after the v0.8.0 cut: `resources` / `resources set`, the status-aware home screen, top-level `doctor` (v0.8.0 had it only as `cluster doctor`), and `semantic_segmentation` support. The full navigation map — every command, decision point, and exit path — lives in [`docs/cli-navigation.md`](docs/cli-navigation.md).
 
 `data ingest` covers **all 16 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `semantic_segmentation`, `text_classification`, `token_classification`, `sentence_pair_classification`, `masked_language_modeling`, `causal_language_modeling`, `seq2seq`, `embeddings`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, `time_series_classification`, and `time_to_event_prediction` (`semantic_segmentation` — the 16th — landed with [#247](https://github.com/tracebloc/cli/pull/247)).
 
@@ -127,7 +127,7 @@ All v0.1 phases are merged:
 
 Beyond the original phases, `data ingest` was widened from image-classification-only to all 16 task categories, and the test suite gained unit-coverage wins plus a kind-based integration harness for the real-I/O seams.
 
-**v0.2–v0.3** added guided `data ingest`, `dataset list` / `dataset rm`, and home-screen polish. **v0.4–v0.5** added browser sign-in (`login` / `logout` / `auth status`), one-command client provisioning, `cluster doctor`, and the `dataset` → `data` rename (RFC-0001). **v0.6–v0.8** hardened ingest end to end: namespace discovery, plain-language copy, flag renames, flexible file-or-folder input, tabular schema confirmation, and the five text tasks. Since the v0.8.0 cut, `develop` gained `resources` / `resources set`, the status-aware home screen, top-level `doctor`, and `semantic_segmentation` ([#247](https://github.com/tracebloc/cli/pull/247)). **Next:** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap (RFC-0002 non-goal, planned). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues).
+**v0.2–v0.3** added guided `data ingest`, `dataset list` / `dataset rm`, and home-screen polish. **v0.4–v0.5** added browser sign-in (`login` / `logout` / `auth status`), one-command client provisioning, `cluster doctor`, and the `dataset` → `data` rename (RFC-0001). **v0.6–v0.8** hardened ingest end to end: namespace discovery, plain-language copy, flag renames, flexible file-or-folder input, tabular schema confirmation, and the five text tasks. **v0.9** added `resources` / `resources set`, the status-aware home screen, top-level `doctor`, and `semantic_segmentation` ([#247](https://github.com/tracebloc/cli/pull/247)); v0.9.1 is the current latest. **Next:** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap (RFC-0002 non-goal, planned). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues).
 
 Epic: [tracebloc/client#147](https://github.com/tracebloc/client/issues/147).
 
