@@ -1,0 +1,49 @@
+name: Vulncheck
+
+# Weekly govulncheck sweep of develop, plus on-demand runs.
+#
+# The PR-blocking copy of this job lives in build.yml — that one stops
+# NEW code from introducing a reachable vuln. This workflow covers the
+# other direction: a CVE published against code we ALREADY ship should
+# redden develop within a week, not wait for the next PR to happen to
+# open (#276 shipped 6 reachable vulns to customers exactly that way).
+#
+# Scheduled workflows only fire from the default branch (main), so this
+# file must ride the normal develop -> main promotion before the cron
+# activates. The checkout pins ref: develop because develop is where a
+# new CVE needs to surface first — main gets the same signal on its
+# next promotion via build.yml's copy.
+#
+# Keep the job in lockstep with build.yml's govulncheck job and
+# GOVULNCHECK_VERSION in the Makefile. Bump deliberately.
+
+on:
+  schedule:
+    # Mondays 05:30 UTC — before the Monday refinement ritual, so a red
+    # sweep is on the board while the week is being planned.
+    - cron: '30 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    timeout-minutes: 10
+    name: govulncheck (develop)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: govulncheck ./...
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
