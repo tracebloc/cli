@@ -67,13 +67,21 @@ jobs:
           PKG: ${{ inputs.package }}
           TCOEF: ${{ inputs.timeout_coefficient }}
         run: |
+          # The implicit default shell is `bash -e {0}` (no pipefail), so a
+          # failure in `gremlins | tee` below would otherwise be masked by
+          # tee's exit code. pipefail makes tool/test health fail the job, as
+          # this workflow's contract promises.
+          set -o pipefail
           case "$PKG" in
             (*[!a-zA-Z0-9/_.-]*|""|/*|*..*)
               echo "::error::invalid package path '$PKG' (want e.g. internal/push)"; exit 1;;
           esac
           case "$TCOEF" in
-            (*[!0-9]*|"")
+            (""|*[!0-9]*)
               echo "::error::invalid timeout_coefficient '$TCOEF' (want a positive integer)"; exit 1;;
+            (*[1-9]*) ;;  # all digits with at least one non-zero -> positive
+            (*)
+              echo "::error::invalid timeout_coefficient '$TCOEF' (want a positive integer greater than 0)"; exit 1;;
           esac
           if [ ! -d "$PKG" ]; then
             echo "::error::no such package directory: $PKG"; exit 1
