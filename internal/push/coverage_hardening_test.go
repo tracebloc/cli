@@ -28,6 +28,13 @@ func TestParseMinSize(t *testing.T) {
 		{"axb", 0, 0, true},    // non-numeric
 		{"1x2x3", 0, 0, true},  // too many parts
 		{"", 0, 0, true},       // empty
+		// Floats are rejected, mirroring the di#365 value contract: the
+		// ingestor's validator rejects a non-integral float at construction,
+		// and even the integer-valued float it would coerce ("32.0") is
+		// rejected here — the flag grammar is integers only, so the emitted
+		// spec.file_options.min_size can never carry a float at all.
+		{"16.5x32", 0, 0, true}, // non-integral float
+		{"32.0x32", 0, 0, true}, // integer-valued float — still not flag grammar
 	}
 	for _, c := range cases {
 		w, h, err := ParseMinSize(c.in)
