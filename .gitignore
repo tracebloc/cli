@@ -13,6 +13,9 @@
 *.out
 coverage.html
 coverage.txt
+# Merged unit+integration coverage data (go tool covdata), and scratch dirs.
+/.coverdata/
+/scratch-cov/
 
 # Vendored dependencies — we use the module cache, not vendor/.
 /vendor/
