@@ -43,7 +43,7 @@ func TestRenderHome_States(t *testing.T) {
 			model: homeModel{
 				state: homeOnline, email: "alice@acme.io", name: "Alice", envName: "acme-01",
 				compute: computeInfo{CPU: 8, MemGiB: 32, GPU: 1}, hasCompute: true,
-				inv: binTracebloc, fullMenu: true, tbTip: true, hasResources: true,
+				inv: binTracebloc, fullMenu: true, hasResources: true,
 			},
 			present: []string{
 				"Welcome to your secure environment for AI, Alice 👋", // greeting by name
@@ -54,18 +54,19 @@ func TestRenderHome_States(t *testing.T) {
 				"Your secure environment",
 				"tracebloc resources", // shown because a resources command is registered
 				"tracebloc doctor", "tracebloc delete",
-				"tip · type  tb  instead of  tracebloc — either works",
 				"Add --help to any command for the flags.",
 				"──────────────────────────────", // header + footer rule
 				"love from tracebloc",
 			},
 			// The two axes stay separate + honest: no "running"/"offline"/signed-out
-			// language on a healthy online screen. And the diagnostic is the NEW
+			// language on a healthy online screen. The diagnostic is the NEW
 			// top-level `doctor`, never the old `cluster doctor`; the "Manage" and
-			// "Work with your data" buckets are gone.
+			// "Work with your data" buckets are gone; and the old "type tb instead"
+			// tip is gone — the menu itself echoes the launcher name now.
 			absent: []string{
 				"· running", "offline", "Not signed in", "No secure environment",
 				"cluster doctor", "Manage", "Work with your data",
+				"type  tb  instead",
 			},
 		},
 		{
@@ -163,22 +164,6 @@ func TestRenderHome_States(t *testing.T) {
 				"love from tracebloc",
 			},
 			absent: []string{"data ingest", "Secure environment", "· Online", "Signed in as"},
-		},
-		{
-			name: "tb tip shown only when invoked as tracebloc with a real alias",
-			model: homeModel{
-				state: homeOnline, email: "a@b.io", envName: "n",
-				inv: binTracebloc, fullMenu: true, tbTip: true,
-			},
-			present: []string{"type  tb  instead of  tracebloc"},
-		},
-		{
-			name: "no tb tip when it wasn't earned",
-			model: homeModel{
-				state: homeOnline, email: "a@b.io", envName: "n",
-				inv: binTracebloc, fullMenu: true, tbTip: false,
-			},
-			absent: []string{"type  tb  instead"},
 		},
 	}
 
@@ -396,31 +381,34 @@ func TestResolveHomeModel_PassesThroughFields(t *testing.T) {
 	}
 }
 
-// TestResolveHomeModel_TbTip: the tip is earned only when invoked as `tracebloc`
-// AND a real alias exists — never when invoked as `tb`, and never on a screen
-// with no menu.
-func TestResolveHomeModel_TbTip(t *testing.T) {
-	t.Run("earned", func(t *testing.T) {
+// TestResolveHomeModel_PrefersTB: command examples echo `tb` whenever a tb
+// launcher is installed beside the CLI (the normal installed state), falling
+// back to the invoked name only when no tb launcher exists — so a bare build
+// never prints a `tb` that wouldn't run. Applies signed-in and signed-out.
+func TestResolveHomeModel_PrefersTB(t *testing.T) {
+	t.Run("tb available → examples use tb even when invoked as tracebloc", func(t *testing.T) {
 		d := baseDeps()
+		d.invoked = func() string { return binTracebloc }
 		d.tbAvailable = func() bool { return true }
-		if !resolveHomeModel(context.Background(), d).tbTip {
-			t.Fatal("tip should show when invoked as tracebloc with a real alias")
+		if got := resolveHomeModel(context.Background(), d).inv; got != binTB {
+			t.Fatalf("inv = %q, want %q (tb launcher present)", got, binTB)
 		}
 	})
-	t.Run("invoked as tb", func(t *testing.T) {
+	t.Run("no tb launcher → fall back to the invoked name", func(t *testing.T) {
 		d := baseDeps()
-		d.invoked = func() string { return binTB }
-		d.tbAvailable = func() bool { return true }
-		if resolveHomeModel(context.Background(), d).tbTip {
-			t.Fatal("no tip when the user already uses tb")
+		d.invoked = func() string { return binTracebloc }
+		d.tbAvailable = func() bool { return false }
+		if got := resolveHomeModel(context.Background(), d).inv; got != binTracebloc {
+			t.Fatalf("inv = %q, want %q (no tb launcher → echo the invoked name)", got, binTracebloc)
 		}
 	})
-	t.Run("signed out never tips", func(t *testing.T) {
+	t.Run("signed-out screen also prefers tb", func(t *testing.T) {
 		d := baseDeps()
 		d.signIn = func() (bool, string, string) { return false, "", "" }
+		d.invoked = func() string { return binTracebloc }
 		d.tbAvailable = func() bool { return true }
-		if resolveHomeModel(context.Background(), d).tbTip {
-			t.Fatal("the minimal signed-out screen carries no tip")
+		if got := resolveHomeModel(context.Background(), d).inv; got != binTB {
+			t.Fatalf("signed-out inv = %q, want %q", got, binTB)
 		}
 	})
 }
@@ -648,12 +636,13 @@ func TestSanitizeInvoked(t *testing.T) {
 // test is that the renderer emits this exact sequence. Any drift in spacing,
 // copy, glyphs, or blank-line count fails here.
 func TestRenderHome_MatchesLockedDemo(t *testing.T) {
-	// The locked example: signed in, Online, invoked as `tb`, a real alias so the
-	// tip shows, and a resources command registered — matching the demo's inputs.
+	// The locked example: signed in, Online, examples rendered in `tb` (a tb
+	// launcher is installed beside the CLI), and a resources command registered —
+	// matching the demo's inputs.
 	m := homeModel{
 		state: homeOnline, email: "lukas@tracebloc.io", name: "Lukas", envName: "lukas-01",
 		compute: computeInfo{CPU: 8, MemGiB: 32, GPU: 1}, hasCompute: true,
-		inv: binTB, tbTip: true, fullMenu: true, hasResources: true,
+		inv: binTB, fullMenu: true, hasResources: true,
 	}
 
 	rule := "  ──────────────────────────────" // 2-space indent + 30 cols
@@ -686,7 +675,6 @@ func TestRenderHome_MatchesLockedDemo(t *testing.T) {
 		row("tb delete", "remove tracebloc from this machine"),
 		"",
 		"",
-		"  tip · type  tb  instead of  tracebloc — either works",
 		"  Add --help to any command for the flags.",
 		"",
 		rule,
