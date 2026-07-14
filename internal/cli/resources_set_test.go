@@ -7,10 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/client-go/kubernetes/fake"
+
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/helm"
 	"github.com/tracebloc/cli/internal/ui"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
 // setTarget builds a resolved cluster target from a fake clientset, with a chart

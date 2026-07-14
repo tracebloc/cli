@@ -10,12 +10,13 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/submit"
 	"github.com/tracebloc/cli/internal/ui"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 )
 
 // The money path (#1009): submit → classify → exit-code → JSON → reclaim.

@@ -20,6 +20,7 @@ MISSPELL_VERSION    ?= v0.3.4
 DEADCODE_VERSION    ?= v0.48.0
 GOVULNCHECK_VERSION ?= v1.1.4
 STATICCHECK_VERSION ?= 2025.1.1
+GOIMPORTS_VERSION   ?= v0.48.0
 
 # ---- top-level targets -------------------------------------------
 
@@ -140,13 +141,23 @@ lint-full:
 .PHONY: fmt
 fmt:
 	gofmt -s -w .
+	$(GO) run golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION) -local github.com/tracebloc/cli -w .
 
+# fmt-check: gofmt -s (simplification) + goimports -local (import grouping:
+# stdlib / third-party / our own — matches .golangci.yml's local-prefixes).
 .PHONY: fmt-check
 fmt-check:
 	@diff="$$(gofmt -s -l . 2>/dev/null)"; \
 	if [ -n "$$diff" ]; then \
 	  echo "==> gofmt -s needed on:"; \
 	  echo "$$diff" | sed 's/^/    /'; \
+	  echo "==> run \`make fmt\` to fix"; \
+	  exit 1; \
+	fi
+	@drift="$$($(GO) run golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION) -local github.com/tracebloc/cli -l .)"; \
+	if [ -n "$$drift" ]; then \
+	  echo "==> goimports (import grouping) needed on:"; \
+	  echo "$$drift" | sed 's/^/    /'; \
 	  echo "==> run \`make fmt\` to fix"; \
 	  exit 1; \
 	fi
