@@ -230,6 +230,80 @@ func assertProvisionedClient(t *testing.T, name string, pc *ProvisionedClient) {
 	}
 }
 
+// assertDecodesFrom verifies every ProvisionedClient field the CLI acts on
+// decoded to exactly what the raw backend row carries, catching BOTH silent-
+// drift directions on a *real synced list* without rejecting legitimate zero
+// values:
+//
+//   - struct-tag drift (a Go json tag is renamed): the wire row still carries
+//     the old key with a value while the struct decodes zero, so decoded !=
+//     wire — caught by the value compare.
+//   - backend rename/drop on re-sync (the wire field is renamed and
+//     scripts/sync-backend-fixtures.sh re-seeds the fixture): the old key
+//     vanishes from the row, so a pure decoded-vs-wire compare reads the zero
+//     value on BOTH sides and would silently agree. The presence check on the
+//     always-present keys catches this — the key is gone, so it fails.
+//
+// The two fields that can be legitimately zero on a real row are handled
+// precisely: status may be STATUS_OFFLINE=0 (present with value 0 → tolerated)
+// and cluster_id is "Empty on legacy / not-yet-backfilled clients" (client.go),
+// so cluster_id is exempt from the presence check and a backend rename of it
+// stays covered by the strict single-fixture contract tests. For every field
+// except cluster_id this is strictly stronger drift detection than the old
+// non-zero check, while never rejecting a legitimate zero.
+func assertDecodesFrom(t *testing.T, name string, raw json.RawMessage, pc *ProvisionedClient) {
+	t.Helper()
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("%s: list row is not a JSON object: %v", name, err)
+	}
+	// present reports whether the row still carries the key with a non-null
+	// value — a renamed or dropped backend field fails this, which is how the
+	// re-sync drift direction is caught for keys the struct always expects.
+	present := func(field string) bool {
+		v, ok := wire[field]
+		return ok && len(v) > 0 && string(v) != "null"
+	}
+	wantStr := func(field string) string {
+		var s string
+		_ = json.Unmarshal(wire[field], &s) // absent/null → "", the field's zero
+		return s
+	}
+	wantInt := func(field string) int {
+		var n int
+		_ = json.Unmarshal(wire[field], &n) // absent/null → 0, the field's zero
+		return n
+	}
+	// Always-present keys: assert the key survives (backend rename/drop guard)
+	// AND that the decoded value matches the wire (struct-tag-drift guard).
+	for _, f := range []string{"id", "first_name", "username", "namespace", "status"} {
+		if !present(f) {
+			t.Errorf("%s: row is missing %q — a renamed/dropped backend field the struct still decodes by that name", name, f)
+		}
+	}
+	if got, want := pc.ID, wantInt("id"); got != want {
+		t.Errorf("%s: id decoded %d, body carries %d — `use <id>` / PATCH targeting would break", name, got, want)
+	}
+	if got, want := pc.Name, wantStr("first_name"); got != want {
+		t.Errorf("%s: first_name decoded %q, body carries %q", name, got, want)
+	}
+	if got, want := pc.Username, wantStr("username"); got != want {
+		t.Errorf("%s: username decoded %q, body carries %q", name, got, want)
+	}
+	if got, want := pc.Namespace, wantStr("namespace"); got != want {
+		t.Errorf("%s: namespace decoded %q, body carries %q — Helm install would target the wrong namespace", name, got, want)
+	}
+	if got, want := pc.Status, wantInt("status"); got != want {
+		t.Errorf("%s: status decoded %d, body carries %d", name, got, want)
+	}
+	// cluster_id is presence-optional (legitimately empty on legacy / unanchored
+	// rows); the value compare still catches struct-tag drift, and a backend
+	// rename of cluster_id stays covered by the strict single-fixture tests.
+	if got, want := pc.ClusterID, wantStr("cluster_id"); got != want {
+		t.Errorf("%s: cluster_id decoded %q, body carries %q — adopt idempotency would break", name, got, want)
+	}
+}
+
 func TestContractCreateClientMint(t *testing.T) {
 	c := fixtureClient(t, "edge_device_create.json")
 	pc, adopted, err := c.CreateClient(context.Background(), CreateClientRequest{})
@@ -319,8 +393,14 @@ func TestContractListClientsPaginated(t *testing.T) {
 	if want := 2 * len(page1.Results); len(all) != want {
 		t.Fatalf("decoded %d clients, want %d", len(all), want)
 	}
+	// Assert decode FIDELITY per row rather than non-zero: a real synced list
+	// can legitimately carry offline (status 0) or unanchored (empty cluster_id)
+	// rows, and asserting those non-zero would fail CI on the next fixture
+	// re-sync even though decoding is correct. The two served pages repeat the
+	// same rows in order, so row i maps to page1.Results[i % len].
 	for i := range all {
-		assertProvisionedClient(t, "edge_device_list.json", &all[i])
+		raw := page1.Results[i%len(page1.Results)]
+		assertDecodesFrom(t, "edge_device_list.json", raw, &all[i])
 	}
 }
 
@@ -333,9 +413,32 @@ func TestContractListClientAdmins(t *testing.T) {
 	if len(admins) == 0 {
 		t.Fatal("no admins decoded from a body that carries them")
 	}
-	for _, a := range admins {
-		if a.Name == "" || a.Email == "" {
-			t.Errorf("admin contact decoded with empty fields: %+v — the ask-an-admin message would be blank", a)
+	// Decode-fidelity per row (same rationale as assertDecodesFrom). email is a
+	// domain-guaranteed identifier — the endpoint exists so the operator can
+	// email the admin — so assert it non-empty AND matching the wire (a renamed
+	// `email` tag decodes "" here → caught). name is a human display name that
+	// can be legitimately blank for an admin who never set one, so only assert
+	// it decodes to exactly what the row carries rather than requiring non-empty.
+	var rows []map[string]json.RawMessage
+	env := loadFixture(t, "edge_device_admins.json")
+	if err := json.Unmarshal(env.Body, &rows); err != nil {
+		t.Fatalf("decoding admins fixture rows: %v", err)
+	}
+	if len(rows) != len(admins) {
+		t.Fatalf("decoded %d admins, fixture carries %d rows", len(admins), len(rows))
+	}
+	for i, a := range admins {
+		var wantName, wantEmail string
+		_ = json.Unmarshal(rows[i]["name"], &wantName)
+		_ = json.Unmarshal(rows[i]["email"], &wantEmail)
+		if a.Email == "" {
+			t.Errorf("admin %d: email decoded empty — the ask-an-admin message would have no recipient", i)
+		}
+		if a.Email != wantEmail {
+			t.Errorf("admin %d: email decoded %q, body carries %q", i, a.Email, wantEmail)
+		}
+		if a.Name != wantName {
+			t.Errorf("admin %d: name decoded %q, body carries %q", i, a.Name, wantName)
 		}
 	}
 }
