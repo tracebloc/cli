@@ -65,11 +65,11 @@ type clusterTarget struct {
 func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, b activeClientBinding, needPVC bool) (*clusterTarget, error) {
 	resolved, err := loadClusterFn(opts)
 	if err != nil {
-		return nil, &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
+		return nil, &exitError{code: exitLocalEnv, err: fmt.Errorf("loading kubeconfig: %w", err)}
 	}
 	cs, err := newClientsetFn(resolved)
 	if err != nil {
-		return nil, &exitError{code: 3, err: err}
+		return nil, &exitError{code: exitLocalEnv, err: err}
 	}
 	// The cluster-wide fallback scan only engages when the target namespace is
 	// the kubeconfig's default — i.e. nobody chose it: not the user (explicit
@@ -82,9 +82,9 @@ func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.Kubec
 		// "runs elsewhere" rewrite; an API/RBAC list failure or an
 		// ambiguous multiple-release match keeps its own message.
 		if errors.Is(err, cluster.ErrNoParentRelease) {
-			return nil, &exitError{code: 4, err: &noParentReleaseError{err}}
+			return nil, &exitError{code: exitNoWorkspace, err: &noParentReleaseError{err}}
 		}
-		return nil, &exitError{code: 4, err: err}
+		return nil, &exitError{code: exitNoWorkspace, err: err}
 	}
 	// The scan may have retargeted discovery to the namespace that actually
 	// hosts the client; everything downstream (PVC discovery, dataset listing,
@@ -94,7 +94,7 @@ func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.Kubec
 	if needPVC {
 		pvc, err := cluster.DiscoverSharedPVC(ctx, cs, resolved.Namespace)
 		if err != nil {
-			return nil, &exitError{code: 4, err: err}
+			return nil, &exitError{code: exitNoWorkspace, err: err}
 		}
 		t.PVC = pvc
 	}
@@ -202,7 +202,7 @@ func (b activeClientBinding) explain(err error) error {
 	if handle == "" {
 		handle = b.namespace
 	}
-	return &exitError{code: 4, err: fmt.Errorf(
+	return &exitError{code: exitNoWorkspace, err: fmt.Errorf(
 		"active client %q runs on another machine — namespace %q isn't on the cluster your kubeconfig points at; "+
 			"run this command there, or override with --namespace/--context",
 		handle, b.namespace)}

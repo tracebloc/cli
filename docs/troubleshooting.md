@@ -104,6 +104,33 @@ If you have a `~/.bash_profile` that doesn't source `~/.profile` or `~/.bashrc`,
 the PATH entry may be skipped. Either add the `export PATH=…` line to the file
 your login shell actually reads, or use the `/usr/local/bin` approach above.
 
+## Exit codes
+
+Every command exits `0` on success. Non-zero codes are a scripting contract —
+they're stable, and each command's `--help` documents the subset it can
+produce (`tracebloc data ingest --help` has the fullest list). This is the
+cross-command view; the names in the last column are the constants in
+`internal/cli/exitcodes.go`, so grepping a name finds every site that
+produces that code.
+
+| Code | Meaning | Produced by | Constant |
+|------|---------|-------------|----------|
+| `0` | Success — includes `--dry-run` completing, a guided run you cancelled cleanly, and `doctor` passing with warnings only | all commands | `exitOK` |
+| `1` | Generic failure with no more specific bucket (also any error without an explicit code) | `login`, `client …`, `delete`, mistyped commands | `exitFailure` |
+| `2` | Your input didn't validate: schema validation failed (spec synthesized from flags, or your YAML), an unsupported/unknown `--task`, a task-scoped flag applied to the wrong task, an invalid dataset name, or a resource size that doesn't fit the machine | `data ingest`, `data validate`, `data delete`, `resources set` | `exitBadInput` |
+| `2` | One or more checks failed | `doctor` | `exitChecksFailed` |
+| `3` | Local environment problem: kubeconfig couldn't be loaded, the dataset path is missing or unreadable, the local layout is wrong, a YAML file didn't parse, or a prompt was needed but the run is non-interactive (`--no-input` / `--output-json` / no TTY) | `data ingest`, `data validate`, `data list`, `data delete`, `doctor`, `resources`, `resources set` | `exitLocalEnv` |
+| `4` | Cluster reachable but no tracebloc client found in the namespace — or its shared storage / dataset list is missing, so the target can't be confirmed | `data ingest`, `data list`, `data delete`, `cluster info`, `resources`, `resources set` | `exitNoWorkspace` |
+| `5` | Auth: the ingestor SA token couldn't be obtained, or jobs-manager rejected it (401/403) | `data ingest`, `cluster info` | `exitAuth` |
+| `5` | No dataset by that name on this client (nothing to delete) | `data delete` | `exitNoSuchDataset` |
+| `6` | Destination table already exists — re-run with `--overwrite` to replace it, or pick a different `--name` | `data ingest` | `exitTableExists` |
+| `7` | Pre-flight succeeded but staging the files failed (Pod creation, image pull, exec stream, or remote tar error) | `data ingest` | `exitStagingFailed` |
+| `7` | Removing an existing table + its files failed partway (see the error for the recovery command) | `data delete`, `data ingest --overwrite` | `exitTeardownFailed` |
+| `7` | The cluster couldn't be queried for its datasets | `data list` | `exitQueryFailed` |
+| `8` | jobs-manager rejected the submitted run (a non-auth 4xx/5xx), or the port-forward to it couldn't be set up | `data ingest` | `exitSubmitFailed` |
+| `9` | The ingestion Job exited non-zero, completed with row-level failures the summary panel reports, or its outcome couldn't be determined / followed | `data ingest` | `exitIngestFailed` |
+| `130` | You hit Ctrl-C at an interactive prompt (128+SIGINT) | interactive prompts | `exitInterrupted` |
+
 ## Still stuck?
 
 Open an issue at [github.com/tracebloc/cli/issues](https://github.com/tracebloc/cli/issues)

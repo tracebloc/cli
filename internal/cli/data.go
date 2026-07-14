@@ -109,7 +109,7 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 	jsonEmitted := false
 	defer func() {
 		if a.OutputJSON && err != nil && !jsonEmitted {
-			code := 1
+			code := exitFailure
 			var ee *exitError
 			if errors.As(err, &ee) {
 				code = ee.Code()
@@ -179,7 +179,7 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 			// partial failure can leave files the DB-backed guard can no
 			// longer see — a plain re-run would upload everything and then
 			// hit them in-cluster. data delete first is the real recovery.
-			return &exitError{code: 7, err: fmt.Errorf(
+			return &exitError{code: exitTeardownFailed, err: fmt.Errorf(
 				"replacing table %q failed partway — its removal may be incomplete, and a plain re-run "+
 					"would hit the leftovers after uploading everything. Run `tracebloc data delete %s` "+
 					"first, then re-run this ingest. Nothing new was staged. (%w)",
@@ -225,7 +225,7 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 		Out:            out,
 	})
 	if stageErr != nil {
-		return &exitError{code: 7, err: stageErr}
+		return &exitError{code: exitStagingFailed, err: stageErr}
 	}
 
 	// 10–12. The ingestion-run tail: mint token → port-forward → submit →

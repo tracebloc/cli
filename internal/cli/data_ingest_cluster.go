@@ -134,7 +134,7 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 	tok, err := mintIngestorTokenFn(ctx, cs, resolved.Namespace,
 		release.IngestorSAName, 3600, nil)
 	if err != nil {
-		return false, &exitError{code: 5, err: err}
+		return false, &exitError{code: exitAuth, err: err}
 	}
 
 	// 11. Open a port-forward to a Pod backing the jobs-manager
@@ -154,7 +154,7 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 		resolved.Namespace, release.JobsManagerServiceName, release.JobsManagerPort)
 	connectSpin.Stop()
 	if err != nil {
-		return false, &exitError{code: 8, err: fmt.Errorf("setting up jobs-manager port-forward: %w", err)}
+		return false, &exitError{code: exitSubmitFailed, err: fmt.Errorf("setting up jobs-manager port-forward: %w", err)}
 	}
 	defer pf.Close()
 
@@ -343,11 +343,11 @@ func existingTableAction(a *runDataIngestArgs, existingTable string) (proceed bo
 			if errors.Is(perr, errInteractiveCancelled) {
 				return false, nil
 			}
-			return false, &exitError{code: 3, err: fmt.Errorf("overwrite prompt: %w", perr)}
+			return false, &exitError{code: exitLocalEnv, err: fmt.Errorf("overwrite prompt: %w", perr)}
 		}
 		return ok, nil
 	}
-	return false, &exitError{code: 6, err: fmt.Errorf(
+	return false, &exitError{code: exitTableExists, err: fmt.Errorf(
 		"table %q already exists in this workspace. Re-ingesting the same table doesn't merge or replace — "+
 			"the run would fail after uploading everything. Re-run with --overwrite to replace it, "+
 			"or pick a different --name. (`tracebloc data delete %s` also removes it.)",

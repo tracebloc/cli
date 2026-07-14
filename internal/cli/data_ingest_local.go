@@ -53,10 +53,10 @@ func expandHome(path string) string {
 func statDatasetPath(path string) error {
 	if _, serr := os.Stat(path); serr != nil {
 		if errors.Is(serr, os.ErrNotExist) {
-			return &exitError{code: 3, err: fmt.Errorf(
+			return &exitError{code: exitLocalEnv, err: fmt.Errorf(
 				"no such file or directory: %q — check the path to your dataset", path)}
 		}
-		return &exitError{code: 3, err: fmt.Errorf(
+		return &exitError{code: exitLocalEnv, err: fmt.Errorf(
 			"can't read %q: %w", path, serr)}
 	}
 	return nil
@@ -87,7 +87,7 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 	// ingesting anything — old data gone, new data never loaded, exit 0 from
 	// the old Job's status. Refuse the combination outright.
 	if a.Overwrite && a.IdempotencyKey != "" {
-		return nil, nil, nil, false, &exitError{code: 2, err: errors.New(
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: errors.New(
 			"--overwrite can't be combined with --idempotency-key: a reused key makes the cluster replay the previous run instead of ingesting the new data — after --overwrite's removal that would report success while loading nothing. Drop one of the two (a fresh per-run key is the default).")}
 	}
 
@@ -116,7 +116,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 			if errors.As(err, &ee) {
 				return nil, nil, nil, false, err
 			}
-			return nil, nil, nil, false, &exitError{code: 3, err: fmt.Errorf("interactive setup: %w", err)}
+			return nil, nil, nil, false, &exitError{code: exitLocalEnv, err: fmt.Errorf("interactive setup: %w", err)}
 		}
 	}
 	// --intent defaults to train. Applied after the interactive block so
@@ -127,7 +127,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 		a.Spec.Intent = "train"
 	}
 	if a.LocalPath == "" {
-		return nil, nil, nil, false, &exitError{code: 3, err: errors.New(
+		return nil, nil, nil, false, &exitError{code: exitLocalEnv, err: errors.New(
 			"local dataset path is required — pass it as an argument, or run " +
 				"on a terminal without --no-input for guided prompts")}
 	}
@@ -162,7 +162,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 	//    below calls StagedPrefix, which panics on an unsafe name —
 	//    so this check MUST come first.
 	if err := push.ValidateTableName(a.Spec.Table); err != nil {
-		return nil, nil, nil, false, &exitError{code: 2, err: err}
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: err}
 	}
 
 	// 2. Category gate. Runs BEFORE schema validation so an
@@ -178,7 +178,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 		// reaching here means a non-interactive run (or --no-input /
 		// --output-json) that omitted --task. Give a clear, actionable
 		// error instead of silently assuming images (the old default).
-		return nil, nil, nil, false, &exitError{code: 2, err: fmt.Errorf(
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
 			"which task is this data for? pass --task — one of: %s. "+
 				"(On a terminal without --no-input, tracebloc asks you to pick.)",
 			push.SupportedCategoriesList())}
@@ -195,11 +195,11 @@ collaborators can train against that table without ever seeing the raw files.`))
 		if spec.UnsupportedNote != "" {
 			reason = " (" + spec.UnsupportedNote + ")"
 		}
-		return nil, nil, nil, false, &exitError{code: 2, err: fmt.Errorf(
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
 			"task %q isn't supported by the CLI yet%s. Supported tasks: %s.",
 			a.Spec.Category, reason, push.SupportedCategoriesList())}
 	default:
-		return nil, nil, nil, false, &exitError{code: 2, err: fmt.Errorf(
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
 			"task %q isn't a recognized task. Supported tasks: %s.",
 			a.Spec.Category, push.SupportedCategoriesList())}
 	}
@@ -215,7 +215,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 			{"--min-size", a.MinSizeFlag},
 		} {
 			if f.val != "" {
-				return nil, nil, nil, false, &exitError{code: 2, err: fmt.Errorf(
+				return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
 					"%s is image tasks only; it doesn't apply to task %q",
 					f.name, a.Spec.Category)}
 			}
@@ -229,28 +229,28 @@ collaborators can train against that table without ever seeing the raw files.`))
 	// Reject a misapplied flag explicitly so it fails fast instead of being
 	// ignored (the scope mirrors spec.go's build gates exactly).
 	if a.SchemaFlag != "" && !push.IsTabular(a.Spec.Category) {
-		return nil, nil, nil, false, &exitError{code: 2, err: fmt.Errorf(
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
 			"--schema is tabular/time-series tasks only; it doesn't apply to task %q", a.Spec.Category)}
 	}
 	if a.Spec.LabelPolicy != "" && !push.IsRegressionClass(a.Spec.Category) {
-		return nil, nil, nil, false, &exitError{code: 2, err: fmt.Errorf(
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
 			"--label-policy is regression-class tasks only (tabular_regression, "+
 				"time_series_forecasting, time_to_event_prediction); it doesn't apply to task %q",
 			a.Spec.Category)}
 	}
 	if a.Spec.TimeColumn != "" && a.Spec.Category != "time_to_event_prediction" {
-		return nil, nil, nil, false, &exitError{code: 2, err: fmt.Errorf(
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
 			"--time-column is time_to_event_prediction only; it doesn't apply to task %q", a.Spec.Category)}
 	}
 	if a.Spec.NumberOfKeypoints != 0 && a.Spec.Category != "keypoint_detection" {
-		return nil, nil, nil, false, &exitError{code: 2, err: fmt.Errorf(
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
 			"--number-of-keypoints is keypoint_detection only; it doesn't apply to task %q", a.Spec.Category)}
 	}
 	// --label-column is meaningless for self-supervised text (the label is the
 	// text itself); buildText drops it, so accepting it silently discarded the
 	// user's value and the review echoed a column that never shipped.
 	if a.Spec.LabelColumn != "" && push.SelfSupervisedText(a.Spec.Category) {
-		return nil, nil, nil, false, &exitError{code: 2, err: fmt.Errorf(
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
 			"--label-column doesn't apply to task %q — it trains on the text itself, with no label column",
 			a.Spec.Category)}
 	}
@@ -280,7 +280,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 	}
 	walkSpin.Stop()
 	if err != nil {
-		return nil, nil, nil, false, &exitError{code: 3, err: err}
+		return nil, nil, nil, false, &exitError{code: exitLocalEnv, err: err}
 	}
 
 	a.Printer.Step(1, 3, "Check your data")
@@ -295,10 +295,10 @@ collaborators can train against that table without ever seeing the raw files.`))
 		// either. The rest of the content preflight runs after the spec
 		// schema validation (mirroring the in-cluster order).
 		if perr := push.CheckTabularBOM(layout.LabelsCSV); perr != nil {
-			return nil, nil, nil, false, &exitError{code: 3, err: perr}
+			return nil, nil, nil, false, &exitError{code: exitLocalEnv, err: perr}
 		}
 		if perr := push.CheckHasDataRows(layout.LabelsCSV); perr != nil {
-			return nil, nil, nil, false, &exitError{code: 3, err: perr}
+			return nil, nil, nil, false, &exitError{code: exitLocalEnv, err: perr}
 		}
 
 		// Column schema. An explicit --schema wins (raw flag, or the
@@ -312,13 +312,13 @@ collaborators can train against that table without ever seeing the raw files.`))
 		if a.SchemaFlag != "" {
 			sch, perr := push.ParseSchema(a.SchemaFlag)
 			if perr != nil {
-				return nil, nil, nil, false, &exitError{code: 2, err: perr}
+				return nil, nil, nil, false, &exitError{code: exitBadInput, err: perr}
 			}
 			a.Spec.Schema = sch
 		} else {
 			res, ierr := push.InferSchema(layout.LabelsCSV)
 			if ierr != nil {
-				return nil, nil, nil, false, &exitError{code: 3, err: fmt.Errorf("inferring schema from CSV: %w", ierr)}
+				return nil, nil, nil, false, &exitError{code: exitLocalEnv, err: fmt.Errorf("inferring schema from CSV: %w", ierr)}
 			}
 			a.Spec.Schema = res.Schema
 			_, _ = fmt.Fprintf(out,
@@ -350,12 +350,12 @@ collaborators can train against that table without ever seeing the raw files.`))
 		// value so the user sees exactly what was rejected.
 		if a.Spec.Category == "keypoint_detection" && a.Spec.NumberOfKeypoints <= 0 {
 			if a.ChangedFlags["number-of-keypoints"] {
-				return nil, nil, nil, false, &exitError{code: 2, err: fmt.Errorf(
+				return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
 					"--number-of-keypoints must be a positive integer (got %d); "+
 						"it's the number of keypoints per sample (e.g. 17 for COCO pose)",
 					a.Spec.NumberOfKeypoints)}
 			}
-			return nil, nil, nil, false, &exitError{code: 2, err: errors.New(
+			return nil, nil, nil, false, &exitError{code: exitBadInput, err: errors.New(
 				"keypoint_detection requires --number-of-keypoints (e.g. " +
 					"--number-of-keypoints 17); it's dataset-specific and has no default")}
 		}
@@ -367,7 +367,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 		if a.TargetSizeFlag != "" {
 			w, h, perr := push.ParseTargetSize(a.TargetSizeFlag)
 			if perr != nil {
-				return nil, nil, nil, false, &exitError{code: 2, err: perr}
+				return nil, nil, nil, false, &exitError{code: exitBadInput, err: perr}
 			}
 			a.Spec.TargetSize = []int{w, h}
 		} else if len(layout.Images) > 0 {
@@ -394,7 +394,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 		if a.MinSizeFlag != "" {
 			w, h, perr := push.ParseMinSize(a.MinSizeFlag)
 			if perr != nil {
-				return nil, nil, nil, false, &exitError{code: 2, err: perr}
+				return nil, nil, nil, false, &exitError{code: exitBadInput, err: perr}
 			}
 			a.Spec.MinSize = []int{w, h}
 		}
@@ -404,7 +404,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 		// rejected .jpg/.png datasets AFTER the full upload (cli#68).
 		ext, exterr := push.DetectExtension(layout.Images)
 		if exterr != nil {
-			return nil, nil, nil, false, &exitError{code: 3, err: exterr}
+			return nil, nil, nil, false, &exitError{code: exitLocalEnv, err: exterr}
 		}
 		a.Spec.Extension = ext
 	default:
@@ -434,7 +434,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 		if cols := sortedKeys(a.Spec.Schema); len(cols) > 0 {
 			msg += " (columns: " + strings.Join(cols, ", ") + ")"
 		}
-		return nil, nil, nil, false, &exitError{code: 2, err: errors.New(msg)}
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: errors.New(msg)}
 	}
 
 	// 4. Synthesize the spec from flags + validate against schema.
@@ -445,11 +445,11 @@ collaborators can train against that table without ever seeing the raw files.`))
 	spec = a.Spec.Build()
 	specBytes, err = yaml.Marshal(spec)
 	if err != nil {
-		return nil, nil, nil, false, &exitError{code: 3, err: fmt.Errorf("marshaling synthesized spec: %w", err)}
+		return nil, nil, nil, false, &exitError{code: exitLocalEnv, err: fmt.Errorf("marshaling synthesized spec: %w", err)}
 	}
 	v, err := schema.NewV1Validator()
 	if err != nil {
-		return nil, nil, nil, false, &exitError{code: 3, err: fmt.Errorf("loading embedded schema: %w", err)}
+		return nil, nil, nil, false, &exitError{code: exitLocalEnv, err: fmt.Errorf("loading embedded schema: %w", err)}
 	}
 	_, errs, parseErr := v.ValidateYAML(specBytes)
 	if parseErr != nil {
@@ -458,7 +458,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 		// with the bytes so we can diagnose. Exit 3 (the
 		// "internal" bucket) matches the marshal-failure branch
 		// above.
-		return nil, nil, nil, false, &exitError{code: 3, err: fmt.Errorf("internal: re-parsing synthesized spec: %w\n%s", parseErr, specBytes)}
+		return nil, nil, nil, false, &exitError{code: exitLocalEnv, err: fmt.Errorf("internal: re-parsing synthesized spec: %w\n%s", parseErr, specBytes)}
 	}
 	if len(errs) > 0 {
 		// Use the SAME formatter `ingest validate` uses, so the
@@ -471,7 +471,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 		_, _ = fmt.Fprintf(errOut, "synthesized spec failed schema validation (%d issue%s):\n",
 			len(errs), plural(len(errs)))
 		_, _ = fmt.Fprintln(errOut, schema.FormatErrors(errs))
-		return nil, nil, nil, false, &exitError{code: 2, err: errors.New("synthesized spec failed schema validation; check the flag values above")}
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: errors.New("synthesized spec failed schema validation; check the flag values above")}
 	}
 
 	// P3 content preflight (backend#828, cli#69/#71/#72/#73): preview the
@@ -554,9 +554,9 @@ func runLocalPreflight(a runDataIngestArgs, layout *push.LocalLayout, errOut io.
 	if problem == nil {
 		return nil
 	}
-	code := 3
+	code := exitLocalEnv
 	if problem.BadFlag {
-		code = 2
+		code = exitBadInput
 	}
 	return &exitError{code: code, err: problem.Err}
 }

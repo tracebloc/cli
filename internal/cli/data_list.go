@@ -117,7 +117,7 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 
 	tables, err := listDatasetsFn(ctx, cs, resolved.RestConfig, resolved.Namespace)
 	if err != nil {
-		return &exitError{code: 7, err: err}
+		return &exitError{code: exitQueryFailed, err: err}
 	}
 
 	if a.OutputJSON {

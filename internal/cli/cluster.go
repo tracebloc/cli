@@ -140,12 +140,12 @@ func runClusterInfo(
 		// Kubeconfig errors are exit-code-3 territory (file/parse
 		// problem, same conceptual class as `ingest validate`'s
 		// unreadable-input).
-		return &exitError{code: 3, err: fmt.Errorf("loading kubeconfig: %w", err)}
+		return &exitError{code: exitLocalEnv, err: fmt.Errorf("loading kubeconfig: %w", err)}
 	}
 
 	cs, err := newClientsetFn(resolved)
 	if err != nil {
-		return &exitError{code: 3, err: err}
+		return &exitError{code: exitLocalEnv, err: err}
 	}
 
 	p.Section("Kubeconfig")
@@ -163,9 +163,9 @@ func runClusterInfo(
 		// installed on this cluster". A binding miss gets the §7.3
 		// "runs elsewhere" explanation, same as the data commands.
 		if errors.Is(err, cluster.ErrNoParentRelease) {
-			return binding.explain(&exitError{code: 4, err: &noParentReleaseError{err}})
+			return binding.explain(&exitError{code: exitNoWorkspace, err: &noParentReleaseError{err}})
 		}
-		return &exitError{code: 4, err: err}
+		return &exitError{code: exitNoWorkspace, err: err}
 	}
 	resolved.Namespace = nsUsed
 	// Printed after discovery so it reflects the namespace the scan actually
@@ -197,7 +197,7 @@ func runClusterInfo(
 		// 5 = "release found but no usable token." Distinct from
 		// 4 (no release) so customers can RBAC-debug separately
 		// from install issues.
-		return &exitError{code: 5, err: err}
+		return &exitError{code: exitAuth, err: err}
 	}
 
 	hash := sha256.Sum256([]byte(tok.Token))
