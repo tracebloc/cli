@@ -1,0 +1,8 @@
+{
+  "body": {
+    "cluster_id": "contract-cluster-uid-0090",
+    "error": "cluster_conflict",
+    "owner_email": "contract-foreign-owner@contract.example"
+  },
+  "status": 409
+}
