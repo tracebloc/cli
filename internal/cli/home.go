@@ -249,11 +249,17 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 
 	env, beat := collectProbes(bctx, envCh, beatCh)
 
-	// Whenever the probe didn't surface a name — it timed out, couldn't reach the
-	// cluster, or reached one that doesn't host this release — fall back to the
-	// remembered name. This is what keeps a provisioned machine on a *named*
-	// offline line instead of the "no environment" lie, on every degrade path.
-	if env.name == "" {
+	// The environment's display name is the remembered client name (e.g.
+	// "acme-01") — the friendly, per-client identity provisioned on this machine.
+	// Prefer it over whatever the probe surfaced, which is the Helm RELEASE name
+	// (e.g. "tracebloc" — shared across installs, not user-facing): otherwise the
+	// SAME environment reads as "tracebloc" Online/Starting but "acme-01" Offline,
+	// since the offline paths surface no name and fall back to remembered. Keep
+	// the probe's name only when nothing was remembered — a last-resort label for
+	// a release present on a machine that never cached a client. This also keeps
+	// the "provisioned ⇒ named offline" fallback (a degraded probe returns no
+	// name) living in exactly one place.
+	if remembered != "" {
 		env.name = remembered
 	}
 
