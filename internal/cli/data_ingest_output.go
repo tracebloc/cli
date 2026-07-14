@@ -3,6 +3,7 @@
 // status string and the process exit code in lockstep (kept in one file
 // with writePushJSON deliberately — they are mutation-hardened together).
 // Moved verbatim from data.go (cli#282) — behavior unchanged.
+
 package cli
 
 import (

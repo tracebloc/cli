@@ -19,6 +19,7 @@ INEFFASSIGN_VERSION ?= v0.2.0
 MISSPELL_VERSION    ?= v0.3.4
 DEADCODE_VERSION    ?= v0.48.0
 GOVULNCHECK_VERSION ?= v1.1.4
+STATICCHECK_VERSION ?= 2025.1.1
 
 # ---- top-level targets -------------------------------------------
 
@@ -90,17 +91,20 @@ cover-merge:
 	$(GO) tool cover -func=$(COVERDIR)/merged.txt | tail -1
 
 # Lint set matched to .github/workflows/build.yml's lint job: errcheck +
-# ineffassign + misspell (gofmt -s is `fmt-check`, go vet is `vet`).
-# golangci-lint-action is disabled in CI pending tracebloc/cli#6 — so
-# until it's re-enabled there, `make ci` runs the SAME standalone tools
-# the CI lint job runs, keeping the "make ci green => CI green" invariant
-# this Makefile exists to protect. `make lint-full` keeps golangci-lint
-# available for a richer local pass.
+# ineffassign + misspell + staticcheck (gofmt -s is `fmt-check`, go vet
+# is `vet`). CI runs the SAME pinned standalone tools, keeping the
+# "make ci green => CI green" invariant this Makefile exists to protect.
+# `make lint-full` keeps golangci-lint available for a richer local pass.
+#
+# staticcheck runs `-checks all,-ST1005`: ST1005 (error-string style) is
+# excluded pending a deliberate review of the ~58 customer-visible error
+# strings it flags — follow-up to tracebloc/cli#279.
 .PHONY: lint
 lint:
 	$(GO) run github.com/kisielk/errcheck@$(ERRCHECK_VERSION) ./...
 	$(GO) run github.com/gordonklaus/ineffassign@$(INEFFASSIGN_VERSION) ./...
 	$(GO) run github.com/client9/misspell/cmd/misspell@$(MISSPELL_VERSION) -error .
+	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -checks all,-ST1005 ./...
 
 # deadcode: reachability scan from the CLI entrypoint (~5s). ADVISORY for now
 # (non-blocking) — it prints unreachable funcs but never fails the build. The

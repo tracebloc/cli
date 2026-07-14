@@ -224,7 +224,7 @@ func TestIsSilentError(t *testing.T) {
 		},
 		{
 			"exitError with non-nil inner (e.g. file read failure)",
-			&exitError{code: 3, err: io_eof_or_similar()},
+			&exitError{code: 3, err: ioEOFOrSimilar()},
 			false,
 		},
 		{"plain error from cobra (e.g. unknown command)", errorString("unknown command"), false},
@@ -247,4 +247,4 @@ type errorString string
 
 func (e errorString) Error() string { return string(e) }
 
-func io_eof_or_similar() error { return errorString("read: file does not exist") }
+func ioEOFOrSimilar() error { return errorString("read: file does not exist") }
