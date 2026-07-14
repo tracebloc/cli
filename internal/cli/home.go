@@ -469,14 +469,14 @@ func realProbeEnv(ctx context.Context) envProbe {
 	if !binding.applied {
 		return envProbe{local: localNoRelease}
 	}
-	resolved, err := cluster.Load(opts)
+	resolved, err := loadClusterFn(opts)
 	if err != nil {
 		return envProbe{local: localUnreachable}
 	}
 	// Bound every API call so an unreachable API server can't hang the home
 	// screen (mirrors cluster.ClusterID's time-boxed best-effort read).
 	resolved.RestConfig.Timeout = homeProbeTimeout
-	cs, err := cluster.NewClientset(resolved)
+	cs, err := newClientsetFn(resolved)
 	if err != nil {
 		return envProbe{local: localUnreachable}
 	}
