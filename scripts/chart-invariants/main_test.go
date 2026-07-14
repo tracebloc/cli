@@ -157,6 +157,18 @@ func TestBrokenInvariants(t *testing.T) {
 			wantMark: "✖ 3.",
 		},
 		{
+			// The CLI's pickJobsManagerService selects the unprefixed
+			// "jobs-manager" Service first (by existence, ignoring ports).
+			// Here that selected Service listens on 9090 while a sibling
+			// "<release>-jobs-manager" Service exposes 8080. An "any Service
+			// exposes 8080" gate would wrongly pass; the gate must fail
+			// because the CLI would port-forward to the wrong target on 8080.
+			name:     "selected service lacks 8080 though a sibling has it",
+			old:      "  name: jobs-manager\n  namespace: tracebloc\nspec:\n  ports:\n    - name: http\n      port: 8080\n      targetPort: 8080",
+			new:      "  name: jobs-manager\n  namespace: tracebloc\nspec:\n  ports:\n    - name: http\n      port: 9090\n      targetPort: 9090\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: tracebloc-jobs-manager\n  namespace: tracebloc\nspec:\n  ports:\n    - name: http\n      port: 8080\n      targetPort: 8080",
+			wantMark: "✖ 3.",
+		},
+		{
 			name:     "pvc renamed",
 			old:      "name: client-pvc\n  namespace: tracebloc",
 			new:      "name: client-data\n  namespace: tracebloc",

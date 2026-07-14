@@ -258,7 +258,15 @@ func (c *checker) checkDeploymentName() {
 	c.fail(n, "jobs-manager Deployment named %q — the CLI only tolerates %q or \"jobs-manager\"", got, c.release+"-jobs-manager")
 }
 
-// 3. Service: one of the names pickJobsManagerService probes, with port 8080.
+// 3. Service: the one pickJobsManagerService actually selects, with port 8080.
+//
+// pickJobsManagerService (internal/cluster/discover.go) probes candidate names
+// in precedence order — unprefixed "jobs-manager" first, then
+// "<release>-jobs-manager" — and returns the first that EXISTS, regardless of
+// its ports. So the gate must assert that *the Service the CLI selects* exposes
+// 8080, not merely that some matching Service does: with both Services rendered
+// but only the non-selected one listening on 8080, an "any Service" check would
+// pass while the CLI port-forwards to the wrong target on 8080.
 func (c *checker) checkService() {
 	const n = 3
 	svcs := c.find("Service", "jobs-manager", c.release+"-jobs-manager")
@@ -266,15 +274,27 @@ func (c *checker) checkService() {
 		c.fail(n, "no Service named \"jobs-manager\" or %q — pickJobsManagerService finds nothing to port-forward to", c.release+"-jobs-manager")
 		return
 	}
-	for _, s := range svcs {
-		for _, p := range digList(s, "spec", "ports") {
-			if port, _ := dig(p, "port").(int); port == 8080 {
-				c.ok(n, "Service %q exposes port 8080 (jobsManagerPort — the CLI's port-forward + POST target)", name(s))
-				return
+	// Mirror pickJobsManagerService's precedence: unprefixed name wins if present.
+	selected := svcs[0]
+	for _, want := range []string{"jobs-manager", c.release + "-jobs-manager"} {
+		found := false
+		for _, s := range svcs {
+			if name(s) == want {
+				selected, found = s, true
+				break
 			}
 		}
+		if found {
+			break
+		}
 	}
-	c.fail(n, "Service %q exists but has no port 8080 — the CLI hardcodes jobsManagerPort=8080", name(svcs[0]))
+	for _, p := range digList(selected, "spec", "ports") {
+		if port, _ := dig(p, "port").(int); port == 8080 {
+			c.ok(n, "Service %q (the one pickJobsManagerService selects) exposes port 8080 (jobsManagerPort — the CLI's port-forward + POST target)", name(selected))
+			return
+		}
+	}
+	c.fail(n, "Service %q — the one the CLI selects (unprefixed-first) — has no port 8080; the CLI hardcodes jobsManagerPort=8080 and would port-forward to the wrong target", name(selected))
 }
 
 // 4. PVC "client-pvc" rendered and mounted at /data/shared by jobs-manager.
