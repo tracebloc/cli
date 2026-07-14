@@ -107,8 +107,7 @@ type homeModel struct {
 	envName    string // secure environment name, when known
 	compute    computeInfo
 	hasCompute bool
-	inv        string // invoked binary name: "tb" or "tracebloc"
-	tbTip      bool   // show the "type tb instead" tip
+	inv        string // command name to echo in examples: "tb" when a tb launcher is installed, else the invoked name
 	fullMenu   bool   // render the full command menu (an environment exists here)
 	// hasResources gates the `resources` row: shown only when a `resources`
 	// command is actually registered on the root (root.go checks the tree), so
@@ -211,7 +210,16 @@ func renderHomeScreen(ctx context.Context, p *ui.Printer, resourcesRegistered bo
 // a slow or failing probe degrades to the softer state and the screen still
 // renders.
 func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
+	// Examples echo `tb` — the canonical short launcher — whenever it's actually
+	// installed beside the CLI (the normal installed state; the installer places
+	// it), so the home screen teaches the short command directly. Fall back to the
+	// name the user invoked only when no `tb` launcher exists (e.g. a bare
+	// `go build`), so we never print a `tb` that wouldn't run. tbAvailable is a
+	// local file check (no network), safe even on the instant logged-out path.
 	inv := d.invoked()
+	if d.tbAvailable() {
+		inv = binTB
+	}
 
 	// Sign-in is a local config read (instant). When logged out we render the
 	// minimal "sign in first" screen and skip all cluster/backend I/O entirely —
@@ -299,12 +307,6 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 		}
 	}
 
-	// The tb tip only makes sense when we're showing a command menu and the user
-	// typed the long name while a real `tb` alias is installed. Probe for the
-	// alias lazily — only when it could actually be shown.
-	if m.fullMenu && inv == binTracebloc {
-		m.tbTip = d.tbAvailable()
-	}
 	return m
 }
 
@@ -715,9 +717,6 @@ func renderHome(p *ui.Printer, m homeModel) {
 	// blank so the sign-off stands alone above the prompt.
 	p.Newline()
 	p.Newline()
-	if m.tbTip {
-		p.Hintf("tip · type  tb  instead of  tracebloc — either works")
-	}
 	if m.fullMenu {
 		p.Hintf("Add --help to any command for the flags.")
 	}
