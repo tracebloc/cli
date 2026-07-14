@@ -18,11 +18,12 @@ ERRCHECK_VERSION    ?= v1.20.0
 INEFFASSIGN_VERSION ?= v0.2.0
 MISSPELL_VERSION    ?= v0.3.4
 DEADCODE_VERSION    ?= v0.48.0
+GOVULNCHECK_VERSION ?= v1.1.4
 
 # ---- top-level targets -------------------------------------------
 
 .PHONY: ci
-ci: vet test lint fmt-check schema-check deadcode
+ci: vet test lint fmt-check schema-check vulncheck deadcode
 	@echo "==> ci: all green"
 
 .PHONY: build
@@ -112,6 +113,15 @@ lint:
 deadcode:
 	@echo "==> deadcode (advisory): unreachable funcs from ./cmd/tracebloc"
 	@$(GO) run golang.org/x/tools/cmd/deadcode@$(DEADCODE_VERSION) ./cmd/tracebloc || true
+
+# vulncheck: govulncheck reachability scan for known CVEs (stdlib + deps).
+# BLOCKING — this is a customer-installed binary; v0.8.0 shipped with 6
+# reachable vulns before this gate existed (#276). Mirrors the govulncheck
+# job in build.yml (PR gate) and vulncheck.yml (weekly cron on develop).
+# Needs network for the vuln DB (https://vuln.go.dev), like schema-check.
+.PHONY: vulncheck
+vulncheck:
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 .PHONY: lint-full
 lint-full:
