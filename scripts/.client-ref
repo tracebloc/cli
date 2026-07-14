@@ -1,0 +1,20 @@
+# Pinned tracebloc/client commit the chart-invariant drift gate renders
+# (.github/workflows/chart-drift.yml). CI renders the chart at THIS ref, not a
+# floating branch — so an unrelated chart commit can't red every open CLI PR;
+# adopting upstream chart changes is a deliberate SHA bump, confronted together
+# with the CLI-side constants they may break (same pattern as
+# scripts/.data-ingestors-ref, backend#1009; gate: cli#290).
+#
+# To adopt upstream: bump this SHA, then re-run the gate locally —
+#   helm template tracebloc <client>/client -n tracebloc \
+#     -f <client>/client/ci/bm-values.yaml \
+#     | go run ./scripts/chart-invariants
+# — and fix any CLI-side constant (internal/cluster, internal/doctor,
+# internal/submit) the render breaks, in the same PR as the bump.
+#
+# Format: the first non-comment, non-blank line is the ref (a full commit SHA
+# preferred; a branch name works but reintroduces floating drift).
+#
+# CURRENT PIN: client develop HEAD at gate introduction (cli#290) —
+# "feat(installer): first-time install run-through (#341)".
+ca9a3352f3b1a1a9135c196dcbb694ce239be1fe

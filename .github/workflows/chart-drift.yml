@@ -1,0 +1,102 @@
+name: Chart drift (cross-repo)
+
+# The CLI hardcodes 8 invariants about the tracebloc/client chart — discovery
+# labels + Deployment name forms, the jobs-manager Service on 8080, the
+# client-pvc mount at /data/shared, the ingestion-authz ConfigMap + "ingestor"
+# SA fallback, the INGESTOR_IMAGE_DIGEST env, the requests-proxy Deployment,
+# and the /internal/submit-ingestion-run port. A chart rename ships green in
+# BOTH repos and breaks discovery/doctor/ingest in the field (cli#290).
+#
+# This gate renders the chart at the PINNED ref in scripts/.client-ref (same
+# pattern as build.yml's schema-drift job with scripts/.data-ingestors-ref:
+# pin, don't float, so an unrelated upstream commit can't red every open CLI
+# PR) and asserts every invariant via scripts/chart-invariants. The client
+# repo guards the same contract at the source on its own PRs
+# (scripts/tests/check-drift.sh) — this side catches a CLI-side constant
+# change, and the weekly run catches a pin gone stale enough to matter.
+#
+# tracebloc/client is public, so the checkout needs no token (same as
+# install-path-persist's cross-repo checkout, PR #62). If the client repo
+# ever goes private, add a read token to the checkout below.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1" # weekly Monday, offset from e2e (03:00) + path-persist (04:00)
+  workflow_dispatch:
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - "internal/cluster/**"
+      - "internal/doctor/**"
+      - "scripts/.client-ref"
+      - "scripts/chart-invariants/**"
+      - ".github/workflows/chart-drift.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  chart-invariants:
+    timeout-minutes: 10
+    name: Chart-invariant gate (pinned client ref)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this CLI ref
+        uses: actions/checkout@v4
+        with:
+          path: cli
+
+      - name: Resolve the pinned client ref
+        id: pin
+        # First non-comment, non-blank line of scripts/.client-ref — the same
+        # convention scripts/sync-schema.sh uses for .data-ingestors-ref. Shape
+        # is validated (SHA/branch/tag characters only, no "..") before it is
+        # handed to the checkout action.
+        run: |
+          ref="$(grep -vE '^[[:space:]]*(#|$)' cli/scripts/.client-ref | head -1 | tr -d '[:space:]')"
+          if [ -z "$ref" ]; then
+            echo "::error file=scripts/.client-ref::no ref found — the first non-comment line must be a commit SHA"
+            exit 1
+          fi
+          if ! printf '%s' "$ref" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || printf '%s' "$ref" | grep -q '\.\.'; then
+            echo "::error file=scripts/.client-ref::invalid ref shape: $ref"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tracebloc/client @ pinned ref
+        uses: actions/checkout@v4
+        with:
+          repository: tracebloc/client
+          ref: ${{ steps.pin.outputs.ref }}
+          path: client
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+          cache: true
+          cache-dependency-path: cli/go.sum
+
+      - name: Set up Helm
+        # Pinned to the same version the client repo's own drift-checks job
+        # uses, so both sides assert against an identical render.
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Render the chart
+        # The chart's values.schema.json rejects a bare-defaults render on
+        # purpose (clientId/clientPassword are required), so render with the
+        # same CI values file the client repo's check-drift.sh uses — dummy
+        # creds + platform bits only; every invariant object is unaffected.
+        env:
+          CLIENT_REF: ${{ steps.pin.outputs.ref }}
+        run: |
+          helm template tracebloc client/client -n tracebloc \
+            -f client/client/ci/bm-values.yaml > rendered.yaml
+          echo "rendered $(grep -c '^kind:' rendered.yaml) objects @ $CLIENT_REF"
+
+      - name: Assert the 8 CLI-assumed chart invariants
+        working-directory: cli
+        run: go run ./scripts/chart-invariants -release tracebloc -namespace tracebloc ../rendered.yaml
