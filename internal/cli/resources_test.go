@@ -114,6 +114,35 @@ func TestRenderResources_GPUSurfaced(t *testing.T) {
 	}
 }
 
+// TestRenderResources_PhantomGPUSuppressed: the chart stamps
+// GPU_LIMITS=nvidia.com/gpu=1 as literal env even on CPU-only hosts. On a node
+// that exposes NO GPU, the per-run ceiling must NOT advertise a GPU — otherwise
+// the view contradicts its own "gpu: none detected" detail. Mirrors the set
+// path's phantom-GPU normalization (Bugbot #241). Fails before the fix (the
+// training line prints "1 GPU" on a GPU-less machine).
+func TestRenderResources_PhantomGPUSuppressed(t *testing.T) {
+	cs := fake.NewClientset(
+		resNode("n1", "8", "32Gi"), // no GPU on the node
+		resJMDeploy("tb", map[string]string{"RESOURCE_LIMITS": "cpu=4,memory=16Gi", "GPU_LIMITS": "nvidia.com/gpu=1"}),
+	)
+	var buf bytes.Buffer
+	if err := renderResources(context.Background(), ui.New(&buf, ui.WithColor(false), ui.WithVerbose(true)), resTarget(cs)); err != nil {
+		t.Fatalf("renderResources: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "GPU") && !strings.Contains(out, "none detected") {
+		t.Fatalf("unexpected GPU vocabulary on a GPU-less machine:\n%s", out)
+	}
+	// The per-run ceiling line must not carry a GPU clause.
+	if strings.Contains(out, "· 1 GPU") {
+		t.Errorf("phantom GPU must be suppressed on a GPU-less machine:\n%s", out)
+	}
+	// And the honest detail must still render (no contradiction).
+	if !strings.Contains(out, "none detected") {
+		t.Errorf("verbose view should report gpu: none detected:\n%s", out)
+	}
+}
+
 // TestRenderResources_NodeListErrorIsNotFatal: even when node capacity can't be
 // read, the training ceiling still renders and the machine line says so.
 func TestRenderResources_VerboseShowsRawEnv(t *testing.T) {

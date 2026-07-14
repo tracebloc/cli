@@ -114,6 +114,17 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 	env := resources.JobsManagerEnv(ctx, cs, resolved.Namespace, release.ReleaseName)
 	train := resources.ParseTraining(env)
 
+	// The chart stamps GPU_REQUESTS/GPU_LIMITS=nvidia.com/gpu=1 as literal env on
+	// every install — even CPU-only hosts — so ParseTraining reports a phantom
+	// HasGPU=true. When we've confirmed the node exposes no GPU, drop it so the
+	// per-run line doesn't advertise a GPU the machine can't provide (and doesn't
+	// contradict the "gpu: none detected" detail below). Mirrors the set path's
+	// phantom-GPU normalization (Bugbot #241). A node-read failure leaves it as-is
+	// (we can't confirm absence — the capacity line already says "unavailable").
+	if nodeErr == nil && len(machine.GPU) == 0 {
+		train.HasGPU = false
+	}
+
 	p.Section("This machine")
 	if nodeErr != nil {
 		p.Field("capacity", "unavailable")
