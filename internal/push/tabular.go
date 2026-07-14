@@ -208,8 +208,8 @@ func DiscoverTabular(rootDir string) (*LocalLayout, error) {
 	if err := rejectSymlink(info, csvName); err != nil {
 		return nil, err
 	}
-	if info.Size() > MaxSingleFileBytes {
-		return nil, sizeError(csvName, info.Size(), MaxSingleFileBytes)
+	if err := checkFileSize(csvName, info.Size()); err != nil {
+		return nil, err
 	}
 
 	layout := &LocalLayout{Root: root, LabelsCSV: csvPath, TotalBytes: info.Size()}
