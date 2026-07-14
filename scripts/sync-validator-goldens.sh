@@ -11,11 +11,26 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 GOLDENS="internal/push/testdata/parity/goldens.json"
 PYTHON="${PYTHON:-python3}"
+# --check exit codes are a contract consumers rely on to tell a real drift
+# apart from a broken harness (the HEAD-drift canary must NOT report an infra
+# failure as a verdict/value drift):
+#   0  in sync
+#   2  HARNESS ERROR — could not regenerate (deps / DATA_INGESTORS_DIR /
+#      generator crash); parity was NEVER evaluated. Not drift.
+#   3  DRIFT — the ingestor's verdicts or read-path VALUES changed.
 if [[ "${1:-}" == "--check" ]]; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   cp "$GOLDENS" "$tmp/committed.json"
-  "$PYTHON" scripts/gen-validator-goldens.py >/dev/null
+  # Regenerating from the REAL validators is the HARNESS step. A failure here
+  # means parity was never evaluated — surface it as the reserved harness code,
+  # not as drift. (The generator writes GOLDENS in place, so restore first.)
+  if ! "$PYTHON" scripts/gen-validator-goldens.py >/dev/null; then
+    cp "$tmp/committed.json" "$GOLDENS"   # restore — check must not mutate
+    echo "HARNESS ERROR: could not regenerate goldens (deps / DATA_INGESTORS_DIR /" >&2
+    echo "generator crash) — parity was NOT evaluated. This is not drift." >&2
+    exit 2
+  fi
   # Compare VERDICTS only — error text may drift harmlessly (and embeds
   # fixture paths); verdicts may not. VALUE-level goldens (resolved label +
   # row count + class set) carry no paths, so compare them too — a value-only
@@ -32,7 +47,7 @@ sys.exit(0 if view(a)==view(b) else 1)
     echo "DRIFT: the ingestor's validator verdicts or read-path VALUES changed. Re-run" >&2
     echo "the generator, commit the new goldens, and update cases.json (+ the Go preview)" >&2
     echo "consciously." >&2
-    exit 1
+    exit 3
   fi
   cp "$tmp/committed.json" "$GOLDENS"   # keep the committed copy (paths etc. unchanged)
   echo "validator goldens in sync"
