@@ -166,8 +166,8 @@ func Discover(rootDir string) (*LocalLayout, error) {
 				"CSV file holding the image_id,label rows.",
 			labelsPath)
 	}
-	if labelsStat.Size() > MaxSingleFileBytes {
-		return nil, sizeError("labels.csv", labelsStat.Size(), MaxSingleFileBytes)
+	if err := checkFileSize("labels.csv", labelsStat.Size()); err != nil {
+		return nil, err
 	}
 	layout.LabelsCSV = labelsPath
 	layout.TotalBytes += labelsStat.Size()
@@ -235,9 +235,8 @@ func Discover(rootDir string) (*LocalLayout, error) {
 		if err := rejectSymlink(info, filepath.Join("images", entry.Name())); err != nil {
 			return nil, err
 		}
-		if info.Size() > MaxSingleFileBytes {
-			return nil, sizeError(filepath.Join("images", entry.Name()),
-				info.Size(), MaxSingleFileBytes)
+		if err := checkFileSize(filepath.Join("images", entry.Name()), info.Size()); err != nil {
+			return nil, err
 		}
 		layout.Images = append(layout.Images, filepath.Join(imagesDir, entry.Name()))
 		layout.TotalBytes += info.Size()
@@ -320,8 +319,8 @@ func rejectSymlink(info os.FileInfo, relPath string) error {
 
 // checkFileSize returns a sizeError when size exceeds the single-file cap
 // (MaxSingleFileBytes), else nil. It centralizes the identical
-// `size > MaxSingleFileBytes` guard that the stream, tabular, and text paths
-// each repeated, so the boundary lives in exactly one place — and can be
+// `size > MaxSingleFileBytes` guard that the image-layout, stream, tabular, and
+// text paths each repeated, so the boundary lives in exactly one place — and can be
 // asserted at the exact cap in a unit test without materializing a
 // MaxSingleFileBytes-sized (500 MB) fixture. The cap is `>` not `>=`: a file of
 // exactly MaxSingleFileBytes is allowed.
