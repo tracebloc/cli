@@ -672,6 +672,23 @@ func TestSanitizeInvoked(t *testing.T) {
 // (not hand-typed) at the same width the renderer uses, so the only thing under
 // test is that the renderer emits this exact sequence. Any drift in spacing,
 // copy, glyphs, or blank-line count fails here.
+// TestRenderHome_EmptyEnvNameNoEmptyQuotes: a provisioned machine can reach an
+// offline (or degraded) state with no cached display name — env.name is "". The
+// env line must render a clean nameless "Secure environment · …" rather than an
+// empty-quoted `Secure environment "" · …`. Fails before the fix (%q on an empty
+// name). Covers every named state, since any could carry an empty name defensively.
+func TestRenderHome_EmptyEnvNameNoEmptyQuotes(t *testing.T) {
+	for _, st := range []homeState{homeOnline, homeRunning, homeStarting, homeOffline} {
+		out := renderToString(homeModel{state: st, email: "a@b.io", envName: "", inv: binTracebloc, fullMenu: true})
+		if strings.Contains(out, `environment ""`) {
+			t.Errorf("state %d rendered an empty-quoted env name:\n%s", st, out)
+		}
+		if !strings.Contains(out, "Secure environment ·") {
+			t.Errorf("state %d should render a nameless 'Secure environment ·' line:\n%s", st, out)
+		}
+	}
+}
+
 func TestRenderHome_MatchesLockedDemo(t *testing.T) {
 	// The locked example: signed in, Online, examples rendered in `tb` (a tb
 	// launcher is installed beside the CLI), and a resources command registered —
