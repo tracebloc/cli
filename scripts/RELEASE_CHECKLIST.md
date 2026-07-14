@@ -5,6 +5,15 @@ triggers it. This document covers the per-release manual steps that
 either ARE or AREN'T automated, so the on-call engineer doesn't
 have to reverse-engineer the surface area on release day.
 
+## Release policy
+
+- **Trigger:** cut a release when a customer-visible feature merges
+  to `develop`, or weekly if anything customer-visible is sitting
+  unreleased — whichever comes first. Don't let `develop` drift
+  releases behind (the v0.8 gap reached 46 unreleased commits).
+- **Owner:** the DevEx squad (role, not a person) cuts the tag and
+  walks this checklist.
+
 ## What runs automatically on `git push origin v0.1.0`
 
 1. `.github/workflows/release.yml` fires.
@@ -31,10 +40,10 @@ The release-cutter runs these on tag day.
 
 ### 1. Pre-flight
 
-- [ ] All v0.1 phase tickets closed (`#147-#153`)
+- [ ] No release-blocking tickets open on the milestone
 - [ ] `develop` is green on CI + Bugbot
 - [ ] Local smoke: `go test -race ./...` passes
-- [ ] Real EKS smoke: `tracebloc dataset push ./cats-dogs ...`
+- [ ] Real EKS smoke: `tracebloc data ingest ./cats-dogs ...`
       end-to-end reports the expected row count
 
 ### 2. Tag + push
