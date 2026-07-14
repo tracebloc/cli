@@ -78,3 +78,30 @@ Every new subcommand needs at least:
 - Snapshot-style tests for output formats where the format is part of the contract (e.g. `--output-json`)
 
 See `internal/cli/version_test.go` for the pattern.
+
+### Test seams
+
+Packages stub their I/O boundaries through package-level function variables (`watchJobFn`, `newAPIClient`, `helm.Runner`, …). To swap one in a test, use the shared helper instead of a hand-rolled save/stub/restore block:
+
+```go
+import "github.com/tracebloc/cli/internal/testutil"
+
+testutil.SwapSeam(t, &watchJobFn, func(...) (*WatchResult, error) {
+    return wr, nil
+})
+```
+
+`SwapSeam` sets the stub and restores the original via `t.Cleanup` (LIFO, so nested swaps unwind correctly). It's generic — non-function seams like timeouts work too. `internal/testutil` is test-support only: production code must never import it.
+
+## Mutation testing
+
+Coverage says a line *ran*; mutation testing says a test would *fail* if the line's logic flipped. We use [gremlins](https://github.com/go-gremlins/gremlins) as an **advisory, on-demand** check — it never gates a merge.
+
+**The ritual:**
+
+1. Trigger the [`Mutation (gremlins)` workflow](../../actions/workflows/mutation.yml) via *Run workflow*, giving it **one package per run** (e.g. `internal/push`). Whole-module runs take hours and produce an untriageable wall of survivors. Locally: `go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.5.0 && gremlins unleash ./internal/push --timeout-coefficient 3`.
+2. Read the run's summary: every `LIVED` mutant is a logic flip no test catches. (`TIMED OUT` usually means the timeout coefficient is too tight — re-run with a higher `timeout_coefficient` input before treating it as signal.)
+3. Triage each survivor. Not every survivor matters: mutants in log strings, cosmetic branches, or defensive checks that are structurally unreachable are noise — note and skip them. Survivors in validation boundaries, error mapping, or anything a customer's data flows through are real gaps.
+4. File one issue per real gap, titled `test(<pkg>): pin <behavior> (mutation survivor)`, quoting the gremlins line (mutant type + file:line) and what behavior the missing test must pin. That issue then flows through the kanban like any other test ticket — #262, #263, #264 are the pattern.
+
+Survivors are *findings to triage*, not build failures — the workflow stays green even when mutants live, on purpose.
