@@ -107,17 +107,15 @@ lint:
 	$(GO) run github.com/client9/misspell/cmd/misspell@$(MISSPELL_VERSION) -error .
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -checks all,-ST1005 ./...
 
-# deadcode: reachability scan from the CLI entrypoint (~5s). ADVISORY for now
-# (non-blocking) — it prints unreachable funcs but never fails the build. The
-# module still carries pre-existing dead-ish funcs that are unsafe to delete
-# blindly: Stringer methods (Status.String, JobOutcome.String) reached only via
-# fmt reflection that static analysis can't see, plus test-only parity harnesses
-# (ReadLabelValues, inferColumnType — di#349). Flip to blocking once that
-# backlog is cleared. Tracked in tracebloc/cli#6 / #127.
+# deadcode: BLOCKING reachability scan from the CLI entrypoint (~5s). The four
+# legit unreachables — Stringer methods (Status.String, JobOutcome.String)
+# reached only via fmt reflection that static analysis can't see, plus the
+# di#349 test-only parity harnesses (ReadLabelValues, inferColumnType) — are
+# declared in scripts/deadcode-allowlist.txt with reasons. Anything else
+# unreachable fails the build (#281 flipped this from advisory).
 .PHONY: deadcode
 deadcode:
-	@echo "==> deadcode (advisory): unreachable funcs from ./cmd/tracebloc"
-	@$(GO) run golang.org/x/tools/cmd/deadcode@$(DEADCODE_VERSION) ./cmd/tracebloc || true
+	@DEADCODE_VERSION=$(DEADCODE_VERSION) ./scripts/deadcode-check.sh
 
 # vulncheck: govulncheck reachability scan for known CVEs (stdlib + deps).
 # BLOCKING — this is a customer-installed binary; v0.8.0 shipped with 6
