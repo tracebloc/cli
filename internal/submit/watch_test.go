@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/tracebloc/cli/internal/testutil"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -424,9 +425,7 @@ func TestWaitForJobPod_SameSecondTiePrefersLive(t *testing.T) {
 // WatchJob must fall back to the Pod phase and report Succeeded rather than
 // Unknown — which the orchestrator maps to a false exit 9. #219.
 func TestWatchJob_UnknownJobFallsBackToPodPhase(t *testing.T) {
-	prev := finalJobStatusTimeout
-	finalJobStatusTimeout = 150 * time.Millisecond
-	defer func() { finalJobStatusTimeout = prev }()
+	testutil.SwapSeam(t, &finalJobStatusTimeout, 150*time.Millisecond)
 
 	cs := fake.NewClientset(
 		jobPod("ingestor-fast", "ingestor", corev1.PodSucceeded),
@@ -483,9 +482,7 @@ func TestMostRecentUsefulPod(t *testing.T) {
 // classify off a stale Failed Pod. With an older Failed Pod and a newer
 // Succeeded one and no Job condition, WatchJob must report Succeeded. #224.
 func TestWatchJob_UnknownFallbackPrefersSucceededOverFailed(t *testing.T) {
-	prev := finalJobStatusTimeout
-	finalJobStatusTimeout = 150 * time.Millisecond
-	defer func() { finalJobStatusTimeout = prev }()
+	testutil.SwapSeam(t, &finalJobStatusTimeout, 150*time.Millisecond)
 
 	now := time.Now()
 	failed := jobPod("ingestor-failed", "ingestor", corev1.PodFailed)
