@@ -2,6 +2,7 @@
 // extraction (ExitCodeFromError); this file owns the naming, so a reviewer
 // reading `&exitError{code: exitTableExists, …}` never has to hold the
 // number table in their head.
+
 package cli
 
 // Exit codes are the CLI's scripting contract: customers branch on them.

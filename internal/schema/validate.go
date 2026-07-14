@@ -166,7 +166,7 @@ func (v *Validator) ValidateYAML(input []byte) (parsed map[string]any, errs []Va
 		// customer sees one line per actual problem, not an outline
 		// of the validator's traversal path.
 		var ve *jsonschema.ValidationError
-		if errors_as(err, &ve) {
+		if errorsAs(err, &ve) {
 			errs = suppressOneOfTypeNoise(flattenValidationError(ve))
 		} else {
 			// Defensive: shouldn't happen with current jsonschema/v6,
@@ -261,10 +261,10 @@ func instanceLocationToPath(loc []string) string {
 	return strings.Join(loc, ".")
 }
 
-// errors_as is a tiny inlining of errors.As to avoid the import
+// errorsAs is a tiny inlining of errors.As to avoid the import
 // just for this one site. Keeps the dependency graph of this file
 // minimal; the only third-party imports stay jsonschema + yaml.
-func errors_as(err error, target **jsonschema.ValidationError) bool {
+func errorsAs(err error, target **jsonschema.ValidationError) bool {
 	for cur := err; cur != nil; cur = unwrap(cur) {
 		if ve, ok := cur.(*jsonschema.ValidationError); ok {
 			*target = ve

@@ -139,6 +139,16 @@ jobs:
           go install github.com/client9/misspell/cmd/misspell@v0.3.4
           misspell -error .
 
+      # staticcheck (standalone, pinned): the full `all` suite minus ST1005.
+      # ST1005 (error-string style) flags ~58 customer-visible error strings
+      # that need a deliberate wording review — follow-up to #279, not a
+      # mechanical sweep. The old golangci-lint OOM story does not apply to
+      # the standalone binary: full run is ~12s wall on this module.
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          staticcheck -checks all,-ST1005 ./...
+
       # deadcode: reachability scan from the CLI entrypoint (~5s). ADVISORY
       # (continue-on-error) for now — it reports unreachable funcs but does not
       # fail the job. The module still carries pre-existing dead-ish funcs that

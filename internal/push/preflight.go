@@ -512,7 +512,7 @@ func CheckMaskPairing(images, masks []string) error {
 		strings.Join(parts, "; "))
 }
 
-// CheckMaskIdColumn previews the ingestor's MaskIdColumnValidator
+// CheckMaskIDColumn previews the ingestor's MaskIdColumnValidator
 // (validators/mask_id_validator.py, backend#816) for semantic_segmentation: the
 // manifest must DECLARE a mask_id column AND POPULATE it on every row. The
 // training client resolves each mask file from this column with no naming-
@@ -535,7 +535,7 @@ func CheckMaskPairing(images, masks []string) error {
 // {"mask_id": "VARCHAR(255)"} in spec.schema. Its csv_options dialect
 // threading is N/A here — the CLI stages comma-separated UTF-8 manifests and
 // emits no custom dialect.
-func CheckMaskIdColumn(csvPath string) error {
+func CheckMaskIDColumn(csvPath string) error {
 	const maskIDColumn = "mask_id"
 	header, err := ReadCSVHeader(csvPath)
 	if err != nil {
@@ -1591,7 +1591,7 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 			if err := CheckMaskPairing(layout.Images, layout.Sidecars["masks"]); err != nil {
 				return nil, dataProblem(err)
 			}
-			if err := CheckMaskIdColumn(layout.LabelsCSV); err != nil {
+			if err := CheckMaskIDColumn(layout.LabelsCSV); err != nil {
 				return nil, dataProblem(err)
 			}
 			missing, orphanFiles, cerr := CrossCheckLabels(layout.LabelsCSV, layout.Images, spec.Extension)

@@ -41,13 +41,13 @@ func fakeHelm(t *testing.T) *[][]string {
 }
 
 // runSet drives applyResourcesSet against a fake cluster + prompter, returning the
-// error and captured stdout.
-func runSet(t *testing.T, cs *fake.Clientset, pr prompter, req setReq) (error, string) {
+// captured stdout and the error.
+func runSet(t *testing.T, cs *fake.Clientset, pr prompter, req setReq) (string, error) {
 	t.Helper()
 	var buf bytes.Buffer
 	err := applyResourcesSet(context.Background(), ui.New(&buf, ui.WithColor(false)), pr,
 		setTarget(cs), cluster.KubeconfigOptions{Path: "/tmp/kc"}, req)
-	return err, buf.String()
+	return buf.String(), err
 }
 
 func csWith(nodeCPU, nodeMem string, env map[string]string, gpu ...string) *fake.Clientset {
@@ -87,7 +87,7 @@ func TestSet_ValidationMatrix(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cs := csWith("8", "32Gi", cur)
-			err, _ := runSet(t, cs, nil, c.req)
+			_, err := runSet(t, cs, nil, c.req)
 			if got := exitCode(t, err); got != c.want {
 				t.Errorf("exit = %d, want %d", got, c.want)
 			}
@@ -99,7 +99,7 @@ func TestSet_ValidationMatrix(t *testing.T) {
 // real max and the exact fix flag.
 func TestSet_TooHighStatesRealMaxAndFix(t *testing.T) {
 	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
-	err, out := runSet(t, cs, nil, setReq{cores: "20", coresSet: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{cores: "20", coresSet: true, yes: true})
 	if exitCode(t, err) != 2 {
 		t.Fatalf("want exit 2")
 	}
@@ -128,7 +128,7 @@ func TestSet_OffTTYWithoutFlags(t *testing.T) {
 // (mutating command needs confirmation), mirroring `delete`.
 func TestSet_OffTTYWithFlagsNeedsYes(t *testing.T) {
 	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
-	err, _ := runSet(t, cs, nil, setReq{cores: "4", coresSet: true}) // yes:false, pr:nil
+	_, err := runSet(t, cs, nil, setReq{cores: "4", coresSet: true}) // yes:false, pr:nil
 	if exitCode(t, err) != 1 {
 		t.Fatalf("want exit 1 without --yes off a terminal, got %v", err)
 	}
@@ -142,7 +142,7 @@ func TestSet_OffTTYWithFlagsNeedsYes(t *testing.T) {
 func TestSet_ApplyBuildsHelmArgsAndValues(t *testing.T) {
 	calls := fakeHelm(t)
 	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
-	err, out := runSet(t, cs, nil, setReq{cores: "4", memory: "16", coresSet: true, memSet: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{cores: "4", memory: "16", coresSet: true, memSet: true, yes: true})
 	if err != nil {
 		t.Fatalf("apply: %v\n%s", err, out)
 	}
@@ -173,7 +173,7 @@ func TestSet_ApplyBuildsHelmArgsAndValues(t *testing.T) {
 // current 8Gi memory (proven via the dry-run plan's resulting values).
 func TestSet_KeepsUnsetDimension(t *testing.T) {
 	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
-	err, out := runSet(t, cs, nil, setReq{cores: "4", coresSet: true, dryRun: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{cores: "4", coresSet: true, dryRun: true, yes: true})
 	if err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestSet_MaxUsesWholeMachineMinusOverhead(t *testing.T) {
 func TestSet_NoOpSkipsApply(t *testing.T) {
 	calls := fakeHelm(t)
 	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=4,memory=16Gi"})
-	err, out := runSet(t, cs, nil, setReq{cores: "4", memory: "16", coresSet: true, memSet: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{cores: "4", memory: "16", coresSet: true, memSet: true, yes: true})
 	if err != nil {
 		t.Fatalf("no-op: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestSet_NoOpEvenWhenCurrentNoLongerFits(t *testing.T) {
 	t.Run("flags restating the current ceiling", func(t *testing.T) {
 		calls := fakeHelm(t)
 		cs := csWith("4", "8Gi", cur)
-		err, out := runSet(t, cs, nil, setReq{cores: "8", memory: "16", coresSet: true, memSet: true, yes: true})
+		out, err := runSet(t, cs, nil, setReq{cores: "8", memory: "16", coresSet: true, memSet: true, yes: true})
 		if err != nil {
 			t.Fatalf("unchanged ceiling must be a no-op even when it no longer fits, got: %v\n%s", err, out)
 		}
@@ -250,7 +250,7 @@ func TestSet_NoOpEvenWhenCurrentNoLongerFits(t *testing.T) {
 		calls := fakeHelm(t)
 		pr := &fakePrompter{answers: map[string]string{"How much may one training run use?": "Leave it as it is"}}
 		cs := csWith("4", "8Gi", cur)
-		err, out := runSet(t, cs, pr, setReq{})
+		out, err := runSet(t, cs, pr, setReq{})
 		if err != nil {
 			t.Fatalf("leave-as-is must be a no-op even when the current ceiling no longer fits, got: %v\n%s", err, out)
 		}
@@ -266,7 +266,7 @@ func TestSet_NoOpEvenWhenCurrentNoLongerFits(t *testing.T) {
 
 	t.Run("an actual change is still fit-checked", func(t *testing.T) {
 		cs := csWith("4", "8Gi", cur)
-		err, _ := runSet(t, cs, nil, setReq{cores: "6", coresSet: true, yes: true})
+		_, err := runSet(t, cs, nil, setReq{cores: "6", coresSet: true, yes: true})
 		if got := exitCode(t, err); got != 2 {
 			t.Fatalf("a changed, unfitting request must still exit 2, got %d (%v)", got, err)
 		}
@@ -277,7 +277,7 @@ func TestSet_NoOpEvenWhenCurrentNoLongerFits(t *testing.T) {
 func TestSet_DryRunAppliesNothing(t *testing.T) {
 	calls := fakeHelm(t)
 	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
-	err, out := runSet(t, cs, nil, setReq{cores: "4", coresSet: true, dryRun: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{cores: "4", coresSet: true, dryRun: true, yes: true})
 	if err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestWizard_LeaveAsIs(t *testing.T) {
 	calls := fakeHelm(t)
 	pr := &fakePrompter{answers: map[string]string{"How much may one training run use?": "Leave it as it is"}}
 	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=4,memory=16Gi"})
-	err, out := runSet(t, cs, pr, setReq{})
+	out, err := runSet(t, cs, pr, setReq{})
 	if err != nil {
 		t.Fatalf("wizard leave: %v", err)
 	}
@@ -428,7 +428,7 @@ func (cancellingPrompter) Confirm(string, bool) (bool, error) {
 func TestWizard_CtrlCIsACleanCancel(t *testing.T) {
 	calls := fakeHelm(t)
 	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
-	err, out := runSet(t, cs, cancellingPrompter{}, setReq{})
+	out, err := runSet(t, cs, cancellingPrompter{}, setReq{})
 	if err != nil {
 		t.Fatalf("Ctrl-C during the wizard must be a clean cancel (nil error → exit 0), got: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestSet_ConfirmCtrlCIsACleanCancel(t *testing.T) {
 	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
 	// Flags set, no --yes, on a "terminal" (prompter present) → the only prompt
 	// reached is the final confirm, which the prompter interrupts.
-	err, out := runSet(t, cs, cancellingPrompter{}, setReq{cores: "4", coresSet: true})
+	out, err := runSet(t, cs, cancellingPrompter{}, setReq{cores: "4", coresSet: true})
 	if err != nil {
 		t.Fatalf("Ctrl-C at the confirm must be a clean cancel (nil error → exit 0), got: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestSet_CPUOnlyMachineIgnoresChartDefaultGPU(t *testing.T) {
 		"RESOURCE_LIMITS": "cpu=2,memory=8Gi",
 		"GPU_REQUESTS":    "nvidia.com/gpu=1",
 	})
-	err, out := runSet(t, cs, nil, setReq{cores: "4", coresSet: true, dryRun: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{cores: "4", coresSet: true, dryRun: true, yes: true})
 	if err != nil {
 		t.Fatalf("a plain --cores change on a GPU-less box must succeed, got: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestSet_PhantomGPUForcesPersistOnNoOpCeiling(t *testing.T) {
 		"GPU_REQUESTS":    "nvidia.com/gpu=1",
 		"GPU_LIMITS":      "nvidia.com/gpu=1",
 	})
-	err, out := runSet(t, cs, nil, setReq{cores: "4", memory: "16", coresSet: true, memSet: true, dryRun: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{cores: "4", memory: "16", coresSet: true, memSet: true, dryRun: true, yes: true})
 	if err != nil {
 		t.Fatalf("phantom-GPU restatement must persist the cleanup, got: %v\n%s", err, out)
 	}
@@ -550,7 +550,7 @@ func TestSet_PhantomGPUCleanupNotBlockedByFitCheck(t *testing.T) {
 		"GPU_REQUESTS":    "nvidia.com/gpu=1",
 		"GPU_LIMITS":      "nvidia.com/gpu=1",
 	})
-	err, out := runSet(t, cs, nil, setReq{cores: "8", memory: "16", coresSet: true, memSet: true, dryRun: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{cores: "8", memory: "16", coresSet: true, memSet: true, dryRun: true, yes: true})
 	if err != nil {
 		t.Fatalf("phantom cleanup on a shrunk machine must NOT be blocked by the fit-check, got: %v\n%s", err, out)
 	}
@@ -610,7 +610,7 @@ func TestSet_RemovingGPUWritesExplicitNoGPUValue(t *testing.T) {
 		"GPU_REQUESTS":    "nvidia.com/gpu=1",
 		"GPU_LIMITS":      "nvidia.com/gpu=1",
 	}, "nvidia.com/gpu", "1")
-	err, out := runSet(t, cs, nil, setReq{gpus: 0, gpusSet: true, dryRun: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{gpus: 0, gpusSet: true, dryRun: true, yes: true})
 	if err != nil {
 		t.Fatalf("removing the GPU should succeed: %v\n%s", err, out)
 	}
@@ -638,7 +638,7 @@ func TestSet_RemovingGPUEchoIsHonest(t *testing.T) {
 		"GPU_REQUESTS":    "nvidia.com/gpu=1",
 		"GPU_LIMITS":      "nvidia.com/gpu=1",
 	}, "nvidia.com/gpu", "1")
-	err, out := runSet(t, cs, nil, setReq{gpus: 0, gpusSet: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{gpus: 0, gpusSet: true, yes: true})
 	if err != nil {
 		t.Fatalf("removing the GPU should succeed: %v\n%s", err, out)
 	}
@@ -656,7 +656,7 @@ func TestSet_UntouchedGPUIsKept(t *testing.T) {
 		"GPU_REQUESTS":    "nvidia.com/gpu=1",
 		"GPU_LIMITS":      "nvidia.com/gpu=1",
 	}, "nvidia.com/gpu", "1")
-	err, out := runSet(t, cs, nil, setReq{cores: "4", coresSet: true, dryRun: true, yes: true})
+	out, err := runSet(t, cs, nil, setReq{cores: "4", coresSet: true, dryRun: true, yes: true})
 	if err != nil {
 		t.Fatalf("cpu-only change on a GPU machine should succeed: %v\n%s", err, out)
 	}

@@ -870,11 +870,11 @@ func TestCheckMaskPairing(t *testing.T) {
 	}
 }
 
-// TestCheckMaskIdColumn mirrors the ingestor's MaskIdColumnValidator
+// TestCheckMaskIDColumn mirrors the ingestor's MaskIdColumnValidator
 // (backend#816): the manifest must declare an exact-lowercase mask_id column and
 // populate it on every row (NA-sentinel-aware); a wrong-case column gets a
 // rename hint, an absent one an add hint.
-func TestCheckMaskIdColumn(t *testing.T) {
+func TestCheckMaskIDColumn(t *testing.T) {
 	cases := []struct {
 		name    string
 		csv     string
@@ -893,7 +893,7 @@ func TestCheckMaskIdColumn(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := writeTmp(t, "labels.csv", []byte(tc.csv))
-			err := CheckMaskIdColumn(p)
+			err := CheckMaskIDColumn(p)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("want nil, got %v", err)
