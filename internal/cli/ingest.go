@@ -81,7 +81,7 @@ func runIngestValidate(cmd *cobra.Command, args []string) error {
 		// exit-coded error so cobra propagates the right code via
 		// the main()-side os.Exit mapping (in a follow-up commit
 		// we'll wire main.go to inspect for these).
-		return &exitError{code: 3, err: fmt.Errorf("reading %s: %w", path, err)}
+		return &exitError{code: exitLocalEnv, err: fmt.Errorf("reading %s: %w", path, err)}
 	}
 
 	v, err := schema.NewV1Validator()
@@ -90,12 +90,12 @@ func runIngestValidate(cmd *cobra.Command, args []string) error {
 		// customer-side — we bundle the schema, so this only fires
 		// if the build is broken. Treat as exit-code-2 so CI can
 		// distinguish from a customer file problem.
-		return &exitError{code: 2, err: fmt.Errorf("loading embedded schema: %w", err)}
+		return &exitError{code: exitBadInput, err: fmt.Errorf("loading embedded schema: %w", err)}
 	}
 
 	doc, violations, parseErr := v.ValidateYAML(body)
 	if parseErr != nil {
-		return &exitError{code: 3, err: fmt.Errorf("%s: %w", path, parseErr)}
+		return &exitError{code: exitLocalEnv, err: fmt.Errorf("%s: %w", path, parseErr)}
 	}
 
 	// The jsonschema types every `schema` value as a bare string, so a bogus
@@ -126,7 +126,7 @@ func runIngestValidate(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s: schema validation failed (%d issue%s)\n",
 		path, len(violations), plural(len(violations)))
 	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), schema.FormatErrors(violations))
-	return &exitError{code: 2, err: nil} // err==nil so cobra doesn't print "Error: ..." on top
+	return &exitError{code: exitBadInput, err: nil} // err==nil so cobra doesn't print "Error: ..." on top
 }
 
 // schemaTypeViolations previews the ingestor's accepted-SQL-type check over a

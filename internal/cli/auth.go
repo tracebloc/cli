@@ -53,7 +53,7 @@ var (
 func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	cfg, err := config.Load()
 	if err != nil {
-		return &exitError{code: 1, err: err}
+		return &exitError{code: exitFailure, err: err}
 	}
 	env := api.ResolveEnv(envFlag)
 	// login PICKS the session env and persists it (cfg.CurrentEnv below), so a
@@ -61,7 +61,7 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	// unknown→prod fallback would otherwise route `--env staging` / `CLIENT_ENV=prd`
 	// to production and store it as the active env for every later command.
 	if !api.IsKnownEnv(env) {
-		return &exitError{code: 1, err: fmt.Errorf(
+		return &exitError{code: exitFailure, err: fmt.Errorf(
 			"unknown backend environment %q — valid values are dev, stg, prod (default). "+
 				"Check --env / $CLIENT_ENV", env)}
 	}
@@ -72,11 +72,11 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	if err != nil {
 		var ae *api.APIError
 		if errors.As(err, &ae) && ae.StatusCode == http.StatusNotFound {
-			return &exitError{code: 1, err: fmt.Errorf(
+			return &exitError{code: exitFailure, err: fmt.Errorf(
 				"this backend (%s) doesn't support browser login yet — the device-grant "+
 					"endpoints land in backend#835: %w", env, err)}
 		}
-		return &exitError{code: 1, err: err}
+		return &exitError{code: exitFailure, err: err}
 	}
 
 	p.Section("Sign in to tracebloc")
@@ -117,7 +117,7 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 		prof.FirstName = id.FirstName
 	}
 	if err := cfg.Save(); err != nil {
-		return &exitError{code: 1, err: err}
+		return &exitError{code: exitFailure, err: err}
 	}
 	if prof.Email != "" {
 		p.Successf("Signed in as %s.", prof.Email)
@@ -149,11 +149,11 @@ func pollForToken(ctx context.Context, p *ui.Printer, client *api.Client, dc *ap
 
 	for {
 		if !deadline.IsZero() && time.Now().After(deadline) {
-			return "", &exitError{code: 1, err: errors.New("login timed out — re-run `tracebloc login`")}
+			return "", &exitError{code: exitFailure, err: errors.New("login timed out — re-run `tracebloc login`")}
 		}
 		select {
 		case <-ctx.Done():
-			return "", &exitError{code: 130} // Ctrl-C: exit quietly (no "Error: context canceled")
+			return "", &exitError{code: exitInterrupted} // Ctrl-C: exit quietly (no "Error: context canceled")
 		case <-pollAfter(time.Duration(interval) * time.Second):
 		}
 
@@ -168,11 +168,11 @@ func pollForToken(ctx context.Context, p *ui.Printer, client *api.Client, dc *ap
 			// interval by 5 seconds for this and all subsequent polls.
 			interval += 5
 		case errors.Is(err, api.ErrExpiredToken):
-			return "", &exitError{code: 1, err: errors.New("the sign-in code expired — re-run `tracebloc login`")}
+			return "", &exitError{code: exitFailure, err: errors.New("the sign-in code expired — re-run `tracebloc login`")}
 		case errors.Is(err, api.ErrAccessDenied):
-			return "", &exitError{code: 1, err: errors.New("sign-in was denied in the browser")}
+			return "", &exitError{code: exitFailure, err: errors.New("sign-in was denied in the browser")}
 		default:
-			return "", &exitError{code: 1, err: err}
+			return "", &exitError{code: exitFailure, err: err}
 		}
 	}
 }
@@ -188,7 +188,7 @@ func newLogoutCmd() *cobra.Command {
 			p := printerFor(cmd)
 			cfg, err := config.Load()
 			if err != nil {
-				return &exitError{code: 1, err: err}
+				return &exitError{code: exitFailure, err: err}
 			}
 			if !cfg.SignedIn() {
 				p.Hintf("Already signed out.")
@@ -212,7 +212,7 @@ func newLogoutCmd() *cobra.Command {
 			// would bleed into the next sign-in on this env.
 			*prof = config.Profile{}
 			if err := cfg.Save(); err != nil {
-				return &exitError{code: 1, err: err}
+				return &exitError{code: exitFailure, err: err}
 			}
 
 			// Then revoke the token server-side so a copied/leaked credential stops
@@ -259,7 +259,7 @@ func newAuthStatusCmd() *cobra.Command {
 			}
 			cfg, err := config.Load()
 			if err != nil {
-				return &exitError{code: 1, err: err}
+				return &exitError{code: exitFailure, err: err}
 			}
 			p := printerFor(cmd)
 			if !cfg.SignedIn() {
@@ -309,7 +309,7 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 		if p.Verbose() {
 			p.Hintf("Not signed in. Run `tracebloc login`.")
 		}
-		return &exitError{code: 1}
+		return &exitError{code: exitFailure}
 	}
 	target := api.ResolveEnv(envFlag)
 	if !cfg.SignedIn() || cfg.CurrentEnv != target {
@@ -320,7 +320,7 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 				p.Hintf("Not signed in. Run `tracebloc login`.")
 			}
 		}
-		return &exitError{code: 1}
+		return &exitError{code: exitFailure}
 	}
 	// Signed in AND CurrentEnv == target: probe it. authedClient() builds the client
 	// for sessionEnv (== CurrentEnv == target) with the stored token — reuse it and
@@ -330,7 +330,7 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 		if p.Verbose() {
 			p.Hintf("Not signed in. Run `tracebloc login`.")
 		}
-		return &exitError{code: 1}
+		return &exitError{code: exitFailure}
 	}
 	if _, err := client.WhoAmI(ctx); err != nil {
 		// A 426 means the CLI is too old, not that the session is invalid — surface
@@ -338,7 +338,7 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 		// instead of the "re-login" advice, which wouldn't help.
 		var ue *api.UpgradeRequiredError
 		if errors.As(err, &ue) {
-			return &exitError{code: 1, err: ue}
+			return &exitError{code: exitFailure, err: ue}
 		}
 		if p.Verbose() {
 			// Only a 401/403 is genuinely a rejected token (where re-login helps); a
@@ -351,7 +351,7 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 				p.Hintf("Couldn't verify your session with the backend (%v).", err)
 			}
 		}
-		return &exitError{code: 1}
+		return &exitError{code: exitFailure}
 	}
 	if p.Verbose() {
 		if email := cfg.Current().Email; email != "" {

@@ -102,16 +102,16 @@ and are erased. Not undoable.`,
 func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) error {
 	client, cfg, err := authedClient()
 	if err != nil {
-		return &exitError{code: 1, err: err}
+		return &exitError{code: exitFailure, err: err}
 	}
 	prof := cfg.Current()
 	if prof.ActiveClientID == "" {
-		return &exitError{code: 1, err: errors.New(
+		return &exitError{code: exitFailure, err: errors.New(
 			"no active client on this machine — nothing to offboard")}
 	}
 	id, cerr := strconv.Atoi(prof.ActiveClientID)
 	if cerr != nil {
-		return &exitError{code: 1, err: fmt.Errorf(
+		return &exitError{code: exitFailure, err: fmt.Errorf(
 			"stored active client id %q is not numeric: %w", prof.ActiveClientID, cerr)}
 	}
 	name := prof.ActiveClientName
@@ -141,7 +141,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 			// than imply the guard was merely skipped.
 			var ue *api.UpgradeRequiredError
 			if errors.As(lerr, &ue) {
-				return &exitError{code: 1, err: lerr}
+				return &exitError{code: exitFailure, err: lerr}
 			}
 			// A 401/403 means the signed-in credential is revoked/expired — it won't
 			// recover by continuing either, and every later step (the revoke included)
@@ -150,7 +150,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 			// poll loop's auth handling in client.go.
 			var ae *api.APIError
 			if errors.As(lerr, &ae) && (ae.StatusCode == http.StatusUnauthorized || ae.StatusCode == http.StatusForbidden) {
-				return &exitError{code: 1, err: errors.New(
+				return &exitError{code: exitFailure, err: errors.New(
 					"tracebloc rejected your credentials — run `tracebloc login`, then retry `tracebloc delete`")}
 			}
 			// Other errors (5xx/429/network) are transient: warn and continue, since
@@ -162,7 +162,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 			// then continue (the revoke below will 403/404 if it isn't really ours).
 			p.Hintf("This client isn't in the signed-in account's client list — continuing; if that's unexpected, check you're logged into the right account/env.")
 		} else if st == clientStatusOnline {
-			return &exitError{code: 1, err: fmt.Errorf(
+			return &exitError{code: exitFailure, err: fmt.Errorf(
 				"client %q is still online (tracebloc reports it running) — stop its training jobs first, "+
 					"or pass --force to offboard anyway", name)}
 		}
@@ -173,7 +173,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	// for automation.
 	if !o.yes {
 		if pr == nil {
-			return &exitError{code: 1, err: errors.New(
+			return &exitError{code: exitFailure, err: errors.New(
 				"refusing to offboard without confirmation: pass --yes, or run on a terminal to type the client name")}
 		}
 		p.Newline()
@@ -202,7 +202,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		// Mirrors the pre-offboard guard above (which treats 426 as terminal).
 		var ue *api.UpgradeRequiredError
 		if errors.As(rerr, &ue) {
-			return &exitError{code: 1, err: rerr}
+			return &exitError{code: exitFailure, err: rerr}
 		}
 		var ae *api.APIError
 		if errors.As(rerr, &ae) {
@@ -216,7 +216,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 				// the online-guard above is skipped, so DON'T silently tear the machine
 				// down while a live credential remains — fail fast and point at sign-in,
 				// mirroring the pre-offboard guard's 401 handling.
-				return &exitError{code: 1, err: errors.New(
+				return &exitError{code: exitFailure, err: errors.New(
 					"tracebloc rejected your credentials — run `tracebloc login`, then retry `tracebloc delete`")}
 			}
 		}

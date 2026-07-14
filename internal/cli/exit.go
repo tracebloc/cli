@@ -9,13 +9,13 @@ package cli
 // handlers go through the constructor.
 func ExitCodeFromError(err error) int {
 	if err == nil {
-		return 0
+		return exitOK
 	}
 	var ee *exitError
 	if asExitError(err, &ee) {
 		return ee.code
 	}
-	return 1
+	return exitFailure
 }
 
 // IsSilentError reports whether a handler-returned error wants

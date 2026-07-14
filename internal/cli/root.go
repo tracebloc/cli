@@ -168,7 +168,7 @@ func runGroup(cmd *cobra.Command, args []string) error {
 		}
 	}
 	msg += fmt.Sprintf("\n\nRun '%s --help' for the available commands.", cmd.CommandPath())
-	return &exitError{code: 1, err: errors.New(msg)}
+	return &exitError{code: exitFailure, err: errors.New(msg)}
 }
 
 // printerFor builds a ui.Printer for a command's stdout, honoring the

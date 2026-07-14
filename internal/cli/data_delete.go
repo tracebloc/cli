@@ -154,14 +154,14 @@ undone — re-ingesting the data is the only way back.`)
 	//    through to ValidateTableName's "set --name" text (that flag belongs to
 	//    `data ingest`, not here). ExactArgs(1) still accepts an explicit "".
 	if a.Table == "" {
-		return &exitError{code: 2, err: errors.New(
+		return &exitError{code: exitBadInput, err: errors.New(
 			"dataset name is required — pass it as an argument: tracebloc data delete <dataset>")}
 	}
 
 	// 1. Validate the name before we build any PVC path from it
 	//    (push.PlanTeardown panics on an unsafe name by design).
 	if err := push.ValidateTableName(a.Table); err != nil {
-		return &exitError{code: 2, err: fmt.Errorf("invalid table name %q: %w", a.Table, err)}
+		return &exitError{code: exitBadInput, err: fmt.Errorf("invalid table name %q: %w", a.Table, err)}
 	}
 
 	// 2. Resolve cluster + clientset (kubeconfig errors = exit 3), then
@@ -225,7 +225,7 @@ undone — re-ingesting the data is the only way back.`)
 	//    a decline still keeps the stdout-always-JSON contract.)
 	if !a.Yes {
 		if a.Prompter == nil {
-			return &exitError{code: 3, err: errors.New(
+			return &exitError{code: exitLocalEnv, err: errors.New(
 				"refusing to delete without confirmation: pass --yes or run on a terminal")}
 		}
 		p.PromptHint("This drops the table and removes the files listed above — there's no undo. Pass --yes next time to skip this prompt.")
@@ -239,7 +239,7 @@ undone — re-ingesting the data is the only way back.`)
 				}
 				return nil
 			}
-			return &exitError{code: 3, err: err}
+			return &exitError{code: exitLocalEnv, err: err}
 		}
 		if !ok {
 			p.Infof("Cancelled — nothing was deleted.")
@@ -271,12 +271,12 @@ undone — re-ingesting the data is the only way back.`)
 		// so re-running is safe; if it keeps failing, remove the leftover
 		// staging dirs on the node directly.
 		if res.DroppedTable {
-			return &exitError{code: 7, err: fmt.Errorf(
+			return &exitError{code: exitTeardownFailed, err: fmt.Errorf(
 				"teardown incomplete — the table %s.%s was dropped, but removing its files failed: %w; "+
 					"re-run `tracebloc data delete %s`, or delete the leftover staging dirs on the node",
 				plan.Database, plan.Table, err, matched)}
 		}
-		return &exitError{code: 7, err: fmt.Errorf("teardown failed: %w", err)}
+		return &exitError{code: exitTeardownFailed, err: fmt.Errorf("teardown failed: %w", err)}
 	}
 
 	p.Newline()
@@ -366,7 +366,7 @@ func writeDataDeleteErrorJSON(w io.Writer, e error, code int) {
 func resolveDeleteTarget(ctx context.Context, cs kubernetes.Interface, resolved *cluster.ResolvedConfig, requested string) (string, error) {
 	names, err := listDatasetsFn(ctx, cs, resolved.RestConfig, resolved.Namespace)
 	if err != nil {
-		return "", &exitError{code: 4, err: fmt.Errorf(
+		return "", &exitError{code: exitNoWorkspace, err: fmt.Errorf(
 			"can't confirm %q exists on this client — refusing to delete without "+
 				"confirming the target first: %w", requested, err)}
 	}
@@ -375,7 +375,7 @@ func resolveDeleteTarget(ctx context.Context, cs kubernetes.Interface, resolved 
 			return n, nil
 		}
 	}
-	return "", &exitError{code: 5, err: fmt.Errorf(
+	return "", &exitError{code: exitNoSuchDataset, err: fmt.Errorf(
 		"no dataset named %q on this client%s", requested, availableHint(names))}
 }
 
