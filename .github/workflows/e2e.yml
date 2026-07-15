@@ -58,7 +58,7 @@ jobs:
       # kubeconfig resolution. kind ships a default StorageClass
       # (local-path), so the test's PVC binds.
       - name: Create kind cluster
-        uses: helm/kind-action@v1.10.0
+        uses: helm/kind-action@v1.14.0
 
       # Run the unit suite + the integration suite each under coverage, then merge
       # them (go tool covdata). The merge credits the real-cluster I/O seams —
