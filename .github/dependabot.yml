@@ -13,11 +13,19 @@
 #
 # Org-wide rollout beyond backend + cli is an open decision — flagged
 # to @saadqbal on the PR that added this file.
+#
+# target-branch is "develop", NOT the default (main): all work in this
+# repo flows feature → develop → main (promote PRs). Dependabot defaults
+# to the repo default branch (main); left unset, bumps landed straight on
+# main, bypassing develop and regressing on the next promote (the develop
+# side has the older deps). Point them at develop so they ride the normal
+# review + promote path.
 
 version: 2
 updates:
   - package-ecosystem: "gomod"
     directory: "/"
+    target-branch: "develop"
     schedule:
       interval: "weekly"
     labels:
@@ -34,6 +42,7 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "develop"
     schedule:
       interval: "monthly"
     labels:
