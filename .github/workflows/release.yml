@@ -153,7 +153,7 @@ jobs:
           cat "$BIN_NAME.sha256"
 
       - name: Upload per-matrix artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/
