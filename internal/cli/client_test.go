@@ -1335,6 +1335,29 @@ func TestClientStatus_WaitFailsFastOnMissingClient(t *testing.T) {
 	}
 }
 
+// TestClientStatus_WaitFailsFastOnNonNumericID (Bugbot, #338 follow-up): a
+// corrupt (non-numeric) active client id can never match a backend client, so
+// --wait must fail fast on a missing client rather than retry a permanent parse
+// error to the timeout. No backend call is expected (the id never parses).
+func TestClientStatus_WaitFailsFastOnNonNumericID(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no backend call expected for a non-numeric id, got %s %s", r.Method, r.URL.Path)
+	})
+	setActiveClientID(t, "not-a-number")
+	// Long timeout: the test would hang if a non-numeric id were treated as a
+	// transient error instead of a missing client.
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, 10*time.Minute)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err != nil && strings.Contains(err.Error(), "timed out") {
+		t.Errorf("a non-numeric id must fail fast, not time out: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "isn't in your account") {
+		t.Errorf("want a missing-client error, got: %v", err)
+	}
+}
+
 // TestClientStatus_WaitTimeoutSurfacesListError (Bugbot #146-F): when every
 // status check fails, the timeout message must name the real error, not a bare
 // "unreachable". A 1ns timeout means the deadline passes on the first failure.

@@ -873,7 +873,13 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 func lookupClientStatus(ctx context.Context, client *api.Client, active string) (status int, found bool, err error) {
 	id, err := strconv.Atoi(active)
 	if err != nil {
-		return 0, false, fmt.Errorf("active client id %q is not numeric: %w", active, err)
+		// A non-numeric active id can never match a backend client, so report it
+		// as not-found — exactly what the old ListClients+match path did — rather
+		// than a permanent error. A --wait loop fail-fasts on a missing client but
+		// treats errors as transient, so returning an error here would make it
+		// poll a permanent parse failure to the timeout (Bugbot: poll/retry loops
+		// must fail-fast on non-transient errors).
+		return 0, false, nil
 	}
 	c, err := client.GetClient(ctx, id)
 	if err != nil {
