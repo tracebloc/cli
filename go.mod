@@ -18,7 +18,7 @@ require (
 	github.com/fatih/color v1.19.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/schollz/progressbar/v3 v3.19.0
-	github.com/spf13/cobra v1.8.1
+	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.45.0
 	golang.org/x/text v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
