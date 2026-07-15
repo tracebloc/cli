@@ -67,7 +67,7 @@ func DiscoverObjectDetection(rootDir string) (*LocalLayout, error) {
 // sidecar walker, so the existing tar/stream machinery stages masks under
 // "masks/". The images↔masks pairing (by the `_mask` filename suffix) and the
 // mask_id link-column contract are previewed in preflight (CheckMaskPairing,
-// CheckMaskIdColumn), mirroring the ingestor's FilePairingValidator +
+// CheckMaskIDColumn), mirroring the ingestor's FilePairingValidator +
 // MaskIdColumnValidator (modalities/validators.py, backend#816).
 func DiscoverSemanticSegmentation(rootDir string) (*LocalLayout, error) {
 	layout, err := Discover(rootDir) // labels.csv + images/ (+ caps + symlink guards)

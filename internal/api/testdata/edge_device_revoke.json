@@ -1,0 +1,9 @@
+{
+  "body": {
+    "client_id": 1,
+    "decommissioned": false,
+    "detail": "Machine credential revoked; the client can re-enroll via the normal provisioning path.",
+    "status": "revoked"
+  },
+  "status": 200
+}

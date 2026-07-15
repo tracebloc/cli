@@ -1,0 +1,18 @@
+# Pinned tracebloc/backend commit the CLI's vendored response-shape fixtures
+# (internal/api/testdata/*.json) are synced from. CI checks against THIS ref,
+# not a floating branch — so an unrelated backend commit can't red every open
+# CLI PR (the backend#1009 pattern, same as scripts/.data-ingestors-ref).
+#
+# To adopt upstream shape changes: bump this SHA, run
+# `scripts/sync-backend-fixtures.sh`, and commit the regenerated fixtures
+# together in one deliberate PR (expect internal/api's contract test to tell
+# you if a load-bearing field stopped decoding).
+#
+# Format: the first non-comment, non-blank line is the ref (a full commit SHA
+# preferred; a branch name works but reintroduces floating drift).
+#
+# CURRENT PIN: the backend#1108 branch head — the first commit carrying
+# metaApi/tests/contracts/cli/ (backend#1106 WS-D.2 / cli#291). Bump to the
+# develop merge commit once backend#1108 lands (T16-style coupled release,
+# same as cli#216 did for the schema pin).
+370e4d65ed40c46be1d0dfd64397fcce99208b07

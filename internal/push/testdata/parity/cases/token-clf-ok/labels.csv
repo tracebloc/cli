@@ -1,0 +1,3 @@
+filename,label
+a.txt,B-PER O O
+b.txt,B-ORG O B-PER

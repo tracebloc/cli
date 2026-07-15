@@ -229,6 +229,11 @@ func CheckHasDataRows(path string) error {
 // minW/minH is the minimum-size floor (#348), mirroring the ingestor's
 // _meets_min_size: an image is too small when EITHER side is below the
 // floor; an image exactly at the floor passes. 0/0 disables the floor.
+// Since data-ingestors #365 (in the ≥0.7.0 pin) the upstream validator also
+// validates the floor VALUES at construction — each side must be a positive
+// integer or the run fails with a config error. That gate needs no preview
+// here: minW/minH arrive as ints by type, and ParseMinSize already rejects
+// non-integer / non-positive --min-size input before it reaches the spec.
 // PreflightDataset passes a non-zero floor ONLY when the customer set
 // --min-size — it does NOT default to MinImageSize, because the deployed
 // ingestor has no floor yet (see the PreflightDataset image branch), so a
@@ -507,7 +512,7 @@ func CheckMaskPairing(images, masks []string) error {
 		strings.Join(parts, "; "))
 }
 
-// CheckMaskIdColumn previews the ingestor's MaskIdColumnValidator
+// CheckMaskIDColumn previews the ingestor's MaskIdColumnValidator
 // (validators/mask_id_validator.py, backend#816) for semantic_segmentation: the
 // manifest must DECLARE a mask_id column AND POPULATE it on every row. The
 // training client resolves each mask file from this column with no naming-
@@ -515,7 +520,22 @@ func CheckMaskPairing(images, masks []string) error {
 // FileNotFoundError at train time. The name is the exact lowercase "mask_id"
 // (the stored table keys on it verbatim; a different-case column stores nothing
 // the client can read), so a case variant gets a rename hint, not a silent pass.
-func CheckMaskIdColumn(csvPath string) error {
+//
+// Audited against the MERGED di#358 validator at pin 8f89aec (cli#286): the
+// semantics match point for point — exact-lowercase header required after
+// whitespace strip (ReadCSVHeader trims like CSVIngestor's
+// columns.str.strip()); case/whitespace variants get a rename hint via the
+// same resolve rule (matchColumnIndex ≙ _match_column); the empty scan tests
+// the RAW untrimmed cell against coercion.NA_SENTINELS (naSentinels is a
+// byte-for-byte mirror) plus whitespace-only/missing — NOT trimmed-then-
+// matched, the #239/#240 padded-sentinel trap; a mid-read error fails closed;
+// and with duplicate stripped-equal headers both sides inspect the FIRST
+// exact-match column. The validator's schema-declaration half is satisfied by
+// construction on the CLI side: buildImage always declares
+// {"mask_id": "VARCHAR(255)"} in spec.schema. Its csv_options dialect
+// threading is N/A here — the CLI stages comma-separated UTF-8 manifests and
+// emits no custom dialect.
+func CheckMaskIDColumn(csvPath string) error {
 	const maskIDColumn = "mask_id"
 	header, err := ReadCSVHeader(csvPath)
 	if err != nil {
@@ -1571,7 +1591,7 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 			if err := CheckMaskPairing(layout.Images, layout.Sidecars["masks"]); err != nil {
 				return nil, dataProblem(err)
 			}
-			if err := CheckMaskIdColumn(layout.LabelsCSV); err != nil {
+			if err := CheckMaskIDColumn(layout.LabelsCSV); err != nil {
 				return nil, dataProblem(err)
 			}
 			missing, orphanFiles, cerr := CrossCheckLabels(layout.LabelsCSV, layout.Images, spec.Extension)

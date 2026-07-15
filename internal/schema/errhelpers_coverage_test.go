@@ -9,7 +9,7 @@ import (
 )
 
 // TestErrorsAsAndUnwrap covers the two tiny error-chain helpers directly: unwrap
-// (wrapping → inner, non-wrapping → nil) and errors_as walking a chain that
+// (wrapping → inner, non-wrapping → nil) and errorsAs walking a chain that
 // holds no *ValidationError (→ false), exercising the full unwrap walk to nil.
 func TestErrorsAsAndUnwrap(t *testing.T) {
 	inner := errors.New("in")
@@ -22,7 +22,7 @@ func TestErrorsAsAndUnwrap(t *testing.T) {
 
 	var target *jsonschema.ValidationError
 	chain := fmt.Errorf("a: %w", fmt.Errorf("b: %w", errors.New("c")))
-	if errors_as(chain, &target) {
-		t.Error("errors_as must be false when the chain holds no *ValidationError")
+	if errorsAs(chain, &target) {
+		t.Error("errorsAs must be false when the chain holds no *ValidationError")
 	}
 }

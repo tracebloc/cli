@@ -1,0 +1,120 @@
+name: Mutation (gremlins)
+
+# ADVISORY, manual-only mutation testing with go-gremlins (#295).
+#
+# Mutation testing answers the question coverage can't: "would the tests
+# actually FAIL if this line's logic flipped?" Several real gaps in this repo
+# were found by running gremlins by hand and pinning the survivors (#262,
+# #263, #264). This workflow formalizes that ritual:
+#
+#   - workflow_dispatch ONLY — never on PRs or pushes. Mutation runs are
+#     slow (each mutant recompiles + reruns the package tests) and their
+#     output needs human triage, so they must never gate a merge.
+#   - ONE package per run (the `package` input). Whole-module runs take
+#     hours and produce an untriageable wall of survivors.
+#   - Findings are NOT failures. A LIVED mutant means "no test would catch
+#     this logic flip" — triage it and file an issue (see CONTRIBUTING.md
+#     "Mutation testing" for the ritual: which survivors matter, which are
+#     noise, and how to write the pinning test).
+#
+# The job's conclusion only reflects tool/test health (a broken suite fails
+# the run); lived mutants never do — no --threshold-* flags are set.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package to mutate, relative to the repo root (one per run), e.g. internal/push"
+        required: true
+        default: "internal/push"
+        type: string
+      timeout_coefficient:
+        description: "gremlins --timeout-coefficient (raise if mutants report TIMED OUT instead of KILLED/LIVED)"
+        required: false
+        default: "3"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ inputs.package }}
+  cancel-in-progress: false
+
+jobs:
+  mutate:
+    timeout-minutes: 45
+    name: Mutation (${{ inputs.package }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Pinned for reproducibility, same policy as the lint tools in
+      # build.yml. v0.5.0 is the latest gremlins release.
+      - name: Install gremlins
+        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.5.0
+
+      # The inputs are typed through env vars and validated before use —
+      # never interpolate ${{ inputs.* }} straight into the script.
+      - name: Run mutation testing (advisory — lived mutants do not fail the job)
+        env:
+          PKG: ${{ inputs.package }}
+          TCOEF: ${{ inputs.timeout_coefficient }}
+        run: |
+          # The implicit default shell is `bash -e {0}` (no pipefail), so a
+          # failure in `gremlins | tee` below would otherwise be masked by
+          # tee's exit code. pipefail makes tool/test health fail the job, as
+          # this workflow's contract promises.
+          set -o pipefail
+          case "$PKG" in
+            (*[!a-zA-Z0-9/_.-]*|""|/*|*..*)
+              echo "::error::invalid package path '$PKG' (want e.g. internal/push)"; exit 1;;
+          esac
+          case "$TCOEF" in
+            (""|*[!0-9]*)
+              echo "::error::invalid timeout_coefficient '$TCOEF' (want a positive integer)"; exit 1;;
+            (*[1-9]*) ;;  # all digits with at least one non-zero -> positive
+            (*)
+              echo "::error::invalid timeout_coefficient '$TCOEF' (want a positive integer greater than 0)"; exit 1;;
+          esac
+          if [ ! -d "$PKG" ]; then
+            echo "::error::no such package directory: $PKG"; exit 1
+          fi
+          gremlins unleash "./$PKG" \
+            --timeout-coefficient "$TCOEF" \
+            --output gremlins-report.json \
+            | tee gremlins.log
+
+      - name: Summary — survivors to triage
+        if: always()
+        run: |
+          {
+            echo "## Mutation report: \`${PKG:-?}\`"
+            echo
+            echo '```'
+            grep -E "^\s+(LIVED|TIMED OUT)" gremlins.log 2>/dev/null || echo "no LIVED or TIMED OUT mutants — nothing to triage"
+            echo '```'
+            echo
+            tail -5 gremlins.log 2>/dev/null || true
+            echo
+            echo "Triage ritual: CONTRIBUTING.md > Mutation testing. Survivors worth killing become issues titled 'test(<pkg>): pin <behavior> (mutation survivor)'."
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          PKG: ${{ inputs.package }}
+
+      - name: Upload machine-readable report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gremlins-report
+          path: |
+            gremlins-report.json
+            gremlins.log
+          if-no-files-found: warn
+          retention-days: 30

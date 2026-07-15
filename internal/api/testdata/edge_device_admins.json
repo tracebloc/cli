@@ -1,0 +1,13 @@
+{
+  "body": [
+    {
+      "email": "contract-admin@contract.example",
+      "name": "Contract Admin"
+    },
+    {
+      "email": "contract-owner@contract.example",
+      "name": "Contract Owner"
+    }
+  ],
+  "status": 200
+}

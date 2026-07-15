@@ -1,0 +1,6 @@
+{
+  "body": {
+    "error": "authorization_pending"
+  },
+  "status": 400
+}

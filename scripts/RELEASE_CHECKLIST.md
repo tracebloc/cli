@@ -5,6 +5,15 @@ triggers it. This document covers the per-release manual steps that
 either ARE or AREN'T automated, so the on-call engineer doesn't
 have to reverse-engineer the surface area on release day.
 
+## Release policy
+
+- **Trigger:** cut a release when a customer-visible feature merges
+  to `develop`, or weekly if anything customer-visible is sitting
+  unreleased — whichever comes first. Don't let `develop` drift
+  releases behind (the v0.8 gap reached 46 unreleased commits).
+- **Owner:** the DevEx squad (role, not a person) cuts the tag and
+  walks this checklist.
+
 ## What runs automatically on `git push origin v0.1.0`
 
 1. `.github/workflows/release.yml` fires.
@@ -18,35 +27,12 @@ have to reverse-engineer the surface area on release day.
 6. A GitHub Release is created with the tag, auto-generated notes,
    and all artifacts attached. `prerelease=true` if the tag
    contains a `-` (e.g. `v0.1.0-rc1`).
-7. (If the `bump-homebrew-tap` job is enabled — see below)
-   the Homebrew tap formula in `tracebloc/homebrew-tap` is
-   updated with the new version + per-platform SHAs.
 
-## What needs manual setup ONCE (not per-release)
-
-These steps land outside the `tracebloc/cli` repo and are NOT
-on the per-release checklist; they're foundational.
-
-### Homebrew tap repo
-
-1. Create `tracebloc/homebrew-tap` (must use the `homebrew-`
-   prefix for `brew tap tracebloc/tap` to resolve).
-2. Add an initial `Formula/tracebloc.rb` (the release workflow
-   will overwrite this on the first tag — any valid-Ruby
-   placeholder is fine).
-3. Mint a fine-grained PAT with `Contents: read+write` on the
-   tap repo. Save as `HOMEBREW_TAP_TOKEN` repo secret on
-   `tracebloc/cli`.
-4. Flip `bump-homebrew-tap`'s `if: false` to `if: true` in
-   `release.yml`.
-
-### Vanity install URL (deferred)
-
-`install.tracebloc.io` is the eventual customer-facing URL but
-isn't on the v0.1 critical path — the GitHub Release raw URL
-(`https://github.com/tracebloc/cli/releases/latest/download/install.sh`)
-serves v0.1 customers. Migrating to the vanity URL is a v0.2
-follow-up (DNS + CNAME or Cloudflare worker).
+GitHub Releases plus the cosign-verified `install.sh` are the
+install path — a Homebrew tap and the `install.tracebloc.io`
+vanity URL were considered and dropped
+([#299](https://github.com/tracebloc/cli/issues/299); the job and
+formula template are recoverable from git history if ever needed).
 
 ## Per-release manual steps
 
@@ -54,10 +40,10 @@ The release-cutter runs these on tag day.
 
 ### 1. Pre-flight
 
-- [ ] All v0.1 phase tickets closed (`#147-#153`)
+- [ ] No release-blocking tickets open on the milestone
 - [ ] `develop` is green on CI + Bugbot
 - [ ] Local smoke: `go test -race ./...` passes
-- [ ] Real EKS smoke: `tracebloc dataset push ./cats-dogs ...`
+- [ ] Real EKS smoke: `tracebloc data ingest ./cats-dogs ...`
       end-to-end reports the expected row count
 
 ### 2. Tag + push
@@ -77,8 +63,6 @@ The workflow takes 5-10 minutes. Monitor at
 - [ ] SHA256SUMS file present
 - [ ] install.sh + install.ps1 present
 - [ ] Each binary has a `.cert` + `.sig` pair
-- [ ] (If tap is set up) the `tracebloc/homebrew-tap` repo has
-      a new commit bumping `Formula/tracebloc.rb`
 
 ### 4. Sanity-test each install path on a clean host
 
@@ -89,8 +73,6 @@ tracebloc version
 
 # macOS:
 curl -fsSL https://github.com/tracebloc/cli/releases/latest/download/install.sh | sh
-# OR (if tap is set up):
-brew install tracebloc/tap/tracebloc
 tracebloc version
 
 # Windows (PowerShell):

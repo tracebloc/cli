@@ -1,0 +1,17 @@
+<annotation>
+  <folder>images</folder>
+  <filename>a.jpg</filename>
+  <segmented>0</segmented>
+  <object>
+    <name>widget</name>
+    <pose>Unspecified</pose>
+    <truncated>0</truncated>
+    <difficult>0</difficult>
+    <bndbox>
+      <xmin>20</xmin>
+      <ymin>3</ymin>
+      <xmax>2</xmax>
+      <ymax>24</ymax>
+    </bndbox>
+  </object>
+</annotation>

@@ -65,7 +65,7 @@ func TestRegistryMirrorsLayoutContract(t *testing.T) {
 // MLM, which uses sequences/).
 // TestSemsegSidecarMirrorsContract pins the semseg sidecar facts the Go code
 // hardcodes — "masks"/pngExtensions (image_extras.go), the mask_id link column
-// (preflight.go CheckMaskIdColumn), and spec["schema"]={mask_id} (spec.go) — to
+// (preflight.go CheckMaskIDColumn), and spec["schema"]={mask_id} (spec.go) — to
 // the vendored layout contract, which the ingestor owns (RFC-0002 Principle 6).
 // If the ingestor renames the link column or changes the mask subdir/glob, this
 // fails rather than the CLI silently emitting and checking the stale name.

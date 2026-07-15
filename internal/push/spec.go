@@ -187,6 +187,14 @@ type SpecArgs struct {
 	// fall back to MinImageSize (32x32). Populated by the CLI from
 	// --min-size. Same [W, H] order as TargetSize — no swap. (Image
 	// categories only.)
+	//
+	// Value contract (data-ingestors #365, in the ≥0.7.0 pin): the ingestor's
+	// ImageResolutionValidator now rejects a min_size whose sides are not
+	// positive integers at CONSTRUCTION (a string/bool/None/non-integral
+	// float is a config error, no longer mislabeled as a corrupt image).
+	// The CLI can never emit those shapes: ParseMinSize is the equivalent
+	// gate at flag-parse time — WxH grammar, Atoi, both sides > 0 — so this
+	// field only ever carries the positive ints upstream accepts.
 	MinSize []int
 
 	// Schema is the column→SQL-type map for tabular / time-series

@@ -1,0 +1,41 @@
+# Dependabot config for tracebloc/cli — extends the org's backend-only
+# pilot (backend runs security-only updates; see tracebloc/backend
+# .github/dependabot.yml) to a second repo. Unlike backend, this repo
+# takes real VERSION updates: the CLI ships as a customer-installed
+# binary, so staying current on k8s.io/* and golang.org/x/* is a
+# security posture, not just hygiene (see #276 — six reachable vulns
+# rode a stale x/net + toolchain).
+#
+# gomod is weekly and grouped so the k8s.io/* constellation (which only
+# upgrades cleanly in lockstep) and the golang.org/x/* siblings arrive
+# as one PR each instead of a dozen singletons. github-actions is
+# monthly — workflow pins move rarely and reviews are trivial.
+#
+# Org-wide rollout beyond backend + cli is an open decision — flagged
+# to @saadqbal on the PR that added this file.
+
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "work-type:tech-debt"
+      - "dependencies"
+    groups:
+      k8s:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    labels:
+      - "work-type:tech-debt"
+      - "dependencies"

@@ -1,0 +1,296 @@
+name: data-ingestors HEAD-drift canary
+
+# Weekly advisory canary (cli#289, epic backend#1106 WS-C.4). NEVER blocking:
+# cron + manual dispatch only, no PR trigger, and the job succeeds even when
+# drift is found — the signal is a single tracking issue, not a red build.
+#
+# The pin (scripts/.data-ingestors-ref) keeps PR CI deterministic, but it also
+# means upstream can walk away from the mirror silently. This canary looks at
+# data-ingestors' develop HEAD (NOT the pin) and raises a hand when the pin has
+# gone stale in either of two ways:
+#
+#   1. GOLDENS DRIFT AT HEAD — the committed parity goldens no longer match
+#      what the REAL validators at HEAD produce (a verdict/value the CLI's
+#      preflight would disagree with once the pin is bumped).
+#   2. MIRRORED-SOURCE DRIFT — any upstream source file the CLI's preflight
+#      mirrors changed between the pin and HEAD, even if no golden flips.
+#      This catches the di#365 class: a new/extended upstream validator with
+#      no corpus case yet, invisible to the goldens check by definition.
+#
+# On either signal it opens (or comments on) ONE tracking issue, keyed by the
+# `head-drift-canary` label — never a second open issue, never a hard failure.
+# The fix is always the same playbook: bump the pin (cli#286 shape) — edit
+# scripts/.data-ingestors-ref, re-run both sync scripts, adopt semantics,
+# commit goldens in the same diff.
+#
+# Cross-repo access: data-ingestors is currently public, so the default token
+# suffices; an org secret CROSS_REPO_READ_TOKEN is preferred when present
+# (only needed if the repo ever goes private). A checkout failure reds this
+# cron run — acceptable for an advisory canary, it blocks nothing.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # weekly, Monday 06:00 UTC — after goldens-drift's 05:30
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: head-drift-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    timeout-minutes: 20
+    name: Pin vs HEAD drift (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the data-ingestors pin
+        id: pin
+        # First non-comment, non-blank line — the same rule sync-schema.sh uses.
+        run: |
+          ref="$(grep -vE '^[[:space:]]*(#|$)' scripts/.data-ingestors-ref | head -1 | tr -d '[:space:]')"
+          if [ -z "$ref" ]; then
+            echo "::error::scripts/.data-ingestors-ref contains no ref"
+            exit 1
+          fi
+          # Shape guard (mirrors chart-drift.yml): SHA / branch / tag characters
+          # only and no "..", so a malformed pin fails here with a clear error
+          # instead of an opaque failure deep in git / actions-checkout.
+          if ! printf '%s' "$ref" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || printf '%s' "$ref" | grep -q '\.\.'; then
+            echo "::error file=scripts/.data-ingestors-ref::invalid ref shape: $ref"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Select the data-ingestors read token
+        id: access
+        # data-ingestors is public today, so github.token suffices. Prefer the
+        # least-privilege CROSS_REPO_READ_TOKEN when it is set AND actually
+        # works, but a set-but-invalid PAT (expired / wrong scope) must fall back
+        # to the default token rather than red this advisory canary for an infra
+        # misconfig — the same reachability probe goldens-drift.yml uses, kept in
+        # lockstep with the checkout below via the use_pat output.
+        env:
+          CROSS_REPO_READ_TOKEN: ${{ secrets.CROSS_REPO_READ_TOKEN }}
+        run: |
+          use_pat=false
+          if [ -n "$CROSS_REPO_READ_TOKEN" ]; then
+            if git ls-remote "https://x-access-token:${CROSS_REPO_READ_TOKEN}@github.com/tracebloc/data-ingestors.git" HEAD >/dev/null 2>&1; then
+              use_pat=true
+            else
+              echo "::warning::CROSS_REPO_READ_TOKEN is set but tracebloc/data-ingestors is not readable with it (expired or wrong scope) — falling back to the default workflow token."
+            fi
+          fi
+          echo "use_pat=$use_pat" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tracebloc/data-ingestors @ develop HEAD
+        uses: actions/checkout@v4
+        with:
+          repository: tracebloc/data-ingestors
+          ref: develop
+          path: data-ingestors
+          # Full history so the pin SHA is present for the pin-vs-HEAD diff.
+          fetch-depth: 0
+          # Exactly the token the probe validated: the PAT only when use_pat
+          # confirmed it works, else the default token — so a set-but-invalid
+          # PAT falls back instead of hard-failing a checkout the public repo
+          # would otherwise allow.
+          token: ${{ steps.access.outputs.use_pat == 'true' && secrets.CROSS_REPO_READ_TOKEN || github.token }}
+
+      - name: Diff the mirrored validator surface, pin vs HEAD
+        id: srcdiff
+        env:
+          PIN: ${{ steps.pin.outputs.ref }}
+        # Content comparison via git (equivalent to hashing each file at both
+        # refs, minus the plumbing). The path list is the upstream surface
+        # internal/push + internal/schema mirror — keep it in sync with the
+        # file references in those packages' doc comments:
+        #   validators/           every preflight verdict previewed (or skipped)
+        #   modalities/           factories, specs, layout traits, link columns
+        #   utils/coercion.py     NA_SENTINELS + bool vocabulary
+        #   utils/columns.py      resolve_column (header resolve rule)
+        #   utils/constants.py    media-extension sets
+        #   utils/validators_mapping.py  which validators run per category
+        #   ingestors/preflight.py       check_csv_encoding
+        #   ingestors/csv_ingestor.py    read dialect / BOM / na_values
+        #   ingestors/record_processor.py schema-filter (kept columns)
+        #   ingestors/base.py     label resolution + options threading
+        #   file_transfer.py      _find_src / _has_extension (CrossCheckLabels)
+        #   schema_inference.py   tabular type-inference parity
+        #   database.py           table-name/identifier rules
+        #   schema/               ingest.v1.json + layout.v1.json (embedded)
+        run: |
+          cd data-ingestors
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if ! git cat-file -e "${PIN}^{commit}" 2>/dev/null; then
+            # A rewritten/garbage pin is itself report-worthy drift.
+            echo "pin_reachable=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "changed<<CHANGED_EOF"
+              echo "CHANGED_EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pin_reachable=true" >> "$GITHUB_OUTPUT"
+          changed="$(git diff --name-only "$PIN" HEAD -- \
+            tracebloc_ingestor/validators \
+            tracebloc_ingestor/modalities \
+            tracebloc_ingestor/utils/coercion.py \
+            tracebloc_ingestor/utils/columns.py \
+            tracebloc_ingestor/utils/constants.py \
+            tracebloc_ingestor/utils/validators_mapping.py \
+            tracebloc_ingestor/ingestors/preflight.py \
+            tracebloc_ingestor/ingestors/csv_ingestor.py \
+            tracebloc_ingestor/ingestors/record_processor.py \
+            tracebloc_ingestor/ingestors/base.py \
+            tracebloc_ingestor/file_transfer.py \
+            tracebloc_ingestor/schema_inference.py \
+            tracebloc_ingestor/database.py \
+            tracebloc_ingestor/schema)"
+          {
+            echo "changed<<CHANGED_EOF"
+            echo "$changed"
+            echo "CHANGED_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # matches data-ingestors' own CI
+          cache: pip
+          cache-dependency-path: data-ingestors/requirements.txt
+
+      - name: Install the ingestor's runtime dependencies
+        run: pip install -r data-ingestors/requirements.txt
+
+      - name: Goldens check against HEAD (advisory)
+        id: goldens
+        # Same harness the goldens-drift job runs against the PIN, pointed at
+        # HEAD instead. Failure here must not red the run — capture the verdict
+        # and let the reporting step raise the issue. Distinguish the script's
+        # exit codes so a HARNESS failure (deps / DATA_INGESTORS_DIR / generator
+        # crash → exit 2) is reported as "could not evaluate", NOT as a
+        # verdict/value DRIFT (exit 3): parity was never evaluated, so calling it
+        # drift would send someone down the pin-bump playbook for an infra bug.
+        env:
+          DATA_INGESTORS_DIR: ${{ github.workspace }}/data-ingestors
+        run: |
+          rc=0
+          ./scripts/sync-validator-goldens.sh --check >goldens-out.txt 2>&1 || rc=$?
+          case "$rc" in
+            0)
+              echo "drift=false"    >> "$GITHUB_OUTPUT"
+              echo "evaluated=true" >> "$GITHUB_OUTPUT"
+              echo "goldens check vs HEAD: in sync" ;;
+            3)
+              echo "drift=true"     >> "$GITHUB_OUTPUT"
+              echo "evaluated=true" >> "$GITHUB_OUTPUT"
+              echo "goldens check vs HEAD: DRIFT" ;;
+            *)
+              # Exit 2 (harness error) or any unexpected non-zero: parity was
+              # never evaluated. Not drift — surface it truthfully.
+              echo "drift=false"     >> "$GITHUB_OUTPUT"
+              echo "evaluated=false" >> "$GITHUB_OUTPUT"
+              echo "goldens check vs HEAD: HARNESS ERROR (exit $rc) — parity NOT evaluated" ;;
+          esac
+          tail -n 20 goldens-out.txt || true
+
+      - name: Open or update the tracking issue
+        if: >-
+          steps.goldens.outputs.drift == 'true' ||
+          steps.goldens.outputs.evaluated == 'false' ||
+          steps.srcdiff.outputs.changed != '' ||
+          steps.srcdiff.outputs.pin_reachable == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PIN: ${{ steps.pin.outputs.ref }}
+          HEAD_SHA: ${{ steps.srcdiff.outputs.head_sha }}
+          PIN_REACHABLE: ${{ steps.srcdiff.outputs.pin_reachable }}
+          GOLDENS_DRIFT: ${{ steps.goldens.outputs.drift }}
+          GOLDENS_EVALUATED: ${{ steps.goldens.outputs.evaluated }}
+          CHANGED: ${{ steps.srcdiff.outputs.changed }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$GOLDENS_DRIFT" = "true" ]; then
+            goldens_cell='DRIFT — verdicts/values changed'
+          elif [ "$GOLDENS_EVALUATED" = "false" ]; then
+            goldens_cell='could not evaluate — harness error (deps / DATA_INGESTORS_DIR / generator); parity NOT checked this run'
+          else
+            goldens_cell='in sync'
+          fi
+          # pin_actionable = there is a real pin/drift signal the pin-bump
+          # playbook addresses. A harness-only failure (evaluated=false with no
+          # source diff and a reachable pin) must NOT push the pin-bump path.
+          if [ "$GOLDENS_DRIFT" = "true" ] || [ -n "$CHANGED" ] || [ "$PIN_REACHABLE" = "false" ]; then
+            pin_actionable=true
+          else
+            pin_actionable=false
+          fi
+          # shellcheck disable=SC2016  # single-quoted printf formats carry markdown backticks, not expansions
+          {
+            printf '<!-- head-drift-canary -->\n'
+            printf '**Canary run:** %s\n\n' "$RUN_URL"
+            printf '| | |\n|---|---|\n'
+            printf '| pin (`scripts/.data-ingestors-ref`) | `%s` |\n' "$PIN"
+            printf '| data-ingestors develop HEAD | `%s` |\n' "$HEAD_SHA"
+            printf '| goldens check vs HEAD | %s |\n' "$goldens_cell"
+            printf '| pin reachable from HEAD | %s |\n\n' "${PIN_REACHABLE:-unknown}"
+            if [ "$PIN_REACHABLE" = "false" ]; then
+              printf '**The pinned SHA is not reachable in the upstream clone** — upstream history was rewritten or the ref file is wrong. Fix the pin first.\n\n'
+            fi
+            if [ "$GOLDENS_EVALUATED" = "false" ]; then
+              printf '**The goldens check could not run at HEAD** (harness error — missing deps, bad `DATA_INGESTORS_DIR`, or a generator crash). Parity was NOT evaluated this run, so goldens drift at HEAD is unverified — see the canary run logs. What to do is in the footer below.\n\n'
+            fi
+            if [ -n "$CHANGED" ]; then
+              printf '**Mirrored validator source files changed between pin and HEAD** (may include verdict-neutral changes with no corpus case yet — the di#365 class):\n\n```\n'
+              printf '%s\n' "$CHANGED"
+              printf '```\n\n'
+            fi
+            if [ "$pin_actionable" = "true" ]; then
+              printf '**Playbook** (pin-bump doctrine, backend#1009 / cli#286 shape): bump `scripts/.data-ingestors-ref` to the new HEAD, run `scripts/sync-schema.sh` + `scripts/sync-validator-goldens.sh`, adopt/audit the intervening upstream changes in the `internal/push` mirror, and ship the regenerated goldens in the same PR.\n\n'
+              printf '_Advisory only — this canary never blocks CI. Close this issue when the pin bump lands._\n'
+            else
+              printf '_Advisory only — this canary never blocks CI. No drift or source change this run — only the goldens harness failed to run. Fix the harness (see run logs); close this issue once the next canary run is clean. Do NOT bump the pin for this._\n'
+            fi
+          } > body.md
+          gh label create head-drift-canary --repo "$REPO" --force \
+            --description "auto-filed by head-drift-canary.yml (cli#289)" --color D93F0B
+          existing="$(gh issue list --repo "$REPO" --label head-drift-canary --state open \
+            --json number --jq '.[0].number // empty')"
+          # Title reflects the CURRENT signal; refresh it on every run so a
+          # persistent issue's title (and board grouping) never lags the latest
+          # failure mode when only the body is updated.
+          if [ "$pin_actionable" = "true" ]; then
+            title="data-ingestors HEAD has drifted from the CLI's pin (canary)"
+          else
+            title="data-ingestors HEAD-drift canary could not run (harness error)"
+          fi
+          if [ -n "$existing" ]; then
+            echo "updating existing tracking issue #$existing"
+            gh issue edit "$existing" --repo "$REPO" --title "$title"
+            gh issue comment "$existing" --repo "$REPO" --body-file body.md
+          else
+            echo "opening new tracking issue"
+            gh issue create --repo "$REPO" \
+              --title "$title" \
+              --body-file body.md \
+              --label head-drift-canary
+          fi
+
+      - name: All clear
+        if: >-
+          steps.goldens.outputs.drift != 'true' &&
+          steps.goldens.outputs.evaluated == 'true' &&
+          steps.srcdiff.outputs.changed == '' &&
+          steps.srcdiff.outputs.pin_reachable == 'true'
+        env:
+          PIN: ${{ steps.pin.outputs.ref }}
+          HEAD_SHA: ${{ steps.srcdiff.outputs.head_sha }}
+        run: |
+          echo "::notice::No HEAD drift — pin $PIN, HEAD $HEAD_SHA: goldens in sync, mirrored surface unchanged."

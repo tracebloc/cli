@@ -11,6 +11,15 @@ import (
 	"testing"
 )
 
+// isSubmitError reports whether err is a *SubmitError. Test-local
+// assertion helper (also used by submit_test.go): production code has
+// no caller, so it lives here to keep the shipped binary free of
+// test-only helpers (#281).
+func isSubmitError(err error) bool {
+	var se *SubmitError
+	return errors.As(err, &se)
+}
+
 // TestHTTPSubmitter_HappyPath: jobs-manager returns 201 with the
 // canonical body shape; client decodes correctly + surfaces all
 // three response fields.

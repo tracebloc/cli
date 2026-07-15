@@ -11,6 +11,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/tracebloc/cli/internal/testutil"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -22,11 +23,9 @@ import (
 // themselves stay covered by watch_test.go.
 func withWatchJob(t *testing.T, wr *WatchResult, watchErr error) {
 	t.Helper()
-	orig := watchJobFn
-	t.Cleanup(func() { watchJobFn = orig })
-	watchJobFn = func(context.Context, kubernetes.Interface, string, string, io.Writer, *ui.Printer) (*WatchResult, error) {
+	testutil.SwapSeam(t, &watchJobFn, func(context.Context, kubernetes.Interface, string, string, io.Writer, *ui.Printer) (*WatchResult, error) {
 		return wr, watchErr
-	}
+	})
 }
 
 // runNonDetach drives Run down the watch path (Detach:false) with the submit POST

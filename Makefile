@@ -19,11 +19,13 @@ INEFFASSIGN_VERSION ?= v0.2.0
 MISSPELL_VERSION    ?= v0.3.4
 DEADCODE_VERSION    ?= v0.48.0
 GOVULNCHECK_VERSION ?= v1.1.4
+STATICCHECK_VERSION ?= 2025.1.1
+GOIMPORTS_VERSION   ?= v0.48.0
 
 # ---- top-level targets -------------------------------------------
 
 .PHONY: ci
-ci: vet test lint fmt-check schema-check vulncheck deadcode
+ci: vet test lint fmt-check schema-check vulncheck file-budget deadcode
 	@echo "==> ci: all green"
 
 .PHONY: build
@@ -90,29 +92,30 @@ cover-merge:
 	$(GO) tool cover -func=$(COVERDIR)/merged.txt | tail -1
 
 # Lint set matched to .github/workflows/build.yml's lint job: errcheck +
-# ineffassign + misspell (gofmt -s is `fmt-check`, go vet is `vet`).
-# golangci-lint-action is disabled in CI pending tracebloc/cli#6 — so
-# until it's re-enabled there, `make ci` runs the SAME standalone tools
-# the CI lint job runs, keeping the "make ci green => CI green" invariant
-# this Makefile exists to protect. `make lint-full` keeps golangci-lint
-# available for a richer local pass.
+# ineffassign + misspell + staticcheck (gofmt -s is `fmt-check`, go vet
+# is `vet`). CI runs the SAME pinned standalone tools, keeping the
+# "make ci green => CI green" invariant this Makefile exists to protect.
+# `make lint-full` keeps golangci-lint available for a richer local pass.
+#
+# staticcheck runs `-checks all,-ST1005`: ST1005 (error-string style) is
+# excluded pending a deliberate review of the ~58 customer-visible error
+# strings it flags — follow-up to tracebloc/cli#279.
 .PHONY: lint
 lint:
 	$(GO) run github.com/kisielk/errcheck@$(ERRCHECK_VERSION) ./...
 	$(GO) run github.com/gordonklaus/ineffassign@$(INEFFASSIGN_VERSION) ./...
 	$(GO) run github.com/client9/misspell/cmd/misspell@$(MISSPELL_VERSION) -error .
+	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -checks all,-ST1005 ./...
 
-# deadcode: reachability scan from the CLI entrypoint (~5s). ADVISORY for now
-# (non-blocking) — it prints unreachable funcs but never fails the build. The
-# module still carries pre-existing dead-ish funcs that are unsafe to delete
-# blindly: Stringer methods (Status.String, JobOutcome.String) reached only via
-# fmt reflection that static analysis can't see, plus test-only parity harnesses
-# (ReadLabelValues, inferColumnType — di#349). Flip to blocking once that
-# backlog is cleared. Tracked in tracebloc/cli#6 / #127.
+# deadcode: BLOCKING reachability scan from the CLI entrypoint (~5s). The four
+# legit unreachables — Stringer methods (Status.String, JobOutcome.String)
+# reached only via fmt reflection that static analysis can't see, plus the
+# di#349 test-only parity harnesses (ReadLabelValues, inferColumnType) — are
+# declared in scripts/deadcode-allowlist.txt with reasons. Anything else
+# unreachable fails the build (#281 flipped this from advisory).
 .PHONY: deadcode
 deadcode:
-	@echo "==> deadcode (advisory): unreachable funcs from ./cmd/tracebloc"
-	@$(GO) run golang.org/x/tools/cmd/deadcode@$(DEADCODE_VERSION) ./cmd/tracebloc || true
+	@DEADCODE_VERSION=$(DEADCODE_VERSION) ./scripts/deadcode-check.sh
 
 # vulncheck: govulncheck reachability scan for known CVEs (stdlib + deps).
 # BLOCKING — this is a customer-installed binary; v0.8.0 shipped with 6
@@ -136,13 +139,23 @@ lint-full:
 .PHONY: fmt
 fmt:
 	gofmt -s -w .
+	$(GO) run golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION) -local github.com/tracebloc/cli -w .
 
+# fmt-check: gofmt -s (simplification) + goimports -local (import grouping:
+# stdlib / third-party / our own — matches .golangci.yml's local-prefixes).
 .PHONY: fmt-check
 fmt-check:
 	@diff="$$(gofmt -s -l . 2>/dev/null)"; \
 	if [ -n "$$diff" ]; then \
 	  echo "==> gofmt -s needed on:"; \
 	  echo "$$diff" | sed 's/^/    /'; \
+	  echo "==> run \`make fmt\` to fix"; \
+	  exit 1; \
+	fi
+	@drift="$$($(GO) run golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION) -local github.com/tracebloc/cli -l .)"; \
+	if [ -n "$$drift" ]; then \
+	  echo "==> goimports (import grouping) needed on:"; \
+	  echo "$$drift" | sed 's/^/    /'; \
 	  echo "==> run \`make fmt\` to fix"; \
 	  exit 1; \
 	fi
@@ -154,6 +167,14 @@ schema-check:
 .PHONY: schema-sync
 schema-sync:
 	./scripts/sync-schema.sh
+
+# file-budget: per-file line ceilings (ratchet down only — raising one is a
+# reviewed edit to scripts/file-budget.sh). Keeps the next 1500-line data.go
+# from growing quietly (backend#1106 WS-B). Also enforced by build.yml's
+# lint job, keeping the "make ci green => CI green" invariant.
+.PHONY: file-budget
+file-budget:
+	./scripts/file-budget.sh
 
 # ---- cleanup -----------------------------------------------------
 
