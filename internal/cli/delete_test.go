@@ -137,9 +137,9 @@ func TestDelete_Yes_FullSequence(t *testing.T) {
 	revokePath := ""
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
 			// Guard's status lookup: report the client OFFLINE so it doesn't block.
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			revokePath = r.URL.Path
 			if got := r.Header.Get("Authorization"); got != "Bearer tok" {
@@ -200,8 +200,8 @@ func TestDelete_Yes_FullSequence(t *testing.T) {
 func TestDelete_RevokeNon403_ContinuesTeardown(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusNotFound) // 404: stale pointer / backend predates /revoke
 		default:
@@ -248,8 +248,8 @@ func TestDelete_RevokeNon403_ContinuesTeardown(t *testing.T) {
 func TestDelete_RevokeNon403_Degraded_HonestClosing(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusNotFound) // 404: best-effort revoke fails
 		default:
@@ -329,8 +329,8 @@ func TestDelete_RevokeUnauthorized_FailsFast(t *testing.T) {
 func TestDelete_KeepData_SparesDataDir(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -375,8 +375,8 @@ func TestDelete_KeepData_SparesDataDir(t *testing.T) {
 func TestDelete_WipeFails_StillClearsPointer(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}
@@ -407,8 +407,8 @@ func TestDelete_WipeFails_StillClearsPointer(t *testing.T) {
 func TestDelete_TeardownFailure_HonestClosing(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}
@@ -441,7 +441,7 @@ func TestDelete_Guard426_FailsFast(t *testing.T) {
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
 			revoked = true
 		}
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
 			w.WriteHeader(http.StatusUpgradeRequired) // 426
 			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
 		}
@@ -472,7 +472,7 @@ func TestDelete_GuardAuthError_FailsFast(t *testing.T) {
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
 			revoked = true
 		}
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
 			w.WriteHeader(http.StatusUnauthorized) // 401 — token revoked/expired
 			_, _ = w.Write([]byte(`{"detail":"invalid token"}`))
 		}
@@ -500,8 +500,8 @@ func TestDelete_GuardAuthError_FailsFast(t *testing.T) {
 func TestDelete_SelfRemovalFails_HonestClosing(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}
@@ -532,8 +532,8 @@ func TestDelete_SelfRemovalFails_HonestClosing(t *testing.T) {
 func TestDelete_KubeconfigContext_ReachHelm(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}
@@ -559,9 +559,9 @@ func TestDelete_RunningJob_RefusesUnlessForce(t *testing.T) {
 	newHandler := func() http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			switch {
-			case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
 				// status 1 = online (a running client).
-				_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":1}]`))
+				_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":1}`))
 			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 				w.WriteHeader(http.StatusOK)
 			}
@@ -619,8 +619,8 @@ func TestDelete_RunningJob_RefusesUnlessForce(t *testing.T) {
 func TestDelete_ShowsRetainedAndLeftCopy(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}
@@ -653,7 +653,7 @@ func TestDelete_TypedNameMismatch_Cancels(t *testing.T) {
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
 			revoked = true
 		}
-		_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 	})
 	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
 	fn := &fakeNodeboot{executable: filepath.Join(t.TempDir(), "tracebloc")}
@@ -675,8 +675,8 @@ func TestDelete_TypedNameMismatch_Cancels(t *testing.T) {
 func TestDelete_BrewManagedBinary_Hint(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}
@@ -704,8 +704,8 @@ func TestDelete_BrewManagedBinary_Hint(t *testing.T) {
 func TestDelete_NoNamespace_WarnsAndSkipsUninstall(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}
@@ -733,8 +733,8 @@ func TestDelete_NoNamespace_WarnsAndSkipsUninstall(t *testing.T) {
 func TestDelete_RevokeForbidden_OffboardCopy(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/admins/":
 			_, _ = w.Write([]byte(`[]`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
@@ -814,8 +814,8 @@ func writeBinaryWithTBAlias(t *testing.T) string {
 func TestDelete_OwnTBAlias_Removed(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}
@@ -839,8 +839,8 @@ func TestDelete_OwnTBAlias_Removed(t *testing.T) {
 func TestDelete_ForeignTBAlias_Left(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 			w.WriteHeader(http.StatusOK)
 		}

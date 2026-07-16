@@ -1223,8 +1223,8 @@ func setActiveClientID(t *testing.T, id string) {
 // reports the active client online, and says so.
 func TestClientStatus_WaitOnline_Exit0(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":1}]`)) // 1 = online
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"c","namespace":"c","status":1}`)) // 1 = online
 			return
 		}
 		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
@@ -1245,8 +1245,8 @@ func TestClientStatus_WaitOnline_Exit0(t *testing.T) {
 // so the loop never sleeps.
 func TestClientStatus_WaitTimeout_Exit1(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":0}]`)) // 0 = offline
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"c","namespace":"c","status":0}`)) // 0 = offline
 		}
 	})
 	setActiveClientID(t, "5")
@@ -1265,8 +1265,8 @@ func TestClientStatus_WaitTimeout_Exit1(t *testing.T) {
 // TestClientStatus_OneShot: without --wait, report the current state and exit 0.
 func TestClientStatus_OneShot(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":2}]`)) // 2 = pending
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"c","namespace":"c","status":2}`)) // 2 = pending
 		}
 	})
 	setActiveClientID(t, "5")
@@ -1297,7 +1297,7 @@ func TestClientStatus_NoActiveClient(t *testing.T) {
 // proves we didn't poll to exhaustion.
 func TestClientStatus_WaitFailsFastOn426(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
 			w.WriteHeader(http.StatusUpgradeRequired) // 426
 			_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
 		}
@@ -1320,8 +1320,8 @@ func TestClientStatus_WaitFailsFastOn426(t *testing.T) {
 // matching the one-shot path, rather than polling to the timeout.
 func TestClientStatus_WaitFailsFastOnMissingClient(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
-			_, _ = w.Write([]byte(`[{"id":9,"first_name":"other","namespace":"other","status":1}]`)) // active id 5 absent
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
+			w.WriteHeader(http.StatusNotFound) // active id 5 absent → 404
 		}
 	})
 	setActiveClientID(t, "5")
@@ -1335,13 +1335,36 @@ func TestClientStatus_WaitFailsFastOnMissingClient(t *testing.T) {
 	}
 }
 
+// TestClientStatus_WaitFailsFastOnNonNumericID (Bugbot, #338 follow-up): a
+// corrupt (non-numeric) active client id can never match a backend client, so
+// --wait must fail fast on a missing client rather than retry a permanent parse
+// error to the timeout. No backend call is expected (the id never parses).
+func TestClientStatus_WaitFailsFastOnNonNumericID(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no backend call expected for a non-numeric id, got %s %s", r.Method, r.URL.Path)
+	})
+	setActiveClientID(t, "not-a-number")
+	// Long timeout: the test would hang if a non-numeric id were treated as a
+	// transient error instead of a missing client.
+	err := runClientStatus(context.Background(), ui.New(&bytes.Buffer{}), true, 10*time.Minute)
+	if got := ExitCodeFromError(err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if err != nil && strings.Contains(err.Error(), "timed out") {
+		t.Errorf("a non-numeric id must fail fast, not time out: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "isn't in your account") {
+		t.Errorf("want a missing-client error, got: %v", err)
+	}
+}
+
 // TestClientStatus_WaitTimeoutSurfacesListError (Bugbot #146-F): when every
 // status check fails, the timeout message must name the real error, not a bare
 // "unreachable". A 1ns timeout means the deadline passes on the first failure.
 func TestClientStatus_WaitTimeoutSurfacesListError(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
-			w.WriteHeader(http.StatusInternalServerError) // persistent list failure
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
+			w.WriteHeader(http.StatusInternalServerError) // persistent status-check failure
 		}
 	})
 	setActiveClientID(t, "5")
@@ -1362,7 +1385,7 @@ func TestClientStatus_WaitTimeoutSurfacesListError(t *testing.T) {
 // the full timeout. A 10-minute timeout would hang the test if it didn't.
 func TestClientStatus_WaitFailsFastOn401(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
 			w.WriteHeader(http.StatusUnauthorized) // dead credential
 		}
 	})
@@ -1398,13 +1421,13 @@ func TestClientStatus_TimeoutWithoutWaitRejected(t *testing.T) {
 func TestClientStatus_WaitTimeoutClearsStaleError(t *testing.T) {
 	calls := 0
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
 			calls++
 			if calls == 1 {
 				w.WriteHeader(http.StatusBadGateway) // one transient blip
 				return
 			}
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":0}]`)) // then offline
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"c","namespace":"c","status":0}`)) // then offline
 		}
 	})
 	setActiveClientID(t, "5")
@@ -1430,8 +1453,8 @@ func TestClientStatus_WaitTimeoutClearsStaleError(t *testing.T) {
 // during --wait exits quietly with code 130 — not a bare "Error: context canceled".
 func TestClientStatus_WaitCtrlCIsSilent(t *testing.T) {
 	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
-			_, _ = w.Write([]byte(`[{"id":5,"first_name":"c","namespace":"c","status":0}]`)) // offline
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/" {
+			_, _ = w.Write([]byte(`{"id":5,"first_name":"c","namespace":"c","status":0}`)) // offline
 		}
 	})
 	setActiveClientID(t, "5")
