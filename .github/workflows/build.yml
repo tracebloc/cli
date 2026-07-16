@@ -32,7 +32,7 @@ jobs:
     # (backend#1009).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: scripts/sync-schema.sh --check
         run: ./scripts/sync-schema.sh --check
 
@@ -46,7 +46,7 @@ jobs:
     # closed when cosign is absent (RFC-0001 R8, backend#889).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck + dash parse
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck dash
@@ -61,7 +61,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -92,7 +92,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -192,7 +192,7 @@ jobs:
     # published between PRs). Bump deliberately.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -235,7 +235,7 @@ jobs:
             arch: arm64
             ext: .exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v5

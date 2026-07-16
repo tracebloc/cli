@@ -47,7 +47,7 @@ jobs:
     name: Pin vs HEAD drift (advisory)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve the data-ingestors pin
         id: pin
@@ -89,7 +89,7 @@ jobs:
           echo "use_pat=$use_pat" >> "$GITHUB_OUTPUT"
 
       - name: Checkout tracebloc/data-ingestors @ develop HEAD
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: tracebloc/data-ingestors
           ref: develop
