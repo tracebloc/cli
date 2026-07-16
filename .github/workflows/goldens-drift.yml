@@ -52,7 +52,7 @@ jobs:
     name: Validator goldens vs data-ingestors @ pin
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve the data-ingestors pin
         id: pin
@@ -125,7 +125,7 @@ jobs:
 
       - name: Checkout tracebloc/data-ingestors @ pin
         if: steps.access.outputs.ok == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: tracebloc/data-ingestors
           ref: ${{ steps.pin.outputs.ref }}
@@ -138,7 +138,7 @@ jobs:
 
       - name: Set up Python
         if: steps.access.outputs.ok == 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'   # matches data-ingestors' own CI
           cache: pip

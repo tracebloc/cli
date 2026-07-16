@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout this CLI ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: cli
 
@@ -65,14 +65,14 @@ jobs:
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Checkout tracebloc/client @ pinned ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: tracebloc/client
           ref: ${{ steps.pin.outputs.ref }}
           path: client
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: cli/go.mod
           cache: true
@@ -81,7 +81,7 @@ jobs:
       - name: Set up Helm
         # Pinned to the same version the client repo's own drift-checks job
         # uses, so both sides assert against an identical render.
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.15.4
 
