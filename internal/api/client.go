@@ -505,6 +505,33 @@ func (c *Client) RevokeClient(ctx context.Context, id int) error {
 // against a misbehaving `next` chain, set well above any real account.
 const maxListPages = 100
 
+// GetClient fetches a single client by its dashboard id (GET /edge-device/{id}/).
+// The detail route is the same one PatchClientClusterID/RevokeClient address, and
+// returns one ProvisionedClient. This is the O(1) way to check ONE client's
+// status — unlike ListClients, which pages through the whole account (the
+// home-screen heartbeat must not do that under its ~1.2s budget, cli#338).
+// A 404 returns (nil, nil) so the caller can distinguish "no such client" from
+// a transport/backend error.
+func (c *Client) GetClient(ctx context.Context, id int) (*ProvisionedClient, error) {
+	path := fmt.Sprintf("/edge-device/%d/", id)
+	url := c.BaseURL + path
+	status, raw, err := c.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, nil
+	}
+	if status < 200 || status >= 300 {
+		return nil, &APIError{StatusCode: status, Body: string(raw), URL: url}
+	}
+	var out ProvisionedClient
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decoding get-client response: %w", err)
+	}
+	return &out, nil
+}
+
 // ListClients returns ALL clients in the caller's account (GET /edge-device/).
 // The endpoint is DRF-paginated, so this follows `next` to the end — list,
 // `use <id>`, and create-time collision detection must see every client, not

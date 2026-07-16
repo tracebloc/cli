@@ -864,30 +864,31 @@ func runClientStatus(ctx context.Context, p *ui.Printer, wait bool, timeout time
 	}
 }
 
-// lookupClientStatus finds the account client whose numeric id matches active and
-// returns its backend status code. found=false means no such client (deleted, or
-// signed into the wrong account). A list error is returned verbatim so --wait can
-// treat it as transient and retry.
+// lookupClientStatus fetches the active client directly and returns its backend
+// status code. found=false means no such client (deleted, or signed into the
+// wrong account). A lookup error is returned verbatim so --wait can treat it as
+// transient and retry. Fetches the single client by id (GET /edge-device/{id}/)
+// rather than listing the whole account — the home-screen heartbeat runs this
+// under a ~1.2s budget, and paging every client blew it (cli#338).
 func lookupClientStatus(ctx context.Context, client *api.Client, active string) (status int, found bool, err error) {
-	clients, err := client.ListClients(ctx)
+	id, err := strconv.Atoi(active)
+	if err != nil {
+		// A non-numeric active id can never match a backend client, so report it
+		// as not-found — exactly what the old ListClients+match path did — rather
+		// than a permanent error. A --wait loop fail-fasts on a missing client but
+		// treats errors as transient, so returning an error here would make it
+		// poll a permanent parse failure to the timeout (Bugbot: poll/retry loops
+		// must fail-fast on non-transient errors).
+		return 0, false, nil
+	}
+	c, err := client.GetClient(ctx, id)
 	if err != nil {
 		return 0, false, err
 	}
-	if c := findClientByID(clients, active); c != nil {
-		return c.Status, true, nil
+	if c == nil {
+		return 0, false, nil // 404 — no such client
 	}
-	return 0, false, nil
-}
-
-// findClientByID returns the account client whose numeric dashboard id equals id
-// (the string form stored as the active-client pointer), or nil if none match.
-func findClientByID(clients []api.ProvisionedClient, id string) *api.ProvisionedClient {
-	for i := range clients {
-		if strconv.Itoa(clients[i].ID) == id {
-			return &clients[i]
-		}
-	}
-	return nil
+	return c.Status, true, nil
 }
 
 // EdgeDevice.status codes mirrored from the backend (metaApi User.py).
