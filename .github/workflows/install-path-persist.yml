@@ -59,13 +59,13 @@ jobs:
     steps:
       # 1. This PR's CLI source — we test THIS install.sh, not the released one.
       - name: Checkout this CLI PR
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: cli
 
       # 2. The fresh-shell harness from tracebloc/client (single source of truth).
       - name: Checkout the client path-persist harness
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: tracebloc/client
           ref: ${{ env.CLIENT_HARNESS_REF }}
