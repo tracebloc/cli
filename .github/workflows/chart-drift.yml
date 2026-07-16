@@ -81,7 +81,7 @@ jobs:
       - name: Set up Helm
         # Pinned to the same version the client repo's own drift-checks job
         # uses, so both sides assert against an identical render.
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.15.4
 

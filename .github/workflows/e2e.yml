@@ -104,7 +104,7 @@ jobs:
         run: curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/v5.7.4/install.sh | TAG=v5.7.4 bash
 
       - name: Install helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.15.4
 
