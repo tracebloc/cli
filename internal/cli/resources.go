@@ -2,6 +2,10 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/url"
+	"runtime"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -83,14 +87,31 @@ Exit codes:
 // the jobs-manager env — the same source `cluster doctor` parses, so the two
 // never disagree.
 func runResourcesShow(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions) error {
-	p.Banner("tracebloc", "machine resources")
-
+	// No banner: the user typed `resources` — don't echo the tool name, a rule,
+	// and "resources" back. Start straight with the numbers.
 	binding := bindActiveClientNamespace(&opts)
 	target, err := resolveClusterTarget(ctx, p, opts, binding, false)
 	if err != nil {
 		return binding.explain(err)
 	}
-	return renderResources(ctx, p, target)
+	if err := renderResources(ctx, p, target); err != nil {
+		return err
+	}
+
+	// The one thing the CLI can change is the per-training ceiling. On a terminal,
+	// offer it inline (→ the guided wizard); off a terminal, point at the
+	// scriptable command instead of prompting into the void.
+	p.Newline()
+	if isInteractiveTTY() {
+		pr := surveyPrompter{}
+		ok, cerr := pr.Confirm("Change how much each training run gets?", false)
+		if cerr != nil || !ok {
+			return nil
+		}
+		return runResourcesSet(ctx, p, pr, opts, setReq{})
+	}
+	p.Hintf("To change a training run's allocation: %s resources set --cores N --memory NGi", launcherName())
+	return nil
 }
 
 // renderResources is the post-resolution half of `resources show`: given an
@@ -103,38 +124,52 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 	// Machine capacity: sum of Ready nodes' allocatable. A node-list failure is
 	// not fatal to the whole view — we still show the training ceiling — but it
 	// is called out so the machine line isn't silently zero.
-	var machine resources.Machine
+	var envCap resources.Machine
 	nodeErr := error(nil)
+	nodeCount := 0
 	if nodes, lerr := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{}); lerr != nil {
 		nodeErr = lerr
 	} else {
-		machine = resources.MachineCapacity(nodes.Items)
+		envCap = resources.MachineCapacity(nodes.Items)
+		nodeCount = len(nodes.Items)
 	}
 
 	env := resources.JobsManagerEnv(ctx, cs, resolved.Namespace, release.ReleaseName)
 	train := resources.ParseTraining(env)
 
-	// The chart stamps GPU_REQUESTS/GPU_LIMITS=nvidia.com/gpu=1 as literal env on
-	// every install — even CPU-only hosts — so ParseTraining reports a phantom
-	// HasGPU=true. When we've confirmed the node exposes no GPU, drop it so the
-	// per-run line doesn't advertise a GPU the machine can't provide (and doesn't
-	// contradict the "gpu: none detected" detail below). Mirrors the set path's
-	// phantom-GPU normalization (Bugbot #241). A node-read failure leaves it as-is
-	// (we can't confirm absence — the capacity line already says "unavailable").
-	if nodeErr == nil && len(machine.GPU) == 0 {
+	// Phantom-GPU: the chart stamps GPU_*=nvidia.com/gpu=1 on every install, even
+	// CPU-only hosts, so drop it when the node exposes no GPU (mirrors the set
+	// path's normalization, Bugbot #241). A node-read failure leaves it as-is.
+	if nodeErr == nil && len(envCap.GPU) == 0 {
 		train.HasGPU = false
 	}
 
-	if nodeErr != nil {
-		p.Stat("Your secure environment is equipped with:", "unavailable")
-		p.Hintf("     couldn't read capacity: %v", nodeErr)
-	} else {
-		p.Stat("Your secure environment is equipped with:", machineLine(machine))
+	// Layer 1 — Your machine: shown only on a LOCAL install (cluster API is
+	// loopback), where the cluster runs on THIS host and its capacity is a slice
+	// of the machine. On a remote cluster the operator's laptop is irrelevant, so
+	// the line is dropped.
+	local := isLoopbackServer(resolved.ServerURL)
+	if local && nodeErr == nil {
+		p.Stat("Your machine has:", resources.DetectHost().Line(envCap.GPU))
 	}
-	// The per-run ceiling is cluster-wide — jobs-manager stamps it on EVERY
-	// training run (there is no per-run override today). perRunSize is the same
-	// "CPU · mem" string `resources set` shows; the label carries the "up to".
-	p.Stat("A training run is allocated up to:", perRunSize(train))
+
+	// Layer 2 — Your secure environment: what the cluster can schedule, with a
+	// per-OS / remote pointer to where its size is actually changed (never a
+	// dead-end CLI prompt — the CLI can't resize Docker or a node pool).
+	if nodeErr != nil {
+		p.Stat("Your secure environment:", "can't reach it — run `"+launcherName()+" doctor`")
+	} else {
+		val := envCap.Line()
+		if !local && nodeCount > 1 {
+			val += fmt.Sprintf("   (across %d nodes)", nodeCount)
+		}
+		p.Stat("Your secure environment has:", val)
+		p.Hintf("     %s", envChangeHint(local))
+	}
+
+	// Layer 3 — Each training run: the one dial the CLI owns. Cluster-wide —
+	// jobs-manager stamps it on EVERY training run (no per-run override today).
+	p.Stat("Each training run may use up to:", perRunSize(train))
 
 	if p.Verbose() {
 		p.Section("Details")
@@ -145,30 +180,58 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 		} else {
 			p.Field("resource env", "(unset — using chart default "+resources.DefaultTraining+")")
 		}
-		if nodeErr == nil && len(machine.GPU) == 0 {
+		if nodeErr == nil && len(envCap.GPU) == 0 {
 			p.Field("gpu", "none detected")
 		}
 	}
-
-	p.Newline()
-	// Match the home screen's launcher resolution so the hint reads `tb …` on a
-	// real install (where the `tb` alias exists) and `tracebloc …` otherwise.
-	cmd := invokedName()
-	if tbAliasAvailable() {
-		cmd = binTB
-	}
-	p.Hintf("Do you want to change the allocation? Run `%s resources set` (guided walkthrough on a terminal).", cmd)
 	return nil
 }
 
-// machineLine renders the machine-capacity value: "8 CPU · 32 GiB" (+ " · 1 GPU"
-// when a device is present).
-func machineLine(m resources.Machine) string {
-	line := resources.FormatCPU(m.CPU) + " · " + resources.FormatMem(m.Mem)
-	for name, qty := range m.GPU {
-		line += " · " + resources.FormatGPU(name, qty)
+// launcherName is the command to print in hints — `tb` when the alias is
+// installed (a real install), else the invoked name. Mirrors the home screen so
+// hints match what the user actually runs.
+func launcherName() string {
+	if tbAliasAvailable() {
+		return binTB
 	}
-	return line
+	return invokedName()
+}
+
+// isLoopbackServer reports whether the cluster API server is on this machine
+// (127.0.0.1 / localhost / ::1) — a local k3d/kind/Docker-Desktop install, where
+// the cluster's capacity is a slice of THIS host.
+func isLoopbackServer(serverURL string) bool {
+	if serverURL == "" {
+		return false
+	}
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// envChangeHint is the per-setup pointer to where the environment's size is
+// actually changed — the CLI can't mutate Docker Desktop or a node pool itself.
+func envChangeHint(local bool) string {
+	if !local {
+		return "to give it more, resize your cluster's node pool"
+	}
+	switch runtime.GOOS {
+	case "darwin", "windows":
+		return "to give it more, open Docker Desktop → Resources"
+	case "linux":
+		return "to reserve part of the machine for other work, cap the environment (docs TBD)"
+	default:
+		return "to change how much it can use, adjust your container runtime's limits"
+	}
 }
 
 // firstNonEmptyEnv returns the first present, non-empty value among keys.

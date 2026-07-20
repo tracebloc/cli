@@ -141,6 +141,19 @@ func FormatGPU(name corev1.ResourceName, q resource.Quantity) string {
 	return fmt.Sprintf("%d %s", n, unit)
 }
 
+// Line renders the machine as "CPU · GPU · GiB" — compute (CPU then any GPUs)
+// first, memory last: CPU and GPU are both compute; RAM is the distinct
+// dimension (the agreed ordering).
+func (m Machine) Line() string {
+	s := FormatCPU(m.CPU)
+	for name, qty := range m.GPU {
+		if !qty.IsZero() {
+			s += " · " + FormatGPU(name, qty)
+		}
+	}
+	return s + " · " + FormatMem(m.Mem)
+}
+
 // --- internal helpers -------------------------------------------------------
 
 // addInto adds src into dst in place. resource.Quantity.Add is a pointer

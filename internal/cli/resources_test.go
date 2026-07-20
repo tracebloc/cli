@@ -72,10 +72,14 @@ func TestRenderResources_ShowsMachineAndTrainingCeiling(t *testing.T) {
 		t.Fatalf("renderResources: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"Your secure environment is equipped with:", "8 CPU · 32 GiB", "A training run is allocated up to:", "4 CPU · 16 GiB"} {
+	for _, want := range []string{"Your secure environment has:", "8 CPU · 32 GiB", "Each training run may use up to:", "4 CPU · 16 GiB"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
+	}
+	// Remote target (no ServerURL set) → no physical "Your machine" line.
+	if strings.Contains(out, "Your machine has:") {
+		t.Errorf("remote target must not show the machine line:\n%s", out)
 	}
 	// No Kubernetes vocabulary must leak into the default view.
 	for _, banned := range []string{"allocatable", "RESOURCE_LIMITS", "limits", "requests"} {
@@ -93,9 +97,31 @@ func TestRenderResources_ChartDefaultWhenEnvUnset(t *testing.T) {
 	if err := renderResources(context.Background(), ui.New(&buf, ui.WithColor(false)), resTarget(cs)); err != nil {
 		t.Fatalf("renderResources: %v", err)
 	}
-	if !strings.Contains(buf.String(), "A training run is allocated up to:") ||
+	if !strings.Contains(buf.String(), "Each training run may use up to:") ||
 		!strings.Contains(buf.String(), "2 CPU · 8 GiB") {
 		t.Errorf("want chart-default ceiling 2 CPU · 8 GiB:\n%s", buf.String())
+	}
+}
+
+// TestRenderResources_LocalShowsMachineLine: on a LOCAL install (loopback API
+// server) the physical "Your machine" line appears above the environment. Its
+// value is host-dependent (DetectHost), so we assert the label, not the numbers.
+func TestRenderResources_LocalShowsMachineLine(t *testing.T) {
+	cs := fake.NewClientset(
+		resNode("n1", "8", "32Gi"),
+		resJMDeploy("tb", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"}),
+	)
+	target := resTarget(cs)
+	target.Resolved.ServerURL = "https://127.0.0.1:6550" // loopback ⇒ local install
+	var buf bytes.Buffer
+	if err := renderResources(context.Background(), ui.New(&buf, ui.WithColor(false)), target); err != nil {
+		t.Fatalf("renderResources: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"Your machine has:", "Your secure environment has:", "Each training run may use up to:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("local install missing %q in:\n%s", want, out)
+		}
 	}
 }
 

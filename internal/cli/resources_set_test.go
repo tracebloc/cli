@@ -315,9 +315,9 @@ func TestWizard_PreselectedMax(t *testing.T) {
 func TestWizard_ChooseAnAmount(t *testing.T) {
 	pr := &fakePrompter{
 		answers: map[string]string{
-			"How much may one training run use?": "Choose an amount",
-			"CPU cores for one run (1–7)":        "3",
-			"Memory for one run in GiB (2–29)":   "12",
+			"How much may one training run use?":                                     "Choose an amount",
+			"How much CPU should each training run get? (now 2 · max 7)":             "3",
+			"How much memory should each training run get? (now 8 GiB · max 29 GiB)": "12",
 		},
 		confirm: boolPtr(true),
 	}

@@ -409,15 +409,15 @@ func runResourcesWizard(p *ui.Printer, pr prompter, node resources.Machine, curr
 				"resources or use a larger machine.", maxCores, maxGiB)}
 	}
 	coresAns, err := pr.Input(
-		fmt.Sprintf("CPU cores for one run (1–%d)", maxCores),
-		"how many CPU cores a single training run may use",
+		fmt.Sprintf("How much CPU should each training run get? (now %s · max %d)", coresNum(current.CPU), maxCores),
+		"the CPU each training run may use; Enter keeps the current value",
 		coresNum(current.CPU), boundedInt(1, maxCores))
 	if err != nil {
 		return resources.Training{}, err
 	}
 	memAns, err := pr.Input(
-		fmt.Sprintf("Memory for one run in GiB (2–%d)", maxGiB),
-		"how much memory a single training run may use, in GiB",
+		fmt.Sprintf("How much memory should each training run get? (now %s GiB · max %d GiB)", gibNum(current.Mem), maxGiB),
+		"the memory each training run may use, in GiB; Enter keeps the current value",
 		gibNum(current.Mem), boundedInt(2, maxGiB))
 	if err != nil {
 		return resources.Training{}, err
@@ -573,11 +573,12 @@ func validationError(msg string) error {
 
 // perRunSize renders a ceiling the way the user reads it: "4 CPU · 16 GiB · 1 GPU".
 func perRunSize(t resources.Training) string {
-	s := resources.FormatCPU(t.CPU) + " · " + resources.FormatMem(t.Mem)
+	// Order: CPU · GPU · GiB — compute (CPU then GPU) first, memory last.
+	s := resources.FormatCPU(t.CPU)
 	if t.HasGPU {
 		s += " · " + resources.FormatGPU(t.GPUName, t.GPU)
 	}
-	return s
+	return s + " · " + resources.FormatMem(t.Mem)
 }
 
 // sameCeiling reports whether two ceilings are identical across every dimension —
