@@ -195,40 +195,66 @@ func TestUninstallChart(t *testing.T) {
 }
 
 func TestPruneImages(t *testing.T) {
-	t.Run("removes tracebloc images, scoped + deduped", func(t *testing.T) {
+	// Removal is by REFERENCE (repo:tag), not image ID (-q): an ID shared across
+	// repos refuses `docker rmi <id>` ("must be forced"). Removing by reference
+	// untags only our refs and never needs a force.
+	const listCmd = `docker images --filter=reference=ghcr.io/tracebloc/* --format {{.Repository}}:{{.Tag}}`
+
+	t.Run("removes tracebloc images by reference, scoped + deduped", func(t *testing.T) {
 		f := newFakeRunner()
-		// Two tags of the same image list the ID twice; PruneImages must pass it once.
-		f.on(`docker images --filter=reference=ghcr.io/tracebloc/* -q`, "aaa111\nbbb222\naaa111\n", nil)
+		// A reference listed twice must be passed to rmi once.
+		f.on(listCmd, "ghcr.io/tracebloc/jobs-manager:1.9.5\nghcr.io/tracebloc/requests-proxy:1.9.5\nghcr.io/tracebloc/jobs-manager:1.9.5\n", nil)
 		f.install(t)
 
 		if err := PruneImages(context.Background()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := []string{
-			`docker images --filter=reference=ghcr.io/tracebloc/* -q`,
-			"docker rmi aaa111 bbb222",
+			listCmd,
+			"docker rmi ghcr.io/tracebloc/jobs-manager:1.9.5 ghcr.io/tracebloc/requests-proxy:1.9.5",
 		}
 		if !reflect.DeepEqual(f.calls, want) {
 			t.Fatalf("calls = %v, want %v", f.calls, want)
 		}
-		// Guard the SCOPED contract: an offboard must never blanket-prune.
+		// SCOPED contract: never a blanket prune, and never a force (which could
+		// evict an image a non-tracebloc workload shares — the whole reason we
+		// switched from -q/ID to by-reference).
 		for _, c := range f.calls {
 			if strings.Contains(c, "system prune") {
 				t.Fatalf("PruneImages must never run `docker system prune`; got %q", c)
 			}
+			if strings.Contains(c, "rmi") && (strings.Contains(c, " -f") || strings.Contains(c, "--force")) {
+				t.Fatalf("PruneImages must never force-remove; got %q", c)
+			}
 		}
 	})
 
-	t.Run("no matching images is a clean no-op", func(t *testing.T) {
+	t.Run("dangling <none> references are skipped", func(t *testing.T) {
 		f := newFakeRunner()
-		f.on(`docker images --filter=reference=ghcr.io/tracebloc/* -q`, "\n  \n", nil)
+		f.on(listCmd, "ghcr.io/tracebloc/jobs-manager:1.9.5\n<none>:<none>\nghcr.io/tracebloc/x:latest\n", nil)
 		f.install(t)
 
 		if err := PruneImages(context.Background()); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// No rmi when there's nothing to remove.
-		want := []string{`docker images --filter=reference=ghcr.io/tracebloc/* -q`}
+		want := []string{
+			listCmd,
+			"docker rmi ghcr.io/tracebloc/jobs-manager:1.9.5 ghcr.io/tracebloc/x:latest",
+		}
+		if !reflect.DeepEqual(f.calls, want) {
+			t.Fatalf("calls = %v, want %v (must skip <none>)", f.calls, want)
+		}
+	})
+
+	t.Run("no matching images is a clean no-op", func(t *testing.T) {
+		f := newFakeRunner()
+		f.on(listCmd, "\n  \n", nil)
+		f.install(t)
+
+		if err := PruneImages(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{listCmd} // no rmi when there's nothing to remove
 		if !reflect.DeepEqual(f.calls, want) {
 			t.Fatalf("calls = %v, want %v", f.calls, want)
 		}
@@ -236,12 +262,12 @@ func TestPruneImages(t *testing.T) {
 
 	t.Run("best-effort: rmi failure surfaces to the caller", func(t *testing.T) {
 		f := newFakeRunner()
-		f.on(`docker images --filter=reference=ghcr.io/tracebloc/* -q`, "aaa111", nil)
-		f.on("docker rmi aaa111", "image is being used by running container", errors.New("exit 1"))
+		f.on(listCmd, "ghcr.io/tracebloc/x:1", nil)
+		f.on("docker rmi ghcr.io/tracebloc/x:1", "image is being used by running container", errors.New("exit 1"))
 		f.install(t)
 
 		// PruneImages returns the error; the CALLER (tracebloc delete) treats it as
-		// best-effort and only warns — that policy lives in the command, not here.
+		// best-effort and only notes it — that policy lives in the command, not here.
 		if err := PruneImages(context.Background()); err == nil {
 			t.Fatal("want the rmi error surfaced, got nil")
 		}
@@ -249,7 +275,7 @@ func TestPruneImages(t *testing.T) {
 
 	t.Run("listing failure surfaces", func(t *testing.T) {
 		f := newFakeRunner()
-		f.on(`docker images --filter=reference=ghcr.io/tracebloc/* -q`, "", errors.New("docker daemon not running"))
+		f.on(listCmd, "", errors.New("docker daemon not running"))
 		f.install(t)
 
 		if err := PruneImages(context.Background()); err == nil {

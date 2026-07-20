@@ -402,6 +402,11 @@ type ProvisionedClient struct {
 	// ClusterID is the kube-system namespace UID this client is anchored to
 	// (RFC-0001 §6.3 / backend#883). Empty on legacy / not-yet-backfilled clients.
 	ClusterID string `json:"cluster_id"`
+	// NumRunningExperiments is how many training runs are active on this client
+	// right now. `tracebloc delete`'s work-guard blocks on this — not on Status
+	// (== online, which a healthy client always is) — so a live-but-idle
+	// environment can still be offboarded after the typed-name confirm.
+	NumRunningExperiments int `json:"num_running_experiments"`
 }
 
 // CreateClientRequest is the POST /edge-device/ body. The account is stamped
