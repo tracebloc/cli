@@ -72,7 +72,7 @@ func TestRenderResources_ShowsMachineAndTrainingCeiling(t *testing.T) {
 		t.Fatalf("renderResources: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"This machine", "8 CPU · 32 GiB", "tracebloc uses", "up to 4 CPU · 16 GiB"} {
+	for _, want := range []string{"Your secure environment is equipped with:", "8 CPU · 32 GiB", "A training run is allocated up to:", "4 CPU · 16 GiB"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
@@ -93,7 +93,8 @@ func TestRenderResources_ChartDefaultWhenEnvUnset(t *testing.T) {
 	if err := renderResources(context.Background(), ui.New(&buf, ui.WithColor(false)), resTarget(cs)); err != nil {
 		t.Fatalf("renderResources: %v", err)
 	}
-	if !strings.Contains(buf.String(), "up to 2 CPU · 8 GiB") {
+	if !strings.Contains(buf.String(), "A training run is allocated up to:") ||
+		!strings.Contains(buf.String(), "2 CPU · 8 GiB") {
 		t.Errorf("want chart-default ceiling 2 CPU · 8 GiB:\n%s", buf.String())
 	}
 }
