@@ -68,9 +68,13 @@ const (
 // Detection is bounded so bare `tracebloc` stays snappy even when the cluster or
 // backend is unreachable. homeProbeTimeout caps each individual probe;
 // homeDetectBudget caps the whole detection regardless of any single probe.
+// These must clear a COLD round-trip: the heartbeat hits the backend and every
+// `tb` run is a fresh process (fresh DNS+TCP+TLS, ~1s), so the old 1200ms cap
+// made a healthy "· Online" flicker to "couldn't confirm" (cli#357) — don't
+// lower them back. Fast path is unaffected: collectProbes returns once both report.
 const (
-	homeDetectBudget = 1500 * time.Millisecond
-	homeProbeTimeout = 1200 * time.Millisecond
+	homeDetectBudget = 3500 * time.Millisecond
+	homeProbeTimeout = 3000 * time.Millisecond
 )
 
 // gpuResource is the allocatable key NVIDIA's device plugin advertises; summed
