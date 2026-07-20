@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -105,7 +106,15 @@ func runResourcesShow(ctx context.Context, p *ui.Printer, opts cluster.Kubeconfi
 	if isInteractiveTTY() {
 		pr := surveyPrompter{}
 		ok, cerr := pr.Confirm("Change how much each training run gets?", false)
-		if cerr != nil || !ok {
+		if cerr != nil {
+			// Ctrl-C / abort at the prompt is a choice, not a failure (exit 0);
+			// a genuine prompt error must surface, not be swallowed.
+			if errors.Is(cerr, errInteractiveCancelled) {
+				return nil
+			}
+			return cerr
+		}
+		if !ok {
 			return nil
 		}
 		return runResourcesSet(ctx, p, pr, opts, setReq{})
@@ -131,7 +140,9 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 		nodeErr = lerr
 	} else {
 		envCap = resources.MachineCapacity(nodes.Items)
-		nodeCount = len(nodes.Items)
+		// Count only Ready nodes — the same set MachineCapacity sums, so the
+		// "(across N nodes)" suffix can't disagree with the capacity it annotates.
+		nodeCount = resources.ReadyNodes(nodes.Items)
 	}
 
 	env := resources.JobsManagerEnv(ctx, cs, resolved.Namespace, release.ReleaseName)
@@ -157,7 +168,10 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 	// per-OS / remote pointer to where its size is actually changed (never a
 	// dead-end CLI prompt — the CLI can't resize Docker or a node pool).
 	if nodeErr != nil {
-		p.Stat("Your secure environment:", "can't reach it — run `"+launcherName()+" doctor`")
+		// A node-list failure isn't necessarily unreachable (it can be an RBAC
+		// restriction on a reachable cluster) — say what we know and let doctor
+		// diagnose which.
+		p.Stat("Your secure environment:", "couldn't read its capacity — run `"+launcherName()+" doctor`")
 	} else {
 		val := envCap.Line()
 		if !local && nodeCount > 1 {

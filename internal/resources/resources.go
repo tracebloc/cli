@@ -91,6 +91,18 @@ func MachineCapacity(nodes []corev1.Node) Machine {
 	return m
 }
 
+// ReadyNodes counts the Ready nodes — the exact set MachineCapacity sums, so a
+// caller's "across N nodes" annotation matches the capacity it describes.
+func ReadyNodes(nodes []corev1.Node) int {
+	n := 0
+	for i := range nodes {
+		if nodeReady(nodes[i]) {
+			n++
+		}
+	}
+	return n
+}
+
 // ParseTraining reads the per-run ceiling from a jobs-manager env map. It
 // prefers RESOURCE_LIMITS (the true ceiling) and falls back to RESOURCE_REQUESTS
 // (requests==limits by chart contract), then to the chart default so an older
