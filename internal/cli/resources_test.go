@@ -125,6 +125,25 @@ func TestRenderResources_LocalShowsMachineLine(t *testing.T) {
 	}
 }
 
+// TestIsLocalServer: local = loopback OR Docker Desktop's docker.internal hosts;
+// remote = a routable/cloud API endpoint.
+func TestIsLocalServer(t *testing.T) {
+	for _, s := range []string{
+		"https://127.0.0.1:6550", "https://localhost:6443",
+		"https://kubernetes.docker.internal:6443", "https://host.docker.internal:6443",
+		"https://[::1]:6443",
+	} {
+		if !isLocalServer(s) {
+			t.Errorf("isLocalServer(%q) = false, want true (local)", s)
+		}
+	}
+	for _, s := range []string{"https://api.eks.amazonaws.com", "https://10.0.0.5:6443", ""} {
+		if isLocalServer(s) {
+			t.Errorf("isLocalServer(%q) = true, want false (remote)", s)
+		}
+	}
+}
+
 // TestRenderResources_GPUSurfaced: a node exposing a GPU shows it on the machine
 // line, and a GPU training run shows it on the ceiling line.
 func TestRenderResources_GPUSurfaced(t *testing.T) {

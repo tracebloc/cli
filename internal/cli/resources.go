@@ -155,12 +155,14 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 		train.HasGPU = false
 	}
 
-	// Layer 1 — Your machine: shown only on a LOCAL install (cluster API is
-	// loopback), where the cluster runs on THIS host and its capacity is a slice
-	// of the machine. On a remote cluster the operator's laptop is irrelevant, so
-	// the line is dropped.
-	local := isLoopbackServer(resolved.ServerURL)
-	if local && nodeErr == nil {
+	// Layer 1 — Your machine: shown on a LOCAL install (cluster API is loopback or
+	// Docker Desktop), where the cluster runs on THIS host and its capacity is a
+	// slice of the machine. DetectHost reads the host directly (no cluster API),
+	// so this renders even when the node list failed (e.g. RBAC). Dropped on a
+	// remote cluster, where the operator's laptop is irrelevant. envCap.GPU is
+	// nil/empty on a node-read failure, so Line just omits the GPU dimension.
+	local := isLocalServer(resolved.ServerURL)
+	if local {
 		p.Stat("Your machine has:", resources.DetectHost().Line(envCap.GPU))
 	}
 
@@ -211,10 +213,12 @@ func launcherName() string {
 	return invokedName()
 }
 
-// isLoopbackServer reports whether the cluster API server is on this machine
-// (127.0.0.1 / localhost / ::1) — a local k3d/kind/Docker-Desktop install, where
-// the cluster's capacity is a slice of THIS host.
-func isLoopbackServer(serverURL string) bool {
+// isLocalServer reports whether the cluster API server runs on THIS machine — a
+// local k3d/kind cluster (loopback: 127.0.0.1 / localhost / ::1) or Docker
+// Desktop (kubernetes.docker.internal / host.docker.internal, which are NOT
+// loopback). On such an install the cluster's capacity is a slice of this host,
+// so the "Your machine" layer is meaningful; on a remote cluster it isn't.
+func isLocalServer(serverURL string) bool {
 	if serverURL == "" {
 		return false
 	}
@@ -223,7 +227,8 @@ func isLoopbackServer(serverURL string) bool {
 		return false
 	}
 	host := u.Hostname()
-	if host == "localhost" {
+	switch host {
+	case "localhost", "kubernetes.docker.internal", "host.docker.internal":
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {
