@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"strings"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -133,9 +132,9 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 		p.Stat("Your secure environment is equipped with:", machineLine(machine))
 	}
 	// The per-run ceiling is cluster-wide — jobs-manager stamps it on EVERY
-	// training run (there is no per-run override today). trainingLine prefixes
-	// "up to "; the label already says it, so trim to avoid saying it twice.
-	p.Stat("A training run is allocated up to:", strings.TrimPrefix(trainingLine(train), "up to "))
+	// training run (there is no per-run override today). perRunSize is the same
+	// "CPU · mem" string `resources set` shows; the label carries the "up to".
+	p.Stat("A training run is allocated up to:", perRunSize(train))
 
 	if p.Verbose() {
 		p.Section("Details")
@@ -168,15 +167,6 @@ func machineLine(m resources.Machine) string {
 	line := resources.FormatCPU(m.CPU) + " · " + resources.FormatMem(m.Mem)
 	for name, qty := range m.GPU {
 		line += " · " + resources.FormatGPU(name, qty)
-	}
-	return line
-}
-
-// trainingLine renders the per-run ceiling: "up to 2 CPU · 8 GiB" (+ GPU).
-func trainingLine(t resources.Training) string {
-	line := "up to " + resources.FormatCPU(t.CPU) + " · " + resources.FormatMem(t.Mem)
-	if t.HasGPU {
-		line += " · " + resources.FormatGPU(t.GPUName, t.GPU)
 	}
 	return line
 }
