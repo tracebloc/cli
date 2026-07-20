@@ -11,7 +11,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/tracebloc/cli/internal/cluster"
 )
@@ -166,13 +168,83 @@ func TestWorst(t *testing.T) {
 }
 
 func TestCheckReachable(t *testing.T) {
-	if r := checkReachable(nil, errors.New("boom"), ns); r.Status != StatusFail {
+	// A non-transport error (e.g. no chart / RBAC) keeps the kubeconfig+chart remedy.
+	if r := checkReachable(nil, errors.New("boom"), ns, ""); r.Status != StatusFail {
 		t.Fatalf("error => %v, want fail", r.Status)
 	}
 	rel := &cluster.ParentRelease{ReleaseName: "tb", ChartVersion: "1.3.5", AppVersion: "1.3.5"}
-	r := checkReachable(rel, nil, ns)
+	r := checkReachable(rel, nil, ns, "")
 	if r.Status != StatusOK || !strings.Contains(r.Detail, "tb") {
 		t.Fatalf("release => %v / %q, want ok mentioning the release", r.Status, r.Detail)
+	}
+
+	// A transport error against a loopback server names the endpoint and gives
+	// the start-the-cluster remedy — not the kubeconfig/chart one.
+	tr := checkReachable(nil, errors.New(`Get "https://127.0.0.1:6550/api": dial tcp 127.0.0.1:6550: connect: connection refused`), ns, "https://127.0.0.1:6550")
+	if tr.Status != StatusFail {
+		t.Fatalf("transport => %v, want fail", tr.Status)
+	}
+	if !strings.Contains(tr.Detail, "127.0.0.1:6550") || !strings.Contains(tr.Detail, "isn't answering") {
+		t.Fatalf("transport detail = %q, want it to name the unreachable endpoint", tr.Detail)
+	}
+	if !strings.Contains(tr.Remedy, "start") || strings.Contains(tr.Remedy, "kubectl get deploy") {
+		t.Fatalf("transport remedy = %q, want a start-the-cluster hint, not the chart remedy", tr.Remedy)
+	}
+}
+
+// TestRun_UnreachableCascade mimics the reported failure: the cluster API is
+// down (connection refused on every call). Run() must emit ONE honest ✖
+// ("Cluster reachable", naming the endpoint) and mark the cluster checks
+// StatusUnknown — never inventing "PVC unbound" / "requests-proxy not found →
+// reinstall" / "chart too old". Backend egress still runs (it's independent of
+// the cluster API), and the exit-code verdict stays Fail from the one real ✖.
+func TestRun_UnreachableCascade(t *testing.T) {
+	cs := fake.NewClientset()
+	connRefused := errors.New(`Get "https://127.0.0.1:6550/apis": dial tcp 127.0.0.1:6550: connect: connection refused`)
+	cs.PrependReactor("*", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, connRefused
+	})
+
+	results := Run(bg(), cs, Options{
+		Namespace: "lukas-test",
+		ServerURL: "https://127.0.0.1:6550",
+		HTTPProbe: func(context.Context, string) error { return nil }, // backend reachable from this machine
+	})
+
+	byName := map[string]Result{}
+	for _, r := range results {
+		byName[r.Name] = r
+	}
+
+	reach := byName["Cluster reachable"]
+	if reach.Status != StatusFail || !strings.Contains(reach.Detail, "127.0.0.1:6550") {
+		t.Fatalf("Cluster reachable = %+v, want fail naming the endpoint", reach)
+	}
+	if !strings.Contains(reach.Remedy, "start") {
+		t.Errorf("Cluster reachable remedy = %q, want a start-the-cluster hint for a loopback server", reach.Remedy)
+	}
+
+	for _, name := range []string{
+		"Pod health", "Restart history", "Dataset volume (PVC)", "Node capacity",
+		"Image pull secret", "Proxy configuration", "Service Bus egress (requests-proxy)",
+	} {
+		r, ok := byName[name]
+		if !ok {
+			t.Fatalf("missing check %q in results", name)
+		}
+		if r.Status != StatusUnknown {
+			t.Errorf("%q = %v, want StatusUnknown (couldn't check) — must not invent a definitive verdict", name, r.Status)
+		}
+		if r.Remedy != "" {
+			t.Errorf("%q emitted remedy %q under an unreachable cluster — should stay silent", name, r.Remedy)
+		}
+	}
+
+	if r := byName["Backend egress (from this machine)"]; r.Status != StatusOK {
+		t.Errorf("Backend egress = %v, want ok (probed from this machine, independent of the cluster API)", r.Status)
+	}
+	if w := Worst(results); w != StatusFail {
+		t.Fatalf("Worst = %v, want fail (verdict from the one real ✖, StatusUnknown ignored)", w)
 	}
 }
 
