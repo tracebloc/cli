@@ -493,10 +493,15 @@ func backendHost(clientEnv string) string {
 	}
 }
 
-// checkRequestsProxy verifies the requests-proxy deployment — the in-cluster
-// broker for experiment egress (the Service Bus "experiments" queue) — is
-// present and Ready. While it's down, experiments egress fails and the
-// experiment silently stays Pending, the exact class this epic targets.
+// checkRequestsProxy verifies the requests-proxy deployment is present and
+// Ready. requests-proxy is the OUTBOUND relay: training pods POST epoch
+// results/FLOPs to it and it forwards them to the Service Bus queues. It is NOT
+// on the scheduling path — jobs-manager consumes the experiment subscription
+// directly with its own credentials — so a down requests-proxy stalls result/
+// weights egress MID-RUN; it does not block scheduling (experiments do not
+// "stay Pending" for this). Ready here is the Deployment's ReadyReplicas, which
+// (absent a readiness probe — backend#1143) only means the container started,
+// not that Service Bus egress actually works; the OK detail says so plainly.
 func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string, release *cluster.ParentRelease) Result {
 	const name = "Service Bus egress (requests-proxy)"
 	dep := findDeployment(ctx, cs, ns, release, "requests-proxy")
@@ -505,7 +510,7 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 			Name:   name,
 			Status: StatusFail,
 			Detail: "requests-proxy deployment not found",
-			Remedy: "The requests-proxy brokers experiment (Service Bus) egress; without it experiments stay Pending. Reinstall/upgrade the client chart.",
+			Remedy: "requests-proxy relays training results/metrics to Service Bus; without it, running experiments can't send results back and training stalls mid-run (scheduling is unaffected). Reinstall/upgrade the client chart.",
 		}
 	}
 	if dep.Status.ReadyReplicas < 1 {
@@ -513,10 +518,10 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 			Name:   name,
 			Status: StatusFail,
 			Detail: fmt.Sprintf("requests-proxy not ready (%d/%d replicas)", dep.Status.ReadyReplicas, dep.Status.Replicas),
-			Remedy: "Experiments egress flows through requests-proxy; while it's down they stay Pending. kubectl describe deploy " + dep.Name + " -n " + ns,
+			Remedy: "While requests-proxy is down, in-flight training can't relay epoch results/FLOPs to Service Bus — result egress stalls (scheduling is unaffected). kubectl describe deploy " + dep.Name + " -n " + ns,
 		}
 	}
-	return Result{Name: name, Status: StatusOK, Detail: "requests-proxy ready (brokers the 'experiments' queue)"}
+	return Result{Name: name, Status: StatusOK, Detail: "requests-proxy Deployment Ready — relays result/FLOPs egress to Service Bus (deployment-ready only; egress not directly probed)"}
 }
 
 // checkNodeFit verifies at least one Ready node can satisfy the resource

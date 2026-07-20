@@ -396,6 +396,33 @@ func TestCheckRequestsProxy(t *testing.T) {
 // When DiscoverParentRelease failed (release nil) but a release-prefixed
 // requests-proxy exists, the suffix fallback must still find it rather than
 // falsely report it missing (Bugbot on #89).
+// TestCheckRequestsProxy_Wording locks the cli#351 reword: requests-proxy is
+// the OUTBOUND result/FLOPs relay, so none of its lines may say experiments
+// "stay Pending" (that's the scheduling path, which it doesn't touch), and the
+// ✔ must be honest that egress is not actually probed.
+func TestCheckRequestsProxy_Wording(t *testing.T) {
+	rel := &cluster.ParentRelease{ReleaseName: "tb"}
+
+	ok := checkRequestsProxy(bg(), fake.NewClientset(requestsProxyDep("tb", 1)), ns, rel)
+	if strings.Contains(ok.Detail, "Pending") {
+		t.Errorf("OK detail says %q — must not mention 'Pending' (that's scheduling, not egress)", ok.Detail)
+	}
+	if !strings.Contains(ok.Detail, "not directly probed") {
+		t.Errorf("OK detail = %q, want it honest that egress is not directly probed", ok.Detail)
+	}
+
+	notReady := checkRequestsProxy(bg(), fake.NewClientset(requestsProxyDep("tb", 0)), ns, rel)
+	missing := checkRequestsProxy(bg(), fake.NewClientset(), ns, rel)
+	for _, r := range []Result{notReady, missing} {
+		if strings.Contains(r.Remedy, "Pending") {
+			t.Errorf("remedy %q must not say experiments 'stay Pending' — a down proxy stalls result egress mid-run", r.Remedy)
+		}
+		if !strings.Contains(r.Remedy, "result") {
+			t.Errorf("remedy %q should describe the real failure (result/metrics egress stalls)", r.Remedy)
+		}
+	}
+}
+
 func TestCheckRequestsProxy_NilReleaseFindsPrefixed(t *testing.T) {
 	cs := fake.NewClientset(requestsProxyDep("tb", 1)) // "tb-requests-proxy"
 	if r := checkRequestsProxy(bg(), cs, ns, nil); r.Status != StatusOK {
