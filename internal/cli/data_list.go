@@ -6,6 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -14,41 +18,47 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// runDataListArgs is the resolved input to runDataList — same
-// shape convention as the other data verbs, keeping the RunE a thin
-// flag-to-struct adapter.
+// listDatasetsDetailedFn is the test seam over push.ListDatasetsDetailed —
+// same fn-var convention as listDatasetsFn / loadClusterFn.
+var listDatasetsDetailedFn = push.ListDatasetsDetailed
+
+// runDataListArgs is the resolved input to runDataList — a thin
+// flag-to-struct adapter, same shape as the other data verbs.
 type runDataListArgs struct {
 	Kubeconfig string
 	Context    string
 	Namespace  string
+	ShowAll    bool
 	OutputJSON bool
 	Printer    *ui.Printer
 	JSONOut    io.Writer
 }
 
-// newDataListCmd implements `tracebloc data list` — a read-only
-// listing of the datasets ingested into the cluster. The kubeconfig
-// flags are all zero-value-safe, so the minimal `tracebloc data list`
-// runs against the current context + its namespace; the flags only
-// override that (same convention as `cluster info`).
+// newDataListCmd implements `tracebloc data list` — a read-only listing of the
+// datasets ingested into the cluster, with per-dataset size, record count,
+// format, split, and freshness. The kubeconfig flags are zero-value-safe, so
+// the minimal `tracebloc data list` runs against the current context + its
+// namespace (same convention as `cluster info`).
 func newDataListCmd() *cobra.Command {
 	var (
 		kubeconfigPath  string
 		contextOverride string
 		nsOverride      string
+		showAll         bool
 		outputJSON      bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List datasets ingested in the cluster",
-		Long: `Lists the datasets ingested into your client —
-the tables in ` + push.IngestionDatabase + ` on the cluster.
+		Short: "List datasets ingested in the cluster, with size / records / format",
+		Long: `Lists the datasets ingested into your client — the tables in ` + push.IngestionDatabase + `
+on the cluster — grouped by modality, with each dataset's split (train/test),
+record count, size, format, and when it was ingested.
 
 With no flags it uses your current kubeconfig context and its namespace;
 the flags below override that, same as ` + "`cluster info`" + ` and ` + "`data ingest`" + `.
-For the full catalog (with metadata), see the dashboard at
-https://ai.tracebloc.io/metadata.
+Framework tables (the ingest-run journal) are hidden unless you pass --all.
+For the full catalog, see the dashboard at https://ai.tracebloc.io/metadata.
 
 Exit codes:
   0  listed successfully (including an empty list)
@@ -69,6 +79,7 @@ Exit codes:
 				Kubeconfig: kubeconfigPath,
 				Context:    contextOverride,
 				Namespace:  nsOverride,
+				ShowAll:    showAll,
 				OutputJSON: outputJSON,
 				Printer:    printer,
 				JSONOut:    jsonOut,
@@ -78,20 +89,21 @@ Exit codes:
 
 	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
 	addNamespaceFlag(cmd, &nsOverride, namespaceFlagUsage)
+	cmd.Flags().BoolVar(&showAll, "all", false,
+		"include framework/system tables (e.g. the ingest-run journal), normally hidden")
 	cmd.Flags().BoolVar(&outputJSON, "output-json", false,
 		"emit the dataset list as JSON on stdout (human output → stderr)")
 
 	return cmd
 }
 
-// runDataList discovers the cluster, enumerates the ingested tables,
-// and renders them. Mirrors the other data verbs' discovery so the
-// exit-code contract is consistent.
+// runDataList discovers the cluster, enumerates the ingested datasets with
+// their metadata, and renders them. Mirrors the other data verbs' discovery so
+// the exit-code contract is consistent.
 func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	// In --output-json mode, guarantee stdout always carries JSON: the
-	// success path emits the listing and sets jsonEmitted; this defer
-	// covers the early-failure returns (kubeconfig, no release, query)
-	// with a JSON error object, mirroring data ingest. (Bugbot #53)
+	// success path emits the listing; this defer covers the early-failure
+	// returns with a JSON error object, mirroring data ingest. (Bugbot #53)
 	jsonEmitted := false
 	defer func() {
 		if a.OutputJSON && err != nil && !jsonEmitted {
@@ -114,51 +126,422 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	}
 	resolved, cs, release := target.Resolved, target.Clientset, target.Release
 
-	tables, err := listDatasetsFn(ctx, cs, resolved.RestConfig, resolved.Namespace)
+	infos, err := listDatasetsDetailedFn(ctx, cs, resolved.RestConfig, resolved.Namespace)
 	if err != nil {
 		return &exitError{code: exitQueryFailed, err: err}
 	}
 
 	if a.OutputJSON {
-		writeDataListJSON(a.JSONOut, resolved.Namespace, release.ReleaseName, tables)
+		writeDataListJSON(a.JSONOut, resolved.Namespace, release.ReleaseName, infos, a.ShowAll)
 		jsonEmitted = true
 		return nil
 	}
-	renderDataList(p, resolved.Namespace, tables)
+	renderDataList(p, resolved.Namespace, infos, a.ShowAll)
 	return nil
 }
 
-// renderDataList prints the human-facing listing. Split out so it's
-// unit-testable with a buffer-backed Printer.
-func renderDataList(p *ui.Printer, namespace string, tables []string) {
-	p.Section(fmt.Sprintf("Datasets in %s (%d)", namespace, len(tables)))
-	if len(tables) == 0 {
+// renderDataList prints the human-facing listing: a summary line, then the
+// datasets grouped by their real task (or inferred modality when the task
+// wasn't recorded) with per-dataset detail. Split out so it's unit-testable
+// with a buffer-backed Printer.
+func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, showAll bool) {
+	var shown, system []push.DatasetInfo
+	var totalBytes int64
+	for _, d := range infos {
+		if d.System {
+			system = append(system, d)
+			continue
+		}
+		shown = append(shown, d)
+		totalBytes += d.SizeBytes
+	}
+
+	if len(shown) == 0 && !(showAll && len(system) > 0) {
+		p.Section(fmt.Sprintf("Datasets in %s (0)", namespace))
 		p.Newline()
 		p.Para(fmt.Sprintf("No datasets yet — ingest one with `%s data ingest`.", invokedName()))
+		if len(system) > 0 && !showAll {
+			p.Hintf("%d system table(s) hidden — show with --all.", len(system))
+		}
 		return
 	}
-	for _, t := range tables {
-		p.Infof("%s", t)
+
+	header := fmt.Sprintf("Datasets in %s — %d", namespace, len(shown))
+	if totalBytes > 0 {
+		header += " · " + push.HumanBytes(totalBytes)
+	}
+	p.Section(header)
+	if len(system) > 0 && !showAll {
+		p.Hintf("%d system table(s) hidden — show with --all.", len(system))
+	}
+
+	// Column widths sized to the actual rows so no cell overflows its slot and
+	// shifts the columns after it. Measured in display columns (runes), so the
+	// em dash and middot don't skew the byte-based padding. Record counts and
+	// sizes vary widely ("100 documents", "100.00 KiB"), so they're sized here
+	// too rather than pinned to a guessed constant.
+	nameW, fmtW, recW, sizeW := 8, 10, 6, 4
+	groups := map[string][]push.DatasetInfo{}
+	groupRank := map[string]int{} // group label → modality rank, for ordering
+	for _, d := range shown {
+		m := datasetModality(d)
+		label := groupLabel(d, m)
+		groups[label] = append(groups[label], d)
+		groupRank[label] = modalityRank(m)
+		if l := dispW(d.Name); l > nameW {
+			nameW = l
+		}
+		if l := dispW(formatCell(d, m)); l > fmtW {
+			fmtW = l
+		}
+		if l := dispW(recordsCell(d, m)); l > recW {
+			recW = l
+		}
+		if l := dispW(sizeCell(d)); l > sizeW {
+			sizeW = l
+		}
+	}
+	// Names are user-controlled and can be arbitrarily long, so cap + truncate
+	// (below) to keep the table narrow. Format cells are system-generated and
+	// naturally bounded ("csv · N cols · M classes"), so they're sized to
+	// content, not capped — capping without truncating would let a wide format
+	// overflow and shift the freshness column, the very thing sizing prevents.
+	if nameW > 24 {
+		nameW = 24
+	}
+
+	// Order groups by modality family (Image→Text→Tabular→Time-series→Other),
+	// then label — so tasks in the same family cluster and the order is stable.
+	labels := make([]string, 0, len(groups))
+	for l := range groups {
+		labels = append(labels, l)
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		if ri, rj := groupRank[labels[i]], groupRank[labels[j]]; ri != rj {
+			return ri < rj
+		}
+		return labels[i] < labels[j]
+	})
+	for _, label := range labels {
+		ds := groups[label]
+		sort.Slice(ds, func(i, j int) bool { return ds[i].Name < ds[j].Name })
+		p.Section(fmt.Sprintf("%s · %d", label, len(ds)))
+		for _, d := range ds {
+			p.Para(datasetRow(d, datasetModality(d), nameW, recW, sizeW, fmtW))
+		}
+	}
+
+	if showAll && len(system) > 0 {
+		// The system group is its own sub-table (name + size only), so size its
+		// two columns to its own rows rather than the shown datasets'. No cap:
+		// system names are framework-generated and short, and padRight doesn't
+		// truncate — a cap here would only reintroduce the overflow it implies
+		// it prevents.
+		sysNameW, sysSizeW := 8, 4
+		for _, d := range system {
+			if l := dispW(d.Name); l > sysNameW {
+				sysNameW = l
+			}
+			if l := dispW(sizeCell(d)); l > sysSizeW {
+				sysSizeW = l
+			}
+		}
+		sort.Slice(system, func(i, j int) bool { return system[i].Name < system[j].Name })
+		p.Section(fmt.Sprintf("System · %d", len(system)))
+		for _, d := range system {
+			p.Para("· " + padRight(d.Name, sysNameW) + "  " + padLeft(sizeCell(d), sysSizeW))
+		}
 	}
 }
 
-// dataListJSON is the --output-json shape (owned by the CLI layer).
-type dataListJSON struct {
-	Namespace string   `json:"namespace"`
-	Release   string   `json:"release"`
-	Count     int      `json:"count"`
-	Datasets  []string `json:"datasets"`
+// datasetRow formats one dataset as an aligned row: status glyph, name, split,
+// record count (with the modality's noun), size, format, and freshness. The
+// widths are display-column counts sized by the caller to the widest cell, so
+// no value overflows its slot and shifts the columns after it. Cells are padded
+// here (by rune count) because fmt's %*s pads by bytes — which would misalign
+// the multi-byte em dash / middot.
+func datasetRow(d push.DatasetInfo, modality string, nameW, recW, sizeW, fmtW int) string {
+	glyph := "✔"
+	if d.Records == 0 {
+		glyph = "⚠" // ingested-but-empty (e.g. an ingest that dropped every record)
+	}
+	name := d.Name
+	if utf8.RuneCountInString(name) > nameW {
+		name = string([]rune(name)[:nameW-1]) + "…"
+	}
+	split := d.Intent
+	if split == "" {
+		split = "—"
+	}
+	return glyph + " " +
+		padRight(name, nameW) + "  " +
+		padRight(split, 5) + "  " +
+		padRight(recordsCell(d, modality), recW) + "  " +
+		padLeft(sizeCell(d), sizeW) + "  " +
+		padRight(formatCell(d, modality), fmtW) + "  " +
+		relativeTime(d.CreatedUnix)
 }
 
-func writeDataListJSON(w io.Writer, namespace, release string, tables []string) {
-	if tables == nil {
-		tables = []string{} // emit [] not null
+// sizeCell renders a dataset's size, or an em dash when the du size is unknown
+// (jobs-manager unreachable, or a system table that isn't du-sized).
+func sizeCell(d push.DatasetInfo) string {
+	if d.SizeBytes > 0 {
+		return push.HumanBytes(d.SizeBytes)
+	}
+	return "—"
+}
+
+// dispW is a string's width in display columns (runes), not bytes — so the em
+// dash and middot (multi-byte, one column each) each count as one.
+func dispW(s string) int { return utf8.RuneCountInString(s) }
+
+// padRight / padLeft pad s to w display columns. fmt's %*s pads by byte length,
+// which over-pads multi-byte glyphs; padding by rune count keeps columns aligned.
+func padRight(s string, w int) string {
+	if n := w - utf8.RuneCountInString(s); n > 0 {
+		return s + strings.Repeat(" ", n)
+	}
+	return s
+}
+
+func padLeft(s string, w int) string {
+	if n := w - utf8.RuneCountInString(s); n > 0 {
+		return strings.Repeat(" ", n) + s
+	}
+	return s
+}
+
+// frameworkCols are the columns the ingestor adds to every dataset table; the
+// rest are the user's schema columns (used for the "N cols" format hint and to
+// detect real datasets vs framework tables).
+var frameworkCols = map[string]bool{
+	"id": true, "created_at": true, "updated_at": true, "status": true,
+	"label": true, "data_intent": true, "data_id": true, "filename": true,
+	"extension": true, "annotation": true, "ingestor_id": true,
+}
+
+// datasetModality returns the modality family. When the ingest task is known
+// (recorded in the run journal) it's taken from the category registry — the
+// same source of truth `data ingest` uses (cli#74), so it can't drift as tasks
+// are added. Time-series tasks are FamilyTabular there, so a known one reports
+// "Tabular"; the "Time-series" bucket below is only the inference fallback for
+// datasets ingested before the task was recorded. Falls back to inferring from
+// the on-disk shape: the file extension, else time/sequence columns.
+func datasetModality(d push.DatasetInfo) string {
+	switch {
+	case push.IsImage(d.Task):
+		return "Image"
+	case push.IsText(d.Task):
+		return "Text"
+	case push.IsTabular(d.Task):
+		return "Tabular"
+	}
+	switch strings.ToLower(d.Extension) {
+	case "jpg", "jpeg", "png":
+		return "Image"
+	case "txt", "text": // the ingestor accepts both .txt and .text
+		return "Text"
+	}
+	if hasCol(d.Columns, "sequence_id") || hasCol(d.Columns, "timestamp") ||
+		(hasCol(d.Columns, "time") && hasCol(d.Columns, "event")) {
+		return "Time-series"
+	}
+	// A populated dataset with user-schema columns is tabular. Require records:
+	// an empty (0-row) table has NULL extension/label, so its modality is
+	// genuinely unknowable — it falls to "Other" rather than a wrong guess (an
+	// empty image/semseg/keypoint table would otherwise look tabular).
+	if d.Records > 0 && featureColCount(d.Columns) > 0 {
+		return "Tabular"
+	}
+	return "Other"
+}
+
+// groupLabel is the section header a dataset is grouped under: its real task's
+// registry label ("Time-series classification", "Sequence-to-sequence") when
+// the journal recorded a known task, the raw task id for a task the registry
+// doesn't know, else the inferred modality family. Using the registry label
+// keeps the header identical to the rest of the CLI rather than re-deriving it.
+func groupLabel(d push.DatasetInfo, modality string) string {
+	if spec, ok := push.Lookup(d.Task); ok {
+		return spec.Label
+	}
+	if d.Task != "" {
+		return d.Task
+	}
+	return modality
+}
+
+// modalityRank orders the modality families so a group's position is stable and
+// related tasks cluster together.
+func modalityRank(modality string) int {
+	switch modality {
+	case "Image":
+		return 0
+	case "Text":
+		return 1
+	case "Tabular":
+		return 2
+	case "Time-series":
+		return 3
+	default: // Other
+		return 4
+	}
+}
+
+// hasCol reports whether cols contains name (case-insensitive, trimmed).
+func hasCol(cols []string, name string) bool {
+	for _, c := range cols {
+		if strings.EqualFold(strings.TrimSpace(c), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// featureColCount is the number of user-schema columns (all columns minus the
+// framework-managed ones).
+func featureColCount(cols []string) int {
+	n := 0
+	for _, c := range cols {
+		if !frameworkCols[strings.ToLower(strings.TrimSpace(c))] {
+			n++
+		}
+	}
+	return n
+}
+
+// recordsCell renders the record count with the modality's natural noun.
+func recordsCell(d push.DatasetInfo, modality string) string {
+	noun := "rows"
+	switch modality {
+	case "Image":
+		noun = "images"
+	case "Text":
+		noun = "documents"
+	}
+	return fmt.Sprintf("%d %s", d.Records, noun)
+}
+
+// formatCell renders the format hint: the file extension for file-bearing
+// tasks, or "csv · N cols" for tabular/time-series, plus "· N classes" when the
+// dataset is labelled.
+func formatCell(d push.DatasetInfo, modality string) string {
+	var base string
+	switch modality {
+	case "Image", "Text":
+		// Usually the recorded file extension. When the modality came from the
+		// task (not the extension), a file dataset whose extension wasn't
+		// recorded still lands here — fall back to "files" rather than blank.
+		base = strings.ToLower(d.Extension)
+		if base == "" {
+			base = "files"
+		}
+	case "Tabular", "Time-series":
+		base = fmt.Sprintf("csv · %d cols", featureColCount(d.Columns))
+	default:
+		// Undetermined modality. Row-based tasks (with user feature columns)
+		// resolve to Tabular/Time-series, so a populated table left here is a
+		// file dataset whose type we couldn't pin down (e.g. extension not
+		// recorded) — say "files". An empty table is genuinely unknown; don't
+		// imply "csv". (A `filename` column can't gate this — it's a framework
+		// column on every table.)
+		if d.Records > 0 {
+			return "files"
+		}
+		return "—"
+	}
+	// Show classes only when the label actually repeats (classes < records):
+	// a continuous regression target has ~one distinct value per row, which is
+	// not a class count. COUNT(DISTINCT label) can't tell the two apart, so this
+	// guard keeps "N classes" to genuinely categorical datasets.
+	if d.Classes >= 2 && d.Classes < d.Records {
+		base += fmt.Sprintf(" · %d classes", d.Classes)
+	}
+	return base
+}
+
+// relativeTime renders a UTC epoch (the table's create_time via UNIX_TIMESTAMP,
+// which is tz-safe regardless of the MySQL session clock) as a coarse "Xh ago".
+// Zero/unknown → an em dash; a future timestamp (clock skew) → "just now".
+func relativeTime(epoch int64) string {
+	if epoch <= 0 {
+		return "—"
+	}
+	d := time.Since(time.Unix(epoch, 0))
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+// ingestedISO renders the ingest time as an explicit UTC RFC3339 stamp from the
+// same epoch relativeTime uses. Deriving it from the epoch (not a session-tz
+// DATE_FORMAT string) keeps JSON consumers and the human "ago" text in
+// agreement regardless of the MySQL session timezone. Empty when unknown.
+func ingestedISO(epoch int64) string {
+	if epoch <= 0 {
+		return ""
+	}
+	return time.Unix(epoch, 0).UTC().Format(time.RFC3339)
+}
+
+// ── JSON output (owned by the CLI layer) ──
+
+type datasetJSON struct {
+	Name      string `json:"name"`
+	Task      string `json:"task,omitempty"` // real ingest task; omitted for pre-persistence datasets
+	Modality  string `json:"modality"`
+	Intent    string `json:"intent,omitempty"`
+	Records   int64  `json:"records"`
+	Classes   int64  `json:"classes,omitempty"`
+	Format    string `json:"format"`
+	SizeBytes int64  `json:"size_bytes"`
+	Ingested  string `json:"ingested,omitempty"`
+	System    bool   `json:"system,omitempty"`
+}
+
+type dataListJSON struct {
+	Namespace string        `json:"namespace"`
+	Release   string        `json:"release"`
+	Count     int           `json:"count"`
+	Datasets  []string      `json:"datasets"` // names — type unchanged (additive-only JSON contract)
+	Details   []datasetJSON `json:"details"`  // per-dataset metadata added by the rich listing
+}
+
+func writeDataListJSON(w io.Writer, namespace, release string, infos []push.DatasetInfo, showAll bool) {
+	names := []string{}
+	details := []datasetJSON{}
+	for _, d := range infos {
+		if d.System && !showAll {
+			continue
+		}
+		m := datasetModality(d)
+		names = append(names, d.Name)
+		details = append(details, datasetJSON{
+			Name:      d.Name,
+			Task:      d.Task,
+			Modality:  m,
+			Intent:    d.Intent,
+			Records:   d.Records,
+			Classes:   d.Classes,
+			Format:    formatCell(d, m),
+			SizeBytes: d.SizeBytes,
+			Ingested:  ingestedISO(d.CreatedUnix),
+			System:    d.System,
+		})
 	}
 	res := dataListJSON{
 		Namespace: namespace,
 		Release:   release,
-		Count:     len(tables),
-		Datasets:  tables,
+		Count:     len(names),
+		Datasets:  names,
+		Details:   details,
 	}
 	b, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
@@ -167,9 +550,9 @@ func writeDataListJSON(w io.Writer, namespace, release string, tables []string) 
 	_, _ = fmt.Fprintln(w, string(b))
 }
 
-// writeDataListErrorJSON emits a minimal JSON error object for
-// --output-json runs that fail before the listing is produced, so
-// stdout is never empty on failure (parallels data ingest). (Bugbot #53)
+// writeDataListErrorJSON emits a minimal JSON error object for --output-json
+// runs that fail before the listing is produced, so stdout is never empty on
+// failure (parallels data ingest). (Bugbot #53)
 func writeDataListErrorJSON(w io.Writer, e error, code int) {
 	res := struct {
 		Status   string `json:"status"`

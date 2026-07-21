@@ -9,7 +9,7 @@ promises, and what a script may rely on.
 |---|---|---|
 | `version` | — (plain payload, no `status` field) | `version`, `git_sha`, `build_date`, `go_version`, `platform` |
 | `data ingest` | `succeeded` · `dry-run` · `detached` · `completed_with_failures` · `failed` · `unknown` · `auth_error` · `submit_error` · `watch_error` | result includes the ingest summary (row counts, success rate) when one was produced |
-| `data list` | — (a listing, no `status` field) | `namespace`, `release`, `count`, `datasets` |
+| `data list` | — (a listing, no `status` field) | `namespace`, `release`, `count`, `datasets` (names, unchanged), `details` (per-dataset objects: `name`, `task` (real ingest task; omitted for datasets ingested before task-persistence), `modality`, `intent`, `records`, `classes`, `format`, `size_bytes`, `ingested`) |
 | `data delete` | `deleted` · `dry-run` · `declined` | result includes `database`, `table` (the case-resolved spelling), `pvc_paths`, `removed_paths`. Never prompts — pass `--yes` (or `--dry-run`) |
 
 Not covered (yet): `doctor`, `resources`, `auth status` — extending
@@ -34,7 +34,7 @@ epic's OQ5 decision. `auth status --check` is exit-code-only by design.
    that need "it actually happened" must check `status`, not just the
    exit code.
 5. **Arrays are never `null`.** Empty lists marshal as `[]`
-   (`datasets`, `pvc_paths`, `removed_paths`), so indexing is safe.
+   (`datasets`, `details`, `pvc_paths`, `removed_paths`), so indexing is safe.
 6. **`--output-json` implies non-interactive.** Commands never prompt
    in JSON mode: `data ingest` treats it as `--no-input`; `data delete`
    requires an explicit `--yes` (or `--dry-run`) and otherwise fails
