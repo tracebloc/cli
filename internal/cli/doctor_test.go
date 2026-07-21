@@ -386,3 +386,34 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 }
+
+// ── doctorVerdict: the closing "everything looks good" / problem / partial call ──
+
+func TestDoctorVerdict(t *testing.T) {
+	ok, warn, fail, unknown := doctor.StatusOK, doctor.StatusWarn, doctor.StatusFail, doctor.StatusUnknown
+	cases := []struct {
+		name             string
+		connected, ready doctor.Status
+		wantFail         bool
+		wantAllGood      bool
+	}{
+		{"both OK → everything good", ok, ok, false, true},
+		{"ready Fail → problem", ok, fail, true, false},
+		{"connected Fail → problem", fail, ok, true, false},
+		// The Bugbot case: connected but readiness couldn't be checked (RBAC →
+		// Unknown). Not a hard failure, but NOT "everything looks good".
+		{"connected + ready can't-check → neither", ok, unknown, false, false},
+		// Not-connected already Fails via connected, regardless of ready=Unknown.
+		{"disconnected + ready unknown → problem", fail, unknown, true, false},
+		{"a warn that isn't Fail → not everything-good", ok, warn, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotFail, gotAllGood := doctorVerdict(tc.connected, tc.ready)
+			if gotFail != tc.wantFail || gotAllGood != tc.wantAllGood {
+				t.Errorf("doctorVerdict(%v,%v) = fail=%v allGood=%v, want fail=%v allGood=%v",
+					tc.connected, tc.ready, gotFail, gotAllGood, tc.wantFail, tc.wantAllGood)
+			}
+		})
+	}
+}

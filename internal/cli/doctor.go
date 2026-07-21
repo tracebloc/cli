@@ -205,15 +205,23 @@ func runClusterDoctor(
 	// --diagnose writes the support bundle via the deferred writer registered
 	// above, so it fires on this path and on every early exit alike.
 
-	// 6. Verdict + exit code (0 healthy, 2 a problem).
+	// 6. Verdict + exit code (0 healthy/partial, 2 a problem).
 	p.Newline()
-	if worseStatus(connected.status, ready.status) == doctor.StatusFail {
+	fail, allGood := doctorVerdict(connected.status, ready.status)
+	switch {
+	case fail:
 		if !diagnose { // they just wrote a bundle — don't send them to write it again
 			p.Hintf("Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())
 		}
 		return &exitError{code: exitChecksFailed, err: nil}
+	case allGood:
+		p.Successf("Everything looks good — you're ready to run training.")
+	default:
+		// Connected and nothing failed, but a check couldn't complete (e.g. pod
+		// health unreadable — RBAC → ready is StatusUnknown). Don't overclaim
+		// "everything looks good"; say so honestly. Not a failure → exit 0 (Bugbot).
+		p.Infof("No problems found, but some checks couldn't finish — re-run with --verbose for detail.")
 	}
-	p.Successf("Everything looks good — you're ready to run training.")
 	return nil
 }
 
@@ -506,4 +514,18 @@ func worseStatus(a, b doctor.Status) doctor.Status {
 		return doctor.StatusWarn
 	}
 	return doctor.StatusOK
+}
+
+// doctorVerdict decides the closing line from the two rolled-up health lines:
+// fail (a real problem → exit 2), or allGood (BOTH genuinely OK → "everything
+// looks good"). The key subtlety: allGood requires both to be StatusOK, NOT
+// merely "not Fail" — a readiness we couldn't determine (StatusUnknown, e.g. a
+// pod-list RBAC failure) must not be reported as good, even though worseStatus
+// treats Unknown as non-worsening (Bugbot). When neither holds, the caller
+// reports a partial "couldn't finish some checks" result (still exit 0).
+func doctorVerdict(connected, ready doctor.Status) (fail, allGood bool) {
+	if worseStatus(connected, ready) == doctor.StatusFail {
+		return true, false
+	}
+	return false, connected == doctor.StatusOK && ready == doctor.StatusOK
 }
