@@ -18,7 +18,6 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
-	"image"
 	"io"
 	"math"
 	"os"
@@ -243,33 +242,10 @@ func CheckHasDataRows(path string) error {
 // target_size uniformity error.
 func ValidateImages(images []string, expectedW, expectedH, minW, minH int) error {
 	const maxListed = 5
-	var broken, tooSmall, mismatched []string
-	for _, path := range images {
-		name := filepath.Base(path)
-		f, err := os.Open(path)
-		if err != nil {
-			broken = append(broken, fmt.Sprintf("%s (unreadable: %v)", name, err))
-			continue
-		}
-		cfg, _, err := image.DecodeConfig(f)
-		_ = f.Close()
-		if err != nil {
-			if st, serr := os.Stat(path); serr == nil && st.Size() == 0 {
-				broken = append(broken, name+" (empty file, 0 bytes)")
-			} else {
-				broken = append(broken, name+" (not a valid image — corrupt or unsupported format)")
-			}
-			continue
-		}
-		if minW > 0 && minH > 0 && (cfg.Width < minW || cfg.Height < minH) {
-			tooSmall = append(tooSmall,
-				fmt.Sprintf("%s (%dx%d)", name, cfg.Width, cfg.Height))
-		}
-		if expectedW > 0 && expectedH > 0 && (cfg.Width != expectedW || cfg.Height != expectedH) {
-			mismatched = append(mismatched,
-				fmt.Sprintf("%s (%dx%d)", name, cfg.Width, cfg.Height))
-		}
-	}
+	// scanImageResolutions (image_resolution.go) is the shared decode-and-compare
+	// core — the SAME one ValidateMaskResolution runs over masks/, so the two
+	// ImageResolutionValidator previews can't drift (cli#352).
+	broken, tooSmall, mismatched := scanImageResolutions(images, expectedW, expectedH, minW, minH)
 	// Floor first: an image below the minimum size simply can't be trained
 	// on, so it's the most fundamental, actionable failure — data-ingestors
 	// #348 returns it ahead of the uniformity / target_size mismatch.
@@ -1444,6 +1420,16 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if err := CheckSchemaColumns(header, spec.Schema, "the data CSV"); err != nil {
 			return nil, dataProblem(err)
 		}
+		// Per-value TYPE check (DataValidator preview, cli#352): a value that
+		// doesn't match its column's declared NUMERIC type — a non-numeric or
+		// fractional value in an INT column, a non-numeric value in a FLOAT
+		// column — is rejected by the ingestor's DataValidator after the table
+		// is created; CheckSchemaColumns only proves the columns EXIST. See
+		// CheckColumnValueTypes for the deliberately-narrow, never-over-reject
+		// scope (numeric types only).
+		if err := CheckColumnValueTypes(layout.LabelsCSV, spec.Schema, spec.Category); err != nil {
+			return nil, dataProblem(err)
+		}
 		// A bogus --label-column otherwise fails in-cluster only at READ
 		// time — after the table was created — leaving an orphaned table.
 		if err := CheckLabelColumn(header, spec.LabelColumn, "the data CSV"); err != nil {
@@ -1592,6 +1578,15 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 				return nil, dataProblem(err)
 			}
 			if err := CheckMaskIDColumn(layout.LabelsCSV); err != nil {
+				return nil, dataProblem(err)
+			}
+			// Mask resolution — the ingestor's SECOND ImageResolutionValidator
+			// ("Mask Resolution Validator", subdir=masks). Masks are pixel-wise
+			// label maps and must share the images' target size + min-size floor;
+			// a corrupt or mis-sized mask otherwise passes preflight and fails
+			// in-cluster after the upload (cli#352). Same expected/floor as the
+			// images (expW/expH/minW/minH), mirroring the factory.
+			if err := ValidateMaskResolution(layout.Sidecars["masks"], expW, expH, minW, minH); err != nil {
 				return nil, dataProblem(err)
 			}
 			missing, orphanFiles, cerr := CrossCheckLabels(layout.LabelsCSV, layout.Images, spec.Extension)

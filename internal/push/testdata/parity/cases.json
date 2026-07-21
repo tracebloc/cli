@@ -841,6 +841,60 @@
       "cli_verdict": "accept",
       "ingestor_verdict": "reject",
       "note": "DOCUMENTED under-preview: a negative 'time' value \u2014 TimeToEventValidator rejects in-cluster, but the CLI has no TTE time-column mirror, so the failure surfaces post-upload. Candidate for a future TTE preview."
+    },
+    {
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "csv": "labels.csv",
+      "name": "semseg-mask-res-mismatch",
+      "category": "semantic_segmentation",
+      "label_column": "label",
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "b_mask.png is 48x48 while the images (and target_size) are 32x32: the ingestor's SECOND ImageResolutionValidator (name 'Mask Resolution Validator', subdir 'masks') rejects it, and the CLI now previews it via ValidateMaskResolution (cli#352). Pairing + mask_id are valid, so mask resolution is the sole rejecter. Before cli#352 the CLI validated only images/ and accepted this, then it failed in-cluster after the upload."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tabular-int-nonnumeric",
+      "category": "tabular_classification",
+      "label_column": "label",
+      "schema": {
+        "age": "INT",
+        "label": "VARCHAR(255)"
+      },
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "age is declared INT but data row 1 is 'abc': the ingestor's DataValidator rejects the non-numeric value (labels cat/dog keep diversity happy, so DataValidator is the sole rejecter), and the CLI now previews it via CheckColumnValueTypes (cli#352). Explicit schema so BOTH sides validate the same typed column."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tabular-int-noninteger",
+      "category": "tabular_classification",
+      "label_column": "label",
+      "schema": {
+        "age": "INT",
+        "label": "VARCHAR(255)"
+      },
+      "cli_verdict": "reject",
+      "ingestor_verdict": "reject",
+      "note": "age is declared INT but data row 2 is '40.5': DataValidator's fractional-value check rejects it; CheckColumnValueTypes previews the same (cli#352). Pins the non-integer sub-check as distinct from the non-numeric one above."
+    },
+    {
+      "csv": "data.csv",
+      "name": "tabular-typed-ok",
+      "category": "tabular_classification",
+      "label_column": "label",
+      "schema": {
+        "age": "INT",
+        "price": "FLOAT",
+        "label": "VARCHAR(255)"
+      },
+      "cli_verdict": "accept",
+      "ingestor_verdict": "accept",
+      "note": "OVER-REJECT guard for cli#352: a fully-typed schema whose values match (INT age, FLOAT price incl. '1e3' scientific notation, VARCHAR label with 2 classes) must pass on BOTH sides. Proves CheckColumnValueTypes accepts numeric-looking values (the #188 direction) rather than over-rejecting a valid typed dataset."
     }
   ]
 }

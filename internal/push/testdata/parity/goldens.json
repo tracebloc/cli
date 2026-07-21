@@ -216,6 +216,14 @@
       ],
       "verdict": "reject"
     },
+    "semseg-mask-res-mismatch": {
+      "errors": [
+        "ImageResolutionValidator: Multiple image resolutions found: [(32, 32), (48, 48)]. All images must have the same resolution.",
+        "ImageResolutionValidator: Expected resolution: [32, 32]",
+        "ImageResolutionValidator: Resolution errors: ['masks/b_mask.png: (48, 48) (expected: [32, 32])']"
+      ],
+      "verdict": "reject"
+    },
     "semseg-missing-mask": {
       "errors": [
         "FilePairingValidator: 1 image(s) have no matching mask: ['b']"
@@ -295,6 +303,18 @@
       ],
       "verdict": "reject"
     },
+    "tabular-int-noninteger": {
+      "errors": [
+        "DataValidator: Column 'age' contains 1 non-integer values"
+      ],
+      "verdict": "reject"
+    },
+    "tabular-int-nonnumeric": {
+      "errors": [
+        "DataValidator: Column 'age' contains 1 non-numeric value(s) at row 0."
+      ],
+      "verdict": "reject"
+    },
     "tabular-label-missing": {
       "errors": [],
       "verdict": "accept"
@@ -323,6 +343,10 @@
         "resolved_label": "label",
         "row_count": 2
       },
+      "verdict": "accept"
+    },
+    "tabular-typed-ok": {
+      "errors": [],
       "verdict": "accept"
     },
     "tabular-varchar-numeric-labels": {
