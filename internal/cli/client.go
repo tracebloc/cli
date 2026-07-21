@@ -186,6 +186,28 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	ilog.Logf("authenticated; provisioning against the signed-in account")
 
 	name, location := opts.name, opts.location
+	// Strip terminal escape sequences / control chars a --name or
+	// $TRACEBLOC_CLIENT_NAME may carry (see sanitizeClientName for the why). A
+	// control-char-only name cleans to "" and falls through to auto-naming below,
+	// exactly like an omitted --name.
+	if cleaned := sanitizeClientName(name); cleaned != name {
+		ilog.Logf("stripped control characters from supplied name %q -> %q", name, cleaned)
+		if cleaned == "" {
+			p.Hintf("The name you provided was only control characters — auto-naming this client instead.")
+		} else {
+			p.Hintf("Removed stray control characters from the name.")
+		}
+		name = cleaned
+	}
+	if cleanedLoc := sanitizeClientName(location); cleanedLoc != location {
+		ilog.Logf("stripped control characters from supplied location %q -> %q", location, cleanedLoc)
+		location = cleanedLoc
+	}
+	// Reflect cleaned values into opts NOW: an early return before the write-back
+	// below (e.g. the ListClients failure in the auto-name block) runs the failure
+	// defer, whose resumeCommand(opts) would otherwise reprint the raw escapes
+	// (Bugbot). The write-back below still captures the auto-generated name.
+	opts.name, opts.location = name, location
 	// cli#137 — the installer path provisions with zero flags and zero prompts:
 	//   • name: auto-generated below (<firstname>-NN) once the account's client
 	//     list is in hand, so --name is never required; --name /
