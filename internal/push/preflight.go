@@ -294,29 +294,20 @@ func ValidateImages(images []string, expectedW, expectedH, minW, minH int) error
 	return nil
 }
 
-// CheckImageFilenameColumn enforces the ingestor's filename-column contract for
-// the image family (layout.v1.json requires_filename_column=true for every image
-// task). At transfer the cluster reads each image's file with a case-SENSITIVE
-// record.get("filename") (data-ingestors record_processor.py:279 ->
-// file_transfer.py:179); a manifest that resolves to no such key drops EVERY row
-// ("No filename found in record") and the run exits 9 — AFTER the full upload.
-// The ingestor's OWN preflight does not catch this: IngestableRecordsValidator
-// passes when the column is absent, and matches case-INSENSITIVELY when present,
-// so mirroring only its preflight validators fails open here. We surface it
-// locally instead — the image mirror of the text family's up-front check.
-//
-// The match is EXACT (whitespace-trimmed, case-sensitive), mirroring the transfer
-// read — so a case variant like "Filename" is rejected here too rather than
-// green-lit into the same doomed upload #371 is about (Asad review, #373). It
-// does NOT accept "data_id" or any other alias — the ingestor never maps another
-// column to "filename" on the copy path (see imageFileColIndex).
+// CheckImageFilenameColumn enforces the image family's filename-column contract
+// (layout.v1.json requires_filename_column=true). It rejects a manifest whose
+// file column isn't an exact lowercase "filename" — the only key the cluster's
+// case-sensitive transfer read resolves (see imageFileColIndex) — so a doomed
+// upload (image_id, data_id, or a "Filename" case variant) fails here, up front,
+// rather than after the upload as an exit-9 file-transfer error. Mirrors the
+// text family's up-front check; the ingestor's own preflight can't catch it
+// (Asad review, #373).
 func CheckImageFilenameColumn(header []string) error {
 	if imageFileColIndex(header) >= 0 {
 		return nil
 	}
-	// A case variant (Filename/FILENAME) passes the ingestor's case-insensitive
-	// preflight but fails its case-sensitive transfer read — flag it with a
-	// targeted message rather than the generic "no filename column" one.
+	// Case variant (Filename/FILENAME): passes the ingestor's case-insensitive
+	// preflight, fails its case-sensitive transfer read — give a targeted hint.
 	for _, h := range header {
 		if trimmed := strings.TrimSpace(h); strings.EqualFold(trimmed, "filename") {
 			return fmt.Errorf(
@@ -415,22 +406,18 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 	return missing, orphans, nil
 }
 
-// imageFileColIndex returns the header index of the "filename" column — the key
-// the ingestor reads each image's file from at transfer. The match is EXACT
-// (whitespace-trimmed, case-SENSITIVE): the ingest copy does a case-sensitive
+// imageFileColIndex returns the index of the "filename" column, matched EXACTLY
+// (whitespace-trimmed, case-SENSITIVE): the ingest copy reads a case-sensitive
 // record.get("filename") (data-ingestors record_processor.py:279 ->
-// file_transfer.py:179) after pandas strips surrounding whitespace from the
-// headers (chunk.columns.str.strip()), so "filename" and " filename " resolve but
-// "Filename"/"FILENAME" do NOT — they read as None and fail every row.
+// file_transfer.py:179) after pandas strips header whitespace, so "filename" and
+// " filename " resolve but "Filename"/"FILENAME" do NOT.
 //
-// It deliberately does NOT accept "data_id" (or any other name). The ingestor
-// never maps another column to "filename" on the COPY path; the filename-vs-
-// data_id fallback #207 cited lives in tracebloc-client's
-// prepare_classification_pytorch_image_df — a TRAINING-time resolver over the
-// already-ingested table, not the ingest copy. A data_id-only manifest therefore
-// copies zero files (exit 9) exactly like image_id. Returns -1 when absent;
-// PreflightDataset enforces presence up front (CheckImageFilenameColumn) before
-// any caller reaches here, and CrossCheckLabels guards the -1 case.
+// It does NOT accept "data_id" — the ingestor never maps another column to
+// "filename" on the copy path. The filename-vs-data_id fallback #207 cited is
+// tracebloc-client's prepare_classification_pytorch_image_df, a TRAINING-time
+// resolver over the already-ingested table (not the copy), so a data_id-only
+// manifest copies zero files (exit 9) like image_id. Returns -1 when absent;
+// presence is enforced up front by CheckImageFilenameColumn.
 func imageFileColIndex(header []string) int {
 	for i, h := range header {
 		if strings.TrimSpace(h) == "filename" {
@@ -1571,12 +1558,9 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 				return nil, dataProblem(err)
 			}
 		}
-		// Runs AFTER the cheap manifest/header checks above: this decodes every
-		// image (O(files)), so a structurally doomed dataset — bad encoding, no
-		// filename column — fails before we open a single image (fail fast, #373).
-		// Every image, header-only decode (cheap). Previously only the
-		// first image was ever opened, so one corrupt or odd-sized file
-		// failed in-cluster after the full upload (cli#72).
+		// Per-image decode (O(files)) — runs AFTER the cheap manifest/header checks
+		// so a doomed manifest fails before we open a single image (fail fast, #373).
+		// Every image is opened; a bad/odd-sized file used to fail post-upload (cli#72).
 		expW, expH := 0, 0
 		if len(spec.TargetSize) == 2 {
 			expW, expH = spec.TargetSize[0], spec.TargetSize[1]
