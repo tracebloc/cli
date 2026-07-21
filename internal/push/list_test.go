@@ -51,6 +51,16 @@ func TestListDatasetsWith(t *testing.T) {
 			t.Errorf("unexpected exec cmd: %#v", fe.gotCmd)
 		}
 	})
+	t.Run("reserved bookkeeping tables are hidden", func(t *testing.T) {
+		fe := &fakeExecutor{stdoutToReturn: []byte("cats_dogs\ntracebloc_ingest_runs\nchurn\ntracebloc_ingest_meta\n")}
+		got, err := listDatasetsWith(context.Background(), fe, "tracebloc", "mysql-0", "mysql")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(got, []string{"cats_dogs", "churn"}) {
+			t.Fatalf("got %#v, want [cats_dogs churn] (reserved tables filtered)", got)
+		}
+	})
 	t.Run("empty database yields no datasets", func(t *testing.T) {
 		fe := &fakeExecutor{stdoutToReturn: []byte("")}
 		got, err := listDatasetsWith(context.Background(), fe, "tracebloc", "mysql-0", "mysql")
@@ -73,4 +83,28 @@ func TestListDatasetsWith(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestFilterReserved pins the reserved-table exclusion: the ingestor's
+// bookkeeping tables never surface as datasets, user datasets keep their
+// order, and the empty-listing → nil contract is preserved (so an empty or
+// all-reserved schema reports "no datasets", not an empty non-nil slice).
+func TestFilterReserved(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"nil stays nil", nil, nil},
+		{"all reserved → nil", []string{ingestRunsTable, ingestMetaTable}, nil},
+		{"keeps user datasets in order", []string{"a", ingestRunsTable, "b", ingestMetaTable, "c"}, []string{"a", "b", "c"}},
+		{"no reserved present → unchanged", []string{"reg_train", "churn_test"}, []string{"reg_train", "churn_test"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := filterReserved(c.in); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("filterReserved(%#v) = %#v, want %#v", c.in, got, c.want)
+			}
+		})
+	}
 }

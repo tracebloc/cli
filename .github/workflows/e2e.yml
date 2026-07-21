@@ -10,13 +10,22 @@ name: Integration (e2e)
 #   - on every push to develop
 #   - nightly (schedule)
 #   - manual (workflow_dispatch)
-#   - on a PR only when it carries the `e2e` label
+#   - on a PR that touches paths the suites exercise (the `changes` job
+#     below decides), or that carries the `e2e` label (manual opt-in)
 #
 # The push trigger exists because scheduled workflows always execute the
 # DEFAULT branch's tree (main), which trails develop by dozens of commits —
 # discovery_e2e_test.go, delete_e2e_test.go, and the delete-teardown job
 # don't exist on main, so the nightly never actually ran them (#293).
 # Running on develop pushes exercises the tree the tests were written for.
+#
+# The paths auto-opt-in exists because label-only gating relies on authors
+# remembering the label: #363/#367/#368 reworded the `tracebloc delete`
+# teardown copy the offboard e2e asserts on, no PR run ever executed the
+# suite, and every develop push went red until #378 realigned the
+# assertions. PRs touching the offboard flow, the rendering layer, or the
+# suites themselves now run the e2e pre-merge (~2 min, both jobs in
+# parallel); unrelated PRs still skip it after a ~5s paths probe.
 
 on:
   push:
@@ -35,20 +44,71 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # PR-only paths probe (~5s): did this PR touch anything the e2e suites
+  # actually exercise? dorny/paths-filter reads the PR's changed files via
+  # the GitHub API — no checkout — which is why the job needs
+  # pull-requests:read (the workflow-level `contents: read` zeroes it).
+  #
+  # Push/schedule/dispatch runs skip this job, so the two e2e jobs guard
+  # their `needs` with !cancelled(): a custom `if` without a status
+  # function gets an implicit success(), and success() is false when a
+  # needed job was skipped — the push/nightly runs would silently skip too.
+  changes:
+    timeout-minutes: 5
+    name: Detect e2e-relevant changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: read
+    outputs:
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          # Union of both suites' dependency surface. Kind suite: the
+          # clientset/discovery + SPDY-exec seams. Offboard (k3d) suite:
+          # everything the black-box `tracebloc delete` run renders and
+          # executes — including internal/ui, because #367 (style system)
+          # broke the copy assertions without touching delete.go. The glob
+          # internal/cli/delete*.go deliberately excludes data_delete*.go
+          # (`tracebloc data delete` is a different command, unit-tested).
+          filters: |
+            e2e:
+              - '.github/workflows/e2e.yml'
+              - 'Makefile'
+              - 'go.mod'
+              - 'go.sum'
+              - 'cmd/**'
+              - 'test/integration/**'
+              - 'internal/cli/delete*.go'
+              - 'internal/nodeboot/**'
+              - 'internal/api/**'
+              - 'internal/config/**'
+              - 'internal/ui/**'
+              - 'internal/cluster/**'
+              - 'internal/push/**'
+
   integration:
     timeout-minutes: 30
     name: Integration (kind)
     runs-on: ubuntu-latest
-    # Skip on PRs that aren't explicitly opted in via the `e2e` label;
-    # always run on schedule / manual dispatch.
+    needs: changes
+    # Always run on push / schedule / manual dispatch; on PRs only when the
+    # paths probe matched or the PR is opted in via the `e2e` label. Fail
+    # CLOSED: if the paths probe itself errors, run the suites rather than
+    # silently dropping the pre-merge gate (its outputs would read empty).
     if: >-
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'e2e')
+      !cancelled() &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e') ||
+      needs.changes.result == 'failure' ||
+      needs.changes.outputs.e2e == 'true')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -85,14 +145,21 @@ jobs:
     timeout-minutes: 20
     name: Offboard teardown (k3d)
     runs-on: ubuntu-latest
+    needs: changes
+    # Same gate as the kind job: push/schedule/dispatch always; PRs via the
+    # paths probe or the `e2e` label. This is the job #363/#367/#368 needed
+    # pre-merge (~1-2 min).
     if: >-
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'e2e')
+      !cancelled() &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e') ||
+      needs.changes.result == 'failure' ||
+      needs.changes.outputs.e2e == 'true')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -104,7 +171,7 @@ jobs:
         run: curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/v5.7.4/install.sh | TAG=v5.7.4 bash
 
       - name: Install helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.15.4
 

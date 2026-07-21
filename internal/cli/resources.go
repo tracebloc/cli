@@ -36,11 +36,11 @@ func newResourcesCmd() *cobra.Command {
 		Short: "Show how much of this machine tracebloc may use",
 		Long: `Shows, in plain terms, how much of this machine tracebloc may use:
 
-  • This machine   — the CPU and memory the cluster can schedule
-  • tracebloc uses — the ceiling a single training run may use right now
+  • Your secure environment — the CPU and memory it can schedule
+  • Each training run — the per-run ceiling every run may use (cluster-wide)
 
-No Kubernetes concepts, no YAML — one number for the machine and one for
-tracebloc's share of it.
+No Kubernetes concepts, no YAML — one number for your environment and one for
+each training run's share of it.
 
 Raise the share with ` + "`tracebloc resources set`" + `. Run with --verbose for the
 per-node breakdown and the raw values.
@@ -83,10 +83,10 @@ Exit codes:
 // the jobs-manager env — the same source `cluster doctor` parses, so the two
 // never disagree.
 func runResourcesShow(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions) error {
-	p.Banner("tracebloc", "machine resources")
+	p.Newline()
 
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTarget(ctx, p, opts, binding, false)
+	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false)
 	if err != nil {
 		return binding.explain(err)
 	}
@@ -125,16 +125,16 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 		train.HasGPU = false
 	}
 
-	p.Section("This machine")
 	if nodeErr != nil {
-		p.Field("capacity", "unavailable")
-		p.Hintf("     couldn't read node capacity: %v", nodeErr)
+		p.Stat("Your secure environment is equipped with:", "unavailable")
+		p.Hintf("     couldn't read capacity: %v", nodeErr)
 	} else {
-		p.Field("capacity", machineLine(machine))
+		p.Stat("Your secure environment is equipped with:", machineLine(machine))
 	}
-
-	p.Section("tracebloc uses")
-	p.Field("per training run", trainingLine(train))
+	// The per-run ceiling is cluster-wide — jobs-manager stamps it on EVERY
+	// training run (there is no per-run override today). perRunSize is the same
+	// "CPU · mem" string `resources set` shows; the label carries the "up to".
+	p.Stat("A training run is allocated up to:", perRunSize(train))
 
 	if p.Verbose() {
 		p.Section("Details")
@@ -151,7 +151,13 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 	}
 
 	p.Newline()
-	p.Hintf("Raise tracebloc's share with `tracebloc resources set` (run it on a terminal for a guided walkthrough).")
+	// Match the home screen's launcher resolution so the hint reads `tb …` on a
+	// real install (where the `tb` alias exists) and `tracebloc …` otherwise.
+	cmd := invokedName()
+	if tbAliasAvailable() {
+		cmd = binTB
+	}
+	p.Hintf("Do you want to change the allocation? Run `%s resources set` (guided walkthrough on a terminal).", cmd)
 	return nil
 }
 
@@ -161,15 +167,6 @@ func machineLine(m resources.Machine) string {
 	line := resources.FormatCPU(m.CPU) + " · " + resources.FormatMem(m.Mem)
 	for name, qty := range m.GPU {
 		line += " · " + resources.FormatGPU(name, qty)
-	}
-	return line
-}
-
-// trainingLine renders the per-run ceiling: "up to 2 CPU · 8 GiB" (+ GPU).
-func trainingLine(t resources.Training) string {
-	line := "up to " + resources.FormatCPU(t.CPU) + " · " + resources.FormatMem(t.Mem)
-	if t.HasGPU {
-		line += " · " + resources.FormatGPU(t.GPUName, t.GPU)
 	}
 	return line
 }

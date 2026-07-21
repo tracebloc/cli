@@ -35,7 +35,6 @@ func TestNew_BufferDefaultsToPlain(t *testing.T) {
 func TestWithColorFalse_OmitsANSI(t *testing.T) {
 	var buf bytes.Buffer
 	p := New(&buf, WithColor(false))
-	p.Banner("tracebloc", "declarative ingestion")
 	p.Step(1, 3, "Discover cluster")
 	p.Warnf("PVC is %s", "ReadWriteOnce")
 	p.Hintf("pass --namespace to override")
@@ -43,7 +42,7 @@ func TestWithColorFalse_OmitsANSI(t *testing.T) {
 	if strings.Contains(buf.String(), esc) {
 		t.Errorf("WithColor(false) still emitted ANSI: %q", buf.String())
 	}
-	for _, want := range []string{"tracebloc", "Step 1/3", "Discover cluster", "ReadWriteOnce"} {
+	for _, want := range []string{"Step 1/3", "Discover cluster", "ReadWriteOnce"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("output missing %q: %q", want, buf.String())
 		}
@@ -88,7 +87,7 @@ func TestSectionAndField_Plain(t *testing.T) {
 }
 
 // TestNoColorEnv_DefaultsPlain exercises the NO_COLOR branch of
-// autoColor: with it set, a freshly-constructed Printer stays plain.
+// detectMode: with it set, a freshly-constructed Printer stays plain.
 // (t.Setenv restores the prior value when the test ends.)
 func TestNoColorEnv_DefaultsPlain(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")

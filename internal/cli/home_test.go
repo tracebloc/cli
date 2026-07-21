@@ -891,8 +891,8 @@ func TestDoctor_TopLevelSharesClusterDoctor(t *testing.T) {
 		t.Errorf("`doctor` exit = %d, want 2 (auth fail + kubeconfig fail escalates)", topErr.Code())
 	}
 	for label, out := range map[string]string{"doctor": topOut, "cluster doctor": clOut} {
-		if !strings.Contains(out, "Auth & config") || !strings.Contains(out, "not signed in") {
-			t.Errorf("%s output missing the shared diagnostic (auth section + not-signed-in):\n%s", label, out)
+		if !strings.Contains(out, "Not signed in") {
+			t.Errorf("%s output missing the shared diagnostic (not-signed-in):\n%s", label, out)
 		}
 	}
 }

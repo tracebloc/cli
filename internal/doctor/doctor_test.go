@@ -11,7 +11,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/tracebloc/cli/internal/cluster"
 )
@@ -155,24 +157,143 @@ func initCrashPod(name string) *corev1.Pod {
 	}
 }
 
-func TestWorst(t *testing.T) {
-	if got := Worst(nil); got != StatusOK {
-		t.Fatalf("Worst(nil) = %v, want ok", got)
+// worstStatus mirrors the overall-verdict rollup for the Run() tests below: the
+// most severe status across results, StatusUnknown ("couldn't check") ignored.
+// Production derives the exit code in the cli layer from the two rolled-up health
+// lines; this keeps the package tests' verdict assertions concise.
+func worstStatus(results []Result) Status {
+	worst := StatusOK
+	for _, r := range results {
+		if r.Status != StatusUnknown && r.Status > worst {
+			worst = r.Status
+		}
 	}
-	rs := []Result{{Status: StatusOK}, {Status: StatusFail}, {Status: StatusWarn}}
-	if got := Worst(rs); got != StatusFail {
-		t.Fatalf("Worst = %v, want fail", got)
-	}
+	return worst
 }
 
 func TestCheckReachable(t *testing.T) {
-	if r := checkReachable(nil, errors.New("boom"), ns); r.Status != StatusFail {
-		t.Fatalf("error => %v, want fail", r.Status)
+	// A non-transport, non-chart error (e.g. RBAC) keeps the kubeconfig+chart
+	// remedy and classifies as ReachError.
+	if r := checkReachable(nil, errors.New("boom"), ns, ""); r.Status != StatusFail || r.Reach != ReachError {
+		t.Fatalf("other error => status %v reach %v, want fail/ReachError", r.Status, r.Reach)
+	}
+	// No chart installed (the API answered) classifies as ReachNoEnv so the
+	// summary points at the installer, never a kubectl (Bugbot #365).
+	if r := checkReachable(nil, cluster.ErrNoParentRelease, ns, ""); r.Reach != ReachNoEnv {
+		t.Fatalf("no-chart => reach %v, want ReachNoEnv", r.Reach)
 	}
 	rel := &cluster.ParentRelease{ReleaseName: "tb", ChartVersion: "1.3.5", AppVersion: "1.3.5"}
-	r := checkReachable(rel, nil, ns)
+	r := checkReachable(rel, nil, ns, "")
 	if r.Status != StatusOK || !strings.Contains(r.Detail, "tb") {
 		t.Fatalf("release => %v / %q, want ok mentioning the release", r.Status, r.Detail)
+	}
+
+	// A transport error against a loopback server names the endpoint and gives
+	// the start-the-cluster remedy — not the kubeconfig/chart one.
+	tr := checkReachable(nil, errors.New(`Get "https://127.0.0.1:6550/api": dial tcp 127.0.0.1:6550: connect: connection refused`), ns, "https://127.0.0.1:6550")
+	if tr.Status != StatusFail {
+		t.Fatalf("transport => %v, want fail", tr.Status)
+	}
+	if !strings.Contains(tr.Detail, "127.0.0.1:6550") || !strings.Contains(tr.Detail, "isn't answering") {
+		t.Fatalf("transport detail = %q, want it to name the unreachable endpoint", tr.Detail)
+	}
+	if !strings.Contains(tr.Remedy, "start") || strings.Contains(tr.Remedy, "kubectl get deploy") {
+		t.Fatalf("transport remedy = %q, want a start-the-cluster hint, not the chart remedy", tr.Remedy)
+	}
+
+	// A stopped k3d cluster advertised as 0.0.0.0 (the kubeconfig host when the
+	// installer pins no explicit --api-port host) must still get the start-Docker
+	// remedy, not the generic "check it's running" line (Bugbot #365).
+	wc := checkReachable(nil, errors.New(`Get "https://0.0.0.0:6550/api": dial tcp 0.0.0.0:6550: connect: connection refused`), ns, "https://0.0.0.0:6550")
+	if wc.Reach != ReachUnreachable {
+		t.Fatalf("0.0.0.0 transport => reach %v, want ReachUnreachable", wc.Reach)
+	}
+	if !strings.Contains(wc.Remedy, "Docker Desktop") {
+		t.Fatalf("0.0.0.0 remedy = %q, want the start-Docker-Desktop hint", wc.Remedy)
+	}
+}
+
+// TestIsLoopback covers every kubeconfig host that means "the cluster is local,
+// so the fix is start Docker Desktop": the loopback addresses, the wildcard bind
+// addresses k3d writes when no host is pinned (0.0.0.0, ::), and Docker Desktop's
+// host alias — but never a genuinely-remote endpoint (Bugbot #365).
+func TestIsLoopback(t *testing.T) {
+	for _, s := range []string{
+		"https://127.0.0.1:6550",
+		"https://localhost:6550",
+		"https://[::1]:6550",
+		"https://0.0.0.0:6550",
+		"https://[::]:6550",
+		"https://host.docker.internal:6550",
+	} {
+		if !isLoopback(s) {
+			t.Errorf("isLoopback(%q) = false, want true (local cluster)", s)
+		}
+	}
+	for _, s := range []string{
+		"https://api.k8s.example.com:6443",
+		"https://10.1.2.3:6443",
+		"",
+	} {
+		if isLoopback(s) {
+			t.Errorf("isLoopback(%q) = true, want false (not a local cluster)", s)
+		}
+	}
+}
+
+// TestRun_UnreachableCascade mimics the reported failure: the cluster API is
+// down (connection refused on every call). Run() must emit ONE honest ✖
+// ("Cluster reachable", naming the endpoint) and mark the cluster checks
+// StatusUnknown — never inventing "PVC unbound" / "requests-proxy not found →
+// reinstall" / "chart too old". Backend egress still runs (it's independent of
+// the cluster API), and the exit-code verdict stays Fail from the one real ✖.
+func TestRun_UnreachableCascade(t *testing.T) {
+	cs := fake.NewClientset()
+	connRefused := errors.New(`Get "https://127.0.0.1:6550/apis": dial tcp 127.0.0.1:6550: connect: connection refused`)
+	cs.PrependReactor("*", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, connRefused
+	})
+
+	results := Run(bg(), cs, Options{
+		Namespace: "lukas-test",
+		ServerURL: "https://127.0.0.1:6550",
+		HTTPProbe: func(context.Context, string) error { return nil }, // backend reachable from this machine
+	})
+
+	byName := map[string]Result{}
+	for _, r := range results {
+		byName[r.Name] = r
+	}
+
+	reach := byName["Cluster reachable"]
+	if reach.Status != StatusFail || !strings.Contains(reach.Detail, "127.0.0.1:6550") {
+		t.Fatalf("Cluster reachable = %+v, want fail naming the endpoint", reach)
+	}
+	if !strings.Contains(reach.Remedy, "start") {
+		t.Errorf("Cluster reachable remedy = %q, want a start-the-cluster hint for a loopback server", reach.Remedy)
+	}
+
+	for _, name := range []string{
+		"Pod health", "Restart history", "Dataset volume (PVC)", "Node capacity",
+		"Image pull secret", "Proxy configuration", "Service Bus egress (requests-proxy)",
+	} {
+		r, ok := byName[name]
+		if !ok {
+			t.Fatalf("missing check %q in results", name)
+		}
+		if r.Status != StatusUnknown {
+			t.Errorf("%q = %v, want StatusUnknown (couldn't check) — must not invent a definitive verdict", name, r.Status)
+		}
+		if r.Remedy != "" {
+			t.Errorf("%q emitted remedy %q under an unreachable cluster — should stay silent", name, r.Remedy)
+		}
+	}
+
+	if r := byName["Backend egress (from this machine)"]; r.Status != StatusOK {
+		t.Errorf("Backend egress = %v, want ok (probed from this machine, independent of the cluster API)", r.Status)
+	}
+	if w := worstStatus(results); w != StatusFail {
+		t.Fatalf("worst = %v, want fail (verdict from the one real ✖, StatusUnknown ignored)", w)
 	}
 }
 
@@ -304,7 +425,10 @@ func TestCheckRequestsProxy(t *testing.T) {
 		dep  *appsv1.Deployment // nil => deployment absent
 		want Status
 	}{
-		{"ready", requestsProxyDep("tb", 1), StatusOK},
+		// Ready is NOT a green ✔: readiness ≠ Service Bus egress works, so a running
+		// relay is an honest StatusUnknown (egress not actively verified), never OK
+		// (cli#351). A down / missing relay is still a real ✖.
+		{"ready", requestsProxyDep("tb", 1), StatusUnknown},
 		{"not-ready", requestsProxyDep("tb", 0), StatusFail},
 		{"missing", nil, StatusFail},
 	}
@@ -324,10 +448,43 @@ func TestCheckRequestsProxy(t *testing.T) {
 // When DiscoverParentRelease failed (release nil) but a release-prefixed
 // requests-proxy exists, the suffix fallback must still find it rather than
 // falsely report it missing (Bugbot on #89).
+// TestCheckRequestsProxy_Wording locks the cli#351 reword + Part-2 downgrade:
+// requests-proxy is the OUTBOUND result/FLOPs relay, so none of its lines may
+// say experiments "stay Pending" (that's the scheduling path, which it doesn't
+// touch); and a Ready relay must read as a neutral StatusUnknown (egress not
+// actively verified), never a green ✔.
+func TestCheckRequestsProxy_Wording(t *testing.T) {
+	rel := &cluster.ParentRelease{ReleaseName: "tb"}
+
+	ready := checkRequestsProxy(bg(), fake.NewClientset(requestsProxyDep("tb", 1)), ns, rel)
+	if ready.Status != StatusUnknown {
+		t.Errorf("Ready relay = %v, want StatusUnknown — readiness must not green a ✔ egress claim (cli#351)", ready.Status)
+	}
+	if strings.Contains(ready.Detail, "Pending") {
+		t.Errorf("detail says %q — must not mention 'Pending' (that's scheduling, not egress)", ready.Detail)
+	}
+	if !strings.Contains(ready.Detail, "not actively verified") {
+		t.Errorf("detail = %q, want it honest that egress is not actively verified", ready.Detail)
+	}
+
+	notReady := checkRequestsProxy(bg(), fake.NewClientset(requestsProxyDep("tb", 0)), ns, rel)
+	missing := checkRequestsProxy(bg(), fake.NewClientset(), ns, rel)
+	for _, r := range []Result{notReady, missing} {
+		if strings.Contains(r.Remedy, "Pending") {
+			t.Errorf("remedy %q must not say experiments 'stay Pending' — a down proxy stalls result egress mid-run", r.Remedy)
+		}
+		if !strings.Contains(r.Remedy, "result") {
+			t.Errorf("remedy %q should describe the real failure (result/metrics egress stalls)", r.Remedy)
+		}
+	}
+}
+
 func TestCheckRequestsProxy_NilReleaseFindsPrefixed(t *testing.T) {
 	cs := fake.NewClientset(requestsProxyDep("tb", 1)) // "tb-requests-proxy"
-	if r := checkRequestsProxy(bg(), cs, ns, nil); r.Status != StatusOK {
-		t.Fatalf("nil release with prefixed deploy => %v (%q), want ok", r.Status, r.Detail)
+	// Found (not falsely reported missing) now reads as StatusUnknown — running,
+	// egress not actively verified — rather than a green ✔ (cli#351).
+	if r := checkRequestsProxy(bg(), cs, ns, nil); r.Status != StatusUnknown {
+		t.Fatalf("nil release with prefixed deploy => %v (%q), want unknown (found, egress unverified)", r.Status, r.Detail)
 	}
 }
 
@@ -365,8 +522,9 @@ func TestCheckRequestsProxy_BareNameAcceptedWhenLabelledForRelease(t *testing.T)
 	bare.Name = "requests-proxy"
 	bare.Labels = map[string]string{"app.kubernetes.io/instance": "relA"}
 	cs := fake.NewClientset(bare)
-	if r := checkRequestsProxy(bg(), cs, ns, rel); r.Status != StatusOK {
-		t.Fatalf("bare requests-proxy labelled for relA => %v (%q), want ok", r.Status, r.Detail)
+	// Accepted (found, not missing) → StatusUnknown, not a green ✔ (cli#351).
+	if r := checkRequestsProxy(bg(), cs, ns, rel); r.Status != StatusUnknown {
+		t.Fatalf("bare requests-proxy labelled for relA => %v (%q), want unknown (accepted/found, egress unverified)", r.Status, r.Detail)
 	}
 }
 
@@ -392,7 +550,7 @@ func TestRun_HealthyCluster(t *testing.T) {
 	if len(results) != 9 {
 		t.Fatalf("want 9 checks, got %d", len(results))
 	}
-	if w := Worst(results); w != StatusOK {
+	if w := worstStatus(results); w != StatusOK {
 		for _, r := range results {
 			t.Logf("%-32s %-4s %s", r.Name, r.Status, r.Detail)
 		}

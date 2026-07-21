@@ -147,7 +147,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		// --detach: report and bail. The run continues in the cluster;
 		// there is no CLI re-attach verb yet, so the honest way back is
 		// the raw log follow, offered as a labelled command.
-		p.Infof("Detached — the ingestion runs in the background on your workspace.")
+		p.Infof("Detached — the ingestion runs in the background on your secure environment.")
 		p.Hintf("Follow it later with:  kubectl logs -f -n %s job/%s", resp.Namespace, resp.JobName)
 		return &Result{Submit: resp}, nil
 	}
@@ -175,14 +175,14 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		p.Newline()
 		switch wr.DetachReason {
 		case DetachReasonSignal:
-			p.Infof("Stopped watching — the ingestion keeps running on your workspace.")
+			p.Infof("Stopped watching — the ingestion keeps running on your secure environment.")
 		case DetachReasonPodWaitTimeout:
 			p.Infof("The ingestion hasn't started yet (usually a slow image pull or a busy cluster). " +
 				"It's queued to run once the cluster can schedule it — check on it with the command below.")
 		case DetachReasonWatchCap:
 			p.Infof("Stopped following after 1 hour — the ingestion is still running and will finish on its own.")
 		default:
-			p.Infof("Stopped watching — the ingestion keeps running on your workspace.")
+			p.Infof("Stopped watching — the ingestion keeps running on your secure environment.")
 		}
 		p.Hintf("Check on it later with:  kubectl logs -f -n %s job/%s", resp.Namespace, resp.JobName)
 		return &Result{Submit: resp, Watch: wr}, nil

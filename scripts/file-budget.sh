@@ -24,7 +24,7 @@ BUDGETS="
 internal/push/preflight.go:1700
 internal/cli/data.go:500
 internal/cli/client.go:1050
-internal/cli/home.go:850
+internal/cli/home.go:855
 "
 
 status=0

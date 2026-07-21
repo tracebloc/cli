@@ -13,14 +13,18 @@ package doctor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -29,7 +33,7 @@ import (
 )
 
 // Status is a single check's severity. Ordered so the numerically-greatest
-// status is the worst — see Worst.
+// status is the worst; the cli layer rolls the checks up into the verdict.
 type Status int
 
 const (
@@ -37,6 +41,22 @@ const (
 	StatusWarn
 	StatusFail
 )
+
+// StatusUnknown marks a check with no trustworthy signal either way. Two cases
+// produce it:
+//
+//  1. The check could not run because a prerequisite was unavailable — today,
+//     the cluster API being unreachable. A single root cause (a stopped cluster)
+//     then renders as one honest ✖ plus neutral "couldn't check" lines, instead
+//     of every downstream check inventing a false cause.
+//  2. The check ran fine, but deliberately declines to assert a green it cannot
+//     back — e.g. requests-proxy is present and Ready, yet readiness does not
+//     prove Service Bus egress actually works and there is no probe for it yet
+//     (backend#1143). A neutral line is more honest than a false ✔.
+//
+// Either way it carries NO signal: the verdict rollup ignores it, so it never
+// affects the overall result or exit code.
+const StatusUnknown Status = -1
 
 func (s Status) String() string {
 	switch s {
@@ -46,6 +66,8 @@ func (s Status) String() string {
 		return "warn"
 	case StatusFail:
 		return "fail"
+	case StatusUnknown:
+		return "unknown"
 	default:
 		return "unknown"
 	}
@@ -58,19 +80,26 @@ type Result struct {
 	Status Status
 	Detail string
 	Remedy string
+
+	// Reach classifies WHY the "Cluster reachable" check landed where it did, so
+	// the cli summary can word the remedy correctly — an unreachable API (stopped
+	// container runtime / network) needs a different fix than a reachable cluster
+	// with no tracebloc installed. Zero (ReachOK) on every other check.
+	Reach ReachState
 }
 
-// Worst returns the most severe status across results (StatusOK for none).
-// The doctor command maps a non-OK worst to a non-zero exit code.
-func Worst(results []Result) Status {
-	worst := StatusOK
-	for _, r := range results {
-		if r.Status > worst {
-			worst = r.Status
-		}
-	}
-	return worst
-}
+// ReachState classifies the "Cluster reachable" outcome so the cli summary can
+// word its remedy correctly (see Result.Reach). A stopped API, a reachable
+// cluster with no tracebloc installed, and an RBAC/other error each need a
+// different plain-language fix — never the same "isn't answering" line.
+type ReachState int
+
+const (
+	ReachOK          ReachState = iota // API answered and the tracebloc chart is here
+	ReachUnreachable                   // API never answered (container runtime/network down)
+	ReachNoEnv                         // API answered, but no tracebloc secure environment here
+	ReachError                         // API answered with some other error (RBAC/NotFound/…)
+)
 
 // Conservative tunables, kept as package consts to avoid false positives on a
 // busy cluster. If a check ever needs runtime tuning, thread it through Options
@@ -98,6 +127,12 @@ const (
 type Options struct {
 	Namespace string
 
+	// ServerURL is the cluster API endpoint from the resolved kubeconfig. Used
+	// only to name the endpoint (and detect a local/loopback cluster) in the
+	// "Cluster reachable" remedy when the API is unreachable. Empty is fine — the
+	// remedy just omits the address.
+	ServerURL string
+
 	// HTTPProbe reports whether a URL is reachable from where the CLI runs.
 	// nil => httpProbe (proxy-aware, short timeout). Injected in tests.
 	HTTPProbe func(ctx context.Context, url string) error
@@ -105,21 +140,45 @@ type Options struct {
 
 // Run executes every check in display order and returns their results. It
 // never returns an error: an unreachable cluster or a failing probe is a
-// Result, not a Go error — the command renders all of them and derives the
-// exit code from Worst.
+// Result, not a Go error — the cli layer rolls them up into the two health
+// lines the owner reads and derives the exit code from that verdict.
 func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 	if opts.HTTPProbe == nil {
 		opts.HTTPProbe = httpProbe
 	}
 	ns := opts.Namespace
 
-	// Discovered once and shared: the parent release gates nothing (every
-	// check still runs and reports), but the later checks reuse it.
+	// Discovered once: the first API call. Its error is the reachability signal
+	// the rest of the sweep keys on.
 	release, relErr := cluster.DiscoverParentRelease(ctx, cs, ns)
+
+	// If the cluster API itself is unreachable (Docker/k3d stopped, wrong server,
+	// network down), every cluster-dependent check would fail its own API call
+	// and invent a domain-specific cause — "PVC unbound", "requests-proxy not
+	// found → reinstall the chart", "chart too old" — burying the one true cause
+	// under a wall of false ✖/⚠. Report checkReachable as the single honest ✖ and
+	// mark the cluster checks StatusUnknown ("couldn't check"). checkBackendEgress
+	// still runs: it probes the backend from THIS machine and never touches the
+	// cluster API, so its verdict stays truthful. Display order is preserved.
+	if isUnreachable(relErr) {
+		return []Result{
+			checkReachable(release, relErr, ns, opts.ServerURL),
+			unknownCheck("Pod health"),
+			unknownCheck("Restart history"),
+			unknownCheck("Dataset volume (PVC)"),
+			unknownCheck("Node capacity"),
+			unknownCheck("Image pull secret"),
+			unknownCheck("Proxy configuration"),
+			checkBackendEgress(ctx, nil, opts.HTTPProbe),
+			unknownCheck("Service Bus egress (requests-proxy)"),
+		}
+	}
+
+	// API reachable: every check runs and reports independently, as before.
 	jmEnv := jobsManagerEnv(ctx, cs, ns, release)
 
 	return []Result{
-		checkReachable(release, relErr, ns),
+		checkReachable(release, relErr, ns, opts.ServerURL),
 		checkPods(ctx, cs, ns),
 		checkRestartHistory(ctx, cs, ns),
 		checkPVC(ctx, cs, ns),
@@ -133,18 +192,42 @@ func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 
 // checkReachable confirms the API answered and the parent client chart is
 // installed here. It's the gate the customer reads first; the rest still run.
-func checkReachable(release *cluster.ParentRelease, err error, ns string) Result {
+func checkReachable(release *cluster.ParentRelease, err error, ns, serverURL string) Result {
 	const name = "Cluster reachable"
 	if err != nil {
+		// Transport error: the API server never answered. Name the endpoint and,
+		// for a local (loopback) cluster, give the start-it remedy — the common
+		// "Docker/k3d stopped" case, not a kubeconfig or chart problem. This is the
+		// only branch reached when Run() takes its unreachable short-circuit.
+		if isUnreachable(err) {
+			detail := "the cluster API server isn't answering"
+			if serverURL != "" {
+				detail = fmt.Sprintf("the cluster API server at %s isn't answering — is the cluster running?", serverURL)
+			}
+			remedy := "Check your secure environment is running."
+			if isLoopback(serverURL) {
+				remedy = "Start Docker Desktop (`open -a Docker`) — your secure environment restarts with it — then run this again."
+			}
+			return Result{Name: name, Status: StatusFail, Detail: detail, Remedy: remedy, Reach: ReachUnreachable}
+		}
+		// API answered but no chart here (ErrNoParentRelease) or another error.
 		// The discovery error's remediation tail points at doctor — which is
 		// what's running. Strip it so doctor never tells the user to run doctor.
 		// (Must match the exact suffix cluster.discover appends.)
 		detail := strings.TrimSuffix(strings.TrimSpace(err.Error()), "Diagnose with `tracebloc doctor`.")
+		// The API answered: a missing chart means "no environment installed here"
+		// (fix: reinstall), anything else is an RBAC/NotFound-class error (fix:
+		// support). The cli summary words each differently — never a kubectl.
+		reach := ReachError
+		if errors.Is(err, cluster.ErrNoParentRelease) {
+			reach = ReachNoEnv
+		}
 		return Result{
 			Name:   name,
 			Status: StatusFail,
 			Detail: strings.TrimSpace(detail),
 			Remedy: "Check your kubeconfig/context and that the tracebloc client chart is installed here: kubectl get deploy -n " + ns,
+			Reach:  reach,
 		}
 	}
 	return Result{
@@ -152,6 +235,81 @@ func checkReachable(release *cluster.ParentRelease, err error, ns string) Result
 		Status: StatusOK,
 		Detail: fmt.Sprintf("release %q, chart %s, appVersion %s (namespace %s)",
 			release.ReleaseName, release.ChartVersion, release.AppVersion, ns),
+	}
+}
+
+// isUnreachable reports whether err is a transport/connectivity failure talking
+// to the cluster API server (connection refused, timeout, DNS, TLS) — as opposed
+// to the API answering with "no chart here" (ErrNoParentRelease) or an
+// RBAC/NotFound status. Those latter cases mean the API IS reachable and the
+// per-check verdicts are trustworthy; a transport error means they are not, so
+// Run() short-circuits to a single honest "Cluster reachable" ✖.
+func isUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	// The API answered — these are real verdicts, not connectivity failures.
+	if errors.Is(err, cluster.ErrNoParentRelease) ||
+		apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsNotFound(err) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
+	}
+	// client-go often wraps the transport error as a plain string by the time it
+	// reaches us; match the connectivity signatures as a fallback.
+	msg := err.Error()
+	for _, sig := range []string{
+		"connection refused", "no such host", "i/o timeout", "dial tcp",
+		"TLS handshake", "network is unreachable", "connection reset",
+		"server misbehaving", "no route to host",
+	} {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLoopback reports whether serverURL points at the local machine — a
+// k3d/kind/Docker-Desktop cluster, whose "isn't answering" almost always means
+// the container runtime or the cluster is simply stopped, so the remedy is
+// "start Docker Desktop". It covers the loopback addresses (127.0.0.0/8, ::1,
+// localhost), the unspecified/wildcard bind addresses k3d writes into a
+// kubeconfig when no explicit host is pinned (0.0.0.0, ::), and Docker Desktop's
+// host alias (host.docker.internal). No genuinely-remote cluster is ever reached
+// through any of these, so treating them as local carries no false-positive risk.
+func isLoopback(serverURL string) bool {
+	if serverURL == "" {
+		return false
+	}
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return false
+	}
+	switch u.Hostname() {
+	case "localhost", "host.docker.internal":
+		return true
+	}
+	if ip := net.ParseIP(u.Hostname()); ip != nil {
+		return ip.IsLoopback() || ip.IsUnspecified()
+	}
+	return false
+}
+
+// unknownCheck is the placeholder for a cluster check that could not run because
+// the API is unreachable — no signal, so the verdict rollup ignores it and the
+// verdict comes from "Cluster reachable" alone.
+func unknownCheck(name string) Result {
+	return Result{
+		Name:   name,
+		Status: StatusUnknown,
+		Detail: "could not check — cluster API unreachable (see 'Cluster reachable' above)",
 	}
 }
 
@@ -361,10 +519,17 @@ func backendHost(clientEnv string) string {
 	}
 }
 
-// checkRequestsProxy verifies the requests-proxy deployment — the in-cluster
-// broker for experiment egress (the Service Bus "experiments" queue) — is
-// present and Ready. While it's down, experiments egress fails and the
-// experiment silently stays Pending, the exact class this epic targets.
+// checkRequestsProxy verifies the requests-proxy deployment is present and
+// Ready. requests-proxy is the OUTBOUND relay: training pods POST epoch
+// results/FLOPs to it and it forwards them to the Service Bus queues. It is NOT
+// on the scheduling path — jobs-manager consumes the experiment subscription
+// directly with its own credentials — so a down requests-proxy stalls result/
+// weights egress MID-RUN; it does not block scheduling (experiments do not
+// "stay Pending" for this). Ready here is the Deployment's ReadyReplicas, which
+// (absent a readiness probe — backend#1143) only means the container started,
+// not that Service Bus egress actually works. So a Ready relay returns a neutral
+// StatusUnknown ("running, egress not actively verified"), never a ✔ (cli#351);
+// the real ✔ arrives once the chart ships that probe and doctor consumes it.
 func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string, release *cluster.ParentRelease) Result {
 	const name = "Service Bus egress (requests-proxy)"
 	dep := findDeployment(ctx, cs, ns, release, "requests-proxy")
@@ -373,7 +538,7 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 			Name:   name,
 			Status: StatusFail,
 			Detail: "requests-proxy deployment not found",
-			Remedy: "The requests-proxy brokers experiment (Service Bus) egress; without it experiments stay Pending. Reinstall/upgrade the client chart.",
+			Remedy: "requests-proxy relays training results/metrics to Service Bus; without it, running experiments can't send results back and training stalls mid-run (scheduling is unaffected). Reinstall/upgrade the client chart.",
 		}
 	}
 	if dep.Status.ReadyReplicas < 1 {
@@ -381,10 +546,17 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 			Name:   name,
 			Status: StatusFail,
 			Detail: fmt.Sprintf("requests-proxy not ready (%d/%d replicas)", dep.Status.ReadyReplicas, dep.Status.Replicas),
-			Remedy: "Experiments egress flows through requests-proxy; while it's down they stay Pending. kubectl describe deploy " + dep.Name + " -n " + ns,
+			Remedy: "While requests-proxy is down, in-flight training can't relay epoch results/FLOPs to Service Bus — result egress stalls (scheduling is unaffected). kubectl describe deploy " + dep.Name + " -n " + ns,
 		}
 	}
-	return Result{Name: name, Status: StatusOK, Detail: "requests-proxy ready (brokers the 'experiments' queue)"}
+	// Present and Ready — but readiness ≠ egress works (see the doc comment). Do
+	// not green this off readiness; report a neutral, honest "unknown" so doctor
+	// never claims Service Bus egress is verified when it hasn't been (cli#351).
+	return Result{
+		Name:   name,
+		Status: StatusUnknown,
+		Detail: "requests-proxy is running, but egress to Service Bus is not actively verified — readiness only confirms the relay started, not that it can reach Service Bus",
+	}
 }
 
 // checkNodeFit verifies at least one Ready node can satisfy the resource

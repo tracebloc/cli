@@ -554,21 +554,23 @@ func TestDelete_KubeconfigContext_ReachHelm(t *testing.T) {
 	}
 }
 
-// (d) A running/online client → refuse unless --force.
+// (d) A client with ACTIVE training runs → refuse unless --force. (Being merely
+// "online" no longer blocks — a healthy environment always heartbeats.)
 func TestDelete_RunningJob_RefusesUnlessForce(t *testing.T) {
 	newHandler := func() http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
-				// status 1 = online (a running client).
-				_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":1}`))
+				// 2 active training runs — the work-guard blocks on this, NOT on
+				// status==online (which a healthy client always reports).
+				_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":1,"num_running_experiments":2}`))
 			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
 				w.WriteHeader(http.StatusOK)
 			}
 		}
 	}
 
-	t.Run("online without --force refuses, no revoke", func(t *testing.T) {
+	t.Run("active training without --force refuses, no revoke", func(t *testing.T) {
 		revoked := false
 		withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
@@ -582,18 +584,24 @@ func TestDelete_RunningJob_RefusesUnlessForce(t *testing.T) {
 
 		var out bytes.Buffer
 		err := runDelete(context.Background(), ui.New(&out), typedNamePrompter{reply: "gpu-box-01"}, deleteOpts{})
-		if err == nil || !strings.Contains(err.Error(), "still online") {
-			t.Fatalf("want online refusal, got %v", err)
+		if err == nil || !strings.Contains(err.Error(), "training run") {
+			t.Fatalf("want an active-training refusal, got %v", err)
 		}
 		if revoked {
-			t.Error("revoke must NOT run when the online guard refuses")
+			t.Error("revoke must NOT run when the work-guard refuses")
 		}
 		if len(fn.calls) != 0 {
 			t.Errorf("no teardown on refusal, got: %v", fn.calls)
 		}
+		// The removal PREVIEW must NOT have printed — the work-guard runs first, so
+		// a blocked offboard never shows a "here's what I'll remove" manifest (the
+		// bug: the manifest used to print before the guard, then error out).
+		if strings.Contains(out.String(), "This will remove") {
+			t.Errorf("preview must not print when the work-guard blocks:\n%s", out.String())
+		}
 	})
 
-	t.Run("--force offboards an online client", func(t *testing.T) {
+	t.Run("--force offboards despite active training", func(t *testing.T) {
 		revoked := false
 		withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke") {
@@ -610,7 +618,7 @@ func TestDelete_RunningJob_RefusesUnlessForce(t *testing.T) {
 			t.Fatalf("offboard --force: %v", err)
 		}
 		if !revoked {
-			t.Error("--force should proceed to revoke an online client")
+			t.Error("--force should proceed to revoke despite active training")
 		}
 	})
 }
@@ -635,13 +643,15 @@ func TestDelete_ShowsRetainedAndLeftCopy(t *testing.T) {
 	}
 	s := out.String()
 	for _, want := range []string{
-		"Kept on tracebloc, as a record",
+		"This will remove",
+		"Your secure environment",
+		"Kept on tracebloc",
 		"Your use cases and the models trained here",
-		"Left in place (system-wide)",
-		"Docker, kubectl, k3d, helm — remove yourself if unused",
+		"Left alone",
+		"Docker and related tools",
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("output missing RETAINED/LEFT copy %q:\n%s", want, s)
+			t.Errorf("output missing preview copy %q:\n%s", want, s)
 		}
 	}
 }

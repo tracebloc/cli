@@ -81,7 +81,7 @@
     },
     "imgc-label-missing": {
       "errors": [
-        "LabelColumnValidator: Configured label column 'label' not found in CSV header (columns: image_id, target). Set 'label:' in the ingest config to an existing column, or add the 'label' column to the CSV."
+        "LabelColumnValidator: Configured label column 'label' not found in CSV header (columns: filename, target). Set 'label:' in the ingest config to an existing column, or add the 'label' column to the CSV."
       ],
       "verdict": "reject"
     },
@@ -104,6 +104,10 @@
       "verdict": "accept"
     },
     "imgc-missing-file": {
+      "errors": [],
+      "verdict": "accept"
+    },
+    "imgc-no-filename-col": {
       "errors": [],
       "verdict": "accept"
     },
@@ -151,6 +155,10 @@
         "ImageResolutionValidator: Images below the minimum size (32, 32) (width, height) were found \u2014 they are too small to train on. Provide larger images or, if your model accepts smaller inputs, lower the floor via file_options.min_size. Offending files: ['images/b.jpg: (16, 16)', 'images/a.jpg: (16, 16)']"
       ],
       "verdict": "reject"
+    },
+    "imgc-uppercase-filename-col": {
+      "errors": [],
+      "verdict": "accept"
     },
     "imgc-zero-byte": {
       "errors": [
@@ -213,6 +221,14 @@
       "errors": [
         "FilePairingValidator: 1 image(s) have no matching mask: ['b']",
         "FilePairingValidator: 1 mask(s) have no matching image: ['b']"
+      ],
+      "verdict": "reject"
+    },
+    "semseg-mask-res-mismatch": {
+      "errors": [
+        "ImageResolutionValidator: Multiple image resolutions found: [(32, 32), (48, 48)]. All images must have the same resolution.",
+        "ImageResolutionValidator: Expected resolution: [32, 32]",
+        "ImageResolutionValidator: Resolution errors: ['masks/b_mask.png: (48, 48) (expected: [32, 32])']"
       ],
       "verdict": "reject"
     },
@@ -295,6 +311,18 @@
       ],
       "verdict": "reject"
     },
+    "tabular-int-noninteger": {
+      "errors": [
+        "DataValidator: Column 'age' contains 1 non-integer values"
+      ],
+      "verdict": "reject"
+    },
+    "tabular-int-nonnumeric": {
+      "errors": [
+        "DataValidator: Column 'age' contains 1 non-numeric value(s) at row 0."
+      ],
+      "verdict": "reject"
+    },
     "tabular-label-missing": {
       "errors": [],
       "verdict": "accept"
@@ -323,6 +351,10 @@
         "resolved_label": "label",
         "row_count": 2
       },
+      "verdict": "accept"
+    },
+    "tabular-typed-ok": {
+      "errors": [],
       "verdict": "accept"
     },
     "tabular-varchar-numeric-labels": {

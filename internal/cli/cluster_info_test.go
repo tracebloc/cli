@@ -61,7 +61,7 @@ func mintTokenReactor(cs *fake.Clientset, token string, expiresAt time.Time) {
 
 // A reached cluster hosting no tracebloc client exits 4 (distinct from the
 // kubeconfig exit-3), still errors.Is-identifiable as ErrNoParentRelease. The
-// banner + Kubeconfig section print before discovery fails.
+// Kubeconfig section prints before discovery fails.
 func TestRunClusterInfo_NoClientExit4(t *testing.T) {
 	out, err := runInfo(t, fake.NewSimpleClientset(), 600)
 	if got := ExitCodeFromError(err); got != 4 {
@@ -70,7 +70,7 @@ func TestRunClusterInfo_NoClientExit4(t *testing.T) {
 	if !errors.Is(err, cluster.ErrNoParentRelease) {
 		t.Errorf("want errors.Is(ErrNoParentRelease), got %v", err)
 	}
-	for _, want := range []string{"cluster diagnostics", "test-ctx"} {
+	for _, want := range []string{"test-ctx"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}

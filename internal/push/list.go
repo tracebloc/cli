@@ -43,7 +43,7 @@ func listDatasetsWith(ctx context.Context, exec Executor, namespace, pod, contai
 		[]string{"sh", "-c", script}, nil, &stdout, &stderr); err != nil {
 		return nil, fmt.Errorf("querying datasets: %w%s", err, stderrSuffix(&stderr))
 	}
-	return parseDatasetList(stdout.String()), nil
+	return filterReserved(parseDatasetList(stdout.String())), nil
 }
 
 // parseDatasetList turns the raw `mysql -N` output (one table name per
@@ -58,4 +58,25 @@ func parseDatasetList(raw string) []string {
 		}
 	}
 	return names
+}
+
+// reservedTables indexes the ingestor's internal bookkeeping tables
+// (ingestRunsTable / ingestMetaTable) for O(1) exclusion.
+var reservedTables = map[string]struct{}{
+	ingestRunsTable: {},
+	ingestMetaTable: {},
+}
+
+// filterReserved drops the ingestor's reserved bookkeeping tables from a raw
+// table listing, leaving only real user datasets. It preserves the
+// empty-listing → nil contract (see parseDatasetList) so an empty or
+// all-reserved schema reports "no datasets" rather than an empty non-nil slice.
+func filterReserved(names []string) []string {
+	var out []string
+	for _, n := range names {
+		if _, reserved := reservedTables[n]; !reserved {
+			out = append(out, n)
+		}
+	}
+	return out
 }

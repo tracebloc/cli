@@ -106,7 +106,7 @@ func Stage(ctx context.Context, opts StageOptions) error {
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(opts.Out, "Opened a secure channel to your workspace's storage.\n")
+	_, _ = fmt.Fprintf(opts.Out, "Opened a secure channel to your secure environment's storage.\n")
 
 	// 3. Defer cleanup. The deferred call uses a FRESH context with
 	//    its own deadline — if the parent ctx is cancelled (SIGINT,

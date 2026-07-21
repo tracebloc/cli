@@ -64,7 +64,7 @@ func statDatasetPath(path string) error {
 }
 
 // resolveLocalInput is everything `data ingest` does BEFORE touching the
-// cluster: the --overwrite/--idempotency-key guard, the intro banner, the
+// cluster: the --overwrite/--idempotency-key guard, the intro explainer, the
 // guided prompts, path expansion + the existence-first check, table-name /
 // category / misapplied-flag validation, the local layout walk, per-category
 // spec resolution, spec synthesis + schema validation, the P3 content
@@ -78,8 +78,8 @@ func statDatasetPath(path string) error {
 // steps that follow see the resolved spec. cancelled=true with a nil err is
 // the guided flow's clean Ctrl-C: the caller exits 0, nothing ingested.
 func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *push.LocalLayout, spec map[string]any, specBytes []byte, cancelled bool, err error) {
-	// Intro header: brand + a plain-English explainer of what an ingest
-	// does, so a first-time user understands it before any prompts.
+	// Intro: a plain-English explainer of what an ingest does, so a
+	// first-time user understands it before any prompts.
 	// Routed through a.Printer, so --output-json keeps it on stderr and
 	// --plain/non-TTY degrade cleanly. (#31)
 	// --overwrite + a reused --idempotency-key is a data-loss trap: the
@@ -92,10 +92,10 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 			"--overwrite can't be combined with --idempotency-key: a reused key makes the cluster replay the previous run instead of ingesting the new data — after --overwrite's removal that would report success while loading nothing. Drop one of the two (a fresh per-run key is the default).")}
 	}
 
-	a.Printer.Banner("tracebloc", "data ingest")
+	a.Printer.Newline()
 	a.Printer.Para(strings.TrimSpace(`
 This ingests a dataset so models can train on it. Your files never leave your
-own infrastructure — tracebloc copies them into your workspace's storage,
+own infrastructure — tracebloc copies them into your secure environment's storage,
 checks them, and loads them into a table your training runs read from. Other
 collaborators can train against that table without ever seeing the raw files.`))
 	a.Printer.Hintf("Learn more: https://docs.tracebloc.io")
@@ -285,7 +285,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 	}
 
 	a.Printer.Step(1, 3, "Check your data")
-	a.Printer.Hintf("Reading your files locally first — nothing has touched your workspace yet — so a layout or settings problem shows up right away.")
+	a.Printer.Hintf("Reading your files locally first — nothing has touched your secure environment yet — so a layout or settings problem shows up right away.")
 
 	// 3a. Per-category spec resolution from the local data, so the
 	//     synthesized spec carries the right fields before validation.

@@ -194,7 +194,7 @@ func TestSniffFamily(t *testing.T) {
 
 	t.Run("image dir", func(t *testing.T) {
 		dir := t.TempDir()
-		writePrev(t, filepath.Join(dir, "labels.csv"), "image_id,label\n1.jpg,c\n")
+		writePrev(t, filepath.Join(dir, "labels.csv"), "filename,label\n1.jpg,c\n")
 		if err := os.Mkdir(filepath.Join(dir, "images"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -333,13 +333,13 @@ func TestPreviewLabelHeaders(t *testing.T) {
 
 	t.Run("image reads labels.csv", func(t *testing.T) {
 		dir := t.TempDir()
-		writePrev(t, filepath.Join(dir, "labels.csv"), "image_id,label\n1.jpg,c\n")
+		writePrev(t, filepath.Join(dir, "labels.csv"), "filename,label\n1.jpg,c\n")
 		hdr, err := PreviewLabelHeaders("image_classification", dir)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(hdr) != 2 || hdr[1] != "label" {
-			t.Fatalf("headers = %v, want [image_id label]", hdr)
+			t.Fatalf("headers = %v, want [filename label]", hdr)
 		}
 	})
 

@@ -102,8 +102,10 @@ func UninstallChart(ctx context.Context, namespace, kubeconfig, kubeContext stri
 	return err
 }
 
-// PruneImages reclaims the tracebloc container images pulled during install —
-// `docker images --filter=reference="ghcr.io/tracebloc/*" -q | docker rmi`. It is
+// PruneImages reclaims the tracebloc container images pulled during install by
+// reference — `docker images --filter=reference="ghcr.io/tracebloc/*" --format
+// {{.Repository}}:{{.Tag}} | docker rmi` (by repo:tag, NOT image ID: a shared ID
+// refuses `docker rmi <id>` — see the body). It is
 // SCOPED to the tracebloc image reference and best-effort by design (RFC-0001
 // §7.10): reclaiming disk is a nice-to-have on offboard, not a hard step, so a
 // docker failure or an image still in use by a container is not fatal. It is
@@ -112,23 +114,36 @@ func UninstallChart(ctx context.Context, namespace, kubeconfig, kubeContext stri
 //
 // No matching images (nothing to reclaim) is a clean no-op, not an error.
 func PruneImages(ctx context.Context) error {
-	out, err := run(ctx, "docker", "images", "--filter=reference="+imageReference, "-q")
+	// List by REFERENCE (repo:tag), not image ID (-q). An image ID shared across
+	// multiple repositories refuses `docker rmi <id>` ("must be forced — image is
+	// referenced in multiple repositories"). Removing by reference untags only OUR
+	// tracebloc references — Docker deletes the underlying image only when nothing
+	// else references it — so we never need a force that could evict an image a
+	// non-tracebloc workload shares (cli delete image-reclaim bug).
+	out, err := run(ctx, "docker", "images", "--filter=reference="+imageReference,
+		"--format", "{{.Repository}}:{{.Tag}}")
 	if err != nil {
 		return err
 	}
-	// De-duplicate the image IDs: a single image tagged multiple times
-	// (ghcr.io/tracebloc/x:1 and :latest) lists its ID once per tag, and passing
-	// the same ID twice to `docker rmi` makes the second reference error.
-	ids := dedupeLines(out)
-	if len(ids) == 0 {
+	// Dedupe and drop dangling refs: an image that lost its tag prints "<none>"
+	// for the repo or tag, which can't be removed by reference (`docker image
+	// prune` reclaims those). Best-effort, so skipping them is fine.
+	var refs []string
+	for _, ref := range dedupeLines(out) {
+		if strings.Contains(ref, "<none>") {
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	if len(refs) == 0 {
 		return nil // nothing tracebloc-owned to reclaim
 	}
-	_, err = run(ctx, "docker", append([]string{"rmi"}, ids...)...)
+	_, err = run(ctx, "docker", append([]string{"rmi"}, refs...)...)
 	return err
 }
 
-// dedupeLines splits combined `docker images -q` output into unique, non-empty,
-// order-preserving lines (image IDs).
+// dedupeLines splits combined `docker images` output into unique, non-empty,
+// order-preserving lines (image IDs or repo:tag references).
 func dedupeLines(out string) []string {
 	seen := map[string]struct{}{}
 	var ids []string

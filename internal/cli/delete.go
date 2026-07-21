@@ -125,48 +125,52 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		ns = prof.ActiveClientNamespace
 	}
 
-	// The three-way scope summary — shown BEFORE the confirm so the user sees
-	// exactly what is removed, kept, and left alone (RFC-0001 §7.10).
-	renderOffboardSummary(p, name, ns, o.keepData)
-
-	// Live-work guard (inherits §7.4): refuse if tracebloc still reports this
-	// client online / with a running job, unless --force. The heartbeat is
-	// advisory, so this is a courtesy stop, not the safety — the teardown itself
-	// is the real gate. A lookup failure is non-fatal (the client may be
-	// unreachable precisely because it's being retired); warn and continue.
+	// Work-guard: refuse to offboard while training runs are ACTIVE (offboarding
+	// would kill them), unless --force. Block on RUNNING experiments, NOT on
+	// "online": a healthy environment is always online (it heartbeats), so
+	// blocking on that would make offboard impossible without --force and mislead
+	// ("stop your training jobs" when there are none). A lookup failure is
+	// non-fatal (the environment may be unreachable precisely because it's being
+	// retired); warn and continue — the typed-name confirm and the teardown are
+	// the real gates. 426/401/403 won't recover by continuing, so fail fast.
 	if !o.force {
-		if st, found, lerr := lookupClientStatus(ctx, client, prof.ActiveClientID); lerr != nil {
-			// A 426 (CLI too old) won't recover by continuing — the whole offboard
-			// talks to the same backend, so fail fast with the upgrade message rather
-			// than imply the guard was merely skipped.
+		pc, lerr := client.GetClient(ctx, id)
+		switch {
+		case lerr != nil:
 			var ue *api.UpgradeRequiredError
 			if errors.As(lerr, &ue) {
 				return &exitError{code: exitFailure, err: lerr}
 			}
-			// A 401/403 means the signed-in credential is revoked/expired — it won't
-			// recover by continuing either, and every later step (the revoke included)
-			// hits the same backend. Fail fast and point at sign-in rather than march
-			// the user through the confirm only to fail at revoke. Mirrors the --wait
-			// poll loop's auth handling in client.go.
 			var ae *api.APIError
 			if errors.As(lerr, &ae) && (ae.StatusCode == http.StatusUnauthorized || ae.StatusCode == http.StatusForbidden) {
 				return &exitError{code: exitFailure, err: errors.New(
 					"tracebloc rejected your credentials — run `tracebloc login`, then retry `tracebloc delete`")}
 			}
-			// Other errors (5xx/429/network) are transient: warn and continue, since
-			// the teardown is the real gate.
-			p.Hintf("Couldn't check whether this client is still online (%v) — continuing; pass --force to skip this check.", lerr)
-		} else if !found {
+			p.Hintf("Couldn't check for active training runs (%v) — continuing; the confirmation below still guards you.", lerr)
+		case pc == nil:
 			// The stored id isn't among this account's clients — likely a stale
-			// pointer or the wrong account/env. Don't silently pass the guard: warn,
-			// then continue (the revoke below will 403/404 if it isn't really ours).
-			p.Hintf("This client isn't in the signed-in account's client list — continuing; if that's unexpected, check you're logged into the right account/env.")
-		} else if st == clientStatusOnline {
+			// pointer or the wrong account. Warn, then continue (the revoke below
+			// will 403/404 if it isn't really ours).
+			p.Hintf("This secure environment isn't in the signed-in account — continuing; if that's unexpected, check you're logged into the right account.")
+		case pc.NumRunningExperiments > 0:
+			// Resolve the launcher the way resources/home do — advertise `tb` only
+			// when the real alias exists (not every install has it), else the name
+			// the user invoked — so the suggested command is always copy-pasteable.
+			relaunch := invokedName()
+			if tbAliasAvailable() {
+				relaunch = binTB
+			}
 			return &exitError{code: exitFailure, err: fmt.Errorf(
-				"client %q is still online (tracebloc reports it running) — stop its training jobs first, "+
-					"or pass --force to offboard anyway", name)}
+				"your secure environment %q has %d training run(s) active — offboarding would stop them. "+
+					"Wait for them to finish or cancel them, then run `%s delete` again — or `%s delete --force` to stop them and offboard now",
+				name, pc.NumRunningExperiments, relaunch, relaunch)}
 		}
 	}
+
+	// The three-way scope PREVIEW — shown after the work-guard and before the
+	// typed-name confirm, so the user sees exactly what WILL be removed, kept, and
+	// left alone before committing to anything (RFC-0001 §7.10).
+	renderOffboardSummary(p, name, o.keepData)
 
 	// Typed-client-name confirmation (not [y/N]): the local data wipe is
 	// irreversible, so require the user to type the client's name. --yes skips it
@@ -233,7 +237,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		p.Hintf("Couldn't revoke the credential server-side (%v) — continuing with local teardown. "+
 			"The credential may still be live on tracebloc; revoke it from the dashboard if needed.", rerr)
 	} else {
-		p.Successf("Revoked this machine's credential (client %q kept on tracebloc as a record).", name)
+		p.Successf("Revoked this machine's credential — your secure environment %q stays on tracebloc as a record.", name)
 	}
 
 	// The teardown steps below are best-effort. (The credential is revoked when the
@@ -266,7 +270,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 			p.Warnf("Chart uninstall reported: %v", uerr)
 			degraded = true
 		} else {
-			p.Successf("Uninstalled the Helm release %s.", ns)
+			p.Successf("Uninstalled tracebloc.")
 		}
 	} else {
 		// No cached namespace (a pre-cache config, or none passed) — we can't name
@@ -282,15 +286,22 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		p.Warnf("Cluster teardown reported: %v", terr)
 		degraded = true
 	} else {
-		p.Successf("Deleted the local cluster %q.", nodeboot.ClusterName)
+		p.Successf("Removed the local environment.")
 	}
 
 	// 4. Reclaim the tracebloc container images (SCOPED to ghcr.io/tracebloc/*,
 	//    never a blanket prune — best-effort).
 	if perr := pruneImages(ctx); perr != nil {
-		p.Warnf("Image reclaim reported: %v", perr)
+		// Pure disk cleanup — a failure here changes nothing about the offboard
+		// (it's excluded from `degraded`). Keep it a quiet, plain note; don't leak
+		// the raw docker/daemon error at the user.
+		// `docker image prune` would NOT help here: it only removes dangling
+		// (untagged) images, and these are tagged ghcr.io/tracebloc/* refs. Point
+		// at the scoped removal that actually matches the failure mode — the same
+		// reference PruneImages targets — never a blanket prune.
+		p.Infof("Some tracebloc images couldn't be reclaimed (harmless) — remove them later with `docker rmi $(docker images --filter=reference='ghcr.io/tracebloc/*' --format '{{.Repository}}:{{.Tag}}')`.")
 	} else {
-		p.Successf("Reclaimed the tracebloc container images.")
+		p.Successf("Reclaimed tracebloc's downloaded images.")
 	}
 
 	// 5. Spare or wipe ~/.tracebloc. The active-client pointer was already cleared
@@ -339,32 +350,27 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	return nil
 }
 
-// renderOffboardSummary prints the removed / retained / left three-way summary
-// (RFC-0001 §7.10 mock) shown before the typed confirm.
-func renderOffboardSummary(p *ui.Printer, name, ns string, keepData bool) {
-	p.Banner("tracebloc", "offboard this machine")
-
-	p.Section("Removed from this machine")
-	p.Infof("This machine's credential (revoked — tracebloc can no longer see it)")
-	if ns != "" {
-		p.Infof("The Helm release %q and the local cluster %q", ns, nodeboot.ClusterName)
-	} else {
-		p.Infof("The Helm release and the local cluster %q", nodeboot.ClusterName)
-	}
-	p.Infof("The tracebloc container images (ghcr.io/tracebloc/*)")
+// renderOffboardSummary prints the three-way PREVIEW — what will be removed,
+// kept, and left alone — shown after the work-guard and before the typed confirm
+// (RFC-0001 §7.10 mock). Plain language only; the Kubernetes/Helm/registry
+// specifics stay out of the user's way.
+func renderOffboardSummary(p *ui.Printer, name string, keepData bool) {
+	p.Section("This will remove")
+	p.Infof("This machine's credential — so tracebloc can no longer reach it")
+	p.Infof("Your secure environment %q and everything it runs on this machine", name)
+	p.Infof("tracebloc's downloaded images")
 	if keepData {
-		p.Infof("The CLI itself (local data + config kept: --keep-data)")
+		p.Infof("The tracebloc CLI (your local data & config are kept — --keep-data)")
 	} else {
-		p.Infof("Local data + config (~/.tracebloc) and the CLI itself — irreversible")
+		p.Infof("Your local data & config (~/.tracebloc) and the tracebloc CLI — can't be undone")
 	}
 
-	p.Section("Kept on tracebloc, as a record")
+	p.Section("Kept on tracebloc")
 	p.Infof("Your use cases and the models trained here")
-	p.Infof("The datasets' catalog entries (marked unavailable, not deleted)")
+	p.Infof("Your dataset records (marked unavailable, not deleted)")
 
-	p.Section("Left in place (system-wide)")
-	p.Infof("Docker, kubectl, k3d, helm — remove yourself if unused")
-	p.Infof("(On a GPU box: NVIDIA drivers + container toolkit)")
+	p.Section("Left alone")
+	p.Infof("Docker and related tools — remove them yourself if you no longer need them")
 }
 
 // removeHostDataDir deletes the tracebloc host data directory (~/.tracebloc, or
