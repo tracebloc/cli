@@ -144,7 +144,7 @@ func runDataDelete(ctx context.Context, a runDataDeleteArgs) (err error) {
 	}()
 
 	p := a.Printer
-	p.Banner("tracebloc", "delete an ingested dataset")
+	p.Newline()
 	p.Para(`This permanently removes a dataset you ingested earlier: it drops the table from
 the cluster and deletes the dataset's files on the shared storage. It can't be
 undone — re-ingesting the data is the only way back.`)

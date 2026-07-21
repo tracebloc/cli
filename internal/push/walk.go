@@ -163,7 +163,7 @@ func Discover(rootDir string) (*LocalLayout, error) {
 		// imagesStat.IsDir() check below.
 		return nil, fmt.Errorf(
 			"%q is a directory, not a file. labels.csv must be the "+
-				"CSV file holding the image_id,label rows.",
+				"CSV file holding the filename,label rows.",
 			labelsPath)
 	}
 	if err := checkFileSize("labels.csv", labelsStat.Size()); err != nil {

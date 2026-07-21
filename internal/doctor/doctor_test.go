@@ -425,7 +425,10 @@ func TestCheckRequestsProxy(t *testing.T) {
 		dep  *appsv1.Deployment // nil => deployment absent
 		want Status
 	}{
-		{"ready", requestsProxyDep("tb", 1), StatusOK},
+		// Ready is NOT a green ✔: readiness ≠ Service Bus egress works, so a running
+		// relay is an honest StatusUnknown (egress not actively verified), never OK
+		// (cli#351). A down / missing relay is still a real ✖.
+		{"ready", requestsProxyDep("tb", 1), StatusUnknown},
 		{"not-ready", requestsProxyDep("tb", 0), StatusFail},
 		{"missing", nil, StatusFail},
 	}
@@ -445,19 +448,23 @@ func TestCheckRequestsProxy(t *testing.T) {
 // When DiscoverParentRelease failed (release nil) but a release-prefixed
 // requests-proxy exists, the suffix fallback must still find it rather than
 // falsely report it missing (Bugbot on #89).
-// TestCheckRequestsProxy_Wording locks the cli#351 reword: requests-proxy is
-// the OUTBOUND result/FLOPs relay, so none of its lines may say experiments
-// "stay Pending" (that's the scheduling path, which it doesn't touch), and the
-// ✔ must be honest that egress is not actually probed.
+// TestCheckRequestsProxy_Wording locks the cli#351 reword + Part-2 downgrade:
+// requests-proxy is the OUTBOUND result/FLOPs relay, so none of its lines may
+// say experiments "stay Pending" (that's the scheduling path, which it doesn't
+// touch); and a Ready relay must read as a neutral StatusUnknown (egress not
+// actively verified), never a green ✔.
 func TestCheckRequestsProxy_Wording(t *testing.T) {
 	rel := &cluster.ParentRelease{ReleaseName: "tb"}
 
-	ok := checkRequestsProxy(bg(), fake.NewClientset(requestsProxyDep("tb", 1)), ns, rel)
-	if strings.Contains(ok.Detail, "Pending") {
-		t.Errorf("OK detail says %q — must not mention 'Pending' (that's scheduling, not egress)", ok.Detail)
+	ready := checkRequestsProxy(bg(), fake.NewClientset(requestsProxyDep("tb", 1)), ns, rel)
+	if ready.Status != StatusUnknown {
+		t.Errorf("Ready relay = %v, want StatusUnknown — readiness must not green a ✔ egress claim (cli#351)", ready.Status)
 	}
-	if !strings.Contains(ok.Detail, "not directly probed") {
-		t.Errorf("OK detail = %q, want it honest that egress is not directly probed", ok.Detail)
+	if strings.Contains(ready.Detail, "Pending") {
+		t.Errorf("detail says %q — must not mention 'Pending' (that's scheduling, not egress)", ready.Detail)
+	}
+	if !strings.Contains(ready.Detail, "not actively verified") {
+		t.Errorf("detail = %q, want it honest that egress is not actively verified", ready.Detail)
 	}
 
 	notReady := checkRequestsProxy(bg(), fake.NewClientset(requestsProxyDep("tb", 0)), ns, rel)
@@ -474,8 +481,10 @@ func TestCheckRequestsProxy_Wording(t *testing.T) {
 
 func TestCheckRequestsProxy_NilReleaseFindsPrefixed(t *testing.T) {
 	cs := fake.NewClientset(requestsProxyDep("tb", 1)) // "tb-requests-proxy"
-	if r := checkRequestsProxy(bg(), cs, ns, nil); r.Status != StatusOK {
-		t.Fatalf("nil release with prefixed deploy => %v (%q), want ok", r.Status, r.Detail)
+	// Found (not falsely reported missing) now reads as StatusUnknown — running,
+	// egress not actively verified — rather than a green ✔ (cli#351).
+	if r := checkRequestsProxy(bg(), cs, ns, nil); r.Status != StatusUnknown {
+		t.Fatalf("nil release with prefixed deploy => %v (%q), want unknown (found, egress unverified)", r.Status, r.Detail)
 	}
 }
 
@@ -513,8 +522,9 @@ func TestCheckRequestsProxy_BareNameAcceptedWhenLabelledForRelease(t *testing.T)
 	bare.Name = "requests-proxy"
 	bare.Labels = map[string]string{"app.kubernetes.io/instance": "relA"}
 	cs := fake.NewClientset(bare)
-	if r := checkRequestsProxy(bg(), cs, ns, rel); r.Status != StatusOK {
-		t.Fatalf("bare requests-proxy labelled for relA => %v (%q), want ok", r.Status, r.Detail)
+	// Accepted (found, not missing) → StatusUnknown, not a green ✔ (cli#351).
+	if r := checkRequestsProxy(bg(), cs, ns, rel); r.Status != StatusUnknown {
+		t.Fatalf("bare requests-proxy labelled for relA => %v (%q), want unknown (accepted/found, egress unverified)", r.Status, r.Detail)
 	}
 }
 

@@ -66,8 +66,8 @@ Exit codes:
   7  couldn't query the cluster for datasets`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// In --output-json mode, human output (the banner) goes to
-			// stderr so stdout carries only the JSON — same split as ingest.
+			// In --output-json mode, human output (the header + listing) goes
+			// to stderr so stdout carries only the JSON — same split as ingest.
 			printer := printerFor(cmd)
 			var jsonOut io.Writer
 			if outputJSON {
@@ -116,7 +116,6 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	}()
 
 	p := a.Printer
-	p.Banner("tracebloc", "datasets in the cluster")
 
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
 	binding := bindActiveClientNamespace(&opts)
@@ -160,7 +159,8 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 
 	if len(shown) == 0 && !(showAll && len(system) > 0) {
 		p.Section(fmt.Sprintf("Datasets in %s (0)", namespace))
-		p.Infof("No datasets yet — ingest one with `tracebloc data ingest`.")
+		p.Newline()
+		p.Para(fmt.Sprintf("No datasets yet — ingest one with `%s data ingest`.", invokedName()))
 		if len(system) > 0 && !showAll {
 			p.Hintf("%d system table(s) hidden — show with --all.", len(system))
 		}

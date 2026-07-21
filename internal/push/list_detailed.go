@@ -135,7 +135,12 @@ func listDatasetsDetailedWith(ctx context.Context, exec Executor, namespace, pod
 	var selects []string
 	for i := range infos {
 		d := &infos[i]
-		if !hasColumn(d.Columns, "data_id") {
+		// A framework table — the ingest-run journal / ingest-meta store
+		// (reservedTables, shared with ListDatasets) or any table lacking a
+		// data_id column — carries no dataset rows. Mark it System so it's
+		// hidden by default and kept out of the data query below, which selects
+		// data_intent (a column these tables don't have).
+		if _, reserved := reservedTables[d.Name]; reserved || !hasColumn(d.Columns, "data_id") {
 			d.System = true
 			continue
 		}
