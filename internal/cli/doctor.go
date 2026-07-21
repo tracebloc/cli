@@ -126,12 +126,17 @@ func runClusterDoctor(
 		}
 	}
 
-	// 3. Find the secure environment (local kubeconfig read).
+	// 3. Find the secure environment (local kubeconfig read). If it isn't here,
+	//    that's the headline — but surface a session/backend fault we already
+	//    found first, so a reinstall is never recommended while a live session
+	//    problem goes unexplained. (A 401/426 is a hard stop earlier; only the
+	//    soft tokenUnreachable/tokenServerErr states reach here.)
 	opts := cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride, Namespace: nsOverride}
 	bindActiveClientNamespace(&opts)
 	resolved, err := loadClusterFn(opts)
 	if err != nil {
 		p.Newline()
+		noteSessionProblem(p, tok)
 		p.Errorf("No secure environment on this machine yet.")
 		p.Hintf("     Set one up: %s", installCmd)
 		return &exitError{code: exitLocalEnv, err: nil}
@@ -139,33 +144,40 @@ func runClusterDoctor(
 	cs, err := newClientsetFn(resolved)
 	if err != nil {
 		p.Newline()
+		noteSessionProblem(p, tok)
 		p.Errorf("Couldn't connect to your secure environment — check your kubeconfig/context.")
 		return &exitError{code: exitLocalEnv, err: nil}
 	}
 	p.Para(fmt.Sprintf("Secure environment %q", envDisplayName(resolved)))
 
-	// 4. Probe the cluster (the granular checks stay for --verbose + --diagnose).
+	// 4. Probe the cluster and roll the granular checks up into the two plain
+	//    lines the owner acts on (the granular results stay for --verbose/--diagnose).
 	results := doctorRunFn(ctx, cs, doctor.Options{Namespace: resolved.Namespace, ServerURL: resolved.ServerURL})
-
-	// --diagnose: write the full technical detail to a file for support, then stop.
-	if diagnose {
-		return writeDiagnoseBundle(p, resolved, results)
-	}
-
-	// 5. Roll the granular checks up into two plain lines the owner can act on.
-	p.Newline()
 	connected, ready := summarizeDoctor(results, tok)
+
+	p.Newline()
 	renderHealth(p, connected)
 	renderHealth(p, ready)
-
 	if p.Verbose() {
 		renderDoctorDetails(p, resolved, results)
 	}
 
-	// 6. Verdict + exit code (unchanged: 0 healthy, 2 a problem).
+	// 5. --diagnose: write the full bundle (session + verdict + technical detail)
+	//    for support. It's additive — the run still ends on the real verdict and
+	//    exit code below, so `--diagnose` never masks a failing check as a 0.
+	if diagnose {
+		p.Newline()
+		if werr := writeDiagnoseBundle(p, resolved, results, tok, connected, ready); werr != nil {
+			return werr
+		}
+	}
+
+	// 6. Verdict + exit code (0 healthy, 2 a problem).
 	p.Newline()
 	if worseStatus(connected.status, ready.status) == doctor.StatusFail {
-		p.Hintf("Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())
+		if !diagnose { // they just wrote a bundle — don't send them to write it again
+			p.Hintf("Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())
+		}
 		return &exitError{code: exitChecksFailed, err: nil}
 	}
 	p.Successf("Everything looks good — you're ready to run training.")
@@ -191,6 +203,33 @@ const (
 	tokenUnreachable
 	tokenServerErr
 )
+
+// noteSessionProblem prints a soft WhoAmI/session fault (unreachable backend or a
+// server-side error) as a standalone ✖ + fix. Used on the no-local-environment
+// path so a fault detected before the kubeconfig read isn't silently dropped when
+// that read fails. It's a no-op when the session is fine (tokenOK).
+func noteSessionProblem(p *ui.Printer, tok tokenState) {
+	switch tok {
+	case tokenUnreachable:
+		p.Errorf("Can't reach tracebloc from here.")
+		p.Hintf("     Check your network / HTTP(S)_PROXY, then run `%s doctor` again.", launcher())
+	case tokenServerErr:
+		p.Errorf("tracebloc didn't confirm your session (server error).")
+		p.Hintf("     Try again shortly; if it persists, email support@tracebloc.io with `%s doctor --diagnose`.", launcher())
+	}
+}
+
+// tokenLabel is the one-line session status recorded in the support bundle.
+func tokenLabel(tok tokenState) string {
+	switch tok {
+	case tokenUnreachable:
+		return "backend unreachable from this machine (network/proxy)"
+	case tokenServerErr:
+		return "backend answered with an error (5xx/403/decode)"
+	default:
+		return "confirmed"
+	}
+}
 
 // summarizeDoctor collapses the granular checks into the two lines the owner
 // reads: "Connected to tracebloc" and "Ready to run training". Each expands to
@@ -316,10 +355,15 @@ func renderDoctorDetails(p *ui.Printer, resolved *cluster.ResolvedConfig, result
 // writeDiagnoseBundle owns the support bundle (moved out of install-k8s.sh, which
 // the user may not have on disk). It writes the redacted technical breakdown to a
 // file the owner emails to support.
-func writeDiagnoseBundle(p *ui.Printer, resolved *cluster.ResolvedConfig, results []doctor.Result) error {
+func writeDiagnoseBundle(p *ui.Printer, resolved *cluster.ResolvedConfig, results []doctor.Result, tok tokenState, connected, ready healthLine) error {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "tracebloc doctor — support bundle (%s)\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(&buf, "tracebloc doctor — support bundle (%s)\n\n", time.Now().Format(time.RFC3339))
 	bp := ui.New(&buf, ui.WithColor(false), ui.WithVerbose(true))
+	// Session + rolled-up verdict first — the state support reads before the raw
+	// Kubernetes detail, and the reason each remedy sends them here.
+	bp.Detailf("session:   %s", tokenLabel(tok))
+	bp.Detailf("connected: %s — %s", connected.status, connected.text)
+	bp.Detailf("ready:     %s — %s", ready.status, ready.text)
 	renderDoctorDetails(bp, resolved, results)
 
 	name := fmt.Sprintf("tracebloc-doctor-%s.txt", time.Now().Format("20060102-150405"))

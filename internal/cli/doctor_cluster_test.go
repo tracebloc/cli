@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -177,5 +179,69 @@ func TestRunClusterDoctor_ClientsetError(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "Couldn't connect to your secure environment") {
 		t.Errorf("want the plain connect-failure message:\n%s", buf.String())
+	}
+}
+
+// --diagnose writes a support bundle that records the session + rolled-up verdict
+// (not just k8s detail) and still exits on the REAL verdict — never a misleading
+// 0 when checks failed (Bugbot #365).
+func TestRunClusterDoctor_DiagnoseBundle(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "a@b.io", ActiveClientID: "5"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // session healthy
+	})
+	withClusterSeams(t, fake.NewSimpleClientset())
+	// A failing check → the verdict is a problem, so exit must be 2, not a bare 0.
+	withDoctorRun(t, []doctor.Result{
+		{Name: "Cluster reachable", Status: doctor.StatusOK},
+		{Name: "Pod health", Status: doctor.StatusFail, Detail: "a pod is CrashLoopBackOff"},
+	})
+
+	// writeDiagnoseBundle writes into the CWD — run it inside a temp dir.
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	var buf bytes.Buffer
+	err = runClusterDoctor(context.Background(), ui.New(&buf, ui.WithColor(false)), "", "", "", true)
+
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("diagnose with a failing check → want exit 2 (real verdict), got %v", err)
+	}
+	if !strings.Contains(buf.String(), "Wrote a support bundle") {
+		t.Errorf("want a 'wrote bundle' confirmation, got:\n%s", buf.String())
+	}
+
+	// The bundle exists and records the session + verdict, not just the k8s detail.
+	entries, _ := os.ReadDir(tmp)
+	var bundle string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "tracebloc-doctor-") {
+			bundle = filepath.Join(tmp, e.Name())
+		}
+	}
+	if bundle == "" {
+		t.Fatalf("no support bundle written to %s (entries: %v)", tmp, entries)
+	}
+	b, err := os.ReadFile(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"session:", "connected:", "ready:", "Pod health"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("bundle missing %q; got:\n%s", want, string(b))
+		}
 	}
 }
