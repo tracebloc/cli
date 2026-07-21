@@ -102,8 +102,10 @@ func UninstallChart(ctx context.Context, namespace, kubeconfig, kubeContext stri
 	return err
 }
 
-// PruneImages reclaims the tracebloc container images pulled during install —
-// `docker images --filter=reference="ghcr.io/tracebloc/*" -q | docker rmi`. It is
+// PruneImages reclaims the tracebloc container images pulled during install by
+// reference — `docker images --filter=reference="ghcr.io/tracebloc/*" --format
+// {{.Repository}}:{{.Tag}} | docker rmi` (by repo:tag, NOT image ID: a shared ID
+// refuses `docker rmi <id>` — see the body). It is
 // SCOPED to the tracebloc image reference and best-effort by design (RFC-0001
 // §7.10): reclaiming disk is a nice-to-have on offboard, not a hard step, so a
 // docker failure or an image still in use by a container is not fatal. It is

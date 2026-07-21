@@ -292,7 +292,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		// (untagged) images, and these are tagged ghcr.io/tracebloc/* refs. Point
 		// at the scoped removal that actually matches the failure mode — the same
 		// reference PruneImages targets — never a blanket prune.
-		p.Infof("Some tracebloc images couldn't be reclaimed (harmless) — remove them later with `docker rmi $(docker images ghcr.io/tracebloc/* -q)`.")
+		p.Infof("Some tracebloc images couldn't be reclaimed (harmless) — remove them later with `docker rmi $(docker images ghcr.io/tracebloc/* --format '{{.Repository}}:{{.Tag}}')`.")
 	} else {
 		p.Successf("Reclaimed tracebloc's downloaded images.")
 	}
