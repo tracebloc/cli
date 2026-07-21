@@ -127,11 +127,21 @@ func TestDatasetModality(t *testing.T) {
 		{push.DatasetInfo{Columns: []string{"timestamp", "value"}}, "Time-series"},
 		{push.DatasetInfo{Columns: []string{"time", "event"}}, "Time-series"},
 		{push.DatasetInfo{Columns: []string{"age", "income"}, Records: 3}, "Tabular"},
+		// empty (0-row) file dataset: NULL extension, no schema cols → undetermined
+		{push.DatasetInfo{Records: 0, Columns: []string{"id", "label", "filename", "extension"}}, "Other"},
 	}
 	for _, c := range cases {
 		if got := datasetModality(c.d); got != c.want {
 			t.Errorf("modality(%+v) = %q, want %q", c.d, got, c.want)
 		}
+	}
+}
+
+// An undetermined ("Other") dataset must not claim a "csv" format.
+func TestFormatCell_OtherIsNeutral(t *testing.T) {
+	d := push.DatasetInfo{Records: 0, Columns: []string{"id", "label", "filename", "extension"}}
+	if got := formatCell(d, datasetModality(d)); got != "—" {
+		t.Errorf("undetermined dataset format = %q, want em dash (not csv)", got)
 	}
 }
 

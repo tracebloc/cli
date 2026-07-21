@@ -13,10 +13,6 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// SharedDataPath is where the client chart mounts the shared PVC; each ingested
-// dataset's files live under <SharedDataPath>/<name>/.
-const SharedDataPath = "/data/shared"
-
 // DatasetInfo is one dataset's metadata for the rich `data list` view. It is
 // assembled from two read-only queries against the mysql pod: an
 // information_schema pass (name/size/create-time/columns) and a per-table data
@@ -74,7 +70,7 @@ func datasetSizesFromShared(ctx context.Context, exec Executor, cs kubernetes.In
 	}
 	var stdout, stderr bytes.Buffer
 	if err := exec.Exec(ctx, namespace, pod, container,
-		[]string{"sh", "-c", "du -sk " + SharedDataPath + "/* 2>/dev/null"},
+		[]string{"sh", "-c", "du -sk " + SharedRoot + "/* 2>/dev/null"},
 		nil, &stdout, &stderr); err != nil {
 		return nil
 	}

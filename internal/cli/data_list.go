@@ -268,7 +268,11 @@ func datasetModality(d push.DatasetInfo) string {
 	if has("sequence_id") || has("timestamp") || (has("time") && has("event")) {
 		return "Time-series"
 	}
-	if d.Records > 0 || featureColCount(d.Columns) > 0 {
+	// A populated dataset with user-schema columns is tabular. Require records:
+	// an empty (0-row) table has NULL extension/label, so its modality is
+	// genuinely unknowable — it falls to "Other" rather than a wrong guess (an
+	// empty image/semseg/keypoint table would otherwise look tabular).
+	if d.Records > 0 && featureColCount(d.Columns) > 0 {
 		return "Tabular"
 	}
 	return "Other"
@@ -309,8 +313,11 @@ func formatCell(d push.DatasetInfo, modality string) string {
 		if base == "" {
 			base = "files"
 		}
-	default:
+	case "Tabular", "Time-series":
 		base = fmt.Sprintf("csv · %d cols", featureColCount(d.Columns))
+	default:
+		// Undetermined modality (e.g. an empty table) — don't imply "csv".
+		return "—"
 	}
 	// Show classes only when the label actually repeats (classes < records):
 	// a continuous regression target has ~one distinct value per row, which is
