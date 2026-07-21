@@ -717,21 +717,21 @@ func renderHome(p *ui.Printer, m homeModel) {
 		// don't claim tracebloc's view — it may be heartbeating fine while only
 		// our probe failed — say we couldn't confirm.
 		if m.confirmedNotOnline {
-			p.WarnLine("%s · running, but tracebloc hasn't heard from it — run %s %s",
-				envLabel, m.inv, doctorPath)
+			p.WarnLine("%s · running, but tracebloc hasn't heard from it — run %s",
+				envLabel, p.Command(m.inv+" "+doctorPath))
 		} else {
-			p.WarnLine("%s · running — couldn't confirm it's connected to tracebloc — run %s %s",
-				envLabel, m.inv, doctorPath)
+			p.WarnLine("%s · running — couldn't confirm it's connected to tracebloc — run %s",
+				envLabel, p.Command(m.inv+" "+doctorPath))
 		}
 	case homeStarting:
-		p.WarnLine("%s · starting up, not ready yet — run %s %s",
-			envLabel, m.inv, doctorPath)
+		p.WarnLine("%s · starting up, not ready yet — run %s",
+			envLabel, p.Command(m.inv+" "+doctorPath))
 	case homeOffline:
 		// One honest line for both causes: a stopped/unreachable cluster AND a
 		// reachable cluster that doesn't host this release from the current
 		// kube-context. "can't reach it from here" is true either way.
-		p.CrossLine("%s · can't reach it from here — run %s %s",
-			envLabel, m.inv, doctorPath)
+		p.CrossLine("%s · can't reach it from here — run %s",
+			envLabel, p.Command(m.inv+" "+doctorPath))
 	case homeNoEnv:
 		p.WarnLine("No secure environment on this machine yet — run the installer to set one up.")
 	}
