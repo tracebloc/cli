@@ -85,6 +85,39 @@ func TestRenderResources_ShowsMachineAndTrainingCeiling(t *testing.T) {
 	}
 }
 
+// TestShow_OpensWithSingleBlank: after the banner removal (#375), the outer
+// runResourcesShow must open with exactly ONE blank line before the view. The
+// leading Newline() lives in runResourcesShow (before resolve, so a resolve-time
+// redirect line also gets a blank) — a spot every renderResources-level test
+// skips — so pin it by driving the outer function through the resolve seam.
+// Mirrors TestSet_ConfirmOpensWithSingleBlank. (Asad review, #375.)
+func TestShow_OpensWithSingleBlank(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	orig := resolveClusterTargetFn
+	t.Cleanup(func() { resolveClusterTargetFn = orig })
+	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=4,memory=16Gi"})
+	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _ bool) (*clusterTarget, error) {
+		return resTarget(cs), nil
+	}
+
+	var buf bytes.Buffer
+	if err := runResourcesShow(context.Background(), ui.New(&buf, ui.WithColor(false)), cluster.KubeconfigOptions{Context: "my-ctx"}); err != nil {
+		t.Fatalf("runResourcesShow: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	head := out
+	if len(head) > 48 {
+		head = head[:48]
+	}
+	// Stat does not self-lead, so the single leading Newline() is the only blank.
+	if !strings.HasPrefix(out, "\n  ") {
+		t.Errorf("show must open with a single blank line then the view, got %q", head)
+	}
+	if strings.HasPrefix(out, "\n\n") {
+		t.Errorf("show opens with a DOUBLE blank line: %q", head)
+	}
+}
+
 // TestRenderResources_ChartDefaultWhenEnvUnset: with no RESOURCE_* env, the
 // ceiling reported is the chart default (cpu=2,memory=8Gi), not "unknown".
 func TestRenderResources_ChartDefaultWhenEnvUnset(t *testing.T) {

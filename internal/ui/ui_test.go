@@ -35,7 +35,6 @@ func TestNew_BufferDefaultsToPlain(t *testing.T) {
 func TestWithColorFalse_OmitsANSI(t *testing.T) {
 	var buf bytes.Buffer
 	p := New(&buf, WithColor(false))
-	p.Banner("tracebloc", "declarative ingestion")
 	p.Step(1, 3, "Discover cluster")
 	p.Warnf("PVC is %s", "ReadWriteOnce")
 	p.Hintf("pass --namespace to override")
@@ -43,7 +42,7 @@ func TestWithColorFalse_OmitsANSI(t *testing.T) {
 	if strings.Contains(buf.String(), esc) {
 		t.Errorf("WithColor(false) still emitted ANSI: %q", buf.String())
 	}
-	for _, want := range []string{"tracebloc", "Step 1/3", "Discover cluster", "ReadWriteOnce"} {
+	for _, want := range []string{"Step 1/3", "Discover cluster", "ReadWriteOnce"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("output missing %q: %q", want, buf.String())
 		}

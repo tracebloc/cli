@@ -119,8 +119,6 @@ func runClusterInfo(
 	kubeconfigPath, contextOverride, nsOverride string,
 	tokenExpiry int64,
 ) error {
-	p.Banner("tracebloc", "cluster diagnostics")
-
 	// Bind the active client's namespace exactly like the data commands do,
 	// so this pre-flight targets what `data ingest` will actually target —
 	// and so the multi-client "set your active client" remediation works

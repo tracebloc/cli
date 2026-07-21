@@ -1,7 +1,7 @@
 // Package ui renders installer-style terminal output for the tracebloc
-// CLI — colored step headers, ✔/⚠/· status lines, dim hints, and a
-// branded banner — matching the look of the tracebloc/client one-line
-// installer (scripts/lib/common.sh).
+// CLI — colored step headers, ✔/⚠/· status lines, and dim hints —
+// matching the look of the tracebloc/client one-line installer
+// (scripts/lib/common.sh).
 //
 // Everything goes through a Printer, constructed with New. A Printer
 // colorizes only when its writer is a real terminal and NO_COLOR is
@@ -243,19 +243,8 @@ func (p *Printer) out(format string, a ...any) {
 	_, _ = fmt.Fprintf(p.w, format, a...)
 }
 
-// Banner prints the branded intro block: a bold-cyan title, a dim rule,
-// and an optional subtitle. Mirrors common.sh print_banner.
-func (p *Printer) Banner(title, subtitle string) {
-	p.out("\n  %s\n", p.hue(title, toneHeading))
-	p.out("  %s\n", p.paint("────────────────────────────────────────", color.Faint))
-	if subtitle != "" {
-		p.out("  %s\n", subtitle)
-	}
-	p.out("\n")
-}
-
 // Para prints a normal-weight paragraph, each line indented to match
-// Banner/Section bodies. It splits on embedded newlines so multi-line
+// Section bodies. It splits on embedded newlines so multi-line
 // prose keeps the indent. Use for explanatory prose — distinct from
 // Hintf (dim one-liners) and Infof (· bullets).
 func (p *Printer) Para(text string) {
