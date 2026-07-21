@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tracebloc/cli/internal/api"
+	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/doctor"
 	"github.com/tracebloc/cli/internal/ui"
@@ -123,6 +124,40 @@ func TestDoctor_DiagnoseNotWrittenOnExpiredSession(t *testing.T) {
 		if strings.HasPrefix(e.Name(), "tracebloc-doctor-") {
 			t.Errorf("a bundle file was written on 401 (%s) — should be none", e.Name())
 		}
+	}
+}
+
+// A session fault (here a transport error → tokenUnreachable) that coincides with
+// a local-env failure must surface as exit 2 ("a problem was found"), matching the
+// full-probe path — not be masked as the local-env exit 3 (Bugbot #365).
+func TestDoctor_SessionFaultDominatesEarlyExit(t *testing.T) {
+	signedInConfig(t)
+	// Point the API client at a closed port so WhoAmI is a transport error →
+	// tokenUnreachable (not an APIError).
+	origAPI := newAPIClient
+	t.Cleanup(func() { newAPIClient = origAPI })
+	newAPIClient = func(string) *api.Client {
+		return &api.Client{BaseURL: "http://127.0.0.1:1", HTTP: &http.Client{Timeout: 2 * time.Second}}
+	}
+	// No environment on this machine.
+	origLoad := loadClusterFn
+	t.Cleanup(func() { loadClusterFn = origLoad })
+	loadClusterFn = func(cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+		return nil, errors.New("no kubeconfig here")
+	}
+
+	var out bytes.Buffer
+	err := runClusterDoctor(context.Background(), ui.New(&out, ui.WithColor(false)), "", "", "", false)
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("session fault + no-env → want exit 2 (problem found), got %v", err)
+	}
+	if !strings.Contains(out.String(), "No secure environment") {
+		t.Errorf("want the no-environment line, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Can't reach tracebloc from here") &&
+		!strings.Contains(out.String(), "didn't confirm your session") {
+		t.Errorf("want the session fault surfaced alongside no-environment, got:\n%s", out.String())
 	}
 }
 

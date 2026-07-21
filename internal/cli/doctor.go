@@ -165,14 +165,14 @@ func runClusterDoctor(
 		noteSessionProblem(p, tok)
 		p.Errorf("No secure environment on this machine yet.")
 		p.Hintf("     Set one up: %s", installCmd)
-		return &exitError{code: exitLocalEnv, err: nil}
+		return &exitError{code: earlyExitCode(tok), err: nil}
 	}
 	cs, err := newClientsetFn(resolved)
 	if err != nil {
 		p.Newline()
 		noteSessionProblem(p, tok)
 		p.Errorf("Couldn't connect to your secure environment — check your kubeconfig/context.")
-		return &exitError{code: exitLocalEnv, err: nil}
+		return &exitError{code: earlyExitCode(tok), err: nil}
 	}
 	p.Para(fmt.Sprintf("Secure environment %q", envDisplayName(resolved)))
 
@@ -235,6 +235,19 @@ func noteSessionProblem(p *ui.Printer, tok tokenState) {
 		p.Errorf("tracebloc didn't confirm your session (server error).")
 		p.Hintf("     Try again shortly; if it persists, email support@tracebloc.io with `%s doctor --diagnose`.", launcher())
 	}
+}
+
+// earlyExitCode picks the exit code for a local-environment early exit (no
+// kubeconfig / clientset error). A connectivity or session fault we already
+// detected (tok != tokenOK) is a checks failure and takes precedence over the
+// local-env code, so those states exit 2 here just as they do on the full probe
+// path — a script keying on "exit 2 = a problem was found" never misses a
+// session fault just because local config also failed.
+func earlyExitCode(tok tokenState) int {
+	if tok != tokenOK {
+		return exitChecksFailed
+	}
+	return exitLocalEnv
 }
 
 // tokenLabel is the one-line session status recorded in the support bundle.
