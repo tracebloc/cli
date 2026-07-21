@@ -1,11 +1,715 @@
-tracebloc CLI — screen copy catalog
-═══════════════════════════════════
-The exact wording + spacing of every screen, rendered from the real
-renderers (colour off). Read this instead of deploying to see copy.
+tracebloc CLI — complete copy catalog
+═════════════════════════════════════
+Every user-facing string, generated from the source. Read this (or the
+diff on any PR that changes it) instead of deploying to review copy.
 Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
 
 
-┌─ tb — home · Online ───────────────────────────────────────
+███ A. COMMANDS — every `--help` ██████████████████████████████
+
+┌─ tracebloc --help ────────────────────────────────────────
+The tracebloc CLI connects machines to tracebloc as clients and
+manages the datasets that models train on. Your data stays on your
+infrastructure — models from other collaborators come to it, once you
+approve them.
+
+Two kinds of commands:
+
+  Your account (sign in first):   login, logout, auth, client
+  This machine's client:          data, cluster
+
+A typical first session:
+
+  tracebloc login                  # sign in or create your account (browser)
+  tracebloc data ingest ./my-data  # stage a dataset into your client
+  tracebloc data list              # see what's in the cluster
+
+The CLI finds your cluster through your kubeconfig, stages data onto
+the cluster's shared storage, and reports progress as it goes. No
+Helm, no YAML, no kubectl needed.
+
+Usage:
+  tracebloc [flags]
+  tracebloc [command]
+
+Available Commands:
+  auth        Inspect tracebloc authentication state
+  client      Provision this machine's tracebloc client
+  cluster     Inspect the cluster the CLI is currently targeting
+  data        Manage the datasets in your secure environment
+  delete      Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)
+  doctor      Check your secure environment is connected and ready to run training
+  login       Sign in to tracebloc in your browser (device flow)
+  logout      Sign out (revoke the token server-side and clear it locally)
+  resources   Show how much of this machine tracebloc may use
+  version     Print the tracebloc CLI version, git SHA, and build date
+
+Flags:
+  -h, --help      help for tracebloc
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+Use "tracebloc [command] --help" for more information about a command.
+
+┌─ tracebloc auth --help ────────────────────────────────────────
+Inspect tracebloc authentication state
+
+Usage:
+  tracebloc auth [flags]
+  tracebloc auth [command]
+
+Available Commands:
+  status      Show whether you're signed in, and to which backend
+
+Flags:
+  -h, --help   help for auth
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+Use "tracebloc auth [command] --help" for more information about a command.
+
+┌─ tracebloc auth status --help ────────────────────────────────────────
+Show whether you're signed in, and to which backend
+
+Usage:
+  tracebloc auth status [flags]
+
+Flags:
+      --check        exit 0 only if signed in with a backend-valid token, else 1; silent unless --verbose
+      --env string   backend environment the check targets: dev|stg|prod (default: $CLIENT_ENV, then prod)
+  -h, --help         help for status
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc client --help ────────────────────────────────────────
+Provision a tracebloc client for this machine. Requires sign-in first
+(`tracebloc login`). To remove tracebloc from this machine, use
+`tracebloc delete`.
+
+Usage:
+  tracebloc client [flags]
+  tracebloc client [command]
+
+Available Commands:
+  status      Show whether tracebloc can see this machine's client (online)
+
+Flags:
+  -h, --help   help for client
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+Use "tracebloc client [command] --help" for more information about a command.
+
+┌─ tracebloc client create --help ────────────────────────────────────────
+Provision a tracebloc client for this machine (auto-named; no flags required)
+
+Usage:
+  tracebloc client create [flags]
+
+Flags:
+      --context string           kubeconfig context for the target cluster (default: current-context)
+      --credential-file string   write the machine credential to this path (mode 0600, sourceable env) instead of printing it — for the installer to feed the chart (never shown on the terminal)
+  -h, --help                     help for create
+      --kubeconfig string        path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config) — read to anchor the client to this cluster
+      --location string          optional location zone for carbon reporting, e.g. DE (default: $TRACEBLOC_CLIENT_LOCATION; omitted if unset)
+      --name string              client name (default: $TRACEBLOC_CLIENT_NAME, else auto-generated <firstname>-NN; shown on your dashboard + carbon reports)
+      --yes                      skip the confirmation prompt
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc client list --help ────────────────────────────────────────
+List the clients in your account
+
+Usage:
+  tracebloc client list [flags]
+
+Aliases:
+  list, ls
+
+Flags:
+  -h, --help   help for list
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc client status --help ────────────────────────────────────────
+Report tracebloc's view of this machine's active client — online, offline,
+or pending. With --wait, poll until tracebloc reports it online (exit 0) or the
+timeout elapses (non-zero), to confirm the client connected after setup.
+
+Usage:
+  tracebloc client status [flags]
+
+Flags:
+  -h, --help               help for status
+      --timeout duration   with --wait, give up after this long (default 2m0s)
+      --wait               poll until tracebloc reports this client online
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc cluster --help ────────────────────────────────────────
+Commands for inspecting the Kubernetes cluster the CLI is
+configured to talk to.
+
+Use `cluster info` to verify which cluster, namespace, and
+client the next `data ingest` will target. Useful as a
+pre-flight before doing anything destructive (e.g. ingesting into
+the wrong cluster).
+
+Usage:
+  tracebloc cluster [flags]
+  tracebloc cluster [command]
+
+Available Commands:
+  info        Show the cluster, namespace, client install, and ingestor token state
+
+Flags:
+  -h, --help   help for cluster
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+Use "tracebloc cluster [command] --help" for more information about a command.
+
+┌─ tracebloc cluster doctor --help ────────────────────────────────────────
+Checks, in plain terms, whether your secure environment is connected to
+tracebloc and ready to run training — and if something's wrong, exactly what to
+do about it.
+
+  --verbose    the full technical breakdown (for support)
+  --diagnose   write a redacted support bundle to email to tracebloc
+
+Exit codes:
+  0   healthy
+  2   a problem was found
+  3   couldn't read your local config
+
+Usage:
+  tracebloc cluster doctor [flags]
+
+Flags:
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+      --diagnose            write a redacted support bundle for tracebloc support and exit
+  -h, --help                help for doctor
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace where your secure environment is installed (default: your active client's)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc cluster info --help ────────────────────────────────────────
+Discovers the tracebloc client installed in the configured
+cluster + namespace and prints:
+
+  • Which kubeconfig context the CLI used
+  • The namespace it resolved to
+  • The client's release name + chart version + appVersion
+  • The jobs-manager Service the next data ingest would POST to
+  • The ingestor ServiceAccount the post-install hook would auth as
+  • The cluster's configured INGESTOR_IMAGE_DIGEST default
+  • Whether the user's kubeconfig can mint short-lived SA tokens
+    via TokenRequest, or has to fall back to a static
+    service-account-token Secret
+
+The actual token bytes are never printed; the diagnostic shows
+SHA256(token)[:8] so the customer can verify "yes, that's the
+token I expect" without leaking it to terminal scrollback.
+
+Exit codes:
+  0   cluster discovered + token mintable; CLI is ready
+  4   cluster reachable but no tracebloc client found
+  5   cluster reachable + release found but no usable SA token
+
+Usage:
+  tracebloc cluster info [flags]
+
+Flags:
+      --context string             name of the kubeconfig context to use (default: kubeconfig's current-context)
+  -h, --help                       help for info
+      --kubeconfig string          path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string           namespace where your tracebloc client is installed (default: the context's namespace, or 'default')
+      --token-expiry-seconds int   requested SA token expiration in seconds (default 600 = 10 min; ignored for static-secret fallback) (default 600)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc data --help ────────────────────────────────────────
+Commands for ingesting and managing the datasets your secure environment holds —
+the data models train on. It stays on your infrastructure.
+
+`data ingest` ingests a local dataset into your secure environment's storage,
+submits the ingestion run, and watches it to completion (streaming
+logs + the final summary). `data validate` checks an ingest.yaml
+locally first.
+
+What a dataset looks like depends on the task:
+  tabular / time-series — a .csv file, or a folder with one .csv
+  image                  — a folder with labels.csv + images/
+  text                   — a folder with labels.csv + texts/
+
+`tracebloc cluster info` is the pre-flight you'd typically run
+before the first ingest.
+
+Usage:
+  tracebloc data [flags]
+  tracebloc data [command]
+
+Aliases:
+  data, dataset
+
+Available Commands:
+  delete      Delete an ingested dataset's in-cluster artifacts (table + PVC files)
+  ingest      Ingest a local dataset into your secure environment
+  list        List datasets ingested in the cluster, with size / records / format
+  validate    Validate an ingest.yaml against the embedded v1 schema, locally
+
+Flags:
+  -h, --help   help for data
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+Use "tracebloc data [command] --help" for more information about a command.
+
+┌─ tracebloc data delete --help ────────────────────────────────────────
+Removes the in-cluster artifacts a previous `data ingest` created
+for a table: the MySQL table in training_test_datasets and the dataset's
+directories on the shared PVC. Destructive and not undoable.
+
+The dataset's catalog metadata on the tracebloc backend is never removed — it
+is kept as a record on tracebloc, marked unavailable, so a collaborator's run
+that referenced it still has its history.
+
+Exit codes:
+  0  artifacts removed (or --dry-run, or the user declined)
+  2  invalid table name
+  3  kubeconfig error, or refused (no confirmation off a terminal)
+  4  cluster reachable but no tracebloc client / shared storage missing,
+     or the client's dataset list couldn't be read (can't confirm the target)
+  5  no dataset by that name on this client (nothing to delete)
+  7  teardown failed mid-flight (table drop or PVC rm errored)
+
+With --output-json, stdout carries exactly one JSON result object per run
+(human output goes to stderr) and the exit codes above are unchanged; see
+docs/json-output.md for the shape and the stability promise.
+
+Usage:
+  tracebloc data delete <table> [flags]
+
+Aliases:
+  delete, rm
+
+Flags:
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+      --dry-run             show what would be deleted without deleting anything
+  -h, --help                help for delete
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace where your tracebloc client is installed
+      --output-json         emit the delete result as JSON on stdout (human output → stderr; never prompts — pass --yes to delete, or --dry-run)
+  -y, --yes                 skip the confirmation prompt (required when not on a terminal)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc data ingest --help ────────────────────────────────────────
+Ingests a local dataset into your secure environment's storage,
+submits the ingestion run, and follows it to completion (streaming
+progress + the final summary). Your data never leaves your own
+infrastructure. Supports 16 tasks across the image, text, and
+tabular / time-series families; pick one with --task.
+
+<dataset> is the data itself. What it looks like depends on the task:
+
+  tabular / time-series — the dataset is a single CSV. Pass the .csv
+  file directly, or a folder holding exactly one .csv:
+
+      churn.csv                (the .csv file itself)
+    or
+      churn/
+        data.csv               (the one .csv in the folder)
+
+  image (classification, object/keypoint detection) — a folder with
+  labels.csv + an images/ subfolder:
+
+      cats_dogs/
+        labels.csv             (required)
+        images/                (required)
+          001.jpg
+          ...
+
+  text (classification, masked language modeling) — a folder with
+  labels.csv + a texts/ subfolder (masked language modeling uses sequences/):
+
+      reviews/
+        labels.csv             (required)
+        texts/                 (required — sequences/ for masked language modeling)
+          001.txt
+          ...
+
+A bare .csv file is accepted only for the tabular / time-series family;
+image and text datasets must be a folder.
+
+Accepted image extensions: .jpg, .jpeg, or .png (case-insensitive).
+All images in one dataset must share a single type — the cluster
+validates the type it was told to expect.
+
+v0.1 caps the dataset at 1 GiB total + 500 MiB per file. Larger
+datasets need the v0.2 cloud-source story (S3/GCS/HTTPS sources) —
+see tracebloc/client#147 non-goals.
+
+Exit codes:
+  0   files staged + ingested successfully (or --detach: just staged + submitted)
+  2   schema validation failed (synthesized spec rejected) or
+      v0.1-unsupported task passed
+  3   local-layout or kubeconfig error
+  4   cluster reachable but no tracebloc client / shared storage missing
+  5   ingestor SA token couldn't be obtained, or jobs-manager
+      rejected the token (401/403)
+  6   destination table already exists (re-run with --overwrite to
+      replace it, or pick a different --name)
+  7   pre-flight succeeded but staging the files failed
+      (Pod creation, image pull, exec stream, or remote tar error) —
+      or, with --overwrite, removing the old table failed
+  8   jobs-manager rejected the submit (4xx/5xx other than auth)
+  9   ingestion Job exited non-zero, or completed with row-level
+      failures the summary panel reports
+
+Usage:
+  tracebloc data ingest <dataset> [flags]
+
+Aliases:
+  ingest, push
+
+Flags:
+      --context string                              name of the kubeconfig context to use (default: kubeconfig's current-context)
+      --detach kubectl logs -f -n <ns> job/<name>   exit immediately after jobs-manager accepts the run (no log streaming, no summary panel). Use for CI scenarios; reconnect later with kubectl logs -f -n <ns> job/<name>.
+      --dry-run                                     validate + discover + walk, but don't create any cluster resources
+  -h, --help                                        help for ingest
+      --idempotency-key string                      reuse this idempotency key across retry attempts (default: fresh per invocation). jobs-manager treats a duplicate key as a replay and attaches to the existing Job rather than spawning a new one — useful for at-most-once-across-attempts semantics.
+      --image-digest images.ingestor.digest         pin the ingestor container image to a specific digest (default: jobs-manager picks the cluster-configured images.ingestor.digest). Format: sha256:<hex>.
+      --intent string                               is this training or test data? train|test (default train)
+      --kubeconfig string                           path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+      --label-column string                         name of the label/target column (in labels.csv for image tasks, in the data CSV for tabular)
+      --label-policy string                         regression-class only (tabular_regression, time_series_forecasting, time_to_event_prediction): passthrough|bucket (default bucket — bins the target so the raw value never leaves the cluster)
+      --min-size string                             image tasks only: reject images smaller than WxH before the ingest (e.g. 64x64). Set it to the smallest size your model can train on — raise or lower it freely. Default: unset (no local size check).
+      --name string                                 a name for this dataset — start with a letter or underscore, then letters/digits/underscores — you'll reference it by this name when you start a training run
+  -n, --namespace string                            namespace where your tracebloc client is installed
+      --no-input                                    disable interactive prompts; fail on missing required values (for CI/scripts)
+      --number-of-keypoints int                     keypoint_detection only: number of keypoints per sample (required; e.g. 17 for COCO pose)
+      --output-json                                 emit a machine-readable JSON result on stdout (human output → stderr; implies --no-input)
+      --overwrite tracebloc data delete             replace the destination table if it already exists: its current table + files are removed first (same as tracebloc data delete), then the new data is ingested. Not combinable with --idempotency-key
+      --schema string                               tabular/time-series only: column types as col:TYPE,col:TYPE (e.g. age:INT,price:FLOAT). Default: inferred from the CSV (INT/BIGINT/FLOAT/BOOLEAN/DATE/DATETIME/VARCHAR(n)).
+      --stage-pod-image string                      override the ephemeral stage Pod's image (default: digest-pinned alpine 3.20 baked into the CLI). Pin by digest in your override too — tag-only refs drift silently.
+      --target-size string                          image tasks only: the resolution your images already are, as WxH (e.g. 512x512). tracebloc never resizes — it checks every image is exactly this size and rejects any that differ. Default: read from your first image.
+      --task string                                 the task this data is for, one of: image_classification, object_detection, keypoint_detection, text_classification, masked_language_modeling, tabular_classification, tabular_regression, time_series_forecasting, time_series_classification, time_to_event_prediction, causal_language_modeling, seq2seq, token_classification, sentence_pair_classification, embeddings, semantic_segmentation. Omit it on a terminal to pick interactively.
+      --time-column string                          time_to_event_prediction only: name of the time/duration column (default: a column named "time")
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc data list --help ────────────────────────────────────────
+Lists the datasets ingested into your client — the tables in training_test_datasets
+on the cluster — grouped by modality, with each dataset's split (train/test),
+record count, size, format, and when it was ingested.
+
+With no flags it uses your current kubeconfig context and its namespace;
+the flags below override that, same as `cluster info` and `data ingest`.
+Framework tables (the ingest-run journal) are hidden unless you pass --all.
+For the full catalog, see the dashboard at https://ai.tracebloc.io/metadata.
+
+Exit codes:
+  0  listed successfully (including an empty list)
+  3  kubeconfig error
+  4  cluster reachable but no tracebloc client in the namespace
+  7  couldn't query the cluster for datasets
+
+Usage:
+  tracebloc data list [flags]
+
+Flags:
+      --all                 include framework/system tables (e.g. the ingest-run journal), normally hidden
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+  -h, --help                help for list
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace where your tracebloc client is installed
+      --output-json         emit the dataset list as JSON on stdout (human output → stderr)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc data validate --help ────────────────────────────────────────
+Reads <path>, parses it as YAML, and validates it against the bundled
+ingest.v1.json schema (synced from tracebloc/data-ingestors). Prints
+violations in the same JSON-pointer-prefixed format the cluster's
+jobs-manager uses, and exits non-zero if any are found.
+
+Useful as a pre-flight before running `tracebloc data ingest` —
+millisecond local feedback instead of a multi-second cluster round
+trip.
+
+Exit codes:
+  0   YAML parses and validates cleanly
+  2   YAML parses but has schema violations (printed to stderr)
+  3   YAML doesn't parse or file isn't readable
+
+Usage:
+  tracebloc data validate <path> [flags]
+
+Flags:
+  -h, --help   help for validate
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc delete --help ────────────────────────────────────────
+Removes tracebloc from this machine: revokes the machine credential,
+uninstalls the Helm release, deletes the local cluster, reclaims the tracebloc
+container images, and clears local state — then removes the CLI itself.
+
+Your use cases, datasets' catalog entries, and the models trained here are KEPT
+on tracebloc as a record (a colleague's model must not vanish because you
+reclaimed this box). System software the installer laid down — Docker, kubectl,
+k3d, helm, NVIDIA drivers — is left in place; remove it yourself if unused.
+
+Destructive: on a single-host install the on-prem datasets live on this machine
+and are erased. Not undoable.
+
+Usage:
+  tracebloc delete [flags]
+
+Flags:
+      --context string      kubeconfig context for the target cluster (default: current-context)
+      --force               offboard even if tracebloc still reports this client online
+  -h, --help                help for delete
+      --keep-data           uninstall the software but keep ~/.tracebloc (local config + on-host datasets)
+      --kubeconfig string   path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace of this machine's tracebloc release (default: the active client's namespace)
+      --yes                 skip the typed-name confirmation (for automation)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc doctor --help ────────────────────────────────────────
+Checks, in plain terms, whether your secure environment is connected to
+tracebloc and ready to run training — and if something's wrong, exactly what to
+do about it.
+
+  --verbose    the full technical breakdown (for support)
+  --diagnose   write a redacted support bundle to email to tracebloc
+
+Exit codes:
+  0   healthy
+  2   a problem was found
+  3   couldn't read your local config
+
+Usage:
+  tracebloc doctor [flags]
+
+Flags:
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+      --diagnose            write a redacted support bundle for tracebloc support and exit
+  -h, --help                help for doctor
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace where your secure environment is installed (default: your active client's)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc ingest --help ────────────────────────────────────────
+Deprecated alias for `tracebloc data validate`
+
+Usage:
+  tracebloc ingest [flags]
+  tracebloc ingest [command]
+
+Available Commands:
+  validate    Validate an ingest.yaml against the embedded v1 schema, locally
+
+Flags:
+  -h, --help   help for ingest
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+Use "tracebloc ingest [command] --help" for more information about a command.
+
+┌─ tracebloc ingest validate --help ────────────────────────────────────────
+Reads <path>, parses it as YAML, and validates it against the bundled
+ingest.v1.json schema (synced from tracebloc/data-ingestors). Prints
+violations in the same JSON-pointer-prefixed format the cluster's
+jobs-manager uses, and exits non-zero if any are found.
+
+Useful as a pre-flight before running `tracebloc data ingest` —
+millisecond local feedback instead of a multi-second cluster round
+trip.
+
+Exit codes:
+  0   YAML parses and validates cleanly
+  2   YAML parses but has schema violations (printed to stderr)
+  3   YAML doesn't parse or file isn't readable
+
+Usage:
+  tracebloc ingest validate <path> [flags]
+
+Flags:
+  -h, --help   help for validate
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc login --help ────────────────────────────────────────
+Sign in to tracebloc. The CLI prints a URL + short code; open the URL
+on any device (your laptop or phone), sign in the way you already do
+(password, Google, or GitHub), and approve the code. The CLI stores a
+user token in ~/.tracebloc (mode 0600).
+
+Works on a headless / SSH box — the browser and the CLI need not share a
+machine. Honors HTTP(S)_PROXY / NO_PROXY for corporate-proxy networks.
+
+Usage:
+  tracebloc login [flags]
+
+Flags:
+      --env string   backend environment: dev|stg|prod (default: $CLIENT_ENV, then prod)
+  -h, --help         help for login
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc logout --help ────────────────────────────────────────
+Sign out (revoke the token server-side and clear it locally)
+
+Usage:
+  tracebloc logout [flags]
+
+Flags:
+  -h, --help   help for logout
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc resources --help ────────────────────────────────────────
+Shows, in plain terms, how much of this machine tracebloc may use:
+
+  • Your secure environment — the CPU and memory it can schedule
+  • Each training run — the per-run ceiling every run may use (cluster-wide)
+
+No Kubernetes concepts, no YAML — one number for your environment and one for
+each training run's share of it.
+
+Raise the share with `tracebloc resources set`. Run with --verbose for the
+per-node breakdown and the raw values.
+
+Exit codes:
+  0   shown
+  3   kubeconfig could not be loaded / cluster unreachable
+  4   cluster reachable but no tracebloc client found here
+
+Usage:
+  tracebloc resources [flags]
+  tracebloc resources [command]
+
+Available Commands:
+  set         Raise how much of this machine tracebloc may use
+
+Flags:
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+  -h, --help                help for resources
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace where your tracebloc client is installed (default: the context's namespace, or 'default')
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+Use "tracebloc resources [command] --help" for more information about a command.
+
+┌─ tracebloc resources set --help ────────────────────────────────────────
+Raise the per-training-run ceiling — how much of this machine a single
+training run may use.
+
+Run it on a terminal with no flags for a guided walkthrough:
+
+  tracebloc resources set
+
+Or set it directly (for scripts / non-interactive shells):
+
+  tracebloc resources set --cores 4 --memory 16Gi   an explicit per-run ceiling
+  tracebloc resources set --cores 4                 change CPU only, keep the rest
+  tracebloc resources set max                       let a run use the whole machine
+
+The number you set is what ONE training run may use. tracebloc keeps a small fixed
+amount (about 1 core and 3 GiB) for itself on top — you never have to subtract it.
+The new ceiling applies to your NEXT training run; a run already going keeps its
+size.
+
+Exit codes:
+  0   applied (or nothing to change)
+  2   the requested size doesn't fit this machine / bad input
+  3   kubeconfig could not be loaded / cluster unreachable
+  4   cluster reachable but no tracebloc client found here
+
+Usage:
+  tracebloc resources set [max] [flags]
+
+Flags:
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+      --cores string        CPU cores one training run may use (e.g. 4)
+      --dry-run             show exactly what would change and apply nothing
+      --gpus int            whole GPUs one training run may use (only on a GPU machine)
+  -h, --help                help for set
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+      --memory string       memory one training run may use (e.g. 16 or 16Gi — the number is GiB)
+  -n, --namespace string    namespace where your tracebloc client is installed (default: the context's namespace, or 'default')
+      --yes                 skip the confirmation prompt (for automation)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+┌─ tracebloc version --help ────────────────────────────────────────
+Print the tracebloc CLI version, git SHA, and build date
+
+Usage:
+  tracebloc version [flags]
+
+Flags:
+  -h, --help          help for version
+      --output-json   emit the version payload as indented JSON instead of a single human-readable line
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+
+███ B. SCREENS — rendered plain ███████████████████████████████
+
+┌─ tb — home · Online ──────────────────────────────────
 
 
   Welcome to your secure environment for AI, Lukas 👋
@@ -36,10 +740,9 @@ Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
 
   love from tracebloc 💚
 
-└──────────────────────────────────────────────────────────────
+└────────────────────────────────────────────────────────────
 
-
-┌─ tb — home · running (couldn't confirm connection) ────────
+┌─ tb — home · running (couldn't confirm) ──────────────
 
 
   Welcome to your secure environment for AI, Lukas 👋
@@ -70,10 +773,9 @@ Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
 
   love from tracebloc 💚
 
-└──────────────────────────────────────────────────────────────
+└────────────────────────────────────────────────────────────
 
-
-┌─ tb — home · running (backend reports not online) ─────────
+┌─ tb — home · running (backend not online) ────────────
 
 
   Welcome to your secure environment for AI, Lukas 👋
@@ -104,10 +806,9 @@ Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
 
   love from tracebloc 💚
 
-└──────────────────────────────────────────────────────────────
+└────────────────────────────────────────────────────────────
 
-
-┌─ tb — home · starting up ──────────────────────────────────
+┌─ tb — home · starting up ─────────────────────────────
 
 
   Welcome to your secure environment for AI, Lukas 👋
@@ -138,10 +839,9 @@ Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
 
   love from tracebloc 💚
 
-└──────────────────────────────────────────────────────────────
+└────────────────────────────────────────────────────────────
 
-
-┌─ tb — home · offline (can't reach it) ─────────────────────
+┌─ tb — home · offline ─────────────────────────────────
 
 
   Welcome to your secure environment for AI, Lukas 👋
@@ -172,10 +872,9 @@ Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
 
   love from tracebloc 💚
 
-└──────────────────────────────────────────────────────────────
+└────────────────────────────────────────────────────────────
 
-
-┌─ tb — home · no secure environment yet ────────────────────
+┌─ tb — home · no secure environment ───────────────────
 
 
   Welcome to tracebloc — your secure environment for AI 👋
@@ -196,10 +895,9 @@ Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
 
   love from tracebloc 💚
 
-└──────────────────────────────────────────────────────────────
+└────────────────────────────────────────────────────────────
 
-
-┌─ tb — home · not signed in ────────────────────────────────
+┌─ tb — home · not signed in ───────────────────────────
 
 
   Welcome to tracebloc — your secure environment for AI 👋
@@ -219,12 +917,581 @@ Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
 
   love from tracebloc 💚
 
-└──────────────────────────────────────────────────────────────
+└────────────────────────────────────────────────────────────
 
-
-┌─ tb data list — empty ──────────────────────────────────────
+┌─ tb data list — empty ─────────────────────────────────
 
   Datasets in hello-world (0)
 
   No datasets yet — ingest one with `tracebloc data ingest`.
-└──────────────────────────────────────────────────────────────
+└────────────────────────────────────────────────────────────
+
+┌─ tb data list — populated ─────────────────────────────
+
+  Datasets in hello-world — 2 · 1.25 GiB
+  1 system table(s) hidden — show with --all.
+
+  Image classification · 2
+  ✔ xray_test   test   3000 images   256.00 MiB  jpg · 2 classes  —
+  ✔ xray_train  train  12000 images    1.00 GiB  jpg · 2 classes  —
+└────────────────────────────────────────────────────────────
+
+┌─ tb data list --all — with system tables ──────────────
+
+  Datasets in hello-world — 2 · 1.25 GiB
+
+  Image classification · 2
+  ✔ xray_test   test   3000 images   256.00 MiB  jpg · 2 classes  —
+  ✔ xray_train  train  12000 images    1.00 GiB  jpg · 2 classes  —
+
+  System · 1
+  · ingest_run_journal     —
+└────────────────────────────────────────────────────────────
+
+┌─ tb client create — review ────────────────────────────
+
+  Review
+    name:          lukas-macbook
+    namespace:     lukas-macbook
+    location:      DE
+    cluster:       a1b2c3d4  (anchors this client — re-runs adopt it)
+└────────────────────────────────────────────────────────────
+
+┌─ tb delete — offboard summary (keep data) ─────────────
+
+  This will remove
+  · This machine's credential — so tracebloc can no longer reach it
+  · Your secure environment "lukas-macbook" and everything it runs on this machine
+  · tracebloc's downloaded images
+  · The tracebloc CLI (your local data & config are kept — --keep-data)
+
+  Kept on tracebloc
+  · Your use cases and the models trained here
+  · Your dataset records (marked unavailable, not deleted)
+
+  Left alone
+  · Docker and related tools — remove them yourself if you no longer need them
+└────────────────────────────────────────────────────────────
+
+┌─ tb delete — offboard summary (remove data) ───────────
+
+  This will remove
+  · This machine's credential — so tracebloc can no longer reach it
+  · Your secure environment "lukas-macbook" and everything it runs on this machine
+  · tracebloc's downloaded images
+  · Your local data & config (~/.tracebloc) and the tracebloc CLI — can't be undone
+
+  Kept on tracebloc
+  · Your use cases and the models trained here
+  · Your dataset records (marked unavailable, not deleted)
+
+  Left alone
+  · Docker and related tools — remove them yourself if you no longer need them
+└────────────────────────────────────────────────────────────
+
+
+███ C. MESSAGES — every user-facing string in the source █████
+(Deduped, sorted. Catches errors, hints, warnings, and flow copy — ingest,
+login, resources — that isn't a rendered screen above. `%…` are placeholders.)
+
+  %d image(s) are smaller than the %dx%d minimum you set with --min-size: %s.
+  %d image(s) can't be ingested: %s. The cluster rejects these after the upload —
+  %d image(s) don't match the %dx%d resolution: %s. The cluster validates the size,
+  %d labels.csv row(s) reference images that aren't in images/: %s. Those records
+  %d mask(s) are smaller than the %dx%d minimum you set with --min-size: %s.
+  %d mask(s) don't match the %dx%d resolution the images use: %s. Semantic-segmentation
+  %d mask(s) in masks/ can't be ingested: %s. The cluster reads every mask as a PNG
+  %d row(s) in %s have an empty %q (e.g. %s). Every row must name its mask file — an
+  %d sequence(s) grouped by %q change their %q value mid-sequence (first offending
+  %d sequence(s) grouped by %q have out-of-order %q values (first offending data row(s)
+  %d system table(s) hidden — show with --all.
+  %q exists but is not a directory
+  %q is a directory, not a file
+  %q is a directory, not a file. labels.csv must be the
+  %q is a symbolic link, which v0.1 does not allow in the dataset
+  %q is not a .csv file. Tabular / time-series data is a single CSV —
+  %q is not a directory; pass the directory containing labels.csv + images/
+  %q is not a directory; pass the directory containing labels.csv + the text files
+  %s %q must be WxH (e.g. 512x512)
+  %s %q: height is not an integer: %w
+  %s %q: width and height must both be positive
+  %s %q: width is not an integer: %w
+  %s %s — %s
+  %s contains a NUL byte — the file is corrupt or not really a CSV. The cluster
+  %s has a header but no data rows (0 ingestable records). Add at least one data row and re-run.
+  %s has duplicate column name(s): %s. Each column must be unique — the cluster
+  %s is empty — add a header and at least one data row, then re-run
+  %s is empty — no header row
+  %s is image tasks only; it doesn't apply to task %q
+  %s isn't valid UTF-8 (likely a Latin-1/Windows-1252 export). The cluster rejects
+  %s requires CLIENT_WRITE permission
+  %s starts with a UTF-8 byte-order mark (Excel's \"CSV UTF-8\" export adds it),
+  %s · Online%s
+  %s · can't reach it from here — run %s
+  %s · running — couldn't confirm it's connected to tracebloc — run %s
+  %s · running, but tracebloc hasn't heard from it — run %s
+  %s · starting up, not ready yet — run %s
+  %s — %s · %s
+  %s — %s · %s  (%s)
+  %s: %w
+  %w in namespace %q, but tracebloc clients are running in: %s.
+  %w in namespace %q.
+  %w on the cluster your kubeconfig points at — if this machine should
+  --label-column doesn't apply to task %q — it trains on the text itself, with no label column
+  --label-policy is regression-class tasks only (tabular_regression,
+  --number-of-keypoints is keypoint_detection only; it doesn't apply to task %q
+  --number-of-keypoints must be a positive integer (got %d);
+  --overwrite can't be combined with --idempotency-key: a reused key makes the cluster replay the previous run instead of ingesting the new data — after --overwrite's removal that would report success while loading nothing. Drop one of the two (a fresh per-run key is the default).
+  --schema is empty; expected col:TYPE,col:TYPE,...
+  --schema is tabular/time-series tasks only; it doesn't apply to task %q
+  --schema names column(s) that aren't in %s: %s. The cluster rejects this after the
+  --time-column is time_to_event_prediction only; it doesn't apply to task %q
+  --timeout has no effect without --wait
+  A name for this dataset — you'll reference it by this name when you start a training run. Start with a letter or underscore, then letters, digits, underscores.  e.g. churn_train
+  A real run continues with step 2 (copy into your secure environment) and step 3 (validate and load).
+  A tracebloc client is already running on this cluster — adopting it. Couldn't read the cluster identity, so its idempotency anchor was left unchanged; point --kubeconfig/--context at a cluster where kube-system is readable to stamp it.
+  A training run is allocated up to:
+  Add --help to any command for the flags.
+  Already signed out.
+  Applies to your next training run; a run already going keeps its size.
+  Ask one of these admins (or ask them to grant you access)
+  Available now:
+  CSV %s has no columns
+  Can't reach tracebloc from here.
+  Cancelled — %q was left as-is; nothing was ingested.
+  Cancelled — nothing was changed.
+  Cancelled — nothing was deleted.
+  Cancelled — nothing was ingested.
+  Cancelled — the name didn't match. Nothing was removed.
+  Cancelled.
+  Chart uninstall reported: %v
+  Check on it later with:  kubectl logs -f -n %s job/%s
+  Check your network / HTTP(S)_PROXY, then run `%s doctor` again.
+  Client install
+  Client status
+  Clients in your account
+  Cluster teardown reported: %v
+  Connecting to your secure environment…
+  Correlation id: %s
+  Couldn't check for active training runs (%v) — continuing; the confirmation below still guards you.
+  Couldn't clear the stored active-client pointer (%v) — the on-disk config
+  Couldn't connect to your secure environment — check your kubeconfig/context.
+  Couldn't determine this client's namespace — skipped the Helm uninstall.
+  Couldn't locate the CLI binary to remove it (%v) — delete it by hand.
+  Couldn't read the target cluster's identity — provisioning without a cluster anchor, so re-running won't be idempotent. Point --kubeconfig/--context at the reachable cluster to enable that.
+  Couldn't read your tracebloc config — run `%s login` to recreate it.
+  Couldn't reclaim the temporary copy (%v). It's harmless — the next re-ingest of %q or a `tracebloc data delete %s` will clear it.
+  Couldn't remove local data (%v) — cleared the active-client pointer;
+  Couldn't remove the CLI (%v) — remove it by hand: rm -f %s
+  Couldn't remove the CLI (%v). It looks Homebrew-managed — finish with: brew uninstall tracebloc
+  Couldn't remove the `tb` alias (%v) — remove it by hand: rm -f %s
+  Couldn't revoke the credential server-side (%v) — continuing with local teardown.
+  Couldn't save the active-client pointer (%v) — re-run `tracebloc client create` (it adopts this cluster's client) to set it.
+  Couldn't save the active-client pointer (%v) — re-run `tracebloc client create` (it adopts this cluster's client).
+  Couldn't verify your session with the backend (%v).
+  Couldn't write the support bundle: %v
+  Credential written to %s (mode 0600, not shown). This machine is set to enroll as client %d.
+  DB failures
+  Deleted %s.%s and %d PVC path(s).
+  Destructive and cannot be undone.
+  Detached — the ingestion runs in the background on your secure environment.
+  Details
+  Details (for support)
+  Diagnose auth / cluster problems with: tracebloc doctor
+  Do you want to change the allocation? Run `%s resources set` (guided walkthrough on a terminal).
+  Docker and related tools — remove them yourself if you no longer need them
+  Dry run — nothing was changed
+  Dry-run complete — your data and secure environment check out; nothing was created.
+  Dry-run — nothing was deleted.
+  Each training run already uses up to %s — nothing to change.
+  Each training run may now use up to %s.
+  Email it to support@tracebloc.io.
+  Enter
+  Everything looks good — you're ready to run training.
+  Follow it later with:  kubectl logs -f -n %s job/%s
+  Full log: %s
+  GPU access removed — training runs will use CPU only.
+  How many keypoints each sample is annotated with — dataset-specific, no default.  e.g. 17 for COCO human pose
+  How much of this machine a training run may use
+  Ingest settings
+  Ingestion complete — %s
+  Ingestion complete — showing its logs:
+  Ingestion completed partially — %s
+  Ingestion completed with failures — %s
+  Ingestion completed with skips — %s
+  Ingestion started — live progress:
+  Ingestion started — streaming logs:
+  Ingestion summary
+  Ingestor SA token
+  Kept local data and config (~/.tracebloc); cleared the active-client pointer — --keep-data.
+  Kept on tracebloc
+  Kubeconfig
+  Learn more: https://docs.tracebloc.io
+  Left %s in place — it isn't tracebloc's `tb` alias.
+  Left alone
+  Let's set up your data ingest
+  Local dataset
+  Machine credential — needed by the installer to connect this client
+  Memory
+  No client in namespace %q — using the one in %q (override with --namespace).
+  No clients yet. Run `tracebloc client create`.
+  No new credential issued; the existing one stands. This machine is set to enroll as client %d.
+  No problems found, but some checks couldn't finish — re-run with --verbose for detail.
+  No secure environment on this machine yet — run the installer to set one up.
+  No secure environment on this machine yet.
+  Not signed in yet.
+  Not signed in — run `%s login`.
+  Not signed in. Run `tracebloc login`.
+  Not yet in the CLI:
+  Offboarded %q. This machine is no longer connected to tracebloc.
+  Offboarded %q: the machine credential is revoked, so it can no longer connect to tracebloc —
+  Only tracebloc's small jobs-manager restarts — running training isn't interrupted.
+  Open
+  Override the column types the CLI would infer. Blank = infer from the CSV.  e.g. age:INT,price:FLOAT,city:VARCHAR
+  POST %s%s: %w
+  PVC %s/%s is in phase %q, not Bound.
+  PVC is %v, not ReadWriteMany — the stage Pod will co-locate with the existing mounter
+  Pick this dataset when you set it up.
+  Press Enter to accept a default; Ctrl-C to cancel.
+  Provisioned client %q (namespace %s).
+  Provisioning didn't complete. Re-running is safe — on the same cluster it adopts the existing client instead of minting a duplicate (idempotent):
+  Reading your files locally first — nothing has touched your secure environment yet — so a layout or settings problem shows up right away.
+  Ready for `tracebloc data ingest`.
+  Reclaimed tracebloc's downloaded images.
+  Regression targets are continuous. 'bucket' groups them into ranges before they leave the cluster; 'passthrough' keeps raw values.
+  Removed local tracebloc data and config.
+  Removed stray control characters from the name.
+  Removed the local environment.
+  Removed the old %q — ingesting the new data.
+  Removed the tracebloc CLI from this machine.
+  Removing in-cluster artifacts…
+  Review
+  Revoked this machine's credential — your secure environment %q stays on tracebloc as a record.
+  Set one up: %s
+  Sign in to tracebloc
+  Signed in
+  Signed in as
+  Signed in as %s
+  Signed in as %s.
+  Signed in to %q, but this run targets %q — run `tracebloc login`.
+  Signed in.
+  Signed out locally, but couldn't revoke the token server-side (%v). Revoke from the dashboard if this was a shared machine.
+  Signed out.
+  Signed-in token was rejected by the backend — run `tracebloc login`.
+  Some tracebloc images couldn't be reclaimed (harmless) — remove them later with `docker rmi $(docker images --filter=reference='ghcr.io/tracebloc/*' --format '{{.Repository}}:{{.Tag}}')`.
+  Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.
+  Stopped following after 1 hour — the ingestion is still running and will finish on its own.
+  Stopped watching — the ingestion keeps running on your secure environment.
+  Submitted — tracebloc is validating your data and loading it into the table.
+  Submitting the run — with --detach it keeps running on your secure environment after this command returns; the reconnect command is shown below.
+  Submitting the run, then following along as tracebloc validates your data and loads it into the table — progress streams below.
+  Table %q already exists — replacing it (table + files).
+  Target
+  Target cluster
+  The column holding the duration / time-to-event.  e.g. time, tenure_days
+  The column in your CSV with the answer the model learns to produce.
+  The dataset's catalog metadata is kept as a record on tracebloc, marked unavailable — never removed.
+  The file or folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn
+  The ingestion hasn't started yet (usually a slow image pull or a busy cluster).
+  The name you provided was only control characters — auto-naming this client instead.
+  The resolution your images already are. tracebloc never resizes — it checks every image is exactly this size and rejects any that differ. Blank = read it from your first image.  e.g. 224x224
+  The tracebloc CLI (your local data & config are kept — --keep-data)
+  This CLI is out of date — update it: %s
+  This cluster is already registered as client %q (namespace %s) — adopted it.
+  This drops the table and removes the files listed above — there's no undo. Pass --yes next time to skip this prompt.
+  This follows the run for up to an hour; a longer run keeps going on its own (or start it with --detach and check back later).
+  This is irreversible. Type the client name to confirm, or leave blank to cancel.
+  This machine's credential — so tracebloc can no longer reach it
+  This matches a previous run (same idempotency key) — attaching to the run already in progress.
+  This secure environment isn't in the signed-in account — continuing; if that's unexpected, check you're logged into the right account.
+  This will remove
+  To train or benchmark models on it, create a use case at https://ai.tracebloc.io/my-use-cases
+  Tore down %q on this machine, but some cleanup above didn't complete and the server-side revoke
+  Tore down %q on this machine. The server-side revoke didn't complete, so the credential may
+  Try again shortly; if it persists, email support@tracebloc.io with `%s doctor --diagnose`.
+  Uninstalled tracebloc.
+  We couldn't tell the data type from what's there — which is it?
+  What's next
+  Whether this split trains the model or evaluates it.
+  Will delete
+  Wrote a support bundle to ./%s
+  Wrote client id + namespace to %s (no new credential — the existing one stands).
+  You don't have permission to %s in this account.
+  Your CPU and memory budget is unchanged — but this machine has no GPU while the cluster still requests one, so I'll clear that stale GPU setting so runs can schedule.
+  Your data is registered as a dataset. View it at https://ai.tracebloc.io/metadata
+  Your dataset records (marked unavailable, not deleted)
+  Your files are copied securely into your secure environment's storage — set up and cleaned up for you.
+  Your local data & config (~/.tracebloc) and the tracebloc CLI — can't be undone
+  Your secure environment %q and everything it runs on this machine
+  Your secure environment is equipped with:
+  Your session expired — run `%s login`.
+  Your use cases and the models trained here
+  \"active\" is this machine's selected client; state is its last reported status to tracebloc.
+  `tracebloc ingest` doesn't stage datasets — did you mean:\n
+  a dataset path is required
+  a tracebloc client is already running on this cluster, but listing your account to verify ownership failed (%w) — re-run once tracebloc is reachable, or resolve manually
+  a tracebloc client is installed in namespace %q but its CLIENT_ID could not be read
+  account
+  active client
+  active client %q runs on another machine — namespace %q isn't on the cluster your kubeconfig points at;
+  active client %s isn't in your account — run `tracebloc client create`
+  annotations
+  app version
+  authorized — confirming the token with the backend …
+  backend
+  backend %s — requesting a device code …
+  backfilling the cluster anchor onto the existing client: %w
+  building SPDY transport: %w
+  building rest config from kubeconfig: %w
+  building submit request: %w
+  building tar archive: %w
+  can't confirm %q exists on this client — refusing to delete without
+  can't read %q: %w
+  cancelled by user
+  chart version
+  checking %s for a byte-order mark: %w
+  client
+  client id
+  closing tar writer: %w
+  cluster
+  column %q isn't all %s: %d value(s) don't match its declared type (e.g. %s).
+  columns
+  command
+  connected: %s — %s
+  constructing kubernetes clientset: %w
+  context
+  couldn't check whether a tracebloc client is already running on this cluster (%w) —
+  couldn't determine the installed client chart version (the release is missing
+  couldn't reach the backend to choose a unique client name (%v) — retry,
+  couldn't read capacity: %v
+  couldn't read the account's client list to tell whether this cluster is new
+  couldn't read this machine's capacity: %w
+  creating SPDY executor for %s/%s: %w
+  creating credential-file directory: %w
+  creating port-forwarder: %w
+  creating stage Pod in namespace %q: %w
+  creating staging-cleanup pod: %w
+  creating teardown pod: %w
+  dashboard id
+  data CSV
+  dataset exceeded v0.1 total cap of %s after streaming %s
+  dataset exceeded v0.1 total cap of %s after streaming %s (reached %s)
+  dataset exceeded v0.1 total cap of %s during stream
+  dataset is %s, exceeds v0.1 cap of %s.
+  dataset is %s, exceeds v0.1 cap of %s. For larger datasets, the
+  dataset name is required (set --name)
+  dataset name is required — pass it as an argument: tracebloc data delete <dataset>
+  decoding image header %q: %w
+  decoding submit response (got body %q): %w
+  deleting stage Pod %s/%s: %w
+  destination
+  dropping %s.%s: %w%s
+  enter a whole number between %d and %d
+  exec stream against %s/%s: %w
+  expected %s %s-separated fields (%s), found %d.
+  expected a single %s record but the file spans multiple lines.
+  expires
+  expires in
+  field %d is empty — every field (%s) must be non-empty
+  file %q is %s, exceeds v0.1 single-file cap of %s.
+  file failures
+  found %d .csv files in %q (%s); the tabular layout expects exactly one.
+  found %d tracebloc clients in namespace %q (%s);
+  full log: %s
+  generating Pod-name random suffix: %w
+  generating idempotency key: %w
+  generating staging-dir suffix: %w
+  images
+  images/ and annotations/ don't pair up: %s. Every image needs a same-named .xml
+  images/ and masks/ don't pair up: %s. Every image needs a same-named
+  inferring schema from CSV: %w
+  ingestion Job completed but the summary reports failures — see panel above
+  ingestion Job exited non-zero — see logs above
+  ingestion Job's final status couldn't be determined within the watch window —
+  ingestor ID
+  ingestor SA
+  ingestor img
+  inserted
+  intent
+  interactive setup: %w
+  internal: re-parsing synthesized spec: %w\n%s
+  invalid table name %q: %w
+  jobs-manager
+  jobs-manager: %s
+  keypoint_detection requires --number-of-keypoints (e.g.
+  keypoints
+  kube-system namespace has no UID
+  label column
+  label column %q isn't in %s's header (columns: %s). Pass --label-column with one of
+  label policy
+  labels.csv
+  labels.csv column %q must be lowercase \"filename\": the cluster reads
+  labels.csv has no \"filename\" column (columns: %s) — image tasks match each
+  labels.csv has no \"filename\" column (columns: %s) — the ingestor matches each
+  listing Pods for service %s/%s: %w
+  listing chart-managed deployments in namespace %s: %w
+  listing client deployments to check for an existing client: %w
+  listing service-account-token secrets in %s: %w
+  listing stage Pods in %s: %w
+  loading embedded schema: %w
+  loading kubeconfig: %w
+  local dataset path is required — pass it as an argument, or run
+  locating mysql pod: %w
+  location
+  login timed out — re-run `tracebloc login`
+  love from tracebloc 💚
+  marshaling submit request: %w
+  marshaling synthesized spec: %w
+  masks
+  min size
+  minting token for ServiceAccount %s/%s via TokenRequest: %w
+  missing %s/ subdirectory in %q
+  missing images/ subdirectory in %q. The CLI expects
+  missing labels.csv in %q. Text categories expect
+  missing labels.csv in %q. The CLI expects
+  must be a positive integer
+  must be between %d and %d
+  mysql table
+  name
+  namespace
+  no .csv file found in %q. Tabular / time-series categories expect a
+  no .png mask files found in %q. semantic_segmentation expects
+  no .txt files found in %q. Text categories expect
+  no .xml annotation files found in %q. object_detection expects
+  no CLI-supported tasks for %s data yet
+  no PersistentVolumeClaim named %q found in namespace %q.
+  no Ready node on this machine to size a training run against
+  no Running Pod backing service %s/%s (found %d Pod(s);
+  no Running pod with name containing %q in namespace %q
+  no Secret of type kubernetes.io/service-account-token bound to
+  no active client on this machine — nothing to offboard
+  no active client on this machine — run `tracebloc client create` (or re-run the installer) first
+  no dataset named %q on this client%s
+  no image files found in %q. Expected .jpg, .jpeg, or .png;
+  no image files to detect a type from
+  no such file or directory: %q — check the path to your dataset
+  no tracebloc client found
+  no usable image files in %q — found %s, but the ingestor
+  no usable ingestor token. TokenRequest failed: %v.
+  not signed in — run `tracebloc login` first
+  outcome:   early exit before the cluster was probed
+  outcome:   early exit — no roll-up verdict (granular checks below)
+  overwrite prompt: %w
+  packaging %s: %w
+  packaging labels.csv: %w
+  password
+  path
+  port-forward allocated zero ports
+  port-forward to %s/%s failed during startup: %w
+  pvc path
+  querying datasets: %w%s
+  reading %q: %w
+  reading %s header: %w
+  reading %s/: %w
+  reading %s: %w
+  reading CSV header from %s: %w
+  reading CSV row from %s: %w
+  reading PVC %s/%s: %w
+  reading allocated port: %w
+  reading dataset directory %q: %w
+  reading dataset path %q: %w
+  reading final Job status for %s/%s: %w
+  reading images/: %w
+  reading kube-system namespace UID: %w
+  reading labels.csv: %w
+  reading raw kubeconfig: %w
+  reading service %s/%s: %w
+  reading submit response body: %w
+  reading the existing client's identity in namespace %q: %w
+  ready:     %s — %s
+  refusing to change the ceiling without confirmation: pass --yes, or run on a terminal
+  refusing to delete without confirmation: pass --yes or run on a terminal
+  refusing to offboard without confirmation: pass --yes, or run on a terminal to type the client name
+  refusing to provision non-interactively without confirmation — pass --yes to
+  refusing to stream symbolic link %q (defense-in-depth; should have been rejected by Discover)
+  release
+  release: %s (chart %s)
+  removing PVC paths: %w%s
+  removing staged copy %s: %w%s
+  replacing table %q failed partway — its removal may be incomplete, and a plain re-run
+  resolution
+  resolving %q: %w
+  resolving Service %s/%s to a Pod: %w
+  resolving namespace from kubeconfig: %w
+  resource env
+  root
+  scanning the cluster for tracebloc clients: %w
+  schema
+  schema entry %q must be col:TYPE (e.g. age:INT,price:FLOAT)
+  schema type %q for column %q isn't a supported SQL type — the ingestor would
+  semantic_segmentation needs a %q column in %s (columns: %s) linking each image to its
+  semantic_segmentation needs a %q column in %s, but found %q (wrong case).
+  sent to API
+  server
+  service %s/%s has no selector — can't resolve to a Pod for port-forwarding
+  session:   %s
+  setting up jobs-manager port-forward: %w
+  sha256[:8]
+  shared PVC
+  shared PVC: %s (%s)
+  sign-in was denied in the browser
+  skipped
+  source
+  stage Pod %s/%s did not become Ready within %s%s
+  stage Pod %s/%s did not reach Ready state: %w%s
+  stage Pod %s/%s terminated in phase %q before becoming Ready%s
+  stat %q: %w
+  stat %s/: %w
+  stat %s: %w
+  stat images/: %w
+  stat labels.csv: %w
+  state
+  status
+  stored active client id %q is not numeric: %w
+  streaming files to %s/%s: %w%s
+  streaming logs from Pod %s/%s: %w
+  submit response missing job_name (got body %q)
+  submit response missing namespace (got body %q)
+  success rate
+  synthesized spec failed schema validation; check the flag values above
+  table %q already exists in this secure environment. Re-ingesting the same table doesn't merge or replace —
+  table name %q is invalid: must start with a letter or
+  table name is %d characters; the max is %d
+  task
+  task %q isn't a recognized task. Supported tasks: %s.
+  task %q isn't supported by the CLI yet%s. Supported tasks: %s.
+  teardown failed: %w
+  teardown incomplete — the table %s.%s was dropped, but removing its files failed: %w;
+  the client running in this namespace is anchored to a different cluster (%s) than --kubeconfig/--context points at (%s) — check you're targeting the right cluster
+  the label column %q has %d distinct value(s) — a classification dataset needs at
+  the sequence column %q has %d empty/null value(s) (first at data row %d). Every
+  the sign-in code expired — re-run `tracebloc login`
+  the time column %q has %d missing/invalid value(s) (first at data row(s) %v%s).
+  this backend (%s) doesn't support browser login yet — the device-grant
+  this machine is too small to choose an amount — after tracebloc's ~1 core and 3 GiB
+  this task's data is sequence-grouped: the schema must declare %q (groups the timestep
+  time column
+  timed out after %s before tracebloc could confirm this client — retry,
+  timed out after %s waiting for tracebloc to report this client online (last state: %s).
+  timed out after %s waiting for tracebloc to report this client online;
+  token saved to ~/.tracebloc (0600)
+  total records
+  total size
+  tracebloc auth
+  tracebloc can see this client.
+  tracebloc didn't confirm your session (server error).
+  tracebloc keeps about 1 core and 3 GiB for itself on top of this — it fits on this machine.
+  tracebloc rejected your credentials while waiting — run `tracebloc login`, then retry
+  tracebloc rejected your credentials — run `tracebloc login`, then retry `tracebloc delete`
+  tracebloc's downloaded images
+  unknown backend environment %q — valid values are dev, stg, prod (default).
+  values:
+  waiting for ingestor Pod: %w
+  waiting for staging-cleanup pod: %w
+  waiting for teardown pod: %w
+  watching ingestor Job: %w
+  which task is this data for? pass --task — one of: %s.
+  would set each run to
+  writing credential file %s: %w
+  your images mix file types (%s) — the ingestor requires one type
+  your secure environment %q has %d training run(s) active — offboarding would stop them.
