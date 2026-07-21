@@ -42,12 +42,20 @@ const (
 	StatusFail
 )
 
-// StatusUnknown marks a check that could not run because a prerequisite was
-// unavailable — today, the cluster API being unreachable. It carries NO signal:
-// the verdict rollup ignores it, so it never affects the overall result or exit
-// code. It exists so a single root cause (a stopped cluster) renders as one
-// honest ✖ plus neutral "couldn't check" lines, instead of every check inventing
-// a false cause.
+// StatusUnknown marks a check with no trustworthy signal either way. Two cases
+// produce it:
+//
+//  1. The check could not run because a prerequisite was unavailable — today,
+//     the cluster API being unreachable. A single root cause (a stopped cluster)
+//     then renders as one honest ✖ plus neutral "couldn't check" lines, instead
+//     of every downstream check inventing a false cause.
+//  2. The check ran fine, but deliberately declines to assert a green it cannot
+//     back — e.g. requests-proxy is present and Ready, yet readiness does not
+//     prove Service Bus egress actually works and there is no probe for it yet
+//     (backend#1143). A neutral line is more honest than a false ✔.
+//
+// Either way it carries NO signal: the verdict rollup ignores it, so it never
+// affects the overall result or exit code.
 const StatusUnknown Status = -1
 
 func (s Status) String() string {
