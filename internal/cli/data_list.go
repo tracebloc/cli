@@ -200,11 +200,13 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 			sizeW = l
 		}
 	}
+	// Names are user-controlled and can be arbitrarily long, so cap + truncate
+	// (below) to keep the table narrow. Format cells are system-generated and
+	// naturally bounded ("csv · N cols · M classes"), so they're sized to
+	// content, not capped — capping without truncating would let a wide format
+	// overflow and shift the freshness column, the very thing sizing prevents.
 	if nameW > 24 {
 		nameW = 24
-	}
-	if fmtW > 28 {
-		fmtW = 28
 	}
 
 	for _, m := range modalityOrder {
@@ -318,15 +320,8 @@ func datasetModality(d push.DatasetInfo) string {
 	case "txt", "text": // the ingestor accepts both .txt and .text
 		return "Text"
 	}
-	has := func(name string) bool {
-		for _, c := range d.Columns {
-			if strings.EqualFold(strings.TrimSpace(c), name) {
-				return true
-			}
-		}
-		return false
-	}
-	if has("sequence_id") || has("timestamp") || (has("time") && has("event")) {
+	if hasCol(d.Columns, "sequence_id") || hasCol(d.Columns, "timestamp") ||
+		(hasCol(d.Columns, "time") && hasCol(d.Columns, "event")) {
 		return "Time-series"
 	}
 	// A populated dataset with user-schema columns is tabular. Require records:
@@ -337,6 +332,16 @@ func datasetModality(d push.DatasetInfo) string {
 		return "Tabular"
 	}
 	return "Other"
+}
+
+// hasCol reports whether cols contains name (case-insensitive, trimmed).
+func hasCol(cols []string, name string) bool {
+	for _, c := range cols {
+		if strings.EqualFold(strings.TrimSpace(c), name) {
+			return true
+		}
+	}
+	return false
 }
 
 // featureColCount is the number of user-schema columns (all columns minus the
@@ -370,14 +375,18 @@ func formatCell(d push.DatasetInfo, modality string) string {
 	var base string
 	switch modality {
 	case "Image", "Text":
+		// Modality is extension-driven, so the extension is always set here.
 		base = strings.ToLower(d.Extension)
-		if base == "" {
-			base = "files"
-		}
 	case "Tabular", "Time-series":
 		base = fmt.Sprintf("csv · %d cols", featureColCount(d.Columns))
 	default:
-		// Undetermined modality (e.g. an empty table) — don't imply "csv".
+		// Undetermined modality. A populated table with a filename column is
+		// still clearly file-based — its extension just wasn't recorded — so
+		// say "files" rather than "—". Anything else is genuinely unknown (e.g.
+		// an empty table); don't imply "csv".
+		if d.Records > 0 && hasCol(d.Columns, "filename") {
+			return "files"
+		}
 		return "—"
 	}
 	// Show classes only when the label actually repeats (classes < records):

@@ -184,6 +184,19 @@ func TestFormatCell_OtherIsNeutral(t *testing.T) {
 	}
 }
 
+// A populated file table whose extension wasn't recorded can't be typed as
+// Image vs Text (so it's "Other"), but it's still clearly file-based — format
+// should read "files", not "—". Exercises the reachable default-case fallback.
+func TestFormatCell_FileWithoutExtension(t *testing.T) {
+	d := push.DatasetInfo{Records: 12, Extension: "", Columns: []string{"id", "label", "data_id", "filename"}}
+	if m := datasetModality(d); m != "Other" {
+		t.Errorf("extension-less file table modality = %q, want Other", m)
+	}
+	if got := formatCell(d, datasetModality(d)); got != "files" {
+		t.Errorf("file-based (has filename, no extension) format = %q, want \"files\"", got)
+	}
+}
+
 // TestWriteDataListJSON: `datasets` stays a string array (additive contract);
 // the rich objects go in the new `details`. System excluded unless --all; an
 // empty result marshals both as [] (not null).
