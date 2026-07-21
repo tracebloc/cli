@@ -83,7 +83,7 @@ Exit codes:
 // the jobs-manager env — the same source `cluster doctor` parses, so the two
 // never disagree.
 func runResourcesShow(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions) error {
-	p.Banner("tracebloc", "machine resources")
+	p.Newline()
 
 	binding := bindActiveClientNamespace(&opts)
 	target, err := resolveClusterTarget(ctx, p, opts, binding, false)

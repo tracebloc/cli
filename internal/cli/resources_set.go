@@ -131,8 +131,6 @@ Exit codes:
 // clientset + fake helm Runner without the real kubeconfig path (the seam
 // renderResources / ingestion_run_test already use).
 func runResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, opts cluster.KubeconfigOptions, req setReq) error {
-	p.Banner("tracebloc", "machine resources")
-
 	// Pure request checks first — no cluster needed, so a bad invocation fails
 	// fast with exit 2 (never touching a live cluster).
 	if err := validateRequestShape(req, pr != nil); err != nil {
@@ -234,6 +232,7 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 	//     is still validated below, before anything mutates.
 	ceilingUnchanged := sameCeiling(desired, current)
 	if ceilingUnchanged && !phantomGPU {
+		p.Newline()
 		p.Successf("Each training run already uses up to %s — nothing to change.", perRunSize(desired))
 		return nil
 	}
@@ -243,6 +242,7 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 		// clean no-op — fall through to persist so BuildEnvSpec's explicit-empty
 		// GPU override lands and clears it; otherwise runs stay unschedulable /
 		// fall back to CPU while the heartbeat keeps advertising a GPU.
+		p.Newline()
 		p.Infof("Your CPU and memory budget is unchanged — but this machine has no GPU while the cluster still requests one, so I'll clear that stale GPU setting so runs can schedule.")
 	}
 
@@ -535,7 +535,6 @@ func persistCeiling(ctx context.Context, p *ui.Printer, target *clusterTarget, o
 	}
 
 	if dryRun {
-		p.Newline()
 		p.Section("Dry run — nothing was changed")
 		p.Field("would set each run to", perRunSize(d))
 		if gpuRemoved {

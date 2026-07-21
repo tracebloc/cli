@@ -226,7 +226,7 @@ func TestDataDeleteCmd_OutputJSONNeverPrompts(t *testing.T) {
 	if got["status"] != "error" {
 		t.Errorf("got %+v, want status=error", got)
 	}
-	// The human banner went to stderr, not stdout.
+	// The human output went to stderr, not stdout.
 	if strings.Contains(out.String(), "tracebloc") && !strings.Contains(out.String(), `"error"`) {
 		t.Errorf("human output leaked to stdout:\n%s", out.String())
 	}
