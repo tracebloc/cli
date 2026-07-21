@@ -236,10 +236,19 @@ func applyTaskLabels(ctx context.Context, exec Executor, namespace, pod, contain
 	if !hasTaskColumn {
 		return
 	}
+	// The LATEST run's task per table — never MAX(task), which is a
+	// lexicographic string max and can pin a re-ingested (--overwrite,
+	// different --task) dataset to its OLD task. started_at ships in the same
+	// DDL that creates the journal, so it exists whenever the table does. Two
+	// runs in the same second tie; either answer is fine (same pathological
+	// re-ingest).
 	out, err := runMySQLQuery(ctx, exec, namespace, pod, container, fmt.Sprintf(
-		"SELECT table_name, COALESCE(MAX(task),'') FROM `%s`.`%s` "+
-			"WHERE task IS NOT NULL GROUP BY table_name",
-		IngestionDatabase, ingestRunsTable))
+		"SELECT r.table_name, COALESCE(r.task,'') FROM `%s`.`%s` r "+
+			"JOIN (SELECT table_name, MAX(started_at) ms FROM `%s`.`%s` "+
+			"WHERE task IS NOT NULL GROUP BY table_name) m "+
+			"ON r.table_name = m.table_name AND r.started_at = m.ms "+
+			"WHERE r.task IS NOT NULL",
+		IngestionDatabase, ingestRunsTable, IngestionDatabase, ingestRunsTable))
 	if err != nil {
 		return // best-effort: the listing still renders with inferred modality
 	}
