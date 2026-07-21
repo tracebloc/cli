@@ -288,7 +288,11 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		// Pure disk cleanup — a failure here changes nothing about the offboard
 		// (it's excluded from `degraded`). Keep it a quiet, plain note; don't leak
 		// the raw docker/daemon error at the user.
-		p.Infof("Some tracebloc images couldn't be reclaimed (harmless) — clear them later with `docker image prune`.")
+		// `docker image prune` would NOT help here: it only removes dangling
+		// (untagged) images, and these are tagged ghcr.io/tracebloc/* refs. Point
+		// at the scoped removal that actually matches the failure mode — the same
+		// reference PruneImages targets — never a blanket prune.
+		p.Infof("Some tracebloc images couldn't be reclaimed (harmless) — remove them later with `docker rmi $(docker images ghcr.io/tracebloc/* -q)`.")
 	} else {
 		p.Successf("Reclaimed tracebloc's downloaded images.")
 	}
