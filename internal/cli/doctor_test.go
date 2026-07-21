@@ -288,6 +288,19 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	// Pods stuck Pending past the grace window surface as Pod-health StatusWarn
+	// (not Fail). Training still can't schedule, so the rollup must NOT report ✔
+	// "Ready to run training" — that false green was the Bugbot finding.
+	t.Run("pods stuck pending (warn) → ready Fail, not a false green", func(t *testing.T) {
+		_, r := summarizeDoctor(with(allOK, "Pod health", doctor.StatusWarn), tokenOK)
+		if r.status == doctor.StatusOK {
+			t.Fatalf("stuck-pending pods must not roll up to Ready, got %v %q", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "Not ready") {
+			t.Errorf("want a Not-ready readiness line for stuck-pending pods, got %q", r.text)
+		}
+	})
+
 	// A reachable cluster with no tracebloc installed must NOT be reported as
 	// "isn't answering" with a kubectl remedy — it's a reinstall (Bugbot #365).
 	// A failing image-pull check means training images can't be fetched — that

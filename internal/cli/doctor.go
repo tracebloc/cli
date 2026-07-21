@@ -339,6 +339,15 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — part of your secure environment isn't running.",
 			fmt.Sprintf("Reinstall with `%s`, or email support@tracebloc.io with `%s doctor --diagnose`.", installCmd, launcher())}
+	case by["Pod health"].Status == doctor.StatusWarn:
+		// Pods stuck Pending past the grace window (unschedulable / image can't
+		// pull) mean training can't actually schedule — so this is NOT ready, even
+		// though the granular Pod-health check rates it a softer ⚠. Without this,
+		// a stuck-pending environment rolled up to ✔ "Ready to run training" and
+		// the "Everything looks good" verdict (Bugbot).
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — part of your secure environment can't start yet.",
+			fmt.Sprintf("Some pods are stuck starting — usually not enough free compute, or a training image that can't be pulled. Free some up in Docker Desktop → Resources, then re-run `%s doctor`; if it persists, email support@tracebloc.io with `%s doctor --diagnose`.", launcher(), launcher())}
 	case by["Image pull secret"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — the training images can't be pulled.",
