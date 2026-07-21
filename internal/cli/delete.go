@@ -299,7 +299,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		// (untagged) images, and these are tagged ghcr.io/tracebloc/* refs. Point
 		// at the scoped removal that actually matches the failure mode — the same
 		// reference PruneImages targets — never a blanket prune.
-		p.Infof("Some tracebloc images couldn't be reclaimed (harmless) — remove them later with `docker rmi $(docker images ghcr.io/tracebloc/* --format '{{.Repository}}:{{.Tag}}')`.")
+		p.Infof("Some tracebloc images couldn't be reclaimed (harmless) — remove them later with `docker rmi $(docker images --filter=reference='ghcr.io/tracebloc/*' --format '{{.Repository}}:{{.Tag}}')`.")
 	} else {
 		p.Successf("Reclaimed tracebloc's downloaded images.")
 	}
@@ -360,9 +360,9 @@ func renderOffboardSummary(p *ui.Printer, name string, keepData bool) {
 	p.Infof("Your secure environment %q and everything it runs on this machine", name)
 	p.Infof("tracebloc's downloaded images")
 	if keepData {
-		p.Infof("The tb CLI (your local data & config are kept — --keep-data)")
+		p.Infof("The tracebloc CLI (your local data & config are kept — --keep-data)")
 	} else {
-		p.Infof("Your local data & config (~/.tracebloc) and the tb CLI — can't be undone")
+		p.Infof("Your local data & config (~/.tracebloc) and the tracebloc CLI — can't be undone")
 	}
 
 	p.Section("Kept on tracebloc")
