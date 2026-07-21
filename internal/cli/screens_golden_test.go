@@ -2,10 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -17,13 +20,14 @@ import (
 
 // TestScreensGolden pins EVERY piece of user-facing copy in one committed file,
 // testdata/screens.golden, so wording AND exact layout (line breaks, tabs,
-// leading/trailing blanks) can be reviewed without deploying — read the file, or
-// the diff on any PR that changes copy.
+// blank lines) can be reviewed without deploying — read the file, or the diff on
+// any PR that changes copy. A verbatim terminal transcript in three parts:
 //
-// It's a verbatim terminal transcript: each block is `$ <command>` followed by
-// the BYTE-EXACT output. Help is captured through the real `--help` flag path
-// (SetArgs+Execute — exactly what the binary runs), screens through the real
-// renderers. Then an appendix indexes every remaining user-facing string.
+//	A. Commands  — the `--help` of every command, byte-exact (real --help path)
+//	B. Screens   — the stateful views rendered verbatim (home, data list, review, …)
+//	C. Messages  — every user-facing STRING in the source, harvested via AST (so
+//	               error paths + live flows — ingest steps, login, progress —
+//	               that aren't a single rendered screen are still all here).
 //
 // The test fails on drift; regenerate after an intentional copy change:
 //
@@ -35,12 +39,10 @@ func TestScreensGolden(t *testing.T) {
 
 	cat.WriteString("tracebloc CLI — complete copy catalog\n")
 	cat.WriteString("A verbatim transcript: each `$ command` is followed by its byte-exact output\n")
-	cat.WriteString("(line breaks, tabs, blank lines — all as the terminal prints them).\n")
-	cat.WriteString("Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden\n")
+	cat.WriteString("(line breaks, tabs, blank lines — all as the terminal prints them). The final\n")
+	cat.WriteString("section indexes every user-facing string, incl. multi-step flows not shown as\n")
+	cat.WriteString("a single screen. Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden\n")
 
-	// block writes `$ <cmd>\n` then the output VERBATIM — nothing else. The only
-	// whitespace between entries is each output's own real leading/trailing blank
-	// lines, so what you read is byte-for-byte what the terminal prints.
 	block := func(cmd, output string) {
 		cat.WriteString("$ " + cmd + "\n")
 		cat.WriteString(output)
@@ -48,7 +50,6 @@ func TestScreensGolden(t *testing.T) {
 
 	// ── PART A: every command's --help, through the real flag path ──────────────
 	cat.WriteString("\n\n" + strings.Repeat("=", 78) + "\n= COMMANDS — every `--help`, byte-exact\n" + strings.Repeat("=", 78) + "\n")
-	// Enumerate every command path (incl. hidden — a user can still run them).
 	var paths [][]string
 	var walk func(c *cobra.Command, prefix []string)
 	walk = func(c *cobra.Command, prefix []string) {
@@ -59,8 +60,7 @@ func TestScreensGolden(t *testing.T) {
 			if s.Name() == "help" || s.Name() == "completion" {
 				continue
 			}
-			child := append(append([]string{}, prefix...), s.Name())
-			walk(s, child)
+			walk(s, append(append([]string{}, prefix...), s.Name()))
 		}
 	}
 	walk(NewRootCmd(bi), nil)
@@ -114,14 +114,20 @@ func TestScreensGolden(t *testing.T) {
 	render("tb data list   # empty", func(p *ui.Printer) { renderDataList(p, "hello-world", nil, false) })
 	render("tb data list   # populated", func(p *ui.Printer) { renderDataList(p, "hello-world", sample, false) })
 	render("tb data list --all", func(p *ui.Printer) { renderDataList(p, "hello-world", sample, true) })
+
+	ingestReview := &runDataIngestArgs{
+		LocalPath: "./data",
+		Spec:      push.SpecArgs{Table: "xray_train", Category: "image_classification", Intent: "train"},
+	}
+	render("tb data ingest ./data   # pre-flight review", func(p *ui.Printer) { renderReview(p, ingestReview) })
 	render("tb client create   # review", func(p *ui.Printer) { renderClientReview(p, "lukas-macbook", "lukas-macbook", "DE", "a1b2c3d4") })
 	render("tb delete   # keep data", func(p *ui.Printer) { renderOffboardSummary(p, "lukas-macbook", true) })
 	render("tb delete   # remove data", func(p *ui.Printer) { renderOffboardSummary(p, "lukas-macbook", false) })
 
-	// ── APPENDIX: every remaining user-facing string ────────────────────────────
-	cat.WriteString("\n\n" + strings.Repeat("=", 78) + "\n= MESSAGE INDEX — every user-facing string in the source (templates, not\n= rendered; %s/%d are runtime placeholders). Catches errors, hints, and the\n= flows not rendered above (ingest validation, login, resources).\n" + strings.Repeat("=", 78) + "\n\n")
+	// ── PART C: every user-facing string (AST harvest — catches all args) ───────
+	cat.WriteString("\n\n" + strings.Repeat("=", 78) + "\n= MESSAGE INDEX — every user-facing string in the source (templates, not\n= rendered; %s/%d are runtime placeholders). Catches the multi-step flows the\n= transcript above can't show whole: ingest steps + progress, login device flow,\n= delete confirmation, and every error/hint.\n" + strings.Repeat("=", 78) + "\n\n")
 	for _, m := range harvestMessages(t) {
-		cat.WriteString("  " + m + "\n")
+		cat.WriteString("  " + strconv.Quote(m) + "\n")
 	}
 
 	got := cat.String()
@@ -144,32 +150,67 @@ func TestScreensGolden(t *testing.T) {
 	}
 }
 
-// harvestMessages reads the user-facing packages and extracts every string
-// literal passed to a Printer method or an error constructor — a complete,
-// deduped index of user-facing copy, independent of whether a screen renders it.
+// harvestMessages parses the user-facing packages and returns every string
+// literal passed to a Printer method or an error constructor — ALL arguments
+// (so Step labels, MenuRow descriptions, Field values are included), both "…" and
+// `…` raw strings. Deduped + sorted. A complete index of user-facing copy,
+// independent of whether a screen renders it.
 func harvestMessages(t *testing.T) []string {
 	t.Helper()
-	printer := regexp.MustCompile(`\.(?:Successf|Warnf|Errorf|Infof|Hintf|Detailf|Para|Section|PromptHint|PromptHeader|WarnLine|CrossLine|CheckLine|Step|Action|Stat|Field)\(\s*"((?:[^"\\]|\\.)*)"`)
-	errs := regexp.MustCompile(`(?:errors\.New|fmt\.Errorf)\(\s*"((?:[^"\\]|\\.)*)"`)
+	methods := map[string]bool{
+		"Successf": true, "Warnf": true, "Errorf": true, "Infof": true, "Hintf": true,
+		"Detailf": true, "Para": true, "Section": true, "PromptHint": true, "PromptHeader": true,
+		"WarnLine": true, "CrossLine": true, "CheckLine": true, "Step": true, "Action": true,
+		"Stat": true, "Field": true, "MenuRow": true, "Banner": true, "Command": true,
+	}
+	isCopyCall := func(call *ast.CallExpr) bool {
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		if methods[sel.Sel.Name] {
+			return true
+		}
+		if x, ok := sel.X.(*ast.Ident); ok {
+			return (x.Name == "errors" && sel.Sel.Name == "New") || (x.Name == "fmt" && sel.Sel.Name == "Errorf")
+		}
+		return false
+	}
+
 	seen := map[string]struct{}{}
+	fset := token.NewFileSet()
 	for _, dir := range []string{".", "../submit", "../push", "../doctor", "../cluster"} {
 		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
-			src, err := os.ReadFile(path)
-			if err != nil {
+			f, perr := parser.ParseFile(fset, path, nil, 0)
+			if perr != nil {
 				return nil
 			}
-			for _, re := range []*regexp.Regexp{printer, errs} {
-				for _, m := range re.FindAllStringSubmatch(string(src), -1) {
-					s := strings.TrimSpace(m[1])
+			ast.Inspect(f, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || !isCopyCall(call) {
+					return true
+				}
+				for _, arg := range call.Args {
+					lit, ok := arg.(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						continue
+					}
+					s, uerr := strconv.Unquote(lit.Value)
+					if uerr != nil {
+						continue
+					}
+					s = strings.TrimSpace(s)
+					// Skip empties and format-only fragments (e.g. "%s", " ") — no words.
 					if len([]rune(s)) < 4 || !strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyz") {
 						continue
 					}
 					seen[s] = struct{}{}
 				}
-			}
+				return true
+			})
 			return nil
 		})
 	}
