@@ -303,3 +303,22 @@ func TestRunClusterDoctor_DiagnoseOnEarlyExit(t *testing.T) {
 		t.Errorf("no support bundle written on early exit (entries: %v)", entries)
 	}
 }
+
+// A reachable cluster with no tracebloc chart (ReachNoEnv) must not print
+// `Secure environment "<name>"` — the Connected line says none is installed, so
+// naming one would assert it both exists and doesn't (Bugbot #365).
+func TestRunClusterDoctor_NoEnvSuppressesEnvHeader(t *testing.T) {
+	out, err := runDoctorClusterHalf(t, []doctor.Result{
+		{Name: "Cluster reachable", Status: doctor.StatusFail, Reach: doctor.ReachNoEnv},
+	})
+	if !strings.Contains(out, "No secure environment installed here") {
+		t.Errorf("want the no-environment Connected line, got:\n%s", out)
+	}
+	if strings.Contains(out, `Secure environment "`) {
+		t.Errorf("must not name a secure environment when none is installed, got:\n%s", out)
+	}
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("ReachNoEnv → want exit 2, got %v", err)
+	}
+}

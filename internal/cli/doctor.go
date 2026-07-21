@@ -174,12 +174,21 @@ func runClusterDoctor(
 		p.Errorf("Couldn't connect to your secure environment — check your kubeconfig/context.")
 		return &exitError{code: earlyExitCode(tok), err: nil}
 	}
-	p.Para(fmt.Sprintf("Secure environment %q", envDisplayName(resolved)))
-
 	// 4. Probe the cluster and roll the granular checks up into the two plain
 	//    lines the owner acts on (the granular results stay for --verbose/--diagnose).
 	results = doctorRunFn(ctx, cs, doctor.Options{Namespace: resolved.Namespace, ServerURL: resolved.ServerURL})
 	connected, ready = summarizeDoctor(results, tok)
+
+	// Name the secure environment only when one is actually installed here. A
+	// reachable cluster with no tracebloc chart (ReachNoEnv) is "no environment",
+	// and the Connected line below says so — naming it too would assert it both
+	// exists and doesn't. Every other reach state (running, stopped, RBAC) means
+	// an environment IS installed, so it's named. Printed here (not before the
+	// probe) so we know which; nothing prints between it and "Signed in" above, so
+	// the two context lines still read as a pair.
+	if reachStateOf(results) != doctor.ReachNoEnv {
+		p.Para(fmt.Sprintf("Secure environment %q", envDisplayName(resolved)))
+	}
 
 	p.Newline()
 	renderHealth(p, connected)
@@ -438,6 +447,18 @@ func envDisplayName(r *cluster.ResolvedConfig) string {
 		return r.Namespace
 	}
 	return "your secure environment"
+}
+
+// reachStateOf returns the "Cluster reachable" check's classification, so the
+// caller can tell a reachable-but-uninstalled cluster (ReachNoEnv) apart from one
+// that simply isn't answering. ReachOK when the check is absent.
+func reachStateOf(results []doctor.Result) doctor.ReachState {
+	for _, r := range results {
+		if r.Name == "Cluster reachable" {
+			return r.Reach
+		}
+	}
+	return doctor.ReachOK
 }
 
 // worseStatus returns the more severe of two doctor statuses (Fail > Warn > OK).
