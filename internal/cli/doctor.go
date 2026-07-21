@@ -130,7 +130,10 @@ func runClusterDoctor(
 	p.Field("server", resolved.ServerURL)
 	p.Field("namespace", resolved.Namespace)
 
-	results := doctorRunFn(ctx, cs, doctor.Options{Namespace: resolved.Namespace})
+	results := doctorRunFn(ctx, cs, doctor.Options{
+		Namespace: resolved.Namespace,
+		ServerURL: resolved.ServerURL,
+	})
 
 	p.Section("Checks")
 	for _, r := range results {
@@ -147,6 +150,10 @@ func runClusterDoctor(
 			if r.Remedy != "" {
 				p.Hintf("     %s", r.Remedy)
 			}
+		case doctor.StatusUnknown:
+			// No signal: a neutral · line, no ✖/⚠ and no remedy — the one honest
+			// "Cluster reachable" ✖ above already carries the cause and the fix.
+			p.Infof("%s — %s", r.Name, r.Detail)
 		}
 	}
 
