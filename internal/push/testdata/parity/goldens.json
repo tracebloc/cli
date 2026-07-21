@@ -156,6 +156,10 @@
       ],
       "verdict": "reject"
     },
+    "imgc-uppercase-filename-col": {
+      "errors": [],
+      "verdict": "accept"
+    },
     "imgc-zero-byte": {
       "errors": [
         "ImageResolutionValidator: Files that could not be processed: ['images/z.jpg: empty file (0 bytes)']"

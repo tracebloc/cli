@@ -296,26 +296,36 @@ func ValidateImages(images []string, expectedW, expectedH, minW, minH int) error
 
 // CheckImageFilenameColumn enforces the ingestor's filename-column contract for
 // the image family (layout.v1.json requires_filename_column=true for every image
-// task). At transfer time the cluster reads each image's file key with a
-// case-sensitive record.get("filename") (file_transfer.py:179); a manifest that
-// omits a filename column resolves to NO key, so EVERY row fails as a
-// file-transfer error ("No filename found in record") and the run exits 9 — AFTER
-// the full upload. The ingestor's OWN preflight (validate_data) does not catch
-// this: IngestableRecordsValidator passes when the column is absent ("not this
-// validator's error to raise"), so mirroring only its preflight validators
-// fails open here. We surface it locally instead — the image mirror of the text
-// family's up-front check (referencedTextNames).
+// task). At transfer the cluster reads each image's file with a case-SENSITIVE
+// record.get("filename") (data-ingestors record_processor.py:279 ->
+// file_transfer.py:179); a manifest that resolves to no such key drops EVERY row
+// ("No filename found in record") and the run exits 9 — AFTER the full upload.
+// The ingestor's OWN preflight does not catch this: IngestableRecordsValidator
+// passes when the column is absent, and matches case-INSENSITIVELY when present,
+// so mirroring only its preflight validators fails open here. We surface it
+// locally instead — the image mirror of the text family's up-front check.
 //
-// Matching is case-insensitive + whitespace-trimmed (matchColumnIndex), the same
-// rule the ingestor's _match_column applies. It deliberately does NOT accept
-// "data_id" or any other alias: the ingestor never maps another column to
-// "filename", so a data_id-only manifest fails transfer identically to image_id.
-// (A case-VARIANT header like "Filename" is accepted here yet still fails the
-// cluster's case-sensitive transfer read — the #340-class label/filename
-// asymmetry, tracked separately.)
+// The match is EXACT (whitespace-trimmed, case-sensitive), mirroring the transfer
+// read — so a case variant like "Filename" is rejected here too rather than
+// green-lit into the same doomed upload #371 is about (Asad review, #373). It
+// does NOT accept "data_id" or any other alias — the ingestor never maps another
+// column to "filename" on the copy path (see imageFileColIndex).
 func CheckImageFilenameColumn(header []string) error {
-	if matchColumnIndex(header, "filename") >= 0 {
+	if imageFileColIndex(header) >= 0 {
 		return nil
+	}
+	// A case variant (Filename/FILENAME) passes the ingestor's case-insensitive
+	// preflight but fails its case-sensitive transfer read — flag it with a
+	// targeted message rather than the generic "no filename column" one.
+	for _, h := range header {
+		if trimmed := strings.TrimSpace(h); strings.EqualFold(trimmed, "filename") {
+			return fmt.Errorf(
+				"labels.csv column %q must be lowercase \"filename\": the cluster reads "+
+					"each image's file with a case-sensitive record.get(\"filename\") at "+
+					"transfer, so %q would upload, then fail with \"No filename found in "+
+					"record\". Rename it to \"filename\" and re-run.",
+				trimmed, trimmed)
+		}
 	}
 	return fmt.Errorf(
 		"labels.csv has no \"filename\" column (columns: %s) — image tasks match each "+
@@ -406,20 +416,28 @@ func CrossCheckLabels(csvPath string, images []string, extension string) (missin
 }
 
 // imageFileColIndex returns the header index of the "filename" column — the key
-// the ingestor reads each image's file from (case-sensitive record.get("filename")
-// at transfer time; file_transfer.py:179). Matching mirrors the ingestor's
-// _match_column: exact first, then case-insensitive with surrounding whitespace
-// stripped.
+// the ingestor reads each image's file from at transfer. The match is EXACT
+// (whitespace-trimmed, case-SENSITIVE): the ingest copy does a case-sensitive
+// record.get("filename") (data-ingestors record_processor.py:279 ->
+// file_transfer.py:179) after pandas strips surrounding whitespace from the
+// headers (chunk.columns.str.strip()), so "filename" and " filename " resolve but
+// "Filename"/"FILENAME" do NOT — they read as None and fail every row.
 //
-// It deliberately does NOT accept "data_id" (or any other name): the ingestor
-// never maps another column to "filename", so a data_id-only manifest fails
-// transfer identically to image_id — accepting it here would false-green-light a
-// doomed upload. Returns -1 when absent; PreflightDataset enforces presence up
-// front (CheckImageFilenameColumn) before any caller reaches here, so a resolved
-// index is guaranteed in production, and CrossCheckLabels guards the -1 case
-// against a panic if exercised directly.
+// It deliberately does NOT accept "data_id" (or any other name). The ingestor
+// never maps another column to "filename" on the COPY path; the filename-vs-
+// data_id fallback #207 cited lives in tracebloc-client's
+// prepare_classification_pytorch_image_df — a TRAINING-time resolver over the
+// already-ingested table, not the ingest copy. A data_id-only manifest therefore
+// copies zero files (exit 9) exactly like image_id. Returns -1 when absent;
+// PreflightDataset enforces presence up front (CheckImageFilenameColumn) before
+// any caller reaches here, and CrossCheckLabels guards the -1 case.
 func imageFileColIndex(header []string) int {
-	return matchColumnIndex(header, "filename")
+	for i, h := range header {
+		if strings.TrimSpace(h) == "filename" {
+			return i
+		}
+	}
+	return -1
 }
 
 // CheckAnnotationPairing previews the ingestor's FilePairingValidator
@@ -1532,6 +1550,30 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if err := CheckCSVEncoding(layout.LabelsCSV); err != nil {
 			return nil, dataProblem(err)
 		}
+		if err := CheckHasDataRows(layout.LabelsCSV); err != nil {
+			return nil, dataProblem(err)
+		}
+		header, err := ReadCSVHeader(layout.LabelsCSV)
+		if err != nil {
+			return nil, dataProblem(err)
+		}
+		if err := CheckDuplicateHeaders(header, "labels.csv"); err != nil {
+			return nil, dataProblem(err)
+		}
+		// The ingestor reads each image's file from a case-sensitive
+		// record.get("filename") at transfer time; a manifest without a
+		// filename column drops EVERY row ("No filename found in record",
+		// exit 9) AFTER the upload, and the ingestor's own preflight does not
+		// catch it. Enforce the contract's requires_filename_column locally —
+		// the image mirror of the text family's up-front check.
+		if tl, ok := LayoutFor(spec.Category); ok && tl.Manifest.RequiresFilenameColumn {
+			if err := CheckImageFilenameColumn(header); err != nil {
+				return nil, dataProblem(err)
+			}
+		}
+		// Runs AFTER the cheap manifest/header checks above: this decodes every
+		// image (O(files)), so a structurally doomed dataset — bad encoding, no
+		// filename column — fails before we open a single image (fail fast, #373).
 		// Every image, header-only decode (cheap). Previously only the
 		// first image was ever opened, so one corrupt or odd-sized file
 		// failed in-cluster after the full upload (cli#72).
@@ -1558,27 +1600,6 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		}
 		if err := ValidateImages(layout.Images, expW, expH, minW, minH); err != nil {
 			return nil, dataProblem(err)
-		}
-		if err := CheckHasDataRows(layout.LabelsCSV); err != nil {
-			return nil, dataProblem(err)
-		}
-		header, err := ReadCSVHeader(layout.LabelsCSV)
-		if err != nil {
-			return nil, dataProblem(err)
-		}
-		if err := CheckDuplicateHeaders(header, "labels.csv"); err != nil {
-			return nil, dataProblem(err)
-		}
-		// The ingestor reads each image's file from a case-sensitive
-		// record.get("filename") at transfer time; a manifest without a
-		// filename column drops EVERY row ("No filename found in record",
-		// exit 9) AFTER the upload, and the ingestor's own preflight does not
-		// catch it. Enforce the contract's requires_filename_column locally —
-		// the image mirror of the text family's up-front check.
-		if tl, ok := LayoutFor(spec.Category); ok && tl.Manifest.RequiresFilenameColumn {
-			if err := CheckImageFilenameColumn(header); err != nil {
-				return nil, dataProblem(err)
-			}
 		}
 		// LabelDiversityValidator runs in-cluster for the WHOLE image
 		// family (is_classification covers object_detection + keypoint

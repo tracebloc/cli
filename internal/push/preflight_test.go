@@ -233,40 +233,6 @@ func TestCrossCheckLabels(t *testing.T) {
 	}
 }
 
-// The image filename is resolved by the "filename" COLUMN NAME, not positionally —
-// so a `label,filename` header (filename not first, a layout the ingestor accepts
-// via record.get("filename")) must not false-reject. Reading rec[0] would treat the
-// label value ("cat"/"dog") as the filename and flag every row missing (exit 3).
-func TestCrossCheckLabels_FilenameColumnNotFirst(t *testing.T) {
-	dir := t.TempDir()
-	imgs := filepath.Join(dir, "images")
-	if err := os.MkdirAll(imgs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, n := range []string{"a.jpg", "b.jpg", "extra.jpg"} {
-		if err := os.WriteFile(filepath.Join(imgs, n), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	csvPath := filepath.Join(dir, "labels.csv")
-	// filename is the SECOND column, and mixed-case to exercise the ci match.
-	if err := os.WriteFile(csvPath,
-		[]byte("label,Filename\ncat,a.jpg\ndog,b\ncat,ghost.jpg\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	images := []string{filepath.Join(imgs, "a.jpg"), filepath.Join(imgs, "b.jpg"), filepath.Join(imgs, "extra.jpg")}
-	missing, orphans, err := CrossCheckLabels(csvPath, images, ".jpg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(missing) != 1 || missing[0] != "ghost.jpg" {
-		t.Errorf("missing = %v, want [ghost.jpg] — the label values must NOT be read as filenames", missing)
-	}
-	if len(orphans) != 1 || orphans[0] != "extra.jpg" {
-		t.Errorf("orphans = %v, want [extra.jpg]", orphans)
-	}
-}
-
 // A `label,filename` header (filename NOT first) must resolve by the filename
 // column, not fall back to index 0 (the label column) — which would read
 // "cat"/"dog" as filenames and false-reject every row. Regression for Asad's
@@ -312,15 +278,23 @@ func TestCheckImageFilenameColumn(t *testing.T) {
 	for _, h := range [][]string{
 		{"filename", "label"},
 		{"label", "filename"},
-		{"label", " Filename "}, // case + whitespace insensitive
+		{"label", " filename "}, // surrounding whitespace trimmed (pandas strips it too)
 	} {
 		if err := CheckImageFilenameColumn(h); err != nil {
 			t.Errorf("CheckImageFilenameColumn(%v) = %v, want nil", h, err)
 		}
 	}
+	// A case variant passes the ingestor's case-insensitive preflight but fails
+	// its case-sensitive transfer read — reject it here, and say to lowercase it.
+	if err := CheckImageFilenameColumn([]string{"Filename", "label"}); err == nil {
+		t.Error("CheckImageFilenameColumn([Filename label]) = nil, want a reject")
+	} else if !strings.Contains(err.Error(), "lowercase") {
+		t.Errorf("case-variant error should tell the user to lowercase it: %v", err)
+	}
 	for _, h := range [][]string{
 		{"image_id", "label"}, // the reported bug
 		{"label", "data_id"},  // NOT a filename alias
+		{"Filename", "label"}, // case variant — also a doomed upload
 		{"label"},             // no file column at all
 	} {
 		err := CheckImageFilenameColumn(h)
@@ -339,11 +313,12 @@ func TestImageFileColIndex(t *testing.T) {
 		header []string
 		want   int
 	}{
-		{[]string{"filename", "label"}, 0},   // filename by name, first
-		{[]string{"label", "filename"}, 1},   // filename by name, not first (the original bug)
-		{[]string{"label", " Filename "}, 1}, // case + whitespace insensitive (mirrors _match_column)
-		{[]string{"image_id", "label"}, -1},  // no filename column → -1 (rejected up front by CheckImageFilenameColumn)
-		{[]string{"label", "data_id"}, -1},   // data_id is NOT a filename alias — the ingestor never maps it
+		{[]string{"filename", "label"}, 0},    // exact, first
+		{[]string{"label", "filename"}, 1},    // exact, not first (the original bug)
+		{[]string{"label", " filename "}, 1},  // surrounding whitespace trimmed (pandas strips it too)
+		{[]string{"label", " Filename "}, -1}, // case VARIANT → -1: transfer's record.get is case-sensitive
+		{[]string{"image_id", "label"}, -1},   // no filename column → -1 (rejected up front by CheckImageFilenameColumn)
+		{[]string{"label", "data_id"}, -1},    // data_id is NOT a filename alias — the ingestor never maps it
 	}
 	for _, c := range cases {
 		if got := imageFileColIndex(c.header); got != c.want {
