@@ -133,12 +133,27 @@ func listDatasetsDetailedWith(ctx context.Context, exec Executor, namespace, pod
 		if !identRe.MatchString(d.Name) {
 			continue // never interpolate a non-identifier table name
 		}
-		// Qualify the table with the schema: mysql runs without -D (so an
-		// empty cluster with no ingestion DB still lists cleanly), and a bare
-		// table reference would fail with "No database selected".
+		// Reference only columns this table actually has. `label` is optional —
+		// self-supervised tasks (MLM/CLM/seq2seq/embeddings) omit it — and
+		// data_intent/extension can be absent on older tables. A missing column
+		// would fail the whole UNION ALL and take the entire listing down (exit
+		// 7), so fall back to a constant when a column isn't present.
+		intentExpr, classesExpr, extExpr := "''", "0", "''"
+		if hasColumn(d.Columns, "data_intent") {
+			intentExpr = "COALESCE(MAX(data_intent),'')"
+		}
+		if hasColumn(d.Columns, "label") {
+			classesExpr = "COUNT(DISTINCT label)"
+		}
+		if hasColumn(d.Columns, "extension") {
+			extExpr = "COALESCE(MAX(extension),'')"
+		}
+		// Qualify the table with the schema: mysql runs without -D (so an empty
+		// cluster with no ingestion DB still lists cleanly), and a bare table
+		// reference would fail with "No database selected".
 		selects = append(selects, fmt.Sprintf(
-			"SELECT '%s',COALESCE(MAX(data_intent),''),COUNT(*),COUNT(DISTINCT label),COALESCE(MAX(extension),'') FROM `%s`.`%s`",
-			d.Name, IngestionDatabase, d.Name))
+			"SELECT '%s',%s,COUNT(*),%s,%s FROM `%s`.`%s`",
+			d.Name, intentExpr, classesExpr, extExpr, IngestionDatabase, d.Name))
 	}
 	if len(selects) > 0 {
 		dataOut, err := runMySQLQuery(ctx, exec, namespace, pod, container, strings.Join(selects, " UNION ALL "))

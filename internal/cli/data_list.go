@@ -166,7 +166,7 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 
 	header := fmt.Sprintf("Datasets in %s — %d", namespace, len(shown))
 	if totalBytes > 0 {
-		header += " · " + humanBytes(totalBytes)
+		header += " · " + push.HumanBytes(totalBytes)
 	}
 	p.Section(header)
 	if len(system) > 0 && !showAll {
@@ -209,7 +209,7 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 		sort.Slice(system, func(i, j int) bool { return system[i].Name < system[j].Name })
 		p.Section(fmt.Sprintf("System · %d", len(system)))
 		for _, d := range system {
-			p.Para(fmt.Sprintf("· %-*s  %9s", nameW, d.Name, humanBytes(d.SizeBytes)))
+			p.Para(fmt.Sprintf("· %-*s  %9s", nameW, d.Name, push.HumanBytes(d.SizeBytes)))
 		}
 	}
 }
@@ -231,7 +231,7 @@ func datasetRow(d push.DatasetInfo, modality string, nameW, fmtW int) string {
 	}
 	size := "—" // du unavailable / unknown
 	if d.SizeBytes > 0 {
-		size = humanBytes(d.SizeBytes)
+		size = push.HumanBytes(d.SizeBytes)
 	}
 	return fmt.Sprintf("%s %-*s  %-5s  %-12s  %9s  %-*s  %s",
 		glyph, nameW, name, split, recordsCell(d, modality), size,
@@ -329,20 +329,6 @@ func formatCell(d push.DatasetInfo, modality string) string {
 	return base
 }
 
-// humanBytes renders a byte count as B / KiB / MiB / GiB / TiB.
-func humanBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit && exp < 3; m /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), []string{"KiB", "MiB", "GiB", "TiB"}[exp])
-}
-
 // relativeTime renders an ISO-ish "2006-01-02T15:04:05" timestamp (the table's
 // create_time, in the DB server's clock) as a coarse "Xh ago". Empty/unparsable
 // → an em dash.
@@ -385,17 +371,20 @@ type dataListJSON struct {
 	Namespace string        `json:"namespace"`
 	Release   string        `json:"release"`
 	Count     int           `json:"count"`
-	Datasets  []datasetJSON `json:"datasets"`
+	Datasets  []string      `json:"datasets"` // names — type unchanged (additive-only JSON contract)
+	Details   []datasetJSON `json:"details"`  // per-dataset metadata added by the rich listing
 }
 
 func writeDataListJSON(w io.Writer, namespace, release string, infos []push.DatasetInfo, showAll bool) {
-	datasets := []datasetJSON{}
+	names := []string{}
+	details := []datasetJSON{}
 	for _, d := range infos {
 		if d.System && !showAll {
 			continue
 		}
 		m := datasetModality(d)
-		datasets = append(datasets, datasetJSON{
+		names = append(names, d.Name)
+		details = append(details, datasetJSON{
 			Name:      d.Name,
 			Modality:  m,
 			Intent:    d.Intent,
@@ -410,8 +399,9 @@ func writeDataListJSON(w io.Writer, namespace, release string, infos []push.Data
 	res := dataListJSON{
 		Namespace: namespace,
 		Release:   release,
-		Count:     len(datasets),
-		Datasets:  datasets,
+		Count:     len(names),
+		Datasets:  names,
+		Details:   details,
 	}
 	b, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {

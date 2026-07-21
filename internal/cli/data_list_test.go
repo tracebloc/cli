@@ -81,7 +81,7 @@ func TestRenderDataList_RichAndGrouped(t *testing.T) {
 	for _, want := range []string{
 		"Datasets in test0721 — 4 · ",                             // 4 shown (system excluded), total size
 		"Image · 1", "Text · 1", "Tabular · 1", "Time-series · 1", // modality groups
-		"image_train", "20 images", "12.9 KiB", "jpg · 2 classes", "train", // rich image row
+		"image_train", "20 images", "12.90 KiB", "jpg · 2 classes", "train", // rich image row
 		"tabular_train", "20 rows", "csv · 2 cols", // tabular row + feature-col count
 		"timeseries_train", "36 rows", // time-series grouped by sequence_id/timestamp
 		"1 system table(s) hidden", // hint
@@ -145,17 +145,9 @@ func TestFormatCell_OtherIsNeutral(t *testing.T) {
 	}
 }
 
-func TestHumanBytes(t *testing.T) {
-	cases := map[int64]string{0: "0 B", 512: "512 B", 2048: "2.0 KiB", 13210: "12.9 KiB", 5 * 1024 * 1024: "5.0 MiB"}
-	for n, want := range cases {
-		if got := humanBytes(n); got != want {
-			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
-		}
-	}
-}
-
-// TestWriteDataListJSON: rich per-dataset objects; system excluded unless
-// --all; an empty result marshals datasets as [] (not null).
+// TestWriteDataListJSON: `datasets` stays a string array (additive contract);
+// the rich objects go in the new `details`. System excluded unless --all; an
+// empty result marshals both as [] (not null).
 func TestWriteDataListJSON(t *testing.T) {
 	var buf bytes.Buffer
 	writeDataListJSON(&buf, "ns1", "tracebloc", sampleInfos(), false)
@@ -167,23 +159,39 @@ func TestWriteDataListJSON(t *testing.T) {
 	if got.Namespace != "ns1" || got.Release != "tracebloc" || got.Count != 4 {
 		t.Errorf("unexpected top-level: %+v", got)
 	}
-	var img *datasetJSON
-	for i := range got.Datasets {
-		if got.Datasets[i].Name == "image_train" {
-			img = &got.Datasets[i]
+	// `datasets` is still a []string of names (contract-preserving).
+	if len(got.Datasets) != 4 {
+		t.Errorf("datasets (names) count = %d, want 4", len(got.Datasets))
+	}
+	foundName := false
+	for _, n := range got.Datasets {
+		if n == "image_train" {
+			foundName = true
 		}
-		if got.Datasets[i].System {
-			t.Errorf("system table must be excluded without --all: %+v", got.Datasets[i])
+	}
+	if !foundName {
+		t.Errorf("datasets should list names incl image_train: %v", got.Datasets)
+	}
+	// `details` carries the rich objects.
+	var img *datasetJSON
+	for i := range got.Details {
+		if got.Details[i].Name == "image_train" {
+			img = &got.Details[i]
+		}
+		if got.Details[i].System {
+			t.Errorf("system table must be excluded without --all: %+v", got.Details[i])
 		}
 	}
 	if img == nil || img.Modality != "Image" || img.Records != 20 || img.Format != "jpg · 2 classes" {
-		t.Errorf("image dataset JSON wrong: %+v", img)
+		t.Errorf("image dataset detail wrong: %+v", img)
 	}
 
 	buf.Reset()
 	writeDataListJSON(&buf, "ns1", "tracebloc", nil, false)
-	if !strings.Contains(buf.String(), `"datasets": []`) {
-		t.Errorf("nil datasets should marshal as []:\n%s", buf.String())
+	for _, want := range []string{`"datasets": []`, `"details": []`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("nil result should marshal %s:\n%s", want, buf.String())
+		}
 	}
 
 	buf.Reset()
