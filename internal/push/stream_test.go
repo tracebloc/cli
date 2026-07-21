@@ -150,7 +150,7 @@ func TestStreamLayout_TarContents(t *testing.T) {
 	want := []entry{
 		{name: "images/a.jpg", size: 100}, // imgcDir writes 100-byte images
 		{name: "images/b.png", size: 100},
-		{name: "labels.csv", size: 39}, // "image_id,label\n001.jpg,cat\n002.jpg,dog\n"
+		{name: "labels.csv", size: 39}, // "filename,label\n001.jpg,cat\n002.jpg,dog\n"
 	}
 	for i := range want {
 		if got[i] != want[i] {

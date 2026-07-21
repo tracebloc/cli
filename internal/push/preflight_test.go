@@ -233,11 +233,12 @@ func TestCrossCheckLabels(t *testing.T) {
 	}
 }
 
-// The image filename is resolved by the "filename" COLUMN NAME, not positionally —
-// so a `label,filename` header (filename not first, a layout the ingestor accepts
-// via record.get("filename")) must not false-reject. Reading rec[0] would treat the
-// label value ("cat"/"dog") as the filename and flag every row missing (exit 3).
-func TestCrossCheckLabels_FilenameColumnNotFirst(t *testing.T) {
+// A `label,filename` header (filename NOT first) must resolve by the filename
+// column, not fall back to index 0 (the label column) — which would read
+// "cat"/"dog" as filenames and false-reject every row. Regression for Asad's
+// #207 review. (The ingestor resolves ONLY a column named "filename"; it does
+// not accept a data_id or image_id alias — see TestCheckImageFilenameColumn.)
+func TestCrossCheckLabels_FilenameNotFirst(t *testing.T) {
 	dir := t.TempDir()
 	imgs := filepath.Join(dir, "images")
 	if err := os.MkdirAll(imgs, 0o755); err != nil {
@@ -249,9 +250,9 @@ func TestCrossCheckLabels_FilenameColumnNotFirst(t *testing.T) {
 		}
 	}
 	csvPath := filepath.Join(dir, "labels.csv")
-	// filename is the SECOND column, and mixed-case to exercise the ci match.
+	// filename column, and not first.
 	if err := os.WriteFile(csvPath,
-		[]byte("label,Filename\ncat,a.jpg\ndog,b\ncat,ghost.jpg\n"), 0o644); err != nil {
+		[]byte("label,filename\ncat,a.jpg\ndog,b\ncat,ghost.jpg\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	images := []string{filepath.Join(imgs, "a.jpg"), filepath.Join(imgs, "b.jpg"), filepath.Join(imgs, "extra.jpg")}
@@ -260,45 +261,50 @@ func TestCrossCheckLabels_FilenameColumnNotFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(missing) != 1 || missing[0] != "ghost.jpg" {
-		t.Errorf("missing = %v, want [ghost.jpg] — the label values must NOT be read as filenames", missing)
+		t.Errorf("missing = %v, want [ghost.jpg] — filename column must resolve; label values must NOT be read as filenames", missing)
 	}
 	if len(orphans) != 1 || orphans[0] != "extra.jpg" {
 		t.Errorf("orphans = %v, want [extra.jpg]", orphans)
 	}
 }
 
-// A `label,data_id` header (no filename column) is ingested cleanly by the cluster —
-// the ingestor resolves the image column as filename ELSE data_id. CrossCheckLabels
-// must resolve data_id, not fall back to index 0 (the label column), which would read
-// "cat"/"dog" as filenames and false-reject every row (exit 3). Regression for Asad's
-// #207 review.
-func TestCrossCheckLabels_DataIDColumn(t *testing.T) {
-	dir := t.TempDir()
-	imgs := filepath.Join(dir, "images")
-	if err := os.MkdirAll(imgs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, n := range []string{"a.jpg", "b.jpg", "extra.jpg"} {
-		if err := os.WriteFile(filepath.Join(imgs, n), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
+// CheckImageFilenameColumn mirrors the ingestor's transfer-time contract
+// (layout.v1.json requires_filename_column): the manifest MUST carry a column
+// that resolves to "filename" (case-insensitive + whitespace-trimmed, like the
+// ingestor's _match_column). image_id / data_id / a label-only header have none,
+// so the cluster drops every row at transfer ("No filename found in record",
+// exit 9) — the CLI rejects them up front instead of green-lighting the upload.
+func TestCheckImageFilenameColumn(t *testing.T) {
+	for _, h := range [][]string{
+		{"filename", "label"},
+		{"label", "filename"},
+		{"label", " filename "}, // surrounding whitespace trimmed (pandas strips it too)
+	} {
+		if err := CheckImageFilenameColumn(h); err != nil {
+			t.Errorf("CheckImageFilenameColumn(%v) = %v, want nil", h, err)
 		}
 	}
-	csvPath := filepath.Join(dir, "labels.csv")
-	// data_id instead of filename, and not first — a layout the ingestor accepts.
-	if err := os.WriteFile(csvPath,
-		[]byte("label,data_id\ncat,a.jpg\ndog,b\ncat,ghost.jpg\n"), 0o644); err != nil {
-		t.Fatal(err)
+	// A case variant passes the ingestor's case-insensitive preflight but fails
+	// its case-sensitive transfer read — reject it here, and say to lowercase it.
+	if err := CheckImageFilenameColumn([]string{"Filename", "label"}); err == nil {
+		t.Error("CheckImageFilenameColumn([Filename label]) = nil, want a reject")
+	} else if !strings.Contains(err.Error(), "lowercase") {
+		t.Errorf("case-variant error should tell the user to lowercase it: %v", err)
 	}
-	images := []string{filepath.Join(imgs, "a.jpg"), filepath.Join(imgs, "b.jpg"), filepath.Join(imgs, "extra.jpg")}
-	missing, orphans, err := CrossCheckLabels(csvPath, images, ".jpg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(missing) != 1 || missing[0] != "ghost.jpg" {
-		t.Errorf("missing = %v, want [ghost.jpg] — data_id must resolve; label values must NOT be read as filenames", missing)
-	}
-	if len(orphans) != 1 || orphans[0] != "extra.jpg" {
-		t.Errorf("orphans = %v, want [extra.jpg]", orphans)
+	for _, h := range [][]string{
+		{"image_id", "label"}, // the reported bug
+		{"label", "data_id"},  // NOT a filename alias
+		{"Filename", "label"}, // case variant — also a doomed upload
+		{"label"},             // no file column at all
+	} {
+		err := CheckImageFilenameColumn(h)
+		if err == nil {
+			t.Errorf("CheckImageFilenameColumn(%v) = nil, want a reject", h)
+			continue
+		}
+		if !strings.Contains(err.Error(), "filename") {
+			t.Errorf("error should name the filename column: %v", err)
+		}
 	}
 }
 
@@ -307,13 +313,12 @@ func TestImageFileColIndex(t *testing.T) {
 		header []string
 		want   int
 	}{
-		{[]string{"filename", "label"}, 0},            // filename by name, first
-		{[]string{"label", "filename"}, 1},            // filename by name, not first (the original bug)
-		{[]string{"label", " Filename "}, 1},          // case + whitespace insensitive
-		{[]string{"label", "data_id"}, 1},             // no filename → data_id (the ingestor's fallback)
-		{[]string{"label", "Data_ID"}, 1},             // data_id, case-insensitive
-		{[]string{"data_id", "filename", "label"}, 1}, // filename wins over data_id when both present
-		{[]string{"image_id", "label"}, 0},            // neither → fallback to 0
+		{[]string{"filename", "label"}, 0},    // exact, first
+		{[]string{"label", "filename"}, 1},    // exact, not first (the original bug)
+		{[]string{"label", " filename "}, 1},  // surrounding whitespace trimmed (pandas strips it too)
+		{[]string{"label", " Filename "}, -1}, // case VARIANT → -1: transfer's record.get is case-sensitive
+		{[]string{"image_id", "label"}, -1},   // no filename column → -1 (rejected up front by CheckImageFilenameColumn)
+		{[]string{"label", "data_id"}, -1},    // data_id is NOT a filename alias — the ingestor never maps it
 	}
 	for _, c := range cases {
 		if got := imageFileColIndex(c.header); got != c.want {

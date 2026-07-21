@@ -81,7 +81,7 @@
     },
     "imgc-label-missing": {
       "errors": [
-        "LabelColumnValidator: Configured label column 'label' not found in CSV header (columns: image_id, target). Set 'label:' in the ingest config to an existing column, or add the 'label' column to the CSV."
+        "LabelColumnValidator: Configured label column 'label' not found in CSV header (columns: filename, target). Set 'label:' in the ingest config to an existing column, or add the 'label' column to the CSV."
       ],
       "verdict": "reject"
     },
@@ -104,6 +104,10 @@
       "verdict": "accept"
     },
     "imgc-missing-file": {
+      "errors": [],
+      "verdict": "accept"
+    },
+    "imgc-no-filename-col": {
       "errors": [],
       "verdict": "accept"
     },
@@ -151,6 +155,10 @@
         "ImageResolutionValidator: Images below the minimum size (32, 32) (width, height) were found \u2014 they are too small to train on. Provide larger images or, if your model accepts smaller inputs, lower the floor via file_options.min_size. Offending files: ['images/b.jpg: (16, 16)', 'images/a.jpg: (16, 16)']"
       ],
       "verdict": "reject"
+    },
+    "imgc-uppercase-filename-col": {
+      "errors": [],
+      "verdict": "accept"
     },
     "imgc-zero-byte": {
       "errors": [

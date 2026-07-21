@@ -73,7 +73,7 @@ func imageDirLayout(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "labels.csv"),
-		[]byte("image_id,label\n001.jpg,cat\n"), 0o644); err != nil {
+		[]byte("filename,label\n001.jpg,cat\n"), 0o644); err != nil {
 		t.Fatalf("write labels.csv: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Join(root, "images"), 0o755); err != nil {
@@ -223,7 +223,7 @@ func TestRunInteractive_SniffIsHintNotLock(t *testing.T) {
 func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "labels.csv"),
-		[]byte("image_id,label\n001.jpg,cat\n"), 0o644); err != nil {
+		[]byte("filename,label\n001.jpg,cat\n"), 0o644); err != nil {
 		t.Fatalf("write labels.csv: %v", err)
 	}
 	if err := os.Mkdir(filepath.Join(dir, "Images"), 0o755); err != nil {
