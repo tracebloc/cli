@@ -175,8 +175,10 @@ func TestApplyDatasetSizes(t *testing.T) {
 			Columns: []string{"data_id", "filename", "extension"}},
 		{Name: "empty_ds", Extension: "", Records: 0, DBBytes: 16384,
 			Columns: []string{"data_id", "filename", "extension"}}, // 0 rows → sizeless, not the page allocation
+		{Name: "tab_dir", Extension: "", Records: 20, DBBytes: 24576,
+			Columns: []string{"data_id", "filename", "extension", "age"}}, // row-based WITH a stray PVC dir
 	}
-	applyDatasetSizes(infos, map[string]int64{"img_train": 1048576})
+	applyDatasetSizes(infos, map[string]int64{"img_train": 1048576, "tab_dir": 999999})
 	if infos[0].SizeBytes != 1048576 {
 		t.Errorf("file dataset should take the du size, got %d", infos[0].SizeBytes)
 	}
@@ -188,6 +190,9 @@ func TestApplyDatasetSizes(t *testing.T) {
 	}
 	if infos[3].SizeBytes != 0 {
 		t.Errorf("empty dataset (0 rows) must stay 0 (—), not the InnoDB page size, got %d", infos[3].SizeBytes)
+	}
+	if infos[4].SizeBytes != 24576 {
+		t.Errorf("row-based dataset with a stray PVC dir must keep DBBytes, not the du size, got %d", infos[4].SizeBytes)
 	}
 }
 

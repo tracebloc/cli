@@ -73,9 +73,14 @@ func ListDatasetsDetailed(ctx context.Context, cs kubernetes.Interface, cfg *res
 // its ⚠ empty flag) rather than implying it holds a page of data.
 func applyDatasetSizes(infos []DatasetInfo, duSizes map[string]int64) {
 	for i := range infos {
-		if b, ok := duSizes[infos[i].Name]; ok {
-			infos[i].SizeBytes = b // file dataset: real PVC size
-		} else if infos[i].Extension == "" && infos[i].Records > 0 {
+		// The Extension gate runs FIRST: a row-based table can still have a dest
+		// dir on the shared PVC (ingest scaffolding), and that stray du entry must
+		// not override its real DBBytes.
+		if infos[i].Extension != "" {
+			if b, ok := duSizes[infos[i].Name]; ok {
+				infos[i].SizeBytes = b // file dataset: real PVC size
+			}
+		} else if infos[i].Records > 0 {
 			infos[i].SizeBytes = infos[i].DBBytes // row-based with rows: DB data_length
 		}
 	}
