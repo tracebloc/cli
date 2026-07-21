@@ -186,13 +186,10 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 	ilog.Logf("authenticated; provisioning against the signed-in account")
 
 	name, location := opts.name, opts.location
-	// Defense-in-depth for the name-garble bug (customer-reported 2026-07-20): a
-	// --name / $TRACEBLOC_CLIENT_NAME can carry terminal escape sequences (arrow
-	// keys = ESC[D/ESC[A, bracketed-paste wrappers). slug.Slugify turns each into
-	// a "-" and would mint a garbage namespace ("se-d-d-a-a"); strip them here so
-	// the shared slug rule stays a faithful mirror of the backend's slug.py. A
-	// name that is ONLY control characters cleans to "" and falls through to
-	// auto-naming below — the same graceful path as an omitted --name.
+	// Strip terminal escape sequences / control chars a --name or
+	// $TRACEBLOC_CLIENT_NAME may carry (see sanitizeClientName for the why). A
+	// control-char-only name cleans to "" and falls through to auto-naming below,
+	// exactly like an omitted --name.
 	if cleaned := sanitizeClientName(name); cleaned != name {
 		ilog.Logf("stripped control characters from supplied name %q -> %q", name, cleaned)
 		if cleaned == "" {
@@ -206,6 +203,11 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 		ilog.Logf("stripped control characters from supplied location %q -> %q", location, cleanedLoc)
 		location = cleanedLoc
 	}
+	// Reflect cleaned values into opts NOW: an early return before the write-back
+	// below (e.g. the ListClients failure in the auto-name block) runs the failure
+	// defer, whose resumeCommand(opts) would otherwise reprint the raw escapes
+	// (Bugbot). The write-back below still captures the auto-generated name.
+	opts.name, opts.location = name, location
 	// cli#137 — the installer path provisions with zero flags and zero prompts:
 	//   • name: auto-generated below (<firstname>-NN) once the account's client
 	//     list is in hand, so --name is never required; --name /

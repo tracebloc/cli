@@ -1494,3 +1494,37 @@ func TestClientSubcommandVisibility(t *testing.T) {
 		t.Error("hidden create must still be runnable (the installer invokes it)")
 	}
 }
+
+// TestClientCreate_GarbledNameNotReprintedOnFailure guards the Bugbot "stale opts
+// after empty sanitize" finding: a control-char-only --name cleans to "", and if
+// the client list then fails, runClientCreate returns from the auto-name block.
+// The failure defer prints resumeCommand(opts) — opts must already hold the
+// CLEANED name, or the raw escape bytes get reprinted into the terminal and the
+// resume line reintroduces the same garbled name.
+func TestClientCreate_GarbledNameNotReprintedOnFailure(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		// ListClients (GET /edge-device/) fails → the empty-name block returns early,
+		// exercising the window between the sanitize and the normal opts write-back.
+		if r.Method == http.MethodGet && r.URL.Path == "/edge-device/" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		t.Errorf("unexpected %s %s — should have bailed on the list failure", r.Method, r.URL.Path)
+	})
+
+	var out bytes.Buffer
+	// Arrow keys only → sanitizeClientName clears it to "" (the auto-name path).
+	err := runClientCreate(context.Background(), ui.New(&out), nil,
+		clientCreateOpts{name: "\x1b[D\x1b[D\x1b[A", yes: true})
+	if err == nil {
+		t.Fatal("expected an error when the client list fails on the auto-name path")
+	}
+	if strings.ContainsRune(out.String(), '\x1b') {
+		t.Fatalf("failure output reprinted raw escape bytes:\n%q", out.String())
+	}
+	// The name cleaned to "" → resumeCommand must omit --name entirely (not offer a
+	// resume line that reintroduces the garble).
+	if strings.Contains(out.String(), "--name") {
+		t.Fatalf("resume command should omit --name after the garbled name cleaned to empty:\n%q", out.String())
+	}
+}
