@@ -28,7 +28,7 @@ func imgcLayout(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "labels.csv"),
-		[]byte("image_id,label\n001.jpg,cat\n002.jpg,dog\n"), 0o644); err != nil {
+		[]byte("filename,label\n001.jpg,cat\n002.jpg,dog\n"), 0o644); err != nil {
 		t.Fatalf("write labels.csv: %v", err)
 	}
 	imagesDir := filepath.Join(root, "images")
@@ -236,7 +236,7 @@ func TestDataIngest_BareCSVFile_Accepted(t *testing.T) {
 func TestDataIngest_ImageBareFile_ExitsThree(t *testing.T) {
 	dir := t.TempDir()
 	csv := filepath.Join(dir, "labels.csv")
-	if err := os.WriteFile(csv, []byte("image_id,label\n1.jpg,c\n"), 0o644); err != nil {
+	if err := os.WriteFile(csv, []byte("filename,label\n1.jpg,c\n"), 0o644); err != nil {
 		t.Fatalf("write csv: %v", err)
 	}
 	code, stdout, _ := execDataIngest(t, []string{

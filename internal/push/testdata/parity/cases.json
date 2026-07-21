@@ -208,6 +208,20 @@
       "note": "DELIBERATE divergence: the ingestor's preflight passes \u2014 the row becomes a failed record at TRANSFER time ('completed with failures', exit 9, post-upload). The CLI previews the transfer fate (cli#72a)."
     },
     {
+      "name": "imgc-no-filename-col",
+      "category": "image_classification",
+      "csv": "labels.csv",
+      "label_column": "label",
+      "extension": ".jpg",
+      "target_size": [
+        32,
+        32
+      ],
+      "cli_verdict": "reject",
+      "ingestor_verdict": "accept",
+      "note": "DELIBERATE divergence: labels.csv names its file column image_id, not filename. The ingestor's preflight (validate_data) accepts it (IngestableRecordsValidator passes when the filename column is absent), but at TRANSFER time record.get('filename') is empty for every row, so all files fail ('No filename found in record'), 0 records ingested, exit 9. The CLI previews this structural gap up front (CheckImageFilenameColumn), mirroring the ingestor's file_transfer contract (requires_filename_column)."
+    },
+    {
       "name": "imgc-label-uniform",
       "category": "image_classification",
       "csv": "labels.csv",

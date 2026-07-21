@@ -267,12 +267,12 @@ func TestCrossCheckLabels_FilenameColumnNotFirst(t *testing.T) {
 	}
 }
 
-// A `label,data_id` header (no filename column) is ingested cleanly by the cluster —
-// the ingestor resolves the image column as filename ELSE data_id. CrossCheckLabels
-// must resolve data_id, not fall back to index 0 (the label column), which would read
-// "cat"/"dog" as filenames and false-reject every row (exit 3). Regression for Asad's
-// #207 review.
-func TestCrossCheckLabels_DataIDColumn(t *testing.T) {
+// A `label,filename` header (filename NOT first) must resolve by the filename
+// column, not fall back to index 0 (the label column) — which would read
+// "cat"/"dog" as filenames and false-reject every row. Regression for Asad's
+// #207 review. (The ingestor resolves ONLY a column named "filename"; it does
+// not accept a data_id or image_id alias — see TestCheckImageFilenameColumn.)
+func TestCrossCheckLabels_FilenameNotFirst(t *testing.T) {
 	dir := t.TempDir()
 	imgs := filepath.Join(dir, "images")
 	if err := os.MkdirAll(imgs, 0o755); err != nil {
@@ -284,9 +284,9 @@ func TestCrossCheckLabels_DataIDColumn(t *testing.T) {
 		}
 	}
 	csvPath := filepath.Join(dir, "labels.csv")
-	// data_id instead of filename, and not first — a layout the ingestor accepts.
+	// filename column, and not first.
 	if err := os.WriteFile(csvPath,
-		[]byte("label,data_id\ncat,a.jpg\ndog,b\ncat,ghost.jpg\n"), 0o644); err != nil {
+		[]byte("label,filename\ncat,a.jpg\ndog,b\ncat,ghost.jpg\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	images := []string{filepath.Join(imgs, "a.jpg"), filepath.Join(imgs, "b.jpg"), filepath.Join(imgs, "extra.jpg")}
@@ -295,10 +295,42 @@ func TestCrossCheckLabels_DataIDColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(missing) != 1 || missing[0] != "ghost.jpg" {
-		t.Errorf("missing = %v, want [ghost.jpg] — data_id must resolve; label values must NOT be read as filenames", missing)
+		t.Errorf("missing = %v, want [ghost.jpg] — filename column must resolve; label values must NOT be read as filenames", missing)
 	}
 	if len(orphans) != 1 || orphans[0] != "extra.jpg" {
 		t.Errorf("orphans = %v, want [extra.jpg]", orphans)
+	}
+}
+
+// CheckImageFilenameColumn mirrors the ingestor's transfer-time contract
+// (layout.v1.json requires_filename_column): the manifest MUST carry a column
+// that resolves to "filename" (case-insensitive + whitespace-trimmed, like the
+// ingestor's _match_column). image_id / data_id / a label-only header have none,
+// so the cluster drops every row at transfer ("No filename found in record",
+// exit 9) — the CLI rejects them up front instead of green-lighting the upload.
+func TestCheckImageFilenameColumn(t *testing.T) {
+	for _, h := range [][]string{
+		{"filename", "label"},
+		{"label", "filename"},
+		{"label", " Filename "}, // case + whitespace insensitive
+	} {
+		if err := CheckImageFilenameColumn(h); err != nil {
+			t.Errorf("CheckImageFilenameColumn(%v) = %v, want nil", h, err)
+		}
+	}
+	for _, h := range [][]string{
+		{"image_id", "label"}, // the reported bug
+		{"label", "data_id"},  // NOT a filename alias
+		{"label"},             // no file column at all
+	} {
+		err := CheckImageFilenameColumn(h)
+		if err == nil {
+			t.Errorf("CheckImageFilenameColumn(%v) = nil, want a reject", h)
+			continue
+		}
+		if !strings.Contains(err.Error(), "filename") {
+			t.Errorf("error should name the filename column: %v", err)
+		}
 	}
 }
 
@@ -307,13 +339,11 @@ func TestImageFileColIndex(t *testing.T) {
 		header []string
 		want   int
 	}{
-		{[]string{"filename", "label"}, 0},            // filename by name, first
-		{[]string{"label", "filename"}, 1},            // filename by name, not first (the original bug)
-		{[]string{"label", " Filename "}, 1},          // case + whitespace insensitive
-		{[]string{"label", "data_id"}, 1},             // no filename → data_id (the ingestor's fallback)
-		{[]string{"label", "Data_ID"}, 1},             // data_id, case-insensitive
-		{[]string{"data_id", "filename", "label"}, 1}, // filename wins over data_id when both present
-		{[]string{"image_id", "label"}, 0},            // neither → fallback to 0
+		{[]string{"filename", "label"}, 0},   // filename by name, first
+		{[]string{"label", "filename"}, 1},   // filename by name, not first (the original bug)
+		{[]string{"label", " Filename "}, 1}, // case + whitespace insensitive (mirrors _match_column)
+		{[]string{"image_id", "label"}, -1},  // no filename column → -1 (rejected up front by CheckImageFilenameColumn)
+		{[]string{"label", "data_id"}, -1},   // data_id is NOT a filename alias — the ingestor never maps it
 	}
 	for _, c := range cases {
 		if got := imageFileColIndex(c.header); got != c.want {

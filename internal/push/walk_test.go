@@ -16,7 +16,7 @@ func imgcDir(t *testing.T, withImages ...string) string {
 	root := t.TempDir()
 
 	if err := os.WriteFile(filepath.Join(root, "labels.csv"),
-		[]byte("image_id,label\n001.jpg,cat\n002.jpg,dog\n"), 0o644); err != nil {
+		[]byte("filename,label\n001.jpg,cat\n002.jpg,dog\n"), 0o644); err != nil {
 		t.Fatalf("write labels.csv: %v", err)
 	}
 	imagesDir := filepath.Join(root, "images")
@@ -57,7 +57,7 @@ func TestDiscover_HappyPath(t *testing.T) {
 
 func TestDiscover_TotalBytesSum(t *testing.T) {
 	// Two 100-byte images + the inline labels.csv string (39 bytes:
-	// "image_id,label\n001.jpg,cat\n002.jpg,dog\n"). 100+100+39 = 239.
+	// "filename,label\n001.jpg,cat\n002.jpg,dog\n"). 100+100+39 = 239.
 	// This pins the pre-cluster size summary the dry-run output
 	// prints — if we ever undercount, customers see "0 bytes"
 	// pre-push and panic.
@@ -119,7 +119,7 @@ func TestDiscover_SkipsNonImageFiles(t *testing.T) {
 func TestDiscover_BareFileRejected(t *testing.T) {
 	dir := t.TempDir()
 	bare := filepath.Join(dir, "labels.csv")
-	if err := os.WriteFile(bare, []byte("image_id,label\n1.jpg,c\n"), 0o644); err != nil {
+	if err := os.WriteFile(bare, []byte("filename,label\n1.jpg,c\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := Discover(bare)
@@ -237,7 +237,7 @@ func TestDiscover_RejectsSymlinkedImage(t *testing.T) {
 	}
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "labels.csv"),
-		[]byte("image_id,label\n001.jpg,cat\n"), 0o644); err != nil {
+		[]byte("filename,label\n001.jpg,cat\n"), 0o644); err != nil {
 		t.Fatalf("write labels.csv: %v", err)
 	}
 	imagesDir := filepath.Join(root, "images")
@@ -278,7 +278,7 @@ func TestDiscover_RejectsSymlinkedImagesDir(t *testing.T) {
 	}
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "labels.csv"),
-		[]byte("image_id,label\n001.jpg,cat\n"), 0o644); err != nil {
+		[]byte("filename,label\n001.jpg,cat\n"), 0o644); err != nil {
 		t.Fatalf("write labels.csv: %v", err)
 	}
 	// Create a real images dir somewhere ELSE that the symlink
@@ -315,7 +315,7 @@ func TestDiscover_RejectsSymlinkedLabelsCSV(t *testing.T) {
 	}
 	root := t.TempDir()
 	target := filepath.Join(t.TempDir(), "outside-labels.csv")
-	if err := os.WriteFile(target, []byte("image_id,label\n001.jpg,cat\n"), 0o644); err != nil {
+	if err := os.WriteFile(target, []byte("filename,label\n001.jpg,cat\n"), 0o644); err != nil {
 		t.Fatalf("write outside target: %v", err)
 	}
 	link := filepath.Join(root, "labels.csv")
