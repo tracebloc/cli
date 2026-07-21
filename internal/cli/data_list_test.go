@@ -123,6 +123,7 @@ func TestDatasetModality(t *testing.T) {
 		{push.DatasetInfo{Extension: "jpg"}, "Image"},
 		{push.DatasetInfo{Extension: "PNG"}, "Image"},
 		{push.DatasetInfo{Extension: "txt"}, "Text"},
+		{push.DatasetInfo{Extension: "text"}, "Text"}, // .text is also a text extension
 		{push.DatasetInfo{Columns: []string{"sequence_id", "timestamp", "hr"}}, "Time-series"},
 		{push.DatasetInfo{Columns: []string{"timestamp", "value"}}, "Time-series"},
 		{push.DatasetInfo{Columns: []string{"time", "event"}}, "Time-series"},

@@ -106,7 +106,11 @@ func listDatasetsDetailedWith(ctx context.Context, exec Executor, namespace, pod
 	// DB holds only metadata rows (the images/text live on the shared PVC), and
 	// for a tiny table InnoDB reports its padded page allocation, not the logical
 	// size — both misleading. Real sizes come from a `du` of the PVC below.
-	schemaQ := "SELECT t.table_name," +
+	// Raise group_concat_max_len (default 1024) so a wide table's column list
+	// isn't truncated mid-name — that would under-count feature columns and drop
+	// late modality markers. Runs as a leading statement over the same stdin.
+	schemaQ := "SET SESSION group_concat_max_len = 1048576; " +
+		"SELECT t.table_name," +
 		" COALESCE(MAX(DATE_FORMAT(t.create_time,'%Y-%m-%dT%H:%i:%s')),'')," +
 		" COALESCE(MAX(UNIX_TIMESTAMP(t.create_time)),0)," + // tz-safe epoch for "ago" math
 		" COALESCE(GROUP_CONCAT(c.column_name ORDER BY c.ordinal_position SEPARATOR ','),'')" +

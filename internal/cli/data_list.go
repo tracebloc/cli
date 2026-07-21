@@ -261,7 +261,7 @@ func datasetModality(d push.DatasetInfo) string {
 	switch strings.ToLower(d.Extension) {
 	case "jpg", "jpeg", "png":
 		return "Image"
-	case "txt":
+	case "txt", "text": // the ingestor accepts both .txt and .text
 		return "Text"
 	}
 	has := func(name string) bool {
