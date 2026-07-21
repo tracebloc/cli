@@ -16,57 +16,70 @@ import (
 )
 
 // TestScreensGolden pins EVERY piece of user-facing copy in one committed file,
-// testdata/screens.golden, so wording + spacing can be reviewed without deploying
-// — read the file, or the diff on any PR that changes copy. Three parts:
+// testdata/screens.golden, so wording AND exact layout (line breaks, tabs,
+// leading/trailing blanks) can be reviewed without deploying — read the file, or
+// the diff on any PR that changes copy.
 //
-//	A. Commands   — the `--help` of every command (all Short/Long/flag copy, exact)
-//	B. Screens    — the stateful views rendered plain (home, data list, review, …)
-//	C. Messages   — a harvested, deduped index of every user-facing string in the
-//	                source, so error paths + flows not rendered above are still here.
+// It's a verbatim terminal transcript: each block is `$ <command>` followed by
+// the BYTE-EXACT output. Help is captured through the real `--help` flag path
+// (SetArgs+Execute — exactly what the binary runs), screens through the real
+// renderers. Then an appendix indexes every remaining user-facing string.
 //
 // The test fails on drift; regenerate after an intentional copy change:
 //
 //	TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
 func TestScreensGolden(t *testing.T) {
 	const goldenPath = "testdata/screens.golden"
+	bi := BuildInfo{Version: "1.4.4", GitSHA: "0000000", BuildDate: "2026-01-01"}
 	var cat strings.Builder
 
 	cat.WriteString("tracebloc CLI — complete copy catalog\n")
-	cat.WriteString("═════════════════════════════════════\n")
-	cat.WriteString("Every user-facing string, generated from the source. Read this (or the\n")
-	cat.WriteString("diff on any PR that changes it) instead of deploying to review copy.\n")
+	cat.WriteString("A verbatim transcript: each `$ command` is followed by its byte-exact output\n")
+	cat.WriteString("(line breaks, tabs, blank lines — all as the terminal prints them).\n")
 	cat.WriteString("Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden\n")
 
-	// ── PART A: every command's --help ─────────────────────────────────────────
-	cat.WriteString("\n\n" + strings.Repeat("█", 3) + " A. COMMANDS — every `--help` " + strings.Repeat("█", 30) + "\n")
-	root := NewRootCmd(BuildInfo{Version: "1.4.4", GitSHA: "0000000", BuildDate: "2026-01-01"})
-	var walk func(c *cobra.Command)
-	walk = func(c *cobra.Command) {
-		var b bytes.Buffer
-		c.SetOut(&b)
-		c.SetErr(&b)
-		c.InitDefaultHelpFlag()
-		_ = c.Help()
-		cat.WriteString("\n┌─ " + c.CommandPath() + " --help " + strings.Repeat("─", 40) + "\n")
-		cat.WriteString(b.String())
+	// block writes `$ <cmd>\n` then the output VERBATIM — nothing else. The only
+	// whitespace between entries is each output's own real leading/trailing blank
+	// lines, so what you read is byte-for-byte what the terminal prints.
+	block := func(cmd, output string) {
+		cat.WriteString("$ " + cmd + "\n")
+		cat.WriteString(output)
+	}
+
+	// ── PART A: every command's --help, through the real flag path ──────────────
+	cat.WriteString("\n\n" + strings.Repeat("=", 78) + "\n= COMMANDS — every `--help`, byte-exact\n" + strings.Repeat("=", 78) + "\n")
+	// Enumerate every command path (incl. hidden — a user can still run them).
+	var paths [][]string
+	var walk func(c *cobra.Command, prefix []string)
+	walk = func(c *cobra.Command, prefix []string) {
+		paths = append(paths, prefix)
 		subs := append([]*cobra.Command(nil), c.Commands()...)
 		sort.Slice(subs, func(i, j int) bool { return subs[i].Name() < subs[j].Name() })
 		for _, s := range subs {
-			if s.Name() != "help" && s.Name() != "completion" {
-				walk(s)
+			if s.Name() == "help" || s.Name() == "completion" {
+				continue
 			}
+			child := append(append([]string{}, prefix...), s.Name())
+			walk(s, child)
 		}
 	}
-	walk(root)
+	walk(NewRootCmd(bi), nil)
+	for _, p := range paths {
+		var b bytes.Buffer
+		r := NewRootCmd(bi)
+		r.SetOut(&b)
+		r.SetErr(&b)
+		r.SetArgs(append(append([]string{}, p...), "--help"))
+		_ = r.Execute()
+		block(strings.TrimSpace("tracebloc "+strings.Join(p, " "))+" --help", b.String())
+	}
 
-	// ── PART B: rendered screens (plain) ────────────────────────────────────────
-	cat.WriteString("\n\n" + strings.Repeat("█", 3) + " B. SCREENS — rendered plain " + strings.Repeat("█", 31) + "\n")
-	screen := func(title string, f func(*ui.Printer)) {
+	// ── PART B: screens, rendered verbatim (same code the binary runs) ──────────
+	cat.WriteString("\n\n" + strings.Repeat("=", 78) + "\n= SCREENS — byte-exact renderer output\n" + strings.Repeat("=", 78) + "\n")
+	render := func(cmd string, f func(*ui.Printer)) {
 		var b bytes.Buffer
 		f(ui.New(&b, ui.WithColor(false)))
-		cat.WriteString("\n┌─ " + title + " " + strings.Repeat("─", maxi(0, 55-len(title))) + "\n")
-		cat.WriteString(b.String())
-		cat.WriteString("└" + strings.Repeat("─", 60) + "\n")
+		block(cmd, b.String())
 	}
 
 	online := homeModel{
@@ -85,30 +98,28 @@ func TestScreensGolden(t *testing.T) {
 	noEnv.state, noEnv.fullMenu, noEnv.envName = homeNoEnv, false, ""
 	signedOut := homeModel{state: homeNotSignedIn, inv: binTB}
 
-	screen("tb — home · Online", func(p *ui.Printer) { renderHome(p, online) })
-	screen("tb — home · running (couldn't confirm)", func(p *ui.Printer) { renderHome(p, noComp) })
-	screen("tb — home · running (backend not online)", func(p *ui.Printer) { renderHome(p, notOnline) })
-	screen("tb — home · starting up", func(p *ui.Printer) { renderHome(p, starting) })
-	screen("tb — home · offline", func(p *ui.Printer) { renderHome(p, offline) })
-	screen("tb — home · no secure environment", func(p *ui.Printer) { renderHome(p, noEnv) })
-	screen("tb — home · not signed in", func(p *ui.Printer) { renderHome(p, signedOut) })
+	render("tb   # home · Online", func(p *ui.Printer) { renderHome(p, online) })
+	render("tb   # home · running (couldn't confirm)", func(p *ui.Printer) { renderHome(p, noComp) })
+	render("tb   # home · running (backend not online)", func(p *ui.Printer) { renderHome(p, notOnline) })
+	render("tb   # home · starting up", func(p *ui.Printer) { renderHome(p, starting) })
+	render("tb   # home · offline", func(p *ui.Printer) { renderHome(p, offline) })
+	render("tb   # home · no secure environment", func(p *ui.Printer) { renderHome(p, noEnv) })
+	render("tb   # home · not signed in", func(p *ui.Printer) { renderHome(p, signedOut) })
 
 	sample := []push.DatasetInfo{
 		{Name: "xray_train", Intent: "train", Task: "image_classification", Records: 12000, Classes: 2, Extension: "jpg", SizeBytes: 1 << 30},
 		{Name: "xray_test", Intent: "test", Task: "image_classification", Records: 3000, Classes: 2, Extension: "jpg", SizeBytes: 256 << 20},
 		{Name: "ingest_run_journal", System: true},
 	}
-	screen("tb data list — empty", func(p *ui.Printer) { renderDataList(p, "hello-world", nil, false) })
-	screen("tb data list — populated", func(p *ui.Printer) { renderDataList(p, "hello-world", sample, false) })
-	screen("tb data list --all — with system tables", func(p *ui.Printer) { renderDataList(p, "hello-world", sample, true) })
-	screen("tb client create — review", func(p *ui.Printer) { renderClientReview(p, "lukas-macbook", "lukas-macbook", "DE", "a1b2c3d4") })
-	screen("tb delete — offboard summary (keep data)", func(p *ui.Printer) { renderOffboardSummary(p, "lukas-macbook", true) })
-	screen("tb delete — offboard summary (remove data)", func(p *ui.Printer) { renderOffboardSummary(p, "lukas-macbook", false) })
+	render("tb data list   # empty", func(p *ui.Printer) { renderDataList(p, "hello-world", nil, false) })
+	render("tb data list   # populated", func(p *ui.Printer) { renderDataList(p, "hello-world", sample, false) })
+	render("tb data list --all", func(p *ui.Printer) { renderDataList(p, "hello-world", sample, true) })
+	render("tb client create   # review", func(p *ui.Printer) { renderClientReview(p, "lukas-macbook", "lukas-macbook", "DE", "a1b2c3d4") })
+	render("tb delete   # keep data", func(p *ui.Printer) { renderOffboardSummary(p, "lukas-macbook", true) })
+	render("tb delete   # remove data", func(p *ui.Printer) { renderOffboardSummary(p, "lukas-macbook", false) })
 
-	// ── PART C: harvested message index ────────────────────────────────────────
-	cat.WriteString("\n\n" + strings.Repeat("█", 3) + " C. MESSAGES — every user-facing string in the source " + strings.Repeat("█", 5) + "\n")
-	cat.WriteString("(Deduped, sorted. Catches errors, hints, warnings, and flow copy — ingest,\n")
-	cat.WriteString("login, resources — that isn't a rendered screen above. `%…` are placeholders.)\n\n")
+	// ── APPENDIX: every remaining user-facing string ────────────────────────────
+	cat.WriteString("\n\n" + strings.Repeat("=", 78) + "\n= MESSAGE INDEX — every user-facing string in the source (templates, not\n= rendered; %s/%d are runtime placeholders). Catches errors, hints, and the\n= flows not rendered above (ingest validation, login, resources).\n" + strings.Repeat("=", 78) + "\n\n")
 	for _, m := range harvestMessages(t) {
 		cat.WriteString("  " + m + "\n")
 	}
@@ -133,23 +144,14 @@ func TestScreensGolden(t *testing.T) {
 	}
 }
 
-func maxi(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // harvestMessages reads the user-facing packages and extracts every string
 // literal passed to a Printer method or an error constructor — a complete,
 // deduped index of user-facing copy, independent of whether a screen renders it.
 func harvestMessages(t *testing.T) []string {
 	t.Helper()
-	// Printer method call with a double-quoted first arg, or errors.New / fmt.Errorf.
 	printer := regexp.MustCompile(`\.(?:Successf|Warnf|Errorf|Infof|Hintf|Detailf|Para|Section|PromptHint|PromptHeader|WarnLine|CrossLine|CheckLine|Step|Action|Stat|Field)\(\s*"((?:[^"\\]|\\.)*)"`)
 	errs := regexp.MustCompile(`(?:errors\.New|fmt\.Errorf)\(\s*"((?:[^"\\]|\\.)*)"`)
 	seen := map[string]struct{}{}
-	// Relative to internal/cli (the test's working dir).
 	for _, dir := range []string{".", "../submit", "../push", "../doctor", "../cluster"} {
 		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
@@ -162,7 +164,6 @@ func harvestMessages(t *testing.T) []string {
 			for _, re := range []*regexp.Regexp{printer, errs} {
 				for _, m := range re.FindAllStringSubmatch(string(src), -1) {
 					s := strings.TrimSpace(m[1])
-					// Skip empties and format-only fragments (" ", "%s") — no real words.
 					if len([]rune(s)) < 4 || !strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyz") {
 						continue
 					}

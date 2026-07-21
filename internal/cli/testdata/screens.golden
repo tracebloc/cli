@@ -1,13 +1,13 @@
 tracebloc CLI — complete copy catalog
-═════════════════════════════════════
-Every user-facing string, generated from the source. Read this (or the
-diff on any PR that changes it) instead of deploying to review copy.
+A verbatim transcript: each `$ command` is followed by its byte-exact output
+(line breaks, tabs, blank lines — all as the terminal prints them).
 Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
 
 
-███ A. COMMANDS — every `--help` ██████████████████████████████
-
-┌─ tracebloc --help ────────────────────────────────────────
+==============================================================================
+= COMMANDS — every `--help`, byte-exact
+==============================================================================
+$ tracebloc --help
 The tracebloc CLI connects machines to tracebloc as clients and
 manages the datasets that models train on. Your data stays on your
 infrastructure — models from other collaborators come to it, once you
@@ -36,9 +36,11 @@ Available Commands:
   auth        Inspect tracebloc authentication state
   client      Provision this machine's tracebloc client
   cluster     Inspect the cluster the CLI is currently targeting
+  completion  Generate the autocompletion script for the specified shell
   data        Manage the datasets in your secure environment
   delete      Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)
   doctor      Check your secure environment is connected and ready to run training
+  help        Help about any command
   login       Sign in to tracebloc in your browser (device flow)
   logout      Sign out (revoke the token server-side and clear it locally)
   resources   Show how much of this machine tracebloc may use
@@ -50,8 +52,7 @@ Flags:
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
 
 Use "tracebloc [command] --help" for more information about a command.
-
-┌─ tracebloc auth --help ────────────────────────────────────────
+$ tracebloc auth --help
 Inspect tracebloc authentication state
 
 Usage:
@@ -69,8 +70,7 @@ Global Flags:
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
 
 Use "tracebloc auth [command] --help" for more information about a command.
-
-┌─ tracebloc auth status --help ────────────────────────────────────────
+$ tracebloc auth status --help
 Show whether you're signed in, and to which backend
 
 Usage:
@@ -84,8 +84,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc client --help ────────────────────────────────────────
+$ tracebloc client --help
 Provision a tracebloc client for this machine. Requires sign-in first
 (`tracebloc login`). To remove tracebloc from this machine, use
 `tracebloc delete`.
@@ -105,8 +104,7 @@ Global Flags:
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
 
 Use "tracebloc client [command] --help" for more information about a command.
-
-┌─ tracebloc client create --help ────────────────────────────────────────
+$ tracebloc client create --help
 Provision a tracebloc client for this machine (auto-named; no flags required)
 
 Usage:
@@ -124,8 +122,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc client list --help ────────────────────────────────────────
+$ tracebloc client list --help
 List the clients in your account
 
 Usage:
@@ -140,8 +137,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc client status --help ────────────────────────────────────────
+$ tracebloc client status --help
 Report tracebloc's view of this machine's active client — online, offline,
 or pending. With --wait, poll until tracebloc reports it online (exit 0) or the
 timeout elapses (non-zero), to confirm the client connected after setup.
@@ -157,8 +153,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc cluster --help ────────────────────────────────────────
+$ tracebloc cluster --help
 Commands for inspecting the Kubernetes cluster the CLI is
 configured to talk to.
 
@@ -182,8 +177,7 @@ Global Flags:
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
 
 Use "tracebloc cluster [command] --help" for more information about a command.
-
-┌─ tracebloc cluster doctor --help ────────────────────────────────────────
+$ tracebloc cluster doctor --help
 Checks, in plain terms, whether your secure environment is connected to
 tracebloc and ready to run training — and if something's wrong, exactly what to
 do about it.
@@ -209,8 +203,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc cluster info --help ────────────────────────────────────────
+$ tracebloc cluster info --help
 Discovers the tracebloc client installed in the configured
 cluster + namespace and prints:
 
@@ -246,8 +239,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc data --help ────────────────────────────────────────
+$ tracebloc data --help
 Commands for ingesting and managing the datasets your secure environment holds —
 the data models train on. It stays on your infrastructure.
 
@@ -285,8 +277,7 @@ Global Flags:
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
 
 Use "tracebloc data [command] --help" for more information about a command.
-
-┌─ tracebloc data delete --help ────────────────────────────────────────
+$ tracebloc data delete --help
 Removes the in-cluster artifacts a previous `data ingest` created
 for a table: the MySQL table in training_test_datasets and the dataset's
 directories on the shared PVC. Destructive and not undoable.
@@ -326,8 +317,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc data ingest --help ────────────────────────────────────────
+$ tracebloc data ingest --help
 Ingests a local dataset into your secure environment's storage,
 submits the ingestion run, and follows it to completion (streaming
 progress + the final summary). Your data never leaves your own
@@ -423,8 +413,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc data list --help ────────────────────────────────────────
+$ tracebloc data list --help
 Lists the datasets ingested into your client — the tables in training_test_datasets
 on the cluster — grouped by modality, with each dataset's split (train/test),
 record count, size, format, and when it was ingested.
@@ -454,8 +443,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc data validate --help ────────────────────────────────────────
+$ tracebloc data validate --help
 Reads <path>, parses it as YAML, and validates it against the bundled
 ingest.v1.json schema (synced from tracebloc/data-ingestors). Prints
 violations in the same JSON-pointer-prefixed format the cluster's
@@ -479,8 +467,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc delete --help ────────────────────────────────────────
+$ tracebloc delete --help
 Removes tracebloc from this machine: revokes the machine credential,
 uninstalls the Helm release, deletes the local cluster, reclaims the tracebloc
 container images, and clears local state — then removes the CLI itself.
@@ -508,8 +495,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc doctor --help ────────────────────────────────────────
+$ tracebloc doctor --help
 Checks, in plain terms, whether your secure environment is connected to
 tracebloc and ready to run training — and if something's wrong, exactly what to
 do about it.
@@ -535,8 +521,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc ingest --help ────────────────────────────────────────
+$ tracebloc ingest --help
 Deprecated alias for `tracebloc data validate`
 
 Usage:
@@ -554,8 +539,7 @@ Global Flags:
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
 
 Use "tracebloc ingest [command] --help" for more information about a command.
-
-┌─ tracebloc ingest validate --help ────────────────────────────────────────
+$ tracebloc ingest validate --help
 Reads <path>, parses it as YAML, and validates it against the bundled
 ingest.v1.json schema (synced from tracebloc/data-ingestors). Prints
 violations in the same JSON-pointer-prefixed format the cluster's
@@ -579,8 +563,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc login --help ────────────────────────────────────────
+$ tracebloc login --help
 Sign in to tracebloc. The CLI prints a URL + short code; open the URL
 on any device (your laptop or phone), sign in the way you already do
 (password, Google, or GitHub), and approve the code. The CLI stores a
@@ -599,8 +582,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc logout --help ────────────────────────────────────────
+$ tracebloc logout --help
 Sign out (revoke the token server-side and clear it locally)
 
 Usage:
@@ -612,8 +594,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc resources --help ────────────────────────────────────────
+$ tracebloc resources --help
 Shows, in plain terms, how much of this machine tracebloc may use:
 
   • Your secure environment — the CPU and memory it can schedule
@@ -648,8 +629,7 @@ Global Flags:
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
 
 Use "tracebloc resources [command] --help" for more information about a command.
-
-┌─ tracebloc resources set --help ────────────────────────────────────────
+$ tracebloc resources set --help
 Raise the per-training-run ceiling — how much of this machine a single
 training run may use.
 
@@ -691,8 +671,7 @@ Flags:
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
-
-┌─ tracebloc version --help ────────────────────────────────────────
+$ tracebloc version --help
 Print the tracebloc CLI version, git SHA, and build date
 
 Usage:
@@ -707,9 +686,10 @@ Global Flags:
       --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
 
 
-███ B. SCREENS — rendered plain ███████████████████████████████
-
-┌─ tb — home · Online ──────────────────────────────────
+==============================================================================
+= SCREENS — byte-exact renderer output
+==============================================================================
+$ tb   # home · Online
 
 
   Welcome to your secure environment for AI, Lukas 👋
@@ -740,9 +720,7 @@ Global Flags:
 
   love from tracebloc 💚
 
-└────────────────────────────────────────────────────────────
-
-┌─ tb — home · running (couldn't confirm) ──────────────
+$ tb   # home · running (couldn't confirm)
 
 
   Welcome to your secure environment for AI, Lukas 👋
@@ -773,9 +751,7 @@ Global Flags:
 
   love from tracebloc 💚
 
-└────────────────────────────────────────────────────────────
-
-┌─ tb — home · running (backend not online) ────────────
+$ tb   # home · running (backend not online)
 
 
   Welcome to your secure environment for AI, Lukas 👋
@@ -806,9 +782,7 @@ Global Flags:
 
   love from tracebloc 💚
 
-└────────────────────────────────────────────────────────────
-
-┌─ tb — home · starting up ─────────────────────────────
+$ tb   # home · starting up
 
 
   Welcome to your secure environment for AI, Lukas 👋
@@ -839,9 +813,7 @@ Global Flags:
 
   love from tracebloc 💚
 
-└────────────────────────────────────────────────────────────
-
-┌─ tb — home · offline ─────────────────────────────────
+$ tb   # home · offline
 
 
   Welcome to your secure environment for AI, Lukas 👋
@@ -872,9 +844,7 @@ Global Flags:
 
   love from tracebloc 💚
 
-└────────────────────────────────────────────────────────────
-
-┌─ tb — home · no secure environment ───────────────────
+$ tb   # home · no secure environment
 
 
   Welcome to tracebloc — your secure environment for AI 👋
@@ -895,9 +865,7 @@ Global Flags:
 
   love from tracebloc 💚
 
-└────────────────────────────────────────────────────────────
-
-┌─ tb — home · not signed in ───────────────────────────
+$ tb   # home · not signed in
 
 
   Welcome to tracebloc — your secure environment for AI 👋
@@ -917,16 +885,12 @@ Global Flags:
 
   love from tracebloc 💚
 
-└────────────────────────────────────────────────────────────
-
-┌─ tb data list — empty ─────────────────────────────────
+$ tb data list   # empty
 
   Datasets in hello-world (0)
 
   No datasets yet — ingest one with `tracebloc data ingest`.
-└────────────────────────────────────────────────────────────
-
-┌─ tb data list — populated ─────────────────────────────
+$ tb data list   # populated
 
   Datasets in hello-world — 2 · 1.25 GiB
   1 system table(s) hidden — show with --all.
@@ -934,9 +898,7 @@ Global Flags:
   Image classification · 2
   ✔ xray_test   test   3000 images   256.00 MiB  jpg · 2 classes  —
   ✔ xray_train  train  12000 images    1.00 GiB  jpg · 2 classes  —
-└────────────────────────────────────────────────────────────
-
-┌─ tb data list --all — with system tables ──────────────
+$ tb data list --all
 
   Datasets in hello-world — 2 · 1.25 GiB
 
@@ -946,18 +908,14 @@ Global Flags:
 
   System · 1
   · ingest_run_journal     —
-└────────────────────────────────────────────────────────────
-
-┌─ tb client create — review ────────────────────────────
+$ tb client create   # review
 
   Review
     name:          lukas-macbook
     namespace:     lukas-macbook
     location:      DE
     cluster:       a1b2c3d4  (anchors this client — re-runs adopt it)
-└────────────────────────────────────────────────────────────
-
-┌─ tb delete — offboard summary (keep data) ─────────────
+$ tb delete   # keep data
 
   This will remove
   · This machine's credential — so tracebloc can no longer reach it
@@ -971,9 +929,7 @@ Global Flags:
 
   Left alone
   · Docker and related tools — remove them yourself if you no longer need them
-└────────────────────────────────────────────────────────────
-
-┌─ tb delete — offboard summary (remove data) ───────────
+$ tb delete   # remove data
 
   This will remove
   · This machine's credential — so tracebloc can no longer reach it
@@ -987,12 +943,13 @@ Global Flags:
 
   Left alone
   · Docker and related tools — remove them yourself if you no longer need them
-└────────────────────────────────────────────────────────────
 
 
-███ C. MESSAGES — every user-facing string in the source █████
-(Deduped, sorted. Catches errors, hints, warnings, and flow copy — ingest,
-login, resources — that isn't a rendered screen above. `%…` are placeholders.)
+==============================================================================
+= MESSAGE INDEX — every user-facing string in the source (templates, not
+= rendered; %s/%d are runtime placeholders). Catches errors, hints, and the
+= flows not rendered above (ingest validation, login, resources).
+==============================================================================
 
   %d image(s) are smaller than the %dx%d minimum you set with --min-size: %s.
   %d image(s) can't be ingested: %s. The cluster rejects these after the upload —
