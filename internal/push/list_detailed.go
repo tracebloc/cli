@@ -19,15 +19,16 @@ import (
 // pass (intent/record-count/classes/extension). Everything here already exists
 // in the ingested tables — no backend round-trip.
 type DatasetInfo struct {
-	Name      string   // table name = dataset name
-	Intent    string   // "train" / "test" / "" (from the data_intent column)
-	Records   int64    // COUNT(*) — images / documents / rows, per modality
-	Classes   int64    // COUNT(DISTINCT label); 0 when unlabelled
-	Extension string   // per-row file extension (jpg/png/txt); "" for CSV tasks
-	SizeBytes int64    // data_length + index_length
-	CreatedAt string   // table create_time, "YYYY-MM-DDTHH:MM:SS" (empty if unknown)
-	Columns   []string // all column names — drives modality inference
-	System    bool     // a framework table (no data_id), e.g. the ingest-run journal
+	Name        string   // table name = dataset name
+	Intent      string   // "train" / "test" / "" (from the data_intent column)
+	Records     int64    // COUNT(*) — images / documents / rows, per modality
+	Classes     int64    // COUNT(DISTINCT label); 0 when unlabelled
+	Extension   string   // per-row file extension (jpg/png/txt); "" for CSV tasks
+	SizeBytes   int64    // real dataset size from a du of the shared PVC; 0 if unavailable
+	CreatedAt   string   // table create_time, "YYYY-MM-DDTHH:MM:SS" (empty if unknown) — for display/JSON
+	CreatedUnix int64    // create_time as a UTC epoch (tz-safe) — for relative "ago" math
+	Columns     []string // all column names — drives modality inference
+	System      bool     // a framework table (no data_id), e.g. the ingest-run journal
 }
 
 // identRe guards table names before they are interpolated into the data query.
@@ -69,8 +70,11 @@ func datasetSizesFromShared(ctx context.Context, exec Executor, cs kubernetes.In
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
+	// `|| true`: du exits non-zero if ANY entry is unreadable (jobs-manager can
+	// hit EACCES on some shared-PVC paths), but the readable entries are already
+	// on stdout — keep them rather than blanking every dataset's size.
 	if err := exec.Exec(ctx, namespace, pod, container,
-		[]string{"sh", "-c", "du -sk " + SharedRoot + "/* 2>/dev/null"},
+		[]string{"sh", "-c", "du -sk " + SharedRoot + "/* 2>/dev/null || true"},
 		nil, &stdout, &stderr); err != nil {
 		return nil
 	}
@@ -104,6 +108,7 @@ func listDatasetsDetailedWith(ctx context.Context, exec Executor, namespace, pod
 	// size — both misleading. Real sizes come from a `du` of the PVC below.
 	schemaQ := "SELECT t.table_name," +
 		" COALESCE(MAX(DATE_FORMAT(t.create_time,'%Y-%m-%dT%H:%i:%s')),'')," +
+		" COALESCE(MAX(UNIX_TIMESTAMP(t.create_time)),0)," + // tz-safe epoch for "ago" math
 		" COALESCE(GROUP_CONCAT(c.column_name ORDER BY c.ordinal_position SEPARATOR ','),'')" +
 		" FROM information_schema.tables t" +
 		" LEFT JOIN information_schema.columns c" +
@@ -188,11 +193,12 @@ func parseSchemaRows(raw string) []DatasetInfo {
 			continue
 		}
 		f := strings.Split(line, "\t")
-		if len(f) < 3 {
+		if len(f) < 4 {
 			continue
 		}
 		d := DatasetInfo{Name: strings.TrimSpace(f[0]), CreatedAt: strings.TrimSpace(f[1])}
-		if cols := strings.TrimSpace(f[2]); cols != "" {
+		d.CreatedUnix, _ = strconv.ParseInt(strings.TrimSpace(f[2]), 10, 64)
+		if cols := strings.TrimSpace(f[3]); cols != "" {
 			d.Columns = strings.Split(cols, ",")
 		}
 		out = append(out, d)

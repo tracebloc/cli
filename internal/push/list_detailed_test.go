@@ -34,15 +34,15 @@ func (e *seqExecutor) Exec(_ context.Context, _, _, _ string, _ []string,
 }
 
 func TestParseSchemaRows(t *testing.T) {
-	raw := "image_train\t2026-07-21T10:00:00\tid,label,data_id,extension\n" +
-		"empty_cols\t\t\n" +
+	raw := "image_train\t2026-07-21T10:00:00\t1721556000\tid,label,data_id,extension\n" +
+		"empty_cols\t\t0\t\n" +
 		"  \n" // blank line skipped
 	got := parseSchemaRows(raw)
 	if len(got) != 2 {
 		t.Fatalf("want 2 rows, got %d: %#v", len(got), got)
 	}
 	d := got[0]
-	if d.Name != "image_train" || d.CreatedAt != "2026-07-21T10:00:00" {
+	if d.Name != "image_train" || d.CreatedAt != "2026-07-21T10:00:00" || d.CreatedUnix != 1721556000 {
 		t.Errorf("row0 wrong: %+v", d)
 	}
 	if len(d.Columns) != 4 || d.Columns[0] != "id" {
@@ -87,8 +87,8 @@ func TestParseDuOutput(t *testing.T) {
 // from the second (data) query, whose SQL selects data_intent — which a system
 // table lacks.
 func TestListDatasetsDetailedWith(t *testing.T) {
-	schema := "image_train\t2026-07-21T10:00:00\tid,label,data_intent,data_id,filename,extension\n" +
-		"tracebloc_ingest_runs\t2026-07-21T09:00:00\tingestor_id,table_name,registered\n"
+	schema := "image_train\t2026-07-21T10:00:00\t1721556000\tid,label,data_intent,data_id,filename,extension\n" +
+		"tracebloc_ingest_runs\t2026-07-21T09:00:00\t1721552400\tingestor_id,table_name,registered\n"
 	data := "image_train\ttrain\t20\t2\t.jpg\n" // leading dot must be stripped
 	fe := &seqExecutor{outs: [][]byte{[]byte(schema), []byte(data)}}
 

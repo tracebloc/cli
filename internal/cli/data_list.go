@@ -161,6 +161,9 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 	if len(shown) == 0 && !(showAll && len(system) > 0) {
 		p.Section(fmt.Sprintf("Datasets in %s (0)", namespace))
 		p.Infof("No datasets yet — ingest one with `tracebloc data ingest`.")
+		if len(system) > 0 && !showAll {
+			p.Hintf("%d system table(s) hidden — show with --all.", len(system))
+		}
 		return
 	}
 
@@ -209,7 +212,11 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 		sort.Slice(system, func(i, j int) bool { return system[i].Name < system[j].Name })
 		p.Section(fmt.Sprintf("System · %d", len(system)))
 		for _, d := range system {
-			p.Para(fmt.Sprintf("· %-*s  %9s", nameW, d.Name, push.HumanBytes(d.SizeBytes)))
+			size := "—" // system tables aren't du-sized; don't imply a measured 0 B
+			if d.SizeBytes > 0 {
+				size = push.HumanBytes(d.SizeBytes)
+			}
+			p.Para(fmt.Sprintf("· %-*s  %9s", nameW, d.Name, size))
 		}
 	}
 }
@@ -235,7 +242,7 @@ func datasetRow(d push.DatasetInfo, modality string, nameW, fmtW int) string {
 	}
 	return fmt.Sprintf("%s %-*s  %-5s  %-12s  %9s  %-*s  %s",
 		glyph, nameW, name, split, recordsCell(d, modality), size,
-		fmtW, formatCell(d, modality), relativeTime(d.CreatedAt))
+		fmtW, formatCell(d, modality), relativeTime(d.CreatedUnix))
 }
 
 // frameworkCols are the columns the ingestor adds to every dataset table; the
@@ -329,20 +336,16 @@ func formatCell(d push.DatasetInfo, modality string) string {
 	return base
 }
 
-// relativeTime renders an ISO-ish "2006-01-02T15:04:05" timestamp (the table's
-// create_time, in the DB server's clock) as a coarse "Xh ago". Empty/unparsable
-// → an em dash.
-func relativeTime(iso string) string {
-	if iso == "" {
+// relativeTime renders a UTC epoch (the table's create_time via UNIX_TIMESTAMP,
+// which is tz-safe regardless of the MySQL session clock) as a coarse "Xh ago".
+// Zero/unknown → an em dash; a future timestamp (clock skew) → "just now".
+func relativeTime(epoch int64) string {
+	if epoch <= 0 {
 		return "—"
 	}
-	t, err := time.Parse("2006-01-02T15:04:05", iso)
-	if err != nil {
-		return "—"
-	}
-	d := time.Since(t.UTC())
+	d := time.Since(time.Unix(epoch, 0))
 	switch {
-	case d < 0, d < time.Minute:
+	case d < time.Minute:
 		return "just now"
 	case d < time.Hour:
 		return fmt.Sprintf("%dm ago", int(d.Minutes()))
