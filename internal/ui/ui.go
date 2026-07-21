@@ -245,6 +245,13 @@ func (p *Printer) Field(label, value string) {
 	p.out("    %s %s\n", p.paint(fmt.Sprintf("%-14s", label+":"), color.Faint), value)
 }
 
+// Stat prints an aligned "label   value" row with a dimmed, fixed-width label,
+// so a short block of them lines up. Unlike Field's compact 14-col key, Stat
+// fits full-sentence labels (e.g. the resources view's two lines).
+func (p *Printer) Stat(label, value string) {
+	p.out("  %s  %s\n", p.paint(fmt.Sprintf("%-42s", label), color.Faint), value)
+}
+
 // Action prints an imperative instruction row — a bold verb label and its value,
 // with no trailing colon: "    Open    https://…". Used for the device-flow
 // sign-in steps (Open the URL / Enter the code), where the label is a thing to
