@@ -57,8 +57,8 @@ Exit codes:
   7  couldn't query the cluster for datasets`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// In --output-json mode, human output (the banner) goes to
-			// stderr so stdout carries only the JSON — same split as ingest.
+			// In --output-json mode, human output (the header + listing) goes
+			// to stderr so stdout carries only the JSON — same split as ingest.
 			printer := printerFor(cmd)
 			var jsonOut io.Writer
 			if outputJSON {
