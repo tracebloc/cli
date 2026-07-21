@@ -363,3 +363,31 @@ func TestRunClusterDoctor_NoEnvSurfacesSessionFault(t *testing.T) {
 		t.Fatalf("session fault + no-env → want exit 2 (fault dominates), got %v", err)
 	}
 }
+
+// --verbose must still print the support-facing Details on failure paths that
+// have a resolved config (here ReachNoEnv), not only on a healthy full run — the
+// early exit returns before the main render (Bugbot #365).
+func TestRunClusterDoctor_VerboseDetailsOnNoEnv(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "a@b.io", ActiveClientID: "5"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // session healthy
+	})
+	withClusterSeams(t, fake.NewSimpleClientset())
+	withDoctorRun(t, []doctor.Result{
+		{Name: "Cluster reachable", Status: doctor.StatusFail, Reach: doctor.ReachNoEnv, Detail: "no tracebloc client found"},
+	})
+
+	var buf bytes.Buffer
+	_ = runClusterDoctor(context.Background(), ui.New(&buf, ui.WithColor(false), ui.WithVerbose(true)), "", "", "", false)
+	if !strings.Contains(buf.String(), "Details (for support)") {
+		t.Errorf("--verbose on ReachNoEnv should still print the Details section, got:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "Cluster reachable") {
+		t.Errorf("--verbose Details should include the granular checks, got:\n%s", buf.String())
+	}
+}

@@ -172,6 +172,7 @@ func runClusterDoctor(
 		p.Newline()
 		noteSessionProblem(p, tok)
 		p.Errorf("Couldn't connect to your secure environment — check your kubeconfig/context.")
+		renderDetailsIfVerbose(p, resolved, results)
 		return &exitError{code: earlyExitCode(tok), err: nil}
 	}
 	// 4. Probe the cluster.
@@ -187,6 +188,7 @@ func runClusterDoctor(
 		noteSessionProblem(p, tok)
 		p.Errorf("No secure environment on this machine yet.")
 		p.Hintf("     Set one up: %s", installCmd)
+		renderDetailsIfVerbose(p, resolved, results)
 		return &exitError{code: earlyExitCode(tok), err: nil}
 	}
 
@@ -198,9 +200,7 @@ func runClusterDoctor(
 	p.Newline()
 	renderHealth(p, connected)
 	renderHealth(p, ready)
-	if p.Verbose() {
-		renderDoctorDetails(p, resolved, results)
-	}
+	renderDetailsIfVerbose(p, resolved, results)
 	// --diagnose writes the support bundle via the deferred writer registered
 	// above, so it fires on this path and on every early exit alike.
 
@@ -376,6 +376,17 @@ func renderHealth(p *ui.Printer, h healthLine) {
 // renderDoctorDetails is the --verbose (and --diagnose) technical breakdown:
 // kubeconfig + every granular check. This is the only place Kubernetes
 // vocabulary appears.
+// renderDetailsIfVerbose prints the --verbose technical breakdown when the flag
+// is set and a cluster config was resolved. Called at every exit that has a
+// resolved config — including the no-environment / clientset-error early exits —
+// so `tb doctor --verbose` still yields the support-facing detail on the failure
+// paths that most need it, not only on the healthy full run.
+func renderDetailsIfVerbose(p *ui.Printer, resolved *cluster.ResolvedConfig, results []doctor.Result) {
+	if p.Verbose() && resolved != nil {
+		renderDoctorDetails(p, resolved, results)
+	}
+}
+
 func renderDoctorDetails(p *ui.Printer, resolved *cluster.ResolvedConfig, results []doctor.Result) {
 	p.Newline()
 	p.Section("Details (for support)")
@@ -411,11 +422,16 @@ func writeDiagnoseBundle(p *ui.Printer, resolved *cluster.ResolvedConfig, result
 	// exit (no environment, clientset error) the roll-up never ran, so record the
 	// session state and note the short-circuit instead of empty verdict lines.
 	bp.Detailf("session:   %s", tokenLabel(tok))
-	if connected.text != "" {
+	switch {
+	case connected.text != "":
 		bp.Detailf("connected: %s — %s", connected.status, connected.text)
 		bp.Detailf("ready:     %s — %s", ready.status, ready.text)
-	} else {
-		bp.Detailf("outcome:   exited before the environment could be probed")
+	case len(results) > 0:
+		// Probed, but exited before the two-line roll-up (e.g. no chart installed).
+		// The granular checks are written below, so don't claim we never probed.
+		bp.Detailf("outcome:   early exit — no roll-up verdict (granular checks below)")
+	default:
+		bp.Detailf("outcome:   early exit before the cluster was probed")
 	}
 	if resolved != nil {
 		renderDoctorDetails(bp, resolved, results)
