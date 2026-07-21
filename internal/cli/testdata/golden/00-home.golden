@@ -1,0 +1,257 @@
+tb / tracebloc — home
+=====================
+What you see when you run `tb` (or `tracebloc`) with no arguments. Covers every
+state the home view resolves to.
+
+$ tb   # signed in · secure environment Online
+
+
+  Welcome to your secure environment for AI, Lukas 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ✓ Secure environment "hello-world" · Online (12 CPU · 23 GiB)
+
+
+  Your data
+
+  · tb data ingest    load a dataset into your secure environment
+  · tb data list      list your datasets
+  · tb data delete    remove a dataset
+
+
+  Your secure environment
+
+  · tb resources      manage compute & memory
+  · tb doctor         check the connection & diagnose issues
+  · tb delete         remove tracebloc from this machine
+
+
+  Add --help to any command for the flags.
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+
+$ tb   # signed in · running, couldn't confirm connection
+
+
+  Welcome to your secure environment for AI, Lukas 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ⚠ Secure environment "hello-world" · running — couldn't confirm it's connected to tracebloc — run tb doctor
+
+
+  Your data
+
+  · tb data ingest    load a dataset into your secure environment
+  · tb data list      list your datasets
+  · tb data delete    remove a dataset
+
+
+  Your secure environment
+
+  · tb resources      manage compute & memory
+  · tb doctor         check the connection & diagnose issues
+  · tb delete         remove tracebloc from this machine
+
+
+  Add --help to any command for the flags.
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+
+$ tb   # signed in · running, backend reports not online
+
+
+  Welcome to your secure environment for AI, Lukas 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ⚠ Secure environment "hello-world" · running, but tracebloc hasn't heard from it — run tb doctor
+
+
+  Your data
+
+  · tb data ingest    load a dataset into your secure environment
+  · tb data list      list your datasets
+  · tb data delete    remove a dataset
+
+
+  Your secure environment
+
+  · tb resources      manage compute & memory
+  · tb doctor         check the connection & diagnose issues
+  · tb delete         remove tracebloc from this machine
+
+
+  Add --help to any command for the flags.
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+
+$ tb   # signed in · starting up
+
+
+  Welcome to your secure environment for AI, Lukas 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ⚠ Secure environment "hello-world" · starting up, not ready yet — run tb doctor
+
+
+  Your data
+
+  · tb data ingest    load a dataset into your secure environment
+  · tb data list      list your datasets
+  · tb data delete    remove a dataset
+
+
+  Your secure environment
+
+  · tb resources      manage compute & memory
+  · tb doctor         check the connection & diagnose issues
+  · tb delete         remove tracebloc from this machine
+
+
+  Add --help to any command for the flags.
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+
+$ tb   # signed in · offline (can't reach it)
+
+
+  Welcome to your secure environment for AI, Lukas 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ✗ Secure environment "hello-world" · can't reach it from here — run tb doctor
+
+
+  Your data
+
+  · tb data ingest    load a dataset into your secure environment
+  · tb data list      list your datasets
+  · tb data delete    remove a dataset
+
+
+  Your secure environment
+
+  · tb resources      manage compute & memory
+  · tb doctor         check the connection & diagnose issues
+  · tb delete         remove tracebloc from this machine
+
+
+  Add --help to any command for the flags.
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+
+$ tb   # signed in · no secure environment on this machine
+
+
+  Welcome to tracebloc — your secure environment for AI 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ⚠ No secure environment on this machine yet — run the installer to set one up.
+
+
+  Your secure environment
+
+  · tb doctor    check the connection & diagnose issues
+
+
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+
+$ tb   # not signed in
+
+
+  Welcome to tracebloc — your secure environment for AI 👋
+
+  ──────────────────────────────
+
+  ✗ Not signed in yet.
+
+
+  Start here
+
+  · tb login    sign in to tracebloc
+
+
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc --help
+The tracebloc CLI connects machines to tracebloc as clients and
+manages the datasets that models train on. Your data stays on your
+infrastructure — models from other collaborators come to it, once you
+approve them.
+
+Two kinds of commands:
+
+  Your account (sign in first):   login, logout, auth, client
+  This machine's client:          data, cluster
+
+A typical first session:
+
+  tracebloc login                  # sign in or create your account (browser)
+  tracebloc data ingest ./my-data  # stage a dataset into your client
+  tracebloc data list              # see what's in the cluster
+
+The CLI finds your cluster through your kubeconfig, stages data onto
+the cluster's shared storage, and reports progress as it goes. No
+Helm, no YAML, no kubectl needed.
+
+Usage:
+  tracebloc [flags]
+  tracebloc [command]
+
+Available Commands:
+  auth        Inspect tracebloc authentication state
+  client      Provision this machine's tracebloc client
+  cluster     Inspect the cluster the CLI is currently targeting
+  completion  Generate the autocompletion script for the specified shell
+  data        Manage the datasets in your secure environment
+  delete      Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)
+  doctor      Check your secure environment is connected and ready to run training
+  help        Help about any command
+  login       Sign in to tracebloc in your browser (device flow)
+  logout      Sign out (revoke the token server-side and clear it locally)
+  resources   Show how much of this machine tracebloc may use
+  version     Print the tracebloc CLI version, git SHA, and build date
+
+Flags:
+  -h, --help      help for tracebloc
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+Use "tracebloc [command] --help" for more information about a command.

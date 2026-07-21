@@ -1,0 +1,64 @@
+tb data list — list your datasets
+=================================
+What you see when you run `tb data list`. Covers empty, populated, and --all.
+
+$ tb data list   # no datasets yet
+
+  Datasets in hello-world (0)
+
+  No datasets yet — ingest one with `tracebloc data ingest`.
+
+$ tb data list   # with datasets (system tables hidden)
+
+  Datasets in hello-world — 2 · 1.25 GiB
+  1 system table(s) hidden — show with --all.
+
+  Image classification · 2
+  ✔ xray_test   test   3000 images   256.00 MiB  jpg · 2 classes  —
+  ✔ xray_train  train  12000 images    1.00 GiB  jpg · 2 classes  —
+
+$ tb data list --all   # including system tables
+
+  Datasets in hello-world — 2 · 1.25 GiB
+
+  Image classification · 2
+  ✔ xray_test   test   3000 images   256.00 MiB  jpg · 2 classes  —
+  ✔ xray_train  train  12000 images    1.00 GiB  jpg · 2 classes  —
+
+  System · 1
+  · ingest_run_journal     —
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc data list --help
+Lists the datasets ingested into your client — the tables in training_test_datasets
+on the cluster — grouped by modality, with each dataset's split (train/test),
+record count, size, format, and when it was ingested.
+
+With no flags it uses your current kubeconfig context and its namespace;
+the flags below override that, same as `cluster info` and `data ingest`.
+Framework tables (the ingest-run journal) are hidden unless you pass --all.
+For the full catalog, see the dashboard at https://ai.tracebloc.io/metadata.
+
+Exit codes:
+  0  listed successfully (including an empty list)
+  3  kubeconfig error
+  4  cluster reachable but no tracebloc client in the namespace
+  7  couldn't query the cluster for datasets
+
+Usage:
+  tracebloc data list [flags]
+
+Flags:
+      --all                 include framework/system tables (e.g. the ingest-run journal), normally hidden
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+  -h, --help                help for list
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace where your tracebloc client is installed
+      --output-json         emit the dataset list as JSON on stdout (human output → stderr)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
