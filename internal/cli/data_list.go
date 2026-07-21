@@ -105,7 +105,6 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	}()
 
 	p := a.Printer
-	p.Banner("tracebloc", "datasets in the cluster")
 
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
 	binding := bindActiveClientNamespace(&opts)
@@ -134,7 +133,8 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 func renderDataList(p *ui.Printer, namespace string, tables []string) {
 	p.Section(fmt.Sprintf("Datasets in %s (%d)", namespace, len(tables)))
 	if len(tables) == 0 {
-		p.Infof("No datasets yet — ingest one with `tracebloc data ingest`.")
+		p.Newline()
+		p.Para(fmt.Sprintf("No datasets yet — ingest one with `%s data ingest`.", invokedName()))
 		return
 	}
 	for _, t := range tables {

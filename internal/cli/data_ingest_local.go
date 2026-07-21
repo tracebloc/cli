@@ -92,7 +92,7 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 			"--overwrite can't be combined with --idempotency-key: a reused key makes the cluster replay the previous run instead of ingesting the new data — after --overwrite's removal that would report success while loading nothing. Drop one of the two (a fresh per-run key is the default).")}
 	}
 
-	a.Printer.Banner("tracebloc", "data ingest")
+	a.Printer.Newline()
 	a.Printer.Para(strings.TrimSpace(`
 This ingests a dataset so models can train on it. Your files never leave your
 own infrastructure — tracebloc copies them into your workspace's storage,
