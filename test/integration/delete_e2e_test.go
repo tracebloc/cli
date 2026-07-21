@@ -192,15 +192,16 @@ func TestE2E_DeleteTeardown(t *testing.T) {
 	}
 
 	// (b) helm release uninstalled — the success line is printed only when the
-	//     real `helm uninstall` exit-0'd against the live cluster.
-	if !strings.Contains(out, "Uninstalled the Helm release "+ns) {
-		t.Errorf("expected Helm release %q to be uninstalled; got:\n%s", ns, out)
+	//     real `helm uninstall` exit-0'd against the live cluster. The plain-
+	//     language copy no longer names the release, so assert the exact line.
+	if !strings.Contains(out, "Uninstalled tracebloc.") {
+		t.Errorf("expected the Helm release %q uninstall success line; got:\n%s", ns, out)
 	}
 
 	// (c) k3d cluster deleted — assert both the CLI's success line and the
 	//     authoritative `k3d cluster list`.
-	if !strings.Contains(out, fmt.Sprintf("Deleted the local cluster %q", e2eClusterName)) {
-		t.Errorf("expected the local cluster %q to be deleted; got:\n%s", e2eClusterName, out)
+	if !strings.Contains(out, "Removed the local environment.") {
+		t.Errorf("expected the local cluster %q to be removed; got:\n%s", e2eClusterName, out)
 	}
 	if clusterExists(t) {
 		t.Errorf("k3d cluster %q still exists after offboard", e2eClusterName)
