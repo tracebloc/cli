@@ -360,9 +360,9 @@ func renderOffboardSummary(p *ui.Printer, name string, keepData bool) {
 	p.Infof("Your secure environment %q and everything it runs on this machine", name)
 	p.Infof("tracebloc's downloaded images")
 	if keepData {
-		p.Infof("The tb CLI (your local data & config are kept — --keep-data)")
+		p.Infof("The tracebloc CLI (your local data & config are kept — --keep-data)")
 	} else {
-		p.Infof("Your local data & config (~/.tracebloc) and the tb CLI — can't be undone")
+		p.Infof("Your local data & config (~/.tracebloc) and the tracebloc CLI — can't be undone")
 	}
 
 	p.Section("Kept on tracebloc")
