@@ -284,4 +284,17 @@ func TestSummarizeDoctor(t *testing.T) {
 			t.Errorf("ready must not be a green check while disconnected, got OK %q", r.text)
 		}
 	})
+
+	// The "Backend egress (from this machine)" probe is indicative-not-definitive;
+	// a miss must NOT contradict a successful WhoAmI by claiming the network is
+	// down. With a healthy session it stays a --verbose diagnostic (Bugbot #365).
+	t.Run("backend-egress miss + healthy session → connected stays OK", func(t *testing.T) {
+		c, _ := summarizeDoctor(with(allOK, "Backend egress (from this machine)", doctor.StatusFail), tokenOK)
+		if c.status != doctor.StatusOK {
+			t.Errorf("indicative backend-egress miss + healthy WhoAmI → want connected OK, got %v %q", c.status, c.text)
+		}
+		if strings.Contains(c.text, "can't reach tracebloc from here") {
+			t.Errorf("must not blame the network after a successful WhoAmI, got %q", c.text)
+		}
+	})
 }

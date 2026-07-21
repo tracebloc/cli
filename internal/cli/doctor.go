@@ -264,7 +264,13 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 				"Not connected — your secure environment isn't answering.",
 				reach.Remedy}
 		}
-	case tok == tokenUnreachable || by["Backend egress (from this machine)"].Status == doctor.StatusFail:
+	case tok == tokenUnreachable:
+		// WhoAmI is the definitive "can this machine reach tracebloc" signal, so it
+		// alone drives this line. The "Backend egress (from this machine)" check is
+		// explicitly indicative-not-definitive (it probes the cluster's configured
+		// host from here, not the cluster's real egress path), so it must NOT flip
+		// Connected to a network error after WhoAmI already succeeded — that would
+		// contradict the successful session probe. It stays a --verbose diagnostic.
 		connected = healthLine{doctor.StatusFail,
 			"Not connected — can't reach tracebloc from here.",
 			fmt.Sprintf("Check your network / HTTP(S)_PROXY, then run `%s doctor` again.", launcher())}
