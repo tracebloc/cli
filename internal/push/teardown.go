@@ -17,6 +17,17 @@ import (
 // and the teardown path agree on where a table lives.
 const IngestionDatabase = "training_test_datasets"
 
+// The ingestor keeps its own bookkeeping tables inside IngestionDatabase — a
+// run-tracking table and a pseudonymization-salt table (data-ingestors
+// tracebloc_ingestor/database.py: RUNS_TABLE / SALT_TABLE, which the ingestor's
+// own tests tag "reserved"). They are not user datasets, so they're excluded
+// from `data list` and never targetable by `data delete` (see filterReserved).
+// Keep in sync with the ingestor's reserved set.
+const (
+	ingestRunsTable = "tracebloc_ingest_runs"
+	ingestMetaTable = "tracebloc_ingest_meta"
+)
+
 // StagingCleanupTimeout bounds the best-effort post-success staging
 // reclaim (CleanStaging). The reclaim pod reuses the image the stage pod
 // just pulled, so it is normally Ready in seconds; this cap keeps a
