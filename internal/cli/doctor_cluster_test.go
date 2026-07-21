@@ -17,9 +17,9 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// withDoctorRun seams doctorRunFn to return a fixed set of check results, so
-// runClusterDoctor's render loop + verdict switch can be exercised with a
-// controlled OK/Warn/Fail mix (the per-check logic is tested in internal/doctor).
+// withDoctorRun seams doctorRunFn to return a fixed set of granular check
+// results, so runClusterDoctor's roll-up + verdict can be exercised with a
+// controlled mix (the per-check logic is tested in internal/doctor).
 func withDoctorRun(t *testing.T, results []doctor.Result) {
 	t.Helper()
 	orig := doctorRunFn
@@ -29,13 +29,9 @@ func withDoctorRun(t *testing.T, results []doctor.Result) {
 	}
 }
 
-// runDoctorClusterHalf drives runClusterDoctor with the auth half stubbed HEALTHY
-// (signed in + active client + a 200 WhoAmI), so the overall verdict reflects the
-// cluster checks rather than the auth section, and the cluster reached through the
-// seams with doctor.Run returning `results`. Before this PR the cluster half — the
-// ✓/⚠/✖ render loop and the verdict switch — was reachable only via a real
-// kubeconfig pointing at an unroutable server (dial failure), never with a
-// controlled result mix.
+// runDoctorClusterHalf drives runClusterDoctor with the identity half stubbed
+// HEALTHY (signed in + a 200 WhoAmI) and the cluster reached through the seams
+// with doctor.Run returning `results`, into a non-verbose printer.
 func runDoctorClusterHalf(t *testing.T, results []doctor.Result) (string, error) {
 	t.Helper()
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
@@ -45,80 +41,116 @@ func runDoctorClusterHalf(t *testing.T, results []doctor.Result) (string, error)
 		t.Fatal(err)
 	}
 	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // WhoAmI ok → auth OK
+		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // WhoAmI ok → session healthy
 	})
 	withClusterSeams(t, fake.NewSimpleClientset()) // cs only flows to doctorRunFn, which ignores it
 	withDoctorRun(t, results)
 	var buf bytes.Buffer
-	err := runClusterDoctor(context.Background(), ui.New(&buf, ui.WithColor(false)), "", "", "")
+	err := runClusterDoctor(context.Background(), ui.New(&buf, ui.WithColor(false)), "", "", "", false)
 	return buf.String(), err
 }
 
-// All three render arms fire (✓ detail, ⚠ + remedy hint, ✖ + remedy hint) and a
-// single failing check drives the overall verdict to Fail → exit 2 with a silent
-// error (the per-check lines already explained it) + the support-bundle hint.
-func TestRunClusterDoctor_RendersAllStatusesAndFails(t *testing.T) {
+// All healthy → the two plain lines + the "ready to run training" verdict, exit 0.
+// The resolved namespace is printed as the secure-environment name (the seam
+// resolves it to "default").
+func TestRunClusterDoctor_AllHealthy(t *testing.T) {
 	out, err := runDoctorClusterHalf(t, []doctor.Result{
-		{Name: "Cluster reachable", Status: doctor.StatusOK, Detail: "api answered"},
-		{Name: "Pod health", Status: doctor.StatusWarn, Detail: "1 pod restarted", Remedy: "check pod logs"},
-		{Name: "Dataset volume", Status: doctor.StatusFail, Detail: "PVC not bound", Remedy: "provision the shared PVC"},
+		{Name: "Cluster reachable", Status: doctor.StatusOK, Detail: "reachable"},
+		{Name: "Backend egress (from this machine)", Status: doctor.StatusOK, Detail: "reachable"},
+	})
+	if err != nil {
+		t.Fatalf("all healthy → want nil error (exit 0), got %v", err)
+	}
+	for _, want := range []string{
+		"Signed in as a@b.io",
+		`Secure environment "default"`,
+		"Connected to tracebloc",
+		"Ready to run training",
+		"Everything looks good",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("healthy view missing %q:\n%s", want, out)
+		}
+	}
+	// No Kubernetes vocabulary leaks into the default view.
+	for _, banned := range []string{"Kubeconfig", "context", "PVC", "kubectl", "requests-proxy", "Pending"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("leaked k8s term %q in default view:\n%s", banned, out)
+		}
+	}
+}
+
+// A failing cluster check rolls up into a plain ✖ line + concrete remedy, drives
+// the verdict to Fail (exit 2, silent error), and points at the support bundle.
+func TestRunClusterDoctor_FailRollsUp(t *testing.T) {
+	out, err := runDoctorClusterHalf(t, []doctor.Result{
+		{Name: "Cluster reachable", Status: doctor.StatusOK, Detail: "reachable"},
+		{Name: "Dataset volume (PVC)", Status: doctor.StatusFail, Detail: "PVC not bound"},
 	})
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.Code() != 2 {
 		t.Fatalf("a failing check → want exit 2, got %v", err)
 	}
 	if ee.err != nil {
-		t.Errorf("the Fail verdict must be a silent exitError (per-check lines already printed), got err=%v", ee.err)
+		t.Errorf("Fail verdict must be a silent exitError (lines already printed), got err=%v", ee.err)
 	}
-	for _, want := range []string{
-		"Cluster reachable", "api answered", // OK arm
-		"Pod health", "1 pod restarted", "check pod logs", // Warn arm + remedy hint
-		"Dataset volume", "PVC not bound", "provision the shared PVC", // Fail arm + remedy hint
-		"Problems found", "support bundle", // Fail verdict + its hint
-	} {
+	for _, want := range []string{"Not ready", "dataset storage", "--diagnose"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q:\n%s", want, out)
+			t.Errorf("failed view missing %q:\n%s", want, out)
 		}
+	}
+	// The raw k8s detail ("PVC not bound") must NOT appear in the default view.
+	if strings.Contains(out, "PVC not bound") {
+		t.Errorf("raw k8s detail leaked into the default view:\n%s", out)
 	}
 }
 
-// Warnings but no failure → overall Warn → exit 0 (nil error) with the
-// "completed with warnings" verdict.
-func TestRunClusterDoctor_WarnVerdict(t *testing.T) {
+// A Warn-level granular check (e.g. a proxy note) is not user-actionable and must
+// NOT fail the verdict — it degrades to --verbose. Default view stays healthy.
+func TestRunClusterDoctor_WarnsDontFail(t *testing.T) {
 	out, err := runDoctorClusterHalf(t, []doctor.Result{
-		{Name: "Cluster reachable", Status: doctor.StatusOK, Detail: "ok"},
-		{Name: "Proxy configuration", Status: doctor.StatusWarn, Detail: "not fully wired", Remedy: "set the proxy env"},
+		{Name: "Cluster reachable", Status: doctor.StatusOK, Detail: "reachable"},
+		{Name: "Proxy configuration", Status: doctor.StatusWarn, Detail: "not fully wired"},
 	})
 	if err != nil {
 		t.Fatalf("warnings-only → want nil error (exit 0), got %v", err)
 	}
-	if !strings.Contains(out, "Completed with warnings") {
-		t.Errorf("want the warnings verdict:\n%s", out)
+	if !strings.Contains(out, "Everything looks good") {
+		t.Errorf("want the healthy verdict (warns are verbose-only):\n%s", out)
 	}
 }
 
-// All checks pass (and auth is healthy) → overall OK → exit 0 with the all-healthy
-// verdict. Also pins that the resolved namespace is printed in the Kubeconfig
-// section (the seam resolves it to "default").
-func TestRunClusterDoctor_AllHealthy(t *testing.T) {
-	out, err := runDoctorClusterHalf(t, []doctor.Result{
-		{Name: "Cluster reachable", Status: doctor.StatusOK, Detail: "api answered, client installed"},
-		{Name: "Backend egress", Status: doctor.StatusOK, Detail: "reachable"},
+// --verbose surfaces the Kubernetes detail (kubeconfig + granular checks) under
+// the plain summary — the one place that vocabulary is allowed.
+func TestRunClusterDoctor_VerboseShowsDetails(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "a@b.io", ActiveClientID: "5"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`))
 	})
-	if err != nil {
-		t.Fatalf("all healthy → want nil error (exit 0), got %v", err)
+	withClusterSeams(t, fake.NewSimpleClientset())
+	withDoctorRun(t, []doctor.Result{
+		{Name: "Cluster reachable", Status: doctor.StatusOK, Detail: "reachable"},
+		{Name: "Service Bus egress (requests-proxy)", Status: doctor.StatusOK, Detail: "ready"},
+	})
+	var buf bytes.Buffer
+	if err := runClusterDoctor(context.Background(), ui.New(&buf, ui.WithColor(false), ui.WithVerbose(true)), "", "", "", false); err != nil {
+		t.Fatalf("verbose healthy → want nil error, got %v", err)
 	}
-	if !strings.Contains(out, "All checks passed") {
-		t.Errorf("want the all-healthy verdict:\n%s", out)
-	}
-	if !strings.Contains(out, "default") {
-		t.Errorf("want the resolved namespace printed in the Kubeconfig section:\n%s", out)
+	for _, want := range []string{"Details (for support)", "Service Bus egress (requests-proxy)"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("verbose view missing %q:\n%s", want, buf.String())
+		}
 	}
 }
 
 // The clientset-build arm: loadClusterFn succeeds but newClientsetFn fails. With
-// the auth half healthy, this keeps the documented exit-3 contract (a kubeconfig-
-// class failure) and surfaces the underlying error.
+// the session healthy, this is a local-environment problem (exit 3) framed
+// plainly (no raw Kubernetes error in the default view).
 func TestRunClusterDoctor_ClientsetError(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
@@ -127,7 +159,7 @@ func TestRunClusterDoctor_ClientsetError(t *testing.T) {
 		t.Fatal(err)
 	}
 	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // auth OK
+		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`))
 	})
 	origLoad, origCS := loadClusterFn, newClientsetFn
 	t.Cleanup(func() { loadClusterFn, newClientsetFn = origLoad, origCS })
@@ -138,12 +170,12 @@ func TestRunClusterDoctor_ClientsetError(t *testing.T) {
 		return nil, errors.New("bad rest config")
 	}
 	var buf bytes.Buffer
-	err := runClusterDoctor(context.Background(), ui.New(&buf, ui.WithColor(false)), "", "", "")
+	err := runClusterDoctor(context.Background(), ui.New(&buf, ui.WithColor(false)), "", "", "", false)
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.Code() != 3 {
-		t.Fatalf("clientset build error + auth-OK → want exit 3, got %v", err)
+		t.Fatalf("clientset build error + healthy session → want exit 3, got %v", err)
 	}
-	if !strings.Contains(buf.String(), "bad rest config") {
-		t.Errorf("want the clientset error surfaced in the Cluster section:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "Couldn't connect to your secure environment") {
+		t.Errorf("want the plain connect-failure message:\n%s", buf.String())
 	}
 }

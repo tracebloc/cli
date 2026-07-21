@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -14,67 +18,59 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
-// doctorRunFn is a test seam over doctor.Run (the cluster-side health sweep).
-// Production runs the real checks; tests inject a fixed []doctor.Result so
-// runClusterDoctor's render loop (the ✓/⚠/✖ switch + remedy hints) and its
-// overall-verdict switch can be exercised with a controlled OK/Warn/Fail mix,
-// without standing up a fake cluster that happens to produce that exact mix
-// (the per-check logic has its own tests in internal/doctor).
+// installCmd is the one-line installer we point people at when there's no
+// secure environment on this machine, or a component needs reinstalling. Kept in
+// one place so every remedy says the same thing.
+const installCmd = "bash <(curl -fsSL https://tracebloc.io/i.sh)"
+
+// doctorRunFn is a test seam over doctor.Run (the cluster-side probe). Tests
+// inject a fixed []doctor.Result so the roll-up + render can be exercised with a
+// controlled mix without standing up a fake cluster.
 var doctorRunFn = doctor.Run
 
-// newDoctorCmd builds the `doctor` command. The SAME command is registered two
-// ways: as the top-level `tracebloc doctor` (visible — the home screen and its
-// env-status lines point here), and, hidden, as `tracebloc cluster doctor` (its
-// original path, kept working so existing docs, muscle memory, and scripts don't
-// break). Pass hidden=true for the cluster-subtree alias. Both entry points
-// share one RunE (runClusterDoctor), so there is a single diagnostic code path.
-//
-// It answers "is this running cluster healthy enough to run an experiment, and
-// if not, what do I fix?" — a read-only, post-install health sweep with remedies
-// (epic client-runtime#116, WS3). The three kubeconfig flags match `cluster
-// info` exactly so muscle memory carries over; all are zero-value-safe.
+// newDoctorCmd builds `doctor`, registered as top-level `tracebloc doctor` and
+// (hidden) `tracebloc cluster doctor`. It answers, in plain language: is my
+// secure environment connected to tracebloc and ready to run training — and if
+// not, exactly what do I do. The Kubernetes detail lives behind --verbose;
+// --diagnose writes a redacted bundle for support.
 func newDoctorCmd(hidden bool) *cobra.Command {
 	var (
 		kubeconfigPath  string
 		contextOverride string
 		nsOverride      string
+		diagnose        bool
 	)
 
 	cmd := &cobra.Command{
 		Use:    "doctor",
 		Hidden: hidden,
-		Short:  "Diagnose a running tracebloc client cluster (✔/⚠/✖ health checks + remedies)",
-		Long: `Runs a read-only health sweep over the tracebloc client release in the
-configured cluster + namespace and prints a ✔/⚠/✖ line per check with a
-remedy for anything that isn't green:
+		Short:  "Check your secure environment is connected and ready to run training",
+		Long: `Checks, in plain terms, whether your secure environment is connected to
+tracebloc and ready to run training — and if something's wrong, exactly what to
+do about it.
 
-  • Cluster reachable — the API answers and the client chart is installed
-  • Pod health — nothing crash-looping or stuck Pending
-  • Dataset volume — the shared PVC exists and is Bound
-  • Proxy configuration — the in-cluster requests/egress proxy wiring
-  • Backend egress — the tracebloc backend is reachable (from this machine)
-  • Service Bus egress — the requests-proxy that brokers experiment egress is Ready
-
-For a full redacted support bundle to send to tracebloc, use the installer's
-` + "`./install-k8s.sh --diagnose`" + ` instead.
+  --verbose    the full technical breakdown (for support)
+  --diagnose   write a redacted support bundle to email to tracebloc
 
 Exit codes:
-  0   all checks passed (or warnings only)
-  2   one or more checks failed
-  3   kubeconfig could not be loaded`,
+  0   healthy
+  2   a problem was found
+  3   couldn't read your local config`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClusterDoctor(
 				cmd.Context(),
 				printerFor(cmd),
-				kubeconfigPath, contextOverride, nsOverride,
+				kubeconfigPath, contextOverride, nsOverride, diagnose,
 			)
 		},
 	}
 
 	addKubeconfigFlags(cmd, &kubeconfigPath, &contextOverride, kubeconfigFlagUsage, contextFlagUsage)
 	addNamespaceFlag(cmd, &nsOverride,
-		"namespace where your tracebloc client is installed (default: your active client's namespace, else the context's)")
+		"namespace where your secure environment is installed (default: your active client's)")
+	cmd.Flags().BoolVar(&diagnose, "diagnose", false,
+		"write a redacted support bundle for tracebloc support and exit")
 
 	return cmd
 }
@@ -83,167 +79,237 @@ func runClusterDoctor(
 	ctx context.Context,
 	p *ui.Printer,
 	kubeconfigPath, contextOverride, nsOverride string,
+	diagnose bool,
 ) error {
-	p.Banner("tracebloc", "doctor")
-
-	// Auth / config checks run FIRST and don't need a cluster — so `doctor` can
-	// diagnose a failed provision (bad/expired token, wrong env, no active
-	// client) even before any cluster is reachable (RFC-0001 §8.5).
-	authStatus := runAuthChecks(ctx, p)
-
-	// Target the active client's namespace exactly like `cluster info`, the data
-	// commands, and the home screen: bind opts.Namespace to the cached active
-	// client when the user overrode neither --namespace nor --context. Without
-	// this, doctor checked only the kubeconfig default namespace — so a typical
-	// install whose client lives in its slug namespace could show one state on the
-	// home screen and a conflicting "no client here" from the on-screen `doctor`
-	// hint (Bugbot / review).
-	opts := cluster.KubeconfigOptions{
-		Path:      kubeconfigPath,
-		Context:   contextOverride,
-		Namespace: nsOverride,
-	}
-	bindActiveClientNamespace(&opts) // side-effect: defaults opts.Namespace to the active client's
-	// Through the loadClusterFn/newClientsetFn seams (like cluster info and the
-	// data commands) so the cluster half — the Checks render loop and the verdict
-	// switch — is testable with a fake clientset instead of only a real kubeconfig.
-	resolved, err := loadClusterFn(opts)
-	if err != nil {
-		// 3 = kubeconfig file/parse problem (same class as cluster info). The
-		// auth section above already ran; if IT also failed, escalate to 2 so
-		// automation doesn't read a real auth failure as a kubeconfig-only one.
-		p.Section("Cluster")
-		p.Errorf("Kubeconfig — couldn't load it: %v", err)
-		p.Hintf("     point --kubeconfig / --context at your cluster, or fix ~/.kube/config")
-		return &exitError{code: kubeconfigExitCode(authStatus), err: nil}
-	}
-
-	cs, err := newClientsetFn(resolved)
-	if err != nil {
-		p.Section("Cluster")
-		p.Errorf("Kubeconfig — %v", err)
-		return &exitError{code: kubeconfigExitCode(authStatus), err: nil}
-	}
-
-	p.Section("Kubeconfig")
-	p.Field("context", resolved.Context)
-	p.Field("server", resolved.ServerURL)
-	p.Field("namespace", resolved.Namespace)
-
-	results := doctorRunFn(ctx, cs, doctor.Options{
-		Namespace: resolved.Namespace,
-		ServerURL: resolved.ServerURL,
-	})
-
-	p.Section("Checks")
-	for _, r := range results {
-		switch r.Status {
-		case doctor.StatusOK:
-			p.Successf("%s — %s", r.Name, r.Detail)
-		case doctor.StatusWarn:
-			p.Warnf("%s — %s", r.Name, r.Detail)
-			if r.Remedy != "" {
-				p.Hintf("     %s", r.Remedy)
-			}
-		case doctor.StatusFail:
-			p.Errorf("%s — %s", r.Name, r.Detail)
-			if r.Remedy != "" {
-				p.Hintf("     %s", r.Remedy)
-			}
-		case doctor.StatusUnknown:
-			// No signal: a neutral · line, no ✖/⚠ and no remedy — the one honest
-			// "Cluster reachable" ✖ above already carries the cause and the fix.
-			p.Infof("%s — %s", r.Name, r.Detail)
-		}
-	}
-
-	p.Newline()
-	// Overall verdict folds in the auth section, so an auth ✖/⚠ counts even when
-	// the cluster itself is healthy.
-	switch worseStatus(authStatus, doctor.Worst(results)) {
-	case doctor.StatusFail:
-		p.Errorf("Problems found — fix the ✖ items above.")
-		p.Hintf("For deeper triage, send tracebloc a support bundle: ./install-k8s.sh --diagnose")
-		// Silent (err == nil): the per-check lines above already explained it,
-		// so main() shouldn't print a redundant "Error:" line.
-		return &exitError{code: exitChecksFailed, err: nil}
-	case doctor.StatusWarn:
-		p.Warnf("Completed with warnings — review the ⚠ items above.")
-		return nil
-	default:
-		p.Successf("All checks passed — auth and cluster look healthy.")
-		return nil
-	}
-}
-
-// runAuthChecks reports on the CLI's own auth/config state (~/.tracebloc): are
-// we signed in, to which env, is an active client selected, and does the backend
-// still accept the token. It's the half of `cluster doctor` that diagnoses a
-// failed *provision* rather than a sick cluster (RFC-0001 §8.5). Returns the
-// worst status seen so the caller can fold it into the overall verdict.
-func runAuthChecks(ctx context.Context, p *ui.Printer) doctor.Status {
-	p.Section("Auth & config")
-
+	// 1. Who you are — a local config read (instant), so we can answer even
+	//    before any cluster is reachable (RFC-0001 §8.5).
 	cfg, err := config.Load()
 	if err != nil {
-		p.Errorf("Config — couldn't read the CLI config: %v", err)
-		p.Hintf("     check ~/.tracebloc/config.json, or run `tracebloc login` to recreate it")
-		return doctor.StatusFail
+		p.Errorf("Couldn't read your tracebloc config — run `%s login` to recreate it.", launcher())
+		return &exitError{code: exitLocalEnv, err: nil}
 	}
 	if !cfg.SignedIn() {
-		p.Errorf("Sign-in — not signed in")
-		p.Hintf("     run `tracebloc login` (add --env dev|stg|prod for a non-prod backend)")
-		return doctor.StatusFail
+		p.Errorf("Not signed in — run `%s login`.", launcher())
+		return &exitError{code: exitChecksFailed, err: nil}
 	}
-
-	env := cfg.CurrentEnv
-	prof := cfg.Current()
-	if prof.Email != "" {
-		p.Successf("Sign-in — signed in to %s as %s", env, prof.Email)
+	if email := cfg.Current().Email; email != "" {
+		p.Para("Signed in as " + email)
 	} else {
-		p.Successf("Sign-in — signed in to %s", env)
+		p.Para("Signed in")
 	}
 
-	worst := doctor.StatusOK
-	if prof.ActiveClientID == "" {
-		p.Warnf("Active client — none selected for %s", env)
-		p.Hintf("     run `tracebloc client create` (or re-run the installer) to set the client this machine enrolls as")
-		worst = doctor.StatusWarn
-	} else {
-		p.Successf("Active client — %s", prof.ActiveClientID)
-	}
-
-	// Live token check. Best-effort: an explicit 401 is a failure (expired /
-	// revoked → must re-login); a network/proxy error is only a warning, since
-	// we can't conclude the token itself is bad.
-	p.Detailf("verifying the token against %s …", api.BaseURL(env))
-	client := newAPIClient(env)
-	client.Token = prof.Token
-	if _, werr := client.WhoAmI(ctx); werr != nil {
+	// 2. Is the session still good with tracebloc? A 401 (expired/revoked) or a
+	//    426 (CLI too old) is a hard stop with a one-command fix. A network error
+	//    is NOT fatal — it folds into the Connected line below.
+	tokenReachable := true
+	apiClient := newAPIClient(cfg.CurrentEnv)
+	apiClient.Token = cfg.Current().Token
+	if _, werr := apiClient.WhoAmI(ctx); werr != nil {
 		var ae *api.APIError
 		var ue *api.UpgradeRequiredError
 		switch {
 		case errors.As(werr, &ae) && ae.StatusCode == http.StatusUnauthorized:
-			p.Errorf("Backend auth — %s rejected the token (401)", api.BaseURL(env))
-			p.Hintf("     your session expired or was revoked — run `tracebloc login`")
-			return doctor.StatusFail
+			p.Newline()
+			p.Errorf("Your session expired — run `%s login`.", launcher())
+			return &exitError{code: exitChecksFailed, err: nil}
 		case errors.As(werr, &ue):
-			// 426: the server enforces a newer CLI. That's a hard, actionable
-			// failure ("upgrade"), not a transient "couldn't verify" warning.
-			p.Errorf("Backend auth — this CLI is too old for %s (HTTP 426)", api.BaseURL(env))
-			p.Hintf("     %s", ue.Error())
-			return doctor.StatusFail
+			p.Newline()
+			p.Errorf("This CLI is out of date — update it: %s", installCmd)
+			return &exitError{code: exitChecksFailed, err: nil}
 		default:
-			p.Warnf("Backend auth — couldn't verify the token: %v", werr)
-			p.Hintf("     the backend may be unreachable from here — check your network / HTTP(S)_PROXY")
-			return worseStatus(worst, doctor.StatusWarn)
+			tokenReachable = false // can't reach tracebloc from here — Connected will say so
 		}
 	}
-	p.Successf("Backend auth — token valid at %s", api.BaseURL(env))
-	return worst
+
+	// 3. Find the secure environment (local kubeconfig read).
+	opts := cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride, Namespace: nsOverride}
+	bindActiveClientNamespace(&opts)
+	resolved, err := loadClusterFn(opts)
+	if err != nil {
+		p.Newline()
+		p.Errorf("No secure environment on this machine yet.")
+		p.Hintf("     Set one up: %s", installCmd)
+		return &exitError{code: exitLocalEnv, err: nil}
+	}
+	cs, err := newClientsetFn(resolved)
+	if err != nil {
+		p.Newline()
+		p.Errorf("Couldn't connect to your secure environment — check your kubeconfig/context.")
+		return &exitError{code: exitLocalEnv, err: nil}
+	}
+	p.Para(fmt.Sprintf("Secure environment %q", envDisplayName(resolved)))
+
+	// 4. Probe the cluster (the granular checks stay for --verbose + --diagnose).
+	results := doctorRunFn(ctx, cs, doctor.Options{Namespace: resolved.Namespace, ServerURL: resolved.ServerURL})
+
+	// --diagnose: write the full technical detail to a file for support, then stop.
+	if diagnose {
+		return writeDiagnoseBundle(p, resolved, results)
+	}
+
+	// 5. Roll the granular checks up into two plain lines the owner can act on.
+	p.Newline()
+	connected, ready := summarizeDoctor(results, tokenReachable)
+	renderHealth(p, connected)
+	renderHealth(p, ready)
+
+	if p.Verbose() {
+		renderDoctorDetails(p, resolved, results)
+	}
+
+	// 6. Verdict + exit code (unchanged: 0 healthy, 2 a problem).
+	p.Newline()
+	if worseStatus(connected.status, ready.status) == doctor.StatusFail {
+		p.Hintf("Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())
+		return &exitError{code: exitChecksFailed, err: nil}
+	}
+	p.Successf("Everything looks good — you're ready to run training.")
+	return nil
+}
+
+// healthLine is one rolled-up, user-facing health signal: a status, the plain
+// line to show, and (on failure) one concrete action.
+type healthLine struct {
+	status doctor.Status
+	text   string
+	remedy string
+}
+
+// summarizeDoctor collapses the granular checks into the two lines the owner
+// reads: "Connected to tracebloc" and "Ready to run training". Each expands to
+// the specific plain-language problem + fix on failure; the Kubernetes detail
+// stays in --verbose. When the environment is unreachable, readiness can't be
+// assessed, so it degrades honestly to "can't check" (never a false ✔).
+func summarizeDoctor(results []doctor.Result, tokenReachable bool) (connected, ready healthLine) {
+	by := make(map[string]doctor.Result, len(results))
+	for _, r := range results {
+		by[r.Name] = r
+	}
+	reach := by["Cluster reachable"]
+
+	switch {
+	case reach.Status == doctor.StatusFail:
+		// checkReachable already produced an endpoint-aware, plain remedy
+		// (start Docker for a local cluster / check it's running for a remote).
+		connected = healthLine{doctor.StatusFail, "Not connected — your secure environment isn't answering.", reach.Remedy}
+	case !tokenReachable || by["Backend egress (from this machine)"].Status == doctor.StatusFail:
+		connected = healthLine{doctor.StatusFail,
+			"Not connected — can't reach tracebloc from here.",
+			fmt.Sprintf("Check your network / HTTP(S)_PROXY, then run `%s doctor` again.", launcher())}
+	case by["Service Bus egress (requests-proxy)"].Status == doctor.StatusFail:
+		connected = healthLine{doctor.StatusFail,
+			"Training results can't reach tracebloc — experiments will stall.",
+			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
+	default:
+		connected = healthLine{doctor.StatusOK, "Connected to tracebloc", ""}
+	}
+
+	// Readiness is meaningless if we can't even reach the environment.
+	if reach.Status == doctor.StatusFail {
+		ready = healthLine{doctor.StatusUnknown, "Ready to run training — can't check until it's connected", ""}
+		return connected, ready
+	}
+	switch {
+	case by["Pod health"].Status == doctor.StatusFail:
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — part of your secure environment isn't running.",
+			fmt.Sprintf("Reinstall with `%s`, or email support@tracebloc.io with `%s doctor --diagnose`.", installCmd, launcher())}
+	case by["Dataset volume (PVC)"].Status == doctor.StatusFail:
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — dataset storage isn't available.",
+			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
+	case by["Node capacity"].Status == doctor.StatusFail:
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — not enough free compute to start a training.",
+			"Free some up, or raise the machine's allocation in Docker Desktop → Resources."}
+	default:
+		ready = healthLine{doctor.StatusOK, "Ready to run training", ""}
+	}
+	return connected, ready
+}
+
+// renderHealth prints one rolled-up line: ✔ for OK, ✖ + remedy for a problem,
+// and a neutral · "can't check" for StatusUnknown (no false green, no alarm).
+func renderHealth(p *ui.Printer, h healthLine) {
+	switch h.status {
+	case doctor.StatusOK:
+		p.Successf("%s", h.text)
+	case doctor.StatusUnknown:
+		p.Infof("%s", h.text)
+	default:
+		p.Errorf("%s", h.text)
+		if h.remedy != "" {
+			p.Hintf("     %s", h.remedy)
+		}
+	}
+}
+
+// renderDoctorDetails is the --verbose (and --diagnose) technical breakdown:
+// kubeconfig + every granular check. This is the only place Kubernetes
+// vocabulary appears.
+func renderDoctorDetails(p *ui.Printer, resolved *cluster.ResolvedConfig, results []doctor.Result) {
+	p.Newline()
+	p.Section("Details (for support)")
+	p.Field("context", resolved.Context)
+	p.Field("server", resolved.ServerURL)
+	p.Field("namespace", resolved.Namespace)
+	for _, r := range results {
+		mark := "·"
+		switch r.Status {
+		case doctor.StatusOK:
+			mark = "OK  "
+		case doctor.StatusWarn:
+			mark = "WARN"
+		case doctor.StatusFail:
+			mark = "FAIL"
+		}
+		p.Detailf("%s %s — %s", mark, r.Name, r.Detail)
+		if r.Remedy != "" {
+			p.Detailf("       %s", r.Remedy)
+		}
+	}
+}
+
+// writeDiagnoseBundle owns the support bundle (moved out of install-k8s.sh, which
+// the user may not have on disk). It writes the redacted technical breakdown to a
+// file the owner emails to support.
+func writeDiagnoseBundle(p *ui.Printer, resolved *cluster.ResolvedConfig, results []doctor.Result) error {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "tracebloc doctor — support bundle (%s)\n", time.Now().Format(time.RFC3339))
+	bp := ui.New(&buf, ui.WithColor(false), ui.WithVerbose(true))
+	renderDoctorDetails(bp, resolved, results)
+
+	name := fmt.Sprintf("tracebloc-doctor-%s.txt", time.Now().Format("20060102-150405"))
+	if werr := os.WriteFile(name, buf.Bytes(), 0o600); werr != nil {
+		p.Errorf("Couldn't write the support bundle: %v", werr)
+		return &exitError{code: exitLocalEnv, err: nil}
+	}
+	p.Successf("Wrote a support bundle to ./%s", name)
+	p.Hintf("     Email it to support@tracebloc.io.")
+	return nil
+}
+
+// launcher resolves the command name to print in remedies: "tb" on a real
+// install (the alias is beside the CLI), else the invoked name — same rule the
+// home screen uses, so copy-paste always works.
+func launcher() string {
+	if tbAliasAvailable() {
+		return binTB
+	}
+	return invokedName()
+}
+
+// envDisplayName is the secure environment's user-facing handle — the namespace
+// slug (RFC-0001 §7: the slug IS the handle).
+func envDisplayName(r *cluster.ResolvedConfig) string {
+	if r != nil && r.Namespace != "" {
+		return r.Namespace
+	}
+	return "your secure environment"
 }
 
 // worseStatus returns the more severe of two doctor statuses (Fail > Warn > OK).
+// StatusUnknown carries no signal, so it never worsens the verdict.
 func worseStatus(a, b doctor.Status) doctor.Status {
 	if a == doctor.StatusFail || b == doctor.StatusFail {
 		return doctor.StatusFail
@@ -252,14 +318,4 @@ func worseStatus(a, b doctor.Status) doctor.Status {
 		return doctor.StatusWarn
 	}
 	return doctor.StatusOK
-}
-
-// kubeconfigExitCode is 3 ("kubeconfig could not be loaded") unless the auth
-// section also failed — then it escalates to 2 ("a check failed"), so a bad
-// token isn't masked behind a kubeconfig-only exit code (Bugbot).
-func kubeconfigExitCode(authStatus doctor.Status) int {
-	if authStatus == doctor.StatusFail {
-		return exitChecksFailed
-	}
-	return exitLocalEnv
 }

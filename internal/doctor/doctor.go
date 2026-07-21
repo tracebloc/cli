@@ -191,9 +191,9 @@ func checkReachable(release *cluster.ParentRelease, err error, ns, serverURL str
 			if serverURL != "" {
 				detail = fmt.Sprintf("the cluster API server at %s isn't answering — is the cluster running?", serverURL)
 			}
-			remedy := "Check the cluster is running and that your kubeconfig/context points at it."
+			remedy := "Check your secure environment is running."
 			if isLoopback(serverURL) {
-				remedy = "This is a local cluster — start Docker Desktop (or your container runtime), then `k3d cluster start` (or your cluster's start command)."
+				remedy = "Start Docker Desktop (`open -a Docker`) — your secure environment restarts with it — then run this again."
 			}
 			return Result{Name: name, Status: StatusFail, Detail: detail, Remedy: remedy}
 		}

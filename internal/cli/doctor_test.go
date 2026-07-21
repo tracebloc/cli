@@ -28,149 +28,94 @@ func stubBackend(t *testing.T, h http.HandlerFunc) {
 	t.Cleanup(func() { newAPIClient = orig })
 }
 
-// cli#101: `cluster doctor` auth/config/token checks (RFC-0001 §8.5). These pin
-// runAuthChecks — the half of doctor that diagnoses a failed *provision*.
-
-func TestRunAuthChecks_NotSignedIn(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	var out bytes.Buffer
-	if st := runAuthChecks(context.Background(), ui.New(&out)); st != doctor.StatusFail {
-		t.Errorf("not signed in → want Fail, got %v", st)
-	}
-	if !strings.Contains(out.String(), "Auth & config") || !strings.Contains(out.String(), "not signed in") {
-		t.Errorf("missing auth section / not-signed-in line:\n%s", out.String())
-	}
-}
-
-func TestRunAuthChecks_TokenValid(t *testing.T) {
+// signedInConfig writes a signed-in config with an active client for the tests
+// that need to get past the identity gate.
+func signedInConfig(t *testing.T) {
+	t.Helper()
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
 		"dev": {Token: "x", Email: "a@b.io", ActiveClientID: "5"},
 	}}).Save(); err != nil {
 		t.Fatal(err)
 	}
-	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`))
-	})
+}
+
+// ── Identity / session gate (runs before any cluster I/O) ──
+
+func TestDoctor_NotSignedIn(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	var out bytes.Buffer
-	if st := runAuthChecks(context.Background(), ui.New(&out)); st != doctor.StatusOK {
-		t.Errorf("valid token + active client → want OK, got %v;\n%s", st, out.String())
+	err := runClusterDoctor(context.Background(), ui.New(&out, ui.WithColor(false)), "", "", "", false)
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("not signed in → want exit 2, got %v", err)
 	}
-	if !strings.Contains(out.String(), "token valid") {
-		t.Errorf("missing token-valid line:\n%s", out.String())
+	if !strings.Contains(out.String(), "Not signed in") || !strings.Contains(out.String(), "login") {
+		t.Errorf("want a plain 'Not signed in — run ... login', got:\n%s", out.String())
 	}
 }
 
-func TestRunAuthChecks_TokenRejected401(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
-		"dev": {Token: "x", ActiveClientID: "5"},
-	}}).Save(); err != nil {
-		t.Fatal(err)
-	}
+func TestDoctor_SessionExpired401(t *testing.T) {
+	signedInConfig(t)
 	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"detail":"Invalid token."}`))
 	})
 	var out bytes.Buffer
-	if st := runAuthChecks(context.Background(), ui.New(&out)); st != doctor.StatusFail {
-		t.Errorf("token rejected (401) → want Fail, got %v", st)
-	}
-	if !strings.Contains(out.String(), "rejected the token (401)") {
-		t.Errorf("missing 401 line:\n%s", out.String())
-	}
-}
-
-func TestRunAuthChecks_NoActiveClientWarns(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
-		"dev": {Token: "x"}, // signed in, but no active client selected
-	}}).Save(); err != nil {
-		t.Fatal(err)
-	}
-	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`))
-	})
-	var out bytes.Buffer
-	if st := runAuthChecks(context.Background(), ui.New(&out)); st != doctor.StatusWarn {
-		t.Errorf("valid token but no active client → want Warn, got %v;\n%s", st, out.String())
-	}
-	if !strings.Contains(out.String(), "Active client — none") {
-		t.Errorf("missing no-active-client warning:\n%s", out.String())
-	}
-}
-
-// TestClusterDoctor_KubeconfigFailEscalatesWhenAuthFails pins the Bugbot fix: a
-// kubeconfig load failure normally exits 3, but if the auth section ALSO failed
-// (here: not signed in) it escalates to 2 so a bad token isn't masked as a
-// kubeconfig-only problem.
-func TestClusterDoctor_KubeconfigFailEscalatesWhenAuthFails(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // not signed in → auth Fail
-	var out bytes.Buffer
-	err := runClusterDoctor(context.Background(), ui.New(&out), "/nonexistent-kubeconfig-xyz", "", "")
+	err := runClusterDoctor(context.Background(), ui.New(&out, ui.WithColor(false)), "", "", "", false)
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.Code() != 2 {
-		t.Fatalf("kubeconfig-fail + auth-fail → want exit 2, got %v", err)
+		t.Fatalf("401 → want exit 2, got %v", err)
+	}
+	if !strings.Contains(out.String(), "session expired") || !strings.Contains(out.String(), "login") {
+		t.Errorf("want 'Your session expired — run ... login', got:\n%s", out.String())
 	}
 }
 
-// TestClusterDoctor_KubeconfigFailStays3WhenAuthOK: with auth healthy, a
-// kubeconfig failure keeps the documented exit-3 contract.
-func TestClusterDoctor_KubeconfigFailStays3WhenAuthOK(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
-		"dev": {Token: "x", ActiveClientID: "5"},
-	}}).Save(); err != nil {
-		t.Fatal(err)
-	}
-	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // WhoAmI ok → auth OK
-	})
-	var out bytes.Buffer
-	err := runClusterDoctor(context.Background(), ui.New(&out), "/nonexistent-kubeconfig-xyz", "", "")
-	var ee *exitError
-	if !errors.As(err, &ee) || ee.Code() != 3 {
-		t.Fatalf("kubeconfig-fail + auth-OK → want exit 3 (contract), got %v", err)
-	}
-}
-
-// TestRunAuthChecks_426IsHardFailure pins the Bugbot fix: a 426 (server enforces
-// a newer CLI) from the live token check is a hard "upgrade" failure, not a
-// transient "couldn't verify — check your network" warning.
-func TestRunAuthChecks_426IsHardFailure(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
-		"dev": {Token: "x", ActiveClientID: "5"},
-	}}).Save(); err != nil {
-		t.Fatal(err)
-	}
+func TestDoctor_OutOfDate426(t *testing.T) {
+	signedInConfig(t)
 	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUpgradeRequired) // 426
 		_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"0.9.0"}`))
 	})
 	var out bytes.Buffer
-	if st := runAuthChecks(context.Background(), ui.New(&out)); st != doctor.StatusFail {
-		t.Errorf("426 from the token check → want Fail (not a transient Warn), got %v", st)
+	err := runClusterDoctor(context.Background(), ui.New(&out, ui.WithColor(false)), "", "", "", false)
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("426 → want exit 2, got %v", err)
 	}
-	if !strings.Contains(out.String(), "too old") || !strings.Contains(out.String(), "426") {
-		t.Errorf("426 should report a clear 'too old / upgrade' failure, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "out of date") || !strings.Contains(out.String(), "tracebloc.io/i.sh") {
+		t.Errorf("want 'This CLI is out of date — update it: <installer>', got:\n%s", out.String())
 	}
 }
 
-// TestClusterDoctor_BindsActiveClientNamespace pins the review fix: with no
-// --namespace/--context, doctor must target the active client's cached namespace
-// (like `cluster info` and the home screen), not the kubeconfig default — else
-// the home screen and doctor can disagree about the same install. The server is
-// unroutable, so discovery falls back to the bound namespace; we assert doctor
-// reports THAT namespace. Mutation-proven: drop bindActiveClientNamespace and the
-// namespace becomes the kubeconfig default, failing this assertion.
-func TestClusterDoctor_BindsActiveClientNamespace(t *testing.T) {
+// A bad kubeconfig, with auth healthy, is a local-environment problem (exit 3)
+// framed as "no secure environment here yet" — not a Kubernetes error dump.
+func TestDoctor_KubeconfigFailIsLocalEnv(t *testing.T) {
+	signedInConfig(t)
+	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // WhoAmI ok
+	})
+	var out bytes.Buffer
+	err := runClusterDoctor(context.Background(), ui.New(&out, ui.WithColor(false)), "/nonexistent-kubeconfig-xyz", "", "", false)
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 3 {
+		t.Fatalf("kubeconfig-fail + auth-OK → want exit 3, got %v", err)
+	}
+	if !strings.Contains(out.String(), "No secure environment") {
+		t.Errorf("want the plain no-environment message, got:\n%s", out.String())
+	}
+}
+
+// With no --namespace/--context, doctor targets the active client's cached
+// namespace (like `cluster info` + the home screen) and prints it as the
+// secure-environment name. Mutation-proven: drop bindActiveClientNamespace and
+// the printed name becomes the kubeconfig default.
+func TestDoctor_BindsActiveClientNamespace(t *testing.T) {
 	writeActiveClientConfig(t, "munich-radiology", "Munich Radiology")
 	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // WhoAmI ok → auth healthy
+		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // WhoAmI ok
 	})
-	// Valid kubeconfig at an unroutable TEST-NET address: loads fine, so the
-	// namespace resolves from the binding; the later cluster dial just fails.
 	const kubeconfig = `apiVersion: v1
 kind: Config
 clusters:
@@ -188,14 +133,86 @@ users:
 	if err := os.WriteFile(kc, []byte(kubeconfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Bound the context so doctor.Run's dial to the unroutable server can't hang
-	// the test (and CI) — we only assert the namespace resolved from the binding,
-	// which is printed before any cluster I/O.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	_ = runClusterDoctor(ctx, ui.New(&out), kc, "", "") // no ns/context override
+	_ = runClusterDoctor(ctx, ui.New(&out, ui.WithColor(false)), kc, "", "", false)
 	if !strings.Contains(out.String(), "munich-radiology") {
-		t.Fatalf("doctor should target the active client's namespace (munich-radiology), got:\n%s", out.String())
+		t.Fatalf("doctor should name the active client's environment (munich-radiology), got:\n%s", out.String())
 	}
+}
+
+// ── summarizeDoctor: the roll-up of the granular checks into two plain lines ──
+
+func TestSummarizeDoctor(t *testing.T) {
+	res := func(name string, s doctor.Status) doctor.Result { return doctor.Result{Name: name, Status: s} }
+	allOK := []doctor.Result{
+		res("Cluster reachable", doctor.StatusOK),
+		res("Backend egress (from this machine)", doctor.StatusOK),
+		res("Service Bus egress (requests-proxy)", doctor.StatusOK),
+		res("Pod health", doctor.StatusOK),
+		res("Dataset volume (PVC)", doctor.StatusOK),
+		res("Node capacity", doctor.StatusOK),
+	}
+	with := func(base []doctor.Result, name string, s doctor.Status) []doctor.Result {
+		out := make([]doctor.Result, len(base))
+		copy(out, base)
+		for i := range out {
+			if out[i].Name == name {
+				out[i].Status = s
+			}
+		}
+		return out
+	}
+
+	t.Run("all healthy → both OK", func(t *testing.T) {
+		c, r := summarizeDoctor(allOK, true)
+		if c.status != doctor.StatusOK || r.status != doctor.StatusOK {
+			t.Fatalf("want both OK, got connected=%v ready=%v", c.status, r.status)
+		}
+		if c.text != "Connected to tracebloc" || r.text != "Ready to run training" {
+			t.Errorf("unexpected healthy text: %q / %q", c.text, r.text)
+		}
+	})
+
+	t.Run("unreachable → connected Fail, ready can't-check", func(t *testing.T) {
+		c, r := summarizeDoctor(with(allOK, "Cluster reachable", doctor.StatusFail), true)
+		if c.status != doctor.StatusFail {
+			t.Errorf("connected should Fail when unreachable, got %v", c.status)
+		}
+		if r.status != doctor.StatusUnknown {
+			t.Errorf("ready should be Unknown (can't check) when unreachable, got %v", r.status)
+		}
+		if !strings.Contains(r.text, "can't check") {
+			t.Errorf("ready text should say can't check, got %q", r.text)
+		}
+	})
+
+	t.Run("token unreachable → connected Fail", func(t *testing.T) {
+		c, _ := summarizeDoctor(allOK, false)
+		if c.status != doctor.StatusFail || !strings.Contains(c.text, "can't reach tracebloc") {
+			t.Errorf("token-unreachable → want connected Fail 'can't reach tracebloc', got %v %q", c.status, c.text)
+		}
+	})
+
+	t.Run("results egress down → connected Fail (experiments stall)", func(t *testing.T) {
+		c, _ := summarizeDoctor(with(allOK, "Service Bus egress (requests-proxy)", doctor.StatusFail), true)
+		if c.status != doctor.StatusFail || !strings.Contains(c.text, "results can't reach") {
+			t.Errorf("want connected Fail on results-egress down, got %v %q", c.status, c.text)
+		}
+	})
+
+	t.Run("no compute → ready Fail", func(t *testing.T) {
+		_, r := summarizeDoctor(with(allOK, "Node capacity", doctor.StatusFail), true)
+		if r.status != doctor.StatusFail || !strings.Contains(r.remedy, "Docker Desktop") {
+			t.Errorf("want ready Fail with a raise-allocation remedy, got %v remedy=%q", r.status, r.remedy)
+		}
+	})
+
+	t.Run("component down → ready Fail (reinstall/support)", func(t *testing.T) {
+		_, r := summarizeDoctor(with(allOK, "Pod health", doctor.StatusFail), true)
+		if r.status != doctor.StatusFail || !strings.Contains(r.remedy, "tracebloc.io/i.sh") {
+			t.Errorf("want ready Fail with a reinstall remedy, got %v remedy=%q", r.status, r.remedy)
+		}
+	})
 }
