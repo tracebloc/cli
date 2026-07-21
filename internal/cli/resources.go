@@ -86,7 +86,7 @@ func runResourcesShow(ctx context.Context, p *ui.Printer, opts cluster.Kubeconfi
 	p.Newline()
 
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTarget(ctx, p, opts, binding, false)
+	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false)
 	if err != nil {
 		return binding.explain(err)
 	}
