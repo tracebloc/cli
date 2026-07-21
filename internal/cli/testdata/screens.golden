@@ -1,0 +1,230 @@
+tracebloc CLI — screen copy catalog
+═══════════════════════════════════
+The exact wording + spacing of every screen, rendered from the real
+renderers (colour off). Read this instead of deploying to see copy.
+Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestScreensGolden
+
+
+┌─ tb — home · Online ───────────────────────────────────────
+
+
+  Welcome to your secure environment for AI, Lukas 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ✓ Secure environment "hello-world" · Online (12 CPU · 23 GiB)
+
+
+  Your data
+
+  · tb data ingest    load a dataset into your secure environment
+  · tb data list      list your datasets
+  · tb data delete    remove a dataset
+
+
+  Your secure environment
+
+  · tb resources      manage compute & memory
+  · tb doctor         check the connection & diagnose issues
+  · tb delete         remove tracebloc from this machine
+
+
+  Add --help to any command for the flags.
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+└──────────────────────────────────────────────────────────────
+
+
+┌─ tb — home · running (couldn't confirm connection) ────────
+
+
+  Welcome to your secure environment for AI, Lukas 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ⚠ Secure environment "hello-world" · running — couldn't confirm it's connected to tracebloc — run tb doctor
+
+
+  Your data
+
+  · tb data ingest    load a dataset into your secure environment
+  · tb data list      list your datasets
+  · tb data delete    remove a dataset
+
+
+  Your secure environment
+
+  · tb resources      manage compute & memory
+  · tb doctor         check the connection & diagnose issues
+  · tb delete         remove tracebloc from this machine
+
+
+  Add --help to any command for the flags.
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+└──────────────────────────────────────────────────────────────
+
+
+┌─ tb — home · running (backend reports not online) ─────────
+
+
+  Welcome to your secure environment for AI, Lukas 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ⚠ Secure environment "hello-world" · running, but tracebloc hasn't heard from it — run tb doctor
+
+
+  Your data
+
+  · tb data ingest    load a dataset into your secure environment
+  · tb data list      list your datasets
+  · tb data delete    remove a dataset
+
+
+  Your secure environment
+
+  · tb resources      manage compute & memory
+  · tb doctor         check the connection & diagnose issues
+  · tb delete         remove tracebloc from this machine
+
+
+  Add --help to any command for the flags.
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+└──────────────────────────────────────────────────────────────
+
+
+┌─ tb — home · starting up ──────────────────────────────────
+
+
+  Welcome to your secure environment for AI, Lukas 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ⚠ Secure environment "hello-world" · starting up, not ready yet — run tb doctor
+
+
+  Your data
+
+  · tb data ingest    load a dataset into your secure environment
+  · tb data list      list your datasets
+  · tb data delete    remove a dataset
+
+
+  Your secure environment
+
+  · tb resources      manage compute & memory
+  · tb doctor         check the connection & diagnose issues
+  · tb delete         remove tracebloc from this machine
+
+
+  Add --help to any command for the flags.
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+└──────────────────────────────────────────────────────────────
+
+
+┌─ tb — home · offline (can't reach it) ─────────────────────
+
+
+  Welcome to your secure environment for AI, Lukas 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ✗ Secure environment "hello-world" · can't reach it from here — run tb doctor
+
+
+  Your data
+
+  · tb data ingest    load a dataset into your secure environment
+  · tb data list      list your datasets
+  · tb data delete    remove a dataset
+
+
+  Your secure environment
+
+  · tb resources      manage compute & memory
+  · tb doctor         check the connection & diagnose issues
+  · tb delete         remove tracebloc from this machine
+
+
+  Add --help to any command for the flags.
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+└──────────────────────────────────────────────────────────────
+
+
+┌─ tb — home · no secure environment yet ────────────────────
+
+
+  Welcome to tracebloc — your secure environment for AI 👋
+
+  ──────────────────────────────
+
+  ✓ Signed in as lukas@tracebloc.io
+  ⚠ No secure environment on this machine yet — run the installer to set one up.
+
+
+  Your secure environment
+
+  · tb doctor    check the connection & diagnose issues
+
+
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+└──────────────────────────────────────────────────────────────
+
+
+┌─ tb — home · not signed in ────────────────────────────────
+
+
+  Welcome to tracebloc — your secure environment for AI 👋
+
+  ──────────────────────────────
+
+  ✗ Not signed in yet.
+
+
+  Start here
+
+  · tb login    sign in to tracebloc
+
+
+
+  ──────────────────────────────
+
+  love from tracebloc 💚
+
+└──────────────────────────────────────────────────────────────
+
+
+┌─ tb data list — empty ──────────────────────────────────────
+
+  Datasets in hello-world (0)
+
+  No datasets yet — ingest one with `tracebloc data ingest`.
+└──────────────────────────────────────────────────────────────

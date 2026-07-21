@@ -30,7 +30,9 @@ or hex elsewhere. The tone table (`internal/ui/ui.go`) maps each role:
 | Error ✖ | `Errorf` (`toneErr`) | red `#f64c4c` | bold glyph |
 | Label : value | `Field`, `Stat` (`toneLabel`) | dim neutral | — |
 
-**No emoji.** The lime `●` is the online indicator (not 🟢).
+**Emoji are welcome** — used with intent, for warmth (👋 greeting, 💚 sign-off,
+🚀 sent) and for status (🟢 online, 🟡 starting, 🔴 offline, ⚠ caution). They're a
+brand touch, not policed by the guard — just don't overuse them.
 
 The engine renders exact 24-bit hex on truecolor terminals, the **deep shade**
 (`#01637a` / `#578c2b`) on light backgrounds, the nearest ANSI-16 otherwise, and
@@ -58,8 +60,8 @@ word in output text only.
 ## What's enforced vs reviewed
 
 `scripts/check-style.sh` (CI Lint job, blocking) catches the **mechanical**
-violations: hardcoded brand colour outside `internal/ui`, status emoji, and
-`workspace` in user-facing text. Run it locally with `make check-style` (also part
+violations: hardcoded brand colour outside `internal/ui`, and `workspace` in
+user-facing text. Run it locally with `make check-style` (also part
 of `make ci`) or directly: `bash scripts/check-style.sh`.
 
 It can't police **judgement** — using the right *role* for a token (a command in
