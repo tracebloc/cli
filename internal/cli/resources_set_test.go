@@ -670,3 +670,41 @@ func TestSet_UntouchedGPUIsKept(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// proceedingPrompter answers the final confirm "yes"; the wizard prompts are
+// unused on the flag-driven path.
+type proceedingPrompter struct{}
+
+func (proceedingPrompter) Input(string, string, string, func(string) error) (string, error) {
+	return "", errInteractiveCancelled
+}
+func (proceedingPrompter) Select(string, string, []string, string) (string, error) {
+	return "", errInteractiveCancelled
+}
+func (proceedingPrompter) Confirm(string, bool) (bool, error) { return true, nil }
+
+// TestSet_ConfirmOpensWithSingleBlank: after the banner removal (#375) the
+// flag-driven confirm path must still open with exactly ONE blank line.
+// PromptHint self-leads with a newline, so a preceding Newline() stacked two —
+// the command opened with a double blank (Bugbot #375). Pins the single-blank
+// opening so the redundant Newline() can't creep back.
+func TestSet_ConfirmOpensWithSingleBlank(t *testing.T) {
+	fakeHelm(t)
+	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
+	out, err := runSet(t, cs, proceedingPrompter{}, setReq{cores: "4", coresSet: true})
+	if err != nil {
+		t.Fatalf("flag-driven confirm + proceed should succeed: %v\n%s", err, out)
+	}
+	head := out
+	if len(head) > 48 {
+		head = head[:48]
+	}
+	// PromptHint emits "\n  <hint>\n": exactly one leading newline, then two
+	// spaces. A double blank ("\n\n…") is the regression.
+	if !strings.HasPrefix(out, "\n  ") {
+		t.Errorf("confirm path must open with a single blank line then the hint, got %q", head)
+	}
+	if strings.HasPrefix(out, "\n\n") {
+		t.Errorf("confirm path opens with a DOUBLE blank line (banner-removal regression): %q", head)
+	}
+}

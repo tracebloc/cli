@@ -266,7 +266,10 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 			return &exitError{code: exitFailure, err: fmt.Errorf(
 				"refusing to change the ceiling without confirmation: pass --yes, or run on a terminal")}
 		}
-		p.Newline()
+		// PromptHint self-leads with a blank line, so this opens with a single
+		// blank — no preceding Newline() (that stacked two: the #375 banner-
+		// removal regression Bugbot caught). Mirrors the dry-run path, which
+		// leans on Section's own leading newline.
 		p.PromptHint("tracebloc keeps about 1 core and 3 GiB for itself on top of this — it fits on this machine.")
 		proceed, cerr := pr.Confirm(fmt.Sprintf("Let each training run use up to %s?", perRunSize(desired)), true)
 		if cerr != nil {
