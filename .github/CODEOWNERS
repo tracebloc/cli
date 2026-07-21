@@ -1,7 +1,0 @@
-# Narrow CODEOWNERS — protects the style-system definition so the enforcement
-# rules and the pinned brand values can't be weakened without review. Author
-# picks reviewers for everything else.
-
-/scripts/check-style.sh                 @saadqbal
-/STYLE.md                               @saadqbal
-/internal/ui/brand_tones_test.go        @saadqbal
