@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -176,17 +177,27 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 		p.Hintf("%d system table(s) hidden — show with --all.", len(system))
 	}
 
-	// Column widths sized to the shown rows (name + format are variable).
-	nameW, fmtW := 8, 10
+	// Column widths sized to the actual rows so no cell overflows its slot and
+	// shifts the columns after it. Measured in display columns (runes), so the
+	// em dash and middot don't skew the byte-based padding. Record counts and
+	// sizes vary widely ("100 documents", "100.00 KiB"), so they're sized here
+	// too rather than pinned to a guessed constant.
+	nameW, fmtW, recW, sizeW := 8, 10, 6, 4
 	groups := map[string][]push.DatasetInfo{}
 	for _, d := range shown {
 		m := datasetModality(d)
 		groups[m] = append(groups[m], d)
-		if l := len(d.Name); l > nameW {
+		if l := dispW(d.Name); l > nameW {
 			nameW = l
 		}
-		if l := len(formatCell(d, m)); l > fmtW {
+		if l := dispW(formatCell(d, m)); l > fmtW {
 			fmtW = l
+		}
+		if l := dispW(recordsCell(d, m)); l > recW {
+			recW = l
+		}
+		if l := dispW(sizeCell(d)); l > sizeW {
+			sizeW = l
 		}
 	}
 	if nameW > 24 {
@@ -204,45 +215,88 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 		sort.Slice(ds, func(i, j int) bool { return ds[i].Name < ds[j].Name })
 		p.Section(fmt.Sprintf("%s · %d", m, len(ds)))
 		for _, d := range ds {
-			p.Para(datasetRow(d, m, nameW, fmtW))
+			p.Para(datasetRow(d, m, nameW, recW, sizeW, fmtW))
 		}
 	}
 
 	if showAll && len(system) > 0 {
+		// The system group is its own sub-table (name + size only), so size its
+		// two columns to its own rows rather than the shown datasets'.
+		sysNameW, sysSizeW := 8, 4
+		for _, d := range system {
+			if l := dispW(d.Name); l > sysNameW {
+				sysNameW = l
+			}
+			if l := dispW(sizeCell(d)); l > sysSizeW {
+				sysSizeW = l
+			}
+		}
+		if sysNameW > 24 {
+			sysNameW = 24
+		}
 		sort.Slice(system, func(i, j int) bool { return system[i].Name < system[j].Name })
 		p.Section(fmt.Sprintf("System · %d", len(system)))
 		for _, d := range system {
-			size := "—" // system tables aren't du-sized; don't imply a measured 0 B
-			if d.SizeBytes > 0 {
-				size = push.HumanBytes(d.SizeBytes)
-			}
-			p.Para(fmt.Sprintf("· %-*s  %9s", nameW, d.Name, size))
+			p.Para("· " + padRight(d.Name, sysNameW) + "  " + padLeft(sizeCell(d), sysSizeW))
 		}
 	}
 }
 
-// datasetRow formats one dataset as a fixed-width row: status glyph, name,
-// split, record count (with the modality's noun), size, format, and freshness.
-func datasetRow(d push.DatasetInfo, modality string, nameW, fmtW int) string {
+// datasetRow formats one dataset as an aligned row: status glyph, name, split,
+// record count (with the modality's noun), size, format, and freshness. The
+// widths are display-column counts sized by the caller to the widest cell, so
+// no value overflows its slot and shifts the columns after it. Cells are padded
+// here (by rune count) because fmt's %*s pads by bytes — which would misalign
+// the multi-byte em dash / middot.
+func datasetRow(d push.DatasetInfo, modality string, nameW, recW, sizeW, fmtW int) string {
 	glyph := "✔"
 	if d.Records == 0 {
 		glyph = "⚠" // ingested-but-empty (e.g. an ingest that dropped every record)
 	}
 	name := d.Name
-	if len(name) > nameW {
-		name = name[:nameW-1] + "…"
+	if utf8.RuneCountInString(name) > nameW {
+		name = string([]rune(name)[:nameW-1]) + "…"
 	}
 	split := d.Intent
 	if split == "" {
 		split = "—"
 	}
-	size := "—" // du unavailable / unknown
+	return glyph + " " +
+		padRight(name, nameW) + "  " +
+		padRight(split, 5) + "  " +
+		padRight(recordsCell(d, modality), recW) + "  " +
+		padLeft(sizeCell(d), sizeW) + "  " +
+		padRight(formatCell(d, modality), fmtW) + "  " +
+		relativeTime(d.CreatedUnix)
+}
+
+// sizeCell renders a dataset's size, or an em dash when the du size is unknown
+// (jobs-manager unreachable, or a system table that isn't du-sized).
+func sizeCell(d push.DatasetInfo) string {
 	if d.SizeBytes > 0 {
-		size = push.HumanBytes(d.SizeBytes)
+		return push.HumanBytes(d.SizeBytes)
 	}
-	return fmt.Sprintf("%s %-*s  %-5s  %-12s  %9s  %-*s  %s",
-		glyph, nameW, name, split, recordsCell(d, modality), size,
-		fmtW, formatCell(d, modality), relativeTime(d.CreatedUnix))
+	return "—"
+}
+
+// dispW is a string's width in display columns (runes), not bytes — so the em
+// dash and middot (multi-byte, one column each) each count as one.
+func dispW(s string) int { return utf8.RuneCountInString(s) }
+
+// padRight / padLeft pad s to w display columns. fmt's %*s pads by byte length,
+// which over-pads multi-byte glyphs; padding by rune count keeps columns aligned.
+func padRight(s string, w int) string {
+	if n := w - utf8.RuneCountInString(s); n > 0 {
+		return s + strings.Repeat(" ", n)
+	}
+	return s
+}
+
+func padLeft(s string, w int) string {
+	if n := w - utf8.RuneCountInString(s); n > 0 {
+		return strings.Repeat(" ", n) + s
+	}
+	return s
 }
 
 // frameworkCols are the columns the ingestor adds to every dataset table; the

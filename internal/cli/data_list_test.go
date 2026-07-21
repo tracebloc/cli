@@ -109,9 +109,47 @@ func TestRenderDataList_ShowAll(t *testing.T) {
 func TestDatasetRow_EmptyIsWarned(t *testing.T) {
 	empty := push.DatasetInfo{Name: "objdet_train", Extension: "jpg", Records: 0, Intent: "train",
 		Columns: []string{"data_id", "filename", "extension"}}
-	row := datasetRow(empty, datasetModality(empty), 16, 16)
+	row := datasetRow(empty, datasetModality(empty), 16, 8, 8, 16)
 	if !strings.HasPrefix(row, "⚠") {
 		t.Errorf("0-record dataset should lead with ⚠, got: %q", row)
+	}
+}
+
+// TestRenderDataList_ColumnsAlign: rows with wide values (≥100 KiB sizes,
+// ≥100-document counts) must stay column-aligned — the size and format columns
+// should start at the same offset on every row. Regression for the fixed-width
+// %9s/%-12s overflow (Bugbot, commit 1cfdcc3).
+func TestRenderDataList_ColumnsAlign(t *testing.T) {
+	infos := []push.DatasetInfo{
+		// small: "5 documents" / "0.75 KiB" (both short)
+		{Name: "text_small", Intent: "train", Records: 5, Classes: 2, Extension: "txt", SizeBytes: 770,
+			Columns: []string{"id", "label", "data_intent", "data_id", "filename", "extension"}},
+		// wide: "100000 documents" (16) + "100.00 KiB" (10) — both overflow the
+		// old fixed %-12s / %9s and would shift later columns without dynamic sizing.
+		{Name: "text_big", Intent: "test", Records: 100000, Classes: 2, Extension: "txt", SizeBytes: 102400,
+			Columns: []string{"id", "label", "data_intent", "data_id", "filename", "extension"}},
+	}
+	var buf bytes.Buffer
+	renderDataList(ui.New(&buf, ui.WithColor(false)), "ns", infos, false)
+	out := buf.String()
+
+	// Both rows are in the same "Text" group; find them and confirm the format
+	// token ("txt · 2 classes") begins at the identical column on each.
+	var offsets []int
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.Contains(ln, "text_small") || strings.Contains(ln, "text_big") {
+			idx := strings.Index(ln, "txt · 2 classes")
+			if idx < 0 {
+				t.Fatalf("row missing format cell: %q", ln)
+			}
+			offsets = append(offsets, idx)
+		}
+	}
+	if len(offsets) != 2 {
+		t.Fatalf("want 2 text rows, found %d in:\n%s", len(offsets), out)
+	}
+	if offsets[0] != offsets[1] {
+		t.Errorf("format column misaligned: offsets %v differ — wide values overflowed:\n%s", offsets, out)
 	}
 }
 
