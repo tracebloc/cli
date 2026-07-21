@@ -167,12 +167,14 @@ func TestApplyDatasetSizes(t *testing.T) {
 	// signal is the per-row Extension: set → file dataset (PVC/du), empty →
 	// row-based (DB data_length).
 	infos := []DatasetInfo{
-		{Name: "img_train", Extension: "jpg", DBBytes: 4096,
+		{Name: "img_train", Extension: "jpg", Records: 20, DBBytes: 4096,
 			Columns: []string{"data_id", "filename", "extension"}},
-		{Name: "tab_train", Extension: "", DBBytes: 24576,
+		{Name: "tab_train", Extension: "", Records: 20, DBBytes: 24576,
 			Columns: []string{"data_id", "filename", "extension", "age", "income"}}, // has filename col yet is row-based
-		{Name: "img_nodu", Extension: "jpg", DBBytes: 4096,
+		{Name: "img_nodu", Extension: "jpg", Records: 20, DBBytes: 4096,
 			Columns: []string{"data_id", "filename", "extension"}},
+		{Name: "empty_ds", Extension: "", Records: 0, DBBytes: 16384,
+			Columns: []string{"data_id", "filename", "extension"}}, // 0 rows → sizeless, not the page allocation
 	}
 	applyDatasetSizes(infos, map[string]int64{"img_train": 1048576})
 	if infos[0].SizeBytes != 1048576 {
@@ -183,6 +185,9 @@ func TestApplyDatasetSizes(t *testing.T) {
 	}
 	if infos[2].SizeBytes != 0 {
 		t.Errorf("file dataset without a du entry must stay 0 (—), not the misleading DBBytes, got %d", infos[2].SizeBytes)
+	}
+	if infos[3].SizeBytes != 0 {
+		t.Errorf("empty dataset (0 rows) must stay 0 (—), not the InnoDB page size, got %d", infos[3].SizeBytes)
 	}
 }
 

@@ -65,12 +65,18 @@ func ListDatasetsDetailed(ctx context.Context, cs kubernetes.Interface, cfg *res
 // marks staged files. du is best-effort: a file dataset with no du entry
 // (jobs-manager unreachable) shows no size rather than the misleading
 // metadata-row DBBytes.
+//
+// DBBytes is used only for row-based datasets that actually have rows. An empty
+// table (0 records) — whether a row-based or a file dataset whose ingest landed
+// nothing — has an empty extension too, but its data_length is just InnoDB's
+// one-page allocation, not real data; leave it sizeless (rendered "—", matching
+// its ⚠ empty flag) rather than implying it holds a page of data.
 func applyDatasetSizes(infos []DatasetInfo, duSizes map[string]int64) {
 	for i := range infos {
 		if b, ok := duSizes[infos[i].Name]; ok {
 			infos[i].SizeBytes = b // file dataset: real PVC size
-		} else if infos[i].Extension == "" {
-			infos[i].SizeBytes = infos[i].DBBytes // row-based: DB data_length
+		} else if infos[i].Extension == "" && infos[i].Records > 0 {
+			infos[i].SizeBytes = infos[i].DBBytes // row-based with rows: DB data_length
 		}
 	}
 }
