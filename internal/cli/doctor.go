@@ -373,6 +373,18 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — dataset storage isn't available.",
 			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
+	case by["Node capacity"].Status == doctor.StatusWarn &&
+		(strings.HasPrefix(by["Node capacity"].Detail, "couldn't read RESOURCE_REQUESTS") ||
+			strings.HasPrefix(by["Node capacity"].Detail, "could not list nodes")):
+		// checkNodeFit's Warn covers two different situations: a can't-check
+		// (RESOURCE_REQUESTS unreadable, nodes unlistable) and the soft GPU
+		// fallback below. For a can't-check we simply don't know whether a node
+		// can fit a training job, so report an honest can't-check — mirroring
+		// the Pod-health list-failure case above — never a ✔ that skipped the
+		// capacity probe (Bugbot). The GPU-soft Warn intentionally stays Ready:
+		// training still runs via the jobs-manager's CPU fallback.
+		ready = healthLine{doctor.StatusUnknown,
+			"Ready to run training — couldn't check free compute (run with --verbose)", ""}
 	case by["Node capacity"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — not enough free compute to start a training.",

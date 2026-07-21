@@ -236,6 +236,15 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 		return out
 	}
+	withDetail := func(base []doctor.Result, name string, s doctor.Status, detail string) []doctor.Result {
+		out := with(base, name, s)
+		for i := range out {
+			if out[i].Name == name {
+				out[i].Detail = detail
+			}
+		}
+		return out
+	}
 
 	t.Run("all healthy → both OK", func(t *testing.T) {
 		c, r := summarizeDoctor(allOK, tokenOK)
@@ -257,6 +266,32 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 		if !strings.Contains(r.text, "can't check") {
 			t.Errorf("ready text should say can't check, got %q", r.text)
+		}
+	})
+
+	t.Run("node capacity can't-check → ready can't-check, never green", func(t *testing.T) {
+		// Both can't-check Warn details (nodes unlistable, RESOURCE_REQUESTS
+		// unreadable) must roll up to an honest Unknown — a ✔ here would assert
+		// readiness without a capacity probe (Bugbot).
+		for _, detail := range []string{
+			"could not list nodes: nodes is forbidden",
+			"couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit",
+		} {
+			_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn, detail), tokenOK)
+			if r.status != doctor.StatusUnknown {
+				t.Errorf("%q: ready should be Unknown, got %v", detail, r.status)
+			}
+			if !strings.Contains(r.text, "couldn't check free compute") {
+				t.Errorf("%q: ready text should say couldn't check free compute, got %q", detail, r.text)
+			}
+		}
+	})
+
+	t.Run("node capacity GPU-soft warn → still ready", func(t *testing.T) {
+		_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			"no single Ready node satisfies cpu+memory AND nvidia.com/gpu — GPU jobs rely on the CPU fallback (needs cpu=2, memory=8Gi)"), tokenOK)
+		if r.status != doctor.StatusOK {
+			t.Errorf("GPU-soft warn must stay Ready (CPU fallback), got %v", r.status)
 		}
 	})
 
