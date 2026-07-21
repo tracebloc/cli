@@ -33,7 +33,7 @@ import (
 )
 
 // Status is a single check's severity. Ordered so the numerically-greatest
-// status is the worst — see Worst.
+// status is the worst; the cli layer rolls the checks up into the verdict.
 type Status int
 
 const (
@@ -44,9 +44,10 @@ const (
 
 // StatusUnknown marks a check that could not run because a prerequisite was
 // unavailable — today, the cluster API being unreachable. It carries NO signal:
-// Worst() ignores it, so it never affects the overall verdict or exit code. It
-// exists so a single root cause (a stopped cluster) renders as one honest ✖ plus
-// neutral "couldn't check" lines, instead of every check inventing a false cause.
+// the verdict rollup ignores it, so it never affects the overall result or exit
+// code. It exists so a single root cause (a stopped cluster) renders as one
+// honest ✖ plus neutral "couldn't check" lines, instead of every check inventing
+// a false cause.
 const StatusUnknown Status = -1
 
 func (s Status) String() string {
@@ -71,22 +72,26 @@ type Result struct {
 	Status Status
 	Detail string
 	Remedy string
+
+	// Reach classifies WHY the "Cluster reachable" check landed where it did, so
+	// the cli summary can word the remedy correctly — an unreachable API (stopped
+	// container runtime / network) needs a different fix than a reachable cluster
+	// with no tracebloc installed. Zero (ReachOK) on every other check.
+	Reach ReachState
 }
 
-// Worst returns the most severe status across results (StatusOK for none).
-// The doctor command maps a non-OK worst to a non-zero exit code.
-func Worst(results []Result) Status {
-	worst := StatusOK
-	for _, r := range results {
-		if r.Status == StatusUnknown {
-			continue // no signal — a "couldn't check" never sets the verdict
-		}
-		if r.Status > worst {
-			worst = r.Status
-		}
-	}
-	return worst
-}
+// ReachState classifies the "Cluster reachable" outcome so the cli summary can
+// word its remedy correctly (see Result.Reach). A stopped API, a reachable
+// cluster with no tracebloc installed, and an RBAC/other error each need a
+// different plain-language fix — never the same "isn't answering" line.
+type ReachState int
+
+const (
+	ReachOK          ReachState = iota // API answered and the tracebloc chart is here
+	ReachUnreachable                   // API never answered (container runtime/network down)
+	ReachNoEnv                         // API answered, but no tracebloc secure environment here
+	ReachError                         // API answered with some other error (RBAC/NotFound/…)
+)
 
 // Conservative tunables, kept as package consts to avoid false positives on a
 // busy cluster. If a check ever needs runtime tuning, thread it through Options
@@ -127,8 +132,8 @@ type Options struct {
 
 // Run executes every check in display order and returns their results. It
 // never returns an error: an unreachable cluster or a failing probe is a
-// Result, not a Go error — the command renders all of them and derives the
-// exit code from Worst.
+// Result, not a Go error — the cli layer rolls them up into the two health
+// lines the owner reads and derives the exit code from that verdict.
 func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 	if opts.HTTPProbe == nil {
 		opts.HTTPProbe = httpProbe
@@ -195,18 +200,26 @@ func checkReachable(release *cluster.ParentRelease, err error, ns, serverURL str
 			if isLoopback(serverURL) {
 				remedy = "Start Docker Desktop (`open -a Docker`) — your secure environment restarts with it — then run this again."
 			}
-			return Result{Name: name, Status: StatusFail, Detail: detail, Remedy: remedy}
+			return Result{Name: name, Status: StatusFail, Detail: detail, Remedy: remedy, Reach: ReachUnreachable}
 		}
 		// API answered but no chart here (ErrNoParentRelease) or another error.
 		// The discovery error's remediation tail points at doctor — which is
 		// what's running. Strip it so doctor never tells the user to run doctor.
 		// (Must match the exact suffix cluster.discover appends.)
 		detail := strings.TrimSuffix(strings.TrimSpace(err.Error()), "Diagnose with `tracebloc doctor`.")
+		// The API answered: a missing chart means "no environment installed here"
+		// (fix: reinstall), anything else is an RBAC/NotFound-class error (fix:
+		// support). The cli summary words each differently — never a kubectl.
+		reach := ReachError
+		if errors.Is(err, cluster.ErrNoParentRelease) {
+			reach = ReachNoEnv
+		}
 		return Result{
 			Name:   name,
 			Status: StatusFail,
 			Detail: strings.TrimSpace(detail),
 			Remedy: "Check your kubeconfig/context and that the tracebloc client chart is installed here: kubectl get deploy -n " + ns,
+			Reach:  reach,
 		}
 	}
 	return Result{
@@ -277,8 +290,8 @@ func isLoopback(serverURL string) bool {
 }
 
 // unknownCheck is the placeholder for a cluster check that could not run because
-// the API is unreachable — no signal, so Worst() ignores it and the verdict
-// comes from "Cluster reachable" alone.
+// the API is unreachable — no signal, so the verdict rollup ignores it and the
+// verdict comes from "Cluster reachable" alone.
 func unknownCheck(name string) Result {
 	return Result{
 		Name:   name,

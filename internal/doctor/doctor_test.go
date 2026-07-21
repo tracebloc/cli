@@ -157,14 +157,18 @@ func initCrashPod(name string) *corev1.Pod {
 	}
 }
 
-func TestWorst(t *testing.T) {
-	if got := Worst(nil); got != StatusOK {
-		t.Fatalf("Worst(nil) = %v, want ok", got)
+// worstStatus mirrors the overall-verdict rollup for the Run() tests below: the
+// most severe status across results, StatusUnknown ("couldn't check") ignored.
+// Production derives the exit code in the cli layer from the two rolled-up health
+// lines; this keeps the package tests' verdict assertions concise.
+func worstStatus(results []Result) Status {
+	worst := StatusOK
+	for _, r := range results {
+		if r.Status != StatusUnknown && r.Status > worst {
+			worst = r.Status
+		}
 	}
-	rs := []Result{{Status: StatusOK}, {Status: StatusFail}, {Status: StatusWarn}}
-	if got := Worst(rs); got != StatusFail {
-		t.Fatalf("Worst = %v, want fail", got)
-	}
+	return worst
 }
 
 func TestCheckReachable(t *testing.T) {
@@ -243,8 +247,8 @@ func TestRun_UnreachableCascade(t *testing.T) {
 	if r := byName["Backend egress (from this machine)"]; r.Status != StatusOK {
 		t.Errorf("Backend egress = %v, want ok (probed from this machine, independent of the cluster API)", r.Status)
 	}
-	if w := Worst(results); w != StatusFail {
-		t.Fatalf("Worst = %v, want fail (verdict from the one real ✖, StatusUnknown ignored)", w)
+	if w := worstStatus(results); w != StatusFail {
+		t.Fatalf("worst = %v, want fail (verdict from the one real ✖, StatusUnknown ignored)", w)
 	}
 }
 
@@ -491,7 +495,7 @@ func TestRun_HealthyCluster(t *testing.T) {
 	if len(results) != 9 {
 		t.Fatalf("want 9 checks, got %d", len(results))
 	}
-	if w := Worst(results); w != StatusOK {
+	if w := worstStatus(results); w != StatusOK {
 		for _, r := range results {
 			t.Logf("%-32s %-4s %s", r.Name, r.Status, r.Detail)
 		}

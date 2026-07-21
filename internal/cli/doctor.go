@@ -189,9 +189,24 @@ func summarizeDoctor(results []doctor.Result, tokenReachable bool) (connected, r
 
 	switch {
 	case reach.Status == doctor.StatusFail:
-		// checkReachable already produced an endpoint-aware, plain remedy
-		// (start Docker for a local cluster / check it's running for a remote).
-		connected = healthLine{doctor.StatusFail, "Not connected — your secure environment isn't answering.", reach.Remedy}
+		// A failed reachability check has three very different fixes; word each
+		// from the classification checkReachable attached, never a kubectl. An
+		// unclassified fail (e.g. a hand-built result) defaults to "isn't
+		// answering" — the safe, pre-existing interpretation.
+		switch reach.Reach {
+		case doctor.ReachNoEnv:
+			connected = healthLine{doctor.StatusFail,
+				"No secure environment installed here.",
+				"Set one up: " + installCmd}
+		case doctor.ReachError:
+			connected = healthLine{doctor.StatusFail,
+				"Not connected — couldn't read your secure environment.",
+				fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
+		default: // ReachUnreachable
+			connected = healthLine{doctor.StatusFail,
+				"Not connected — your secure environment isn't answering.",
+				reach.Remedy}
+		}
 	case !tokenReachable || by["Backend egress (from this machine)"].Status == doctor.StatusFail:
 		connected = healthLine{doctor.StatusFail,
 			"Not connected — can't reach tracebloc from here.",
@@ -206,7 +221,7 @@ func summarizeDoctor(results []doctor.Result, tokenReachable bool) (connected, r
 
 	// Readiness is meaningless if we can't even reach the environment.
 	if reach.Status == doctor.StatusFail {
-		ready = healthLine{doctor.StatusUnknown, "Ready to run training — can't check until it's connected", ""}
+		ready = healthLine{doctor.StatusUnknown, "Ready to run training — can't check yet", ""}
 		return connected, ready
 	}
 	switch {
@@ -214,6 +229,10 @@ func summarizeDoctor(results []doctor.Result, tokenReachable bool) (connected, r
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — part of your secure environment isn't running.",
 			fmt.Sprintf("Reinstall with `%s`, or email support@tracebloc.io with `%s doctor --diagnose`.", installCmd, launcher())}
+	case by["Image pull secret"].Status == doctor.StatusFail:
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — the training images can't be pulled.",
+			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
 	case by["Dataset volume (PVC)"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — dataset storage isn't available.",
