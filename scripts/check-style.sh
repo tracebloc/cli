@@ -46,7 +46,7 @@ echo "== tracebloc style guard =="
 # 1) Hardcoded brand colour outside the engine (internal/ui).
 brand='#?(01a5cc|91e947|a7ed6c|01637a|578c2b|34b7d6)|38;2;(1;165;204|145;233;71|167;237;108|1;99;122|87;140;43)'
 report "hardcoded brand colour — use the Printer tones in ${ENGINE}, don't re-hardcode hex/RGB" \
-  "$(scan "$brand" | grep -vE "^${ENGINE}")"
+  "$(scan "$brand" '-i' | grep -vE "^${ENGINE}")"
 
 # 2) Status / traffic-light emoji. Pattern built from bytes so this source stays
 #    emoji-free (green/red/yellow/orange circles).
