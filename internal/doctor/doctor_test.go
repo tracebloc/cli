@@ -157,20 +157,30 @@ func initCrashPod(name string) *corev1.Pod {
 	}
 }
 
-func TestWorst(t *testing.T) {
-	if got := Worst(nil); got != StatusOK {
-		t.Fatalf("Worst(nil) = %v, want ok", got)
+// worstStatus mirrors the overall-verdict rollup for the Run() tests below: the
+// most severe status across results, StatusUnknown ("couldn't check") ignored.
+// Production derives the exit code in the cli layer from the two rolled-up health
+// lines; this keeps the package tests' verdict assertions concise.
+func worstStatus(results []Result) Status {
+	worst := StatusOK
+	for _, r := range results {
+		if r.Status != StatusUnknown && r.Status > worst {
+			worst = r.Status
+		}
 	}
-	rs := []Result{{Status: StatusOK}, {Status: StatusFail}, {Status: StatusWarn}}
-	if got := Worst(rs); got != StatusFail {
-		t.Fatalf("Worst = %v, want fail", got)
-	}
+	return worst
 }
 
 func TestCheckReachable(t *testing.T) {
-	// A non-transport error (e.g. no chart / RBAC) keeps the kubeconfig+chart remedy.
-	if r := checkReachable(nil, errors.New("boom"), ns, ""); r.Status != StatusFail {
-		t.Fatalf("error => %v, want fail", r.Status)
+	// A non-transport, non-chart error (e.g. RBAC) keeps the kubeconfig+chart
+	// remedy and classifies as ReachError.
+	if r := checkReachable(nil, errors.New("boom"), ns, ""); r.Status != StatusFail || r.Reach != ReachError {
+		t.Fatalf("other error => status %v reach %v, want fail/ReachError", r.Status, r.Reach)
+	}
+	// No chart installed (the API answered) classifies as ReachNoEnv so the
+	// summary points at the installer, never a kubectl (Bugbot #365).
+	if r := checkReachable(nil, cluster.ErrNoParentRelease, ns, ""); r.Reach != ReachNoEnv {
+		t.Fatalf("no-chart => reach %v, want ReachNoEnv", r.Reach)
 	}
 	rel := &cluster.ParentRelease{ReleaseName: "tb", ChartVersion: "1.3.5", AppVersion: "1.3.5"}
 	r := checkReachable(rel, nil, ns, "")
@@ -189,6 +199,45 @@ func TestCheckReachable(t *testing.T) {
 	}
 	if !strings.Contains(tr.Remedy, "start") || strings.Contains(tr.Remedy, "kubectl get deploy") {
 		t.Fatalf("transport remedy = %q, want a start-the-cluster hint, not the chart remedy", tr.Remedy)
+	}
+
+	// A stopped k3d cluster advertised as 0.0.0.0 (the kubeconfig host when the
+	// installer pins no explicit --api-port host) must still get the start-Docker
+	// remedy, not the generic "check it's running" line (Bugbot #365).
+	wc := checkReachable(nil, errors.New(`Get "https://0.0.0.0:6550/api": dial tcp 0.0.0.0:6550: connect: connection refused`), ns, "https://0.0.0.0:6550")
+	if wc.Reach != ReachUnreachable {
+		t.Fatalf("0.0.0.0 transport => reach %v, want ReachUnreachable", wc.Reach)
+	}
+	if !strings.Contains(wc.Remedy, "Docker Desktop") {
+		t.Fatalf("0.0.0.0 remedy = %q, want the start-Docker-Desktop hint", wc.Remedy)
+	}
+}
+
+// TestIsLoopback covers every kubeconfig host that means "the cluster is local,
+// so the fix is start Docker Desktop": the loopback addresses, the wildcard bind
+// addresses k3d writes when no host is pinned (0.0.0.0, ::), and Docker Desktop's
+// host alias — but never a genuinely-remote endpoint (Bugbot #365).
+func TestIsLoopback(t *testing.T) {
+	for _, s := range []string{
+		"https://127.0.0.1:6550",
+		"https://localhost:6550",
+		"https://[::1]:6550",
+		"https://0.0.0.0:6550",
+		"https://[::]:6550",
+		"https://host.docker.internal:6550",
+	} {
+		if !isLoopback(s) {
+			t.Errorf("isLoopback(%q) = false, want true (local cluster)", s)
+		}
+	}
+	for _, s := range []string{
+		"https://api.k8s.example.com:6443",
+		"https://10.1.2.3:6443",
+		"",
+	} {
+		if isLoopback(s) {
+			t.Errorf("isLoopback(%q) = true, want false (not a local cluster)", s)
+		}
 	}
 }
 
@@ -243,8 +292,8 @@ func TestRun_UnreachableCascade(t *testing.T) {
 	if r := byName["Backend egress (from this machine)"]; r.Status != StatusOK {
 		t.Errorf("Backend egress = %v, want ok (probed from this machine, independent of the cluster API)", r.Status)
 	}
-	if w := Worst(results); w != StatusFail {
-		t.Fatalf("Worst = %v, want fail (verdict from the one real ✖, StatusUnknown ignored)", w)
+	if w := worstStatus(results); w != StatusFail {
+		t.Fatalf("worst = %v, want fail (verdict from the one real ✖, StatusUnknown ignored)", w)
 	}
 }
 
@@ -491,7 +540,7 @@ func TestRun_HealthyCluster(t *testing.T) {
 	if len(results) != 9 {
 		t.Fatalf("want 9 checks, got %d", len(results))
 	}
-	if w := Worst(results); w != StatusOK {
+	if w := worstStatus(results); w != StatusOK {
 		for _, r := range results {
 			t.Logf("%-32s %-4s %s", r.Name, r.Status, r.Detail)
 		}
