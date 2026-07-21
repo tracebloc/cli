@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/doctor"
@@ -311,14 +313,53 @@ func TestRunClusterDoctor_NoEnvSuppressesEnvHeader(t *testing.T) {
 	out, err := runDoctorClusterHalf(t, []doctor.Result{
 		{Name: "Cluster reachable", Status: doctor.StatusFail, Reach: doctor.ReachNoEnv},
 	})
-	if !strings.Contains(out, "No secure environment installed here") {
-		t.Errorf("want the no-environment Connected line, got:\n%s", out)
+	if !strings.Contains(out, "No secure environment on this machine yet") {
+		t.Errorf("want the unified no-environment message, got:\n%s", out)
 	}
 	if strings.Contains(out, `Secure environment "`) {
 		t.Errorf("must not name a secure environment when none is installed, got:\n%s", out)
 	}
+	if strings.Contains(out, "kubectl") {
+		t.Errorf("no-env output must not leak kubectl, got:\n%s", out)
+	}
+	// Healthy session → a local-env setup problem (exit 3), consistent with a
+	// missing kubeconfig.
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 3 {
+		t.Fatalf("ReachNoEnv (healthy session) → want exit 3, got %v", err)
+	}
+}
+
+// A session fault alongside no-environment must be surfaced (not hidden) and must
+// dominate the exit code (2), matching the other no-env exits (Bugbot #365).
+func TestRunClusterDoctor_NoEnvSurfacesSessionFault(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "a@b.io", ActiveClientID: "5"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	// WhoAmI at a closed port → transport error → tokenUnreachable.
+	origAPI := newAPIClient
+	t.Cleanup(func() { newAPIClient = origAPI })
+	newAPIClient = func(string) *api.Client {
+		return &api.Client{BaseURL: "http://127.0.0.1:1", HTTP: &http.Client{Timeout: 2 * time.Second}}
+	}
+	withClusterSeams(t, fake.NewSimpleClientset())
+	withDoctorRun(t, []doctor.Result{
+		{Name: "Cluster reachable", Status: doctor.StatusFail, Reach: doctor.ReachNoEnv},
+	})
+
+	var buf bytes.Buffer
+	err := runClusterDoctor(context.Background(), ui.New(&buf, ui.WithColor(false)), "", "", "", false)
+	if !strings.Contains(buf.String(), "Can't reach tracebloc from here") {
+		t.Errorf("session fault must be surfaced on no-env, got:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "No secure environment on this machine yet") {
+		t.Errorf("want the no-environment message too, got:\n%s", buf.String())
+	}
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.Code() != 2 {
-		t.Fatalf("ReachNoEnv → want exit 2, got %v", err)
+		t.Fatalf("session fault + no-env → want exit 2 (fault dominates), got %v", err)
 	}
 }

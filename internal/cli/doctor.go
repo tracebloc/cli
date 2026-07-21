@@ -174,21 +174,26 @@ func runClusterDoctor(
 		p.Errorf("Couldn't connect to your secure environment — check your kubeconfig/context.")
 		return &exitError{code: earlyExitCode(tok), err: nil}
 	}
-	// 4. Probe the cluster and roll the granular checks up into the two plain
-	//    lines the owner acts on (the granular results stay for --verbose/--diagnose).
+	// 4. Probe the cluster.
 	results = doctorRunFn(ctx, cs, doctor.Options{Namespace: resolved.Namespace, ServerURL: resolved.ServerURL})
-	connected, ready = summarizeDoctor(results, tok)
 
-	// Name the secure environment only when one is actually installed here. A
-	// reachable cluster with no tracebloc chart (ReachNoEnv) is "no environment",
-	// and the Connected line below says so — naming it too would assert it both
-	// exists and doesn't. Every other reach state (running, stopped, RBAC) means
-	// an environment IS installed, so it's named. Printed here (not before the
-	// probe) so we know which; nothing prints between it and "Signed in" above, so
-	// the two context lines still read as a pair.
-	if reachStateOf(results) != doctor.ReachNoEnv {
-		p.Para(fmt.Sprintf("Secure environment %q", envDisplayName(resolved)))
+	// A reachable cluster with no tracebloc chart installed is the same "no secure
+	// environment here" state as a missing kubeconfig — route it through the same
+	// message (which also surfaces any session fault) rather than naming an
+	// environment that isn't installed. This unifies all three no-environment
+	// exits: missing kubeconfig, clientset error, and no chart.
+	if reachStateOf(results) == doctor.ReachNoEnv {
+		p.Newline()
+		noteSessionProblem(p, tok)
+		p.Errorf("No secure environment on this machine yet.")
+		p.Hintf("     Set one up: %s", installCmd)
+		return &exitError{code: earlyExitCode(tok), err: nil}
 	}
+
+	// An environment is installed here — name it (nothing prints between this and
+	// "Signed in" above, so the two context lines read as a pair), then roll up.
+	p.Para(fmt.Sprintf("Secure environment %q", envDisplayName(resolved)))
+	connected, ready = summarizeDoctor(results, tok)
 
 	p.Newline()
 	renderHealth(p, connected)
@@ -286,15 +291,11 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 
 	switch {
 	case reach.Status == doctor.StatusFail:
-		// A failed reachability check has three very different fixes; word each
-		// from the classification checkReachable attached, never a kubectl. An
-		// unclassified fail (e.g. a hand-built result) defaults to "isn't
-		// answering" — the safe, pre-existing interpretation.
+		// ReachNoEnv (reachable, no chart) is short-circuited in runClusterDoctor,
+		// so it never reaches here. The two remaining fails are worded from the
+		// classification, never a kubectl; an unclassified fail (e.g. a hand-built
+		// result) defaults to "isn't answering" — the safe interpretation.
 		switch reach.Reach {
-		case doctor.ReachNoEnv:
-			connected = healthLine{doctor.StatusFail,
-				"No secure environment installed here.",
-				"Set one up: " + installCmd}
 		case doctor.ReachError:
 			connected = healthLine{doctor.StatusFail,
 				"Not connected — couldn't read your secure environment.",

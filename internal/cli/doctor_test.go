@@ -290,28 +290,6 @@ func TestSummarizeDoctor(t *testing.T) {
 
 	// A reachable cluster with no tracebloc installed must NOT be reported as
 	// "isn't answering" with a kubectl remedy — it's a reinstall (Bugbot #365).
-	t.Run("no environment installed → connected Fail (installer, not kubectl)", func(t *testing.T) {
-		noEnv := with(allOK, "Cluster reachable", doctor.StatusFail)
-		for i := range noEnv {
-			if noEnv[i].Name == "Cluster reachable" {
-				noEnv[i].Reach = doctor.ReachNoEnv
-			}
-		}
-		c, r := summarizeDoctor(noEnv, tokenOK)
-		if c.status != doctor.StatusFail || !strings.Contains(c.text, "No secure environment") {
-			t.Errorf("no-env → want connected Fail 'No secure environment', got %v %q", c.status, c.text)
-		}
-		if !strings.Contains(c.remedy, "tracebloc.io/i.sh") {
-			t.Errorf("no-env remedy should be the installer, got %q", c.remedy)
-		}
-		if strings.Contains(c.remedy, "kubectl") {
-			t.Errorf("no-env remedy must not leak kubectl, got %q", c.remedy)
-		}
-		if r.status != doctor.StatusUnknown {
-			t.Errorf("no-env → ready should be can't-check (Unknown), got %v", r.status)
-		}
-	})
-
 	// A failing image-pull check means training images can't be fetched — that
 	// is not-ready, and must not be silently dropped from the rollup (Bugbot #365).
 	t.Run("images can't be pulled → ready Fail", func(t *testing.T) {
