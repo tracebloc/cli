@@ -99,9 +99,12 @@ func runClusterDoctor(
 	}
 
 	// 2. Is the session still good with tracebloc? A 401 (expired/revoked) or a
-	//    426 (CLI too old) is a hard stop with a one-command fix. A network error
-	//    is NOT fatal — it folds into the Connected line below.
-	tokenReachable := true
+	//    426 (CLI too old) is a hard stop with a one-command fix. Anything else
+	//    folds into the Connected line below — but a backend that ANSWERED with
+	//    an error (5xx/403/decode) is a tracebloc-side problem, distinct from a
+	//    network failure to reach it at all. Conflating the two would blame the
+	//    user's network (and hand them a proxy remedy) for tracebloc's own error.
+	tok := tokenOK
 	apiClient := newAPIClient(cfg.CurrentEnv)
 	apiClient.Token = cfg.Current().Token
 	if _, werr := apiClient.WhoAmI(ctx); werr != nil {
@@ -116,8 +119,10 @@ func runClusterDoctor(
 			p.Newline()
 			p.Errorf("This CLI is out of date — update it: %s", installCmd)
 			return &exitError{code: exitChecksFailed, err: nil}
+		case errors.As(werr, &ae):
+			tok = tokenServerErr // tracebloc answered, just not with 200
 		default:
-			tokenReachable = false // can't reach tracebloc from here — Connected will say so
+			tok = tokenUnreachable // couldn't reach tracebloc at all (network/proxy)
 		}
 	}
 
@@ -149,7 +154,7 @@ func runClusterDoctor(
 
 	// 5. Roll the granular checks up into two plain lines the owner can act on.
 	p.Newline()
-	connected, ready := summarizeDoctor(results, tokenReachable)
+	connected, ready := summarizeDoctor(results, tok)
 	renderHealth(p, connected)
 	renderHealth(p, ready)
 
@@ -175,12 +180,25 @@ type healthLine struct {
 	remedy string
 }
 
+// tokenState classifies the WhoAmI probe for the Connected rollup: the session
+// confirmed (tokenOK), the backend unreachable from this machine (tokenUnreachable
+// — network/proxy), or the backend reachable but answering with an error
+// (tokenServerErr — 5xx/403/decode, a tracebloc-side problem, not the network).
+type tokenState int
+
+const (
+	tokenOK tokenState = iota
+	tokenUnreachable
+	tokenServerErr
+)
+
 // summarizeDoctor collapses the granular checks into the two lines the owner
 // reads: "Connected to tracebloc" and "Ready to run training". Each expands to
 // the specific plain-language problem + fix on failure; the Kubernetes detail
-// stays in --verbose. When the environment is unreachable, readiness can't be
-// assessed, so it degrades honestly to "can't check" (never a false ✔).
-func summarizeDoctor(results []doctor.Result, tokenReachable bool) (connected, ready healthLine) {
+// stays in --verbose. When the owner isn't connected — for ANY reason — a
+// healthy local cluster still can't run training, so readiness degrades honestly
+// to "can't check" rather than showing a reassuring ✔ next to a Connected ✖.
+func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready healthLine) {
 	by := make(map[string]doctor.Result, len(results))
 	for _, r := range results {
 		by[r.Name] = r
@@ -207,10 +225,14 @@ func summarizeDoctor(results []doctor.Result, tokenReachable bool) (connected, r
 				"Not connected — your secure environment isn't answering.",
 				reach.Remedy}
 		}
-	case !tokenReachable || by["Backend egress (from this machine)"].Status == doctor.StatusFail:
+	case tok == tokenUnreachable || by["Backend egress (from this machine)"].Status == doctor.StatusFail:
 		connected = healthLine{doctor.StatusFail,
 			"Not connected — can't reach tracebloc from here.",
 			fmt.Sprintf("Check your network / HTTP(S)_PROXY, then run `%s doctor` again.", launcher())}
+	case tok == tokenServerErr:
+		connected = healthLine{doctor.StatusFail,
+			"Not connected — tracebloc didn't confirm your session (server error).",
+			fmt.Sprintf("Try again shortly; if it persists, email support@tracebloc.io with `%s doctor --diagnose`.", launcher())}
 	case by["Service Bus egress (requests-proxy)"].Status == doctor.StatusFail:
 		connected = healthLine{doctor.StatusFail,
 			"Training results can't reach tracebloc — experiments will stall.",
@@ -219,8 +241,10 @@ func summarizeDoctor(results []doctor.Result, tokenReachable bool) (connected, r
 		connected = healthLine{doctor.StatusOK, "Connected to tracebloc", ""}
 	}
 
-	// Readiness is meaningless if we can't even reach the environment.
-	if reach.Status == doctor.StatusFail {
+	// Readiness only means something once we're connected: a healthy local
+	// cluster still can't run training while it can't reach tracebloc. If
+	// Connected is anything but OK, degrade honestly — never a green ✔ under a ✖.
+	if connected.status != doctor.StatusOK {
 		ready = healthLine{doctor.StatusUnknown, "Ready to run training — can't check yet", ""}
 		return connected, ready
 	}

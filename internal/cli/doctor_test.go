@@ -166,7 +166,7 @@ func TestSummarizeDoctor(t *testing.T) {
 	}
 
 	t.Run("all healthy → both OK", func(t *testing.T) {
-		c, r := summarizeDoctor(allOK, true)
+		c, r := summarizeDoctor(allOK, tokenOK)
 		if c.status != doctor.StatusOK || r.status != doctor.StatusOK {
 			t.Fatalf("want both OK, got connected=%v ready=%v", c.status, r.status)
 		}
@@ -176,7 +176,7 @@ func TestSummarizeDoctor(t *testing.T) {
 	})
 
 	t.Run("unreachable → connected Fail, ready can't-check", func(t *testing.T) {
-		c, r := summarizeDoctor(with(allOK, "Cluster reachable", doctor.StatusFail), true)
+		c, r := summarizeDoctor(with(allOK, "Cluster reachable", doctor.StatusFail), tokenOK)
 		if c.status != doctor.StatusFail {
 			t.Errorf("connected should Fail when unreachable, got %v", c.status)
 		}
@@ -189,28 +189,28 @@ func TestSummarizeDoctor(t *testing.T) {
 	})
 
 	t.Run("token unreachable → connected Fail", func(t *testing.T) {
-		c, _ := summarizeDoctor(allOK, false)
+		c, _ := summarizeDoctor(allOK, tokenUnreachable)
 		if c.status != doctor.StatusFail || !strings.Contains(c.text, "can't reach tracebloc") {
 			t.Errorf("token-unreachable → want connected Fail 'can't reach tracebloc', got %v %q", c.status, c.text)
 		}
 	})
 
 	t.Run("results egress down → connected Fail (experiments stall)", func(t *testing.T) {
-		c, _ := summarizeDoctor(with(allOK, "Service Bus egress (requests-proxy)", doctor.StatusFail), true)
+		c, _ := summarizeDoctor(with(allOK, "Service Bus egress (requests-proxy)", doctor.StatusFail), tokenOK)
 		if c.status != doctor.StatusFail || !strings.Contains(c.text, "results can't reach") {
 			t.Errorf("want connected Fail on results-egress down, got %v %q", c.status, c.text)
 		}
 	})
 
 	t.Run("no compute → ready Fail", func(t *testing.T) {
-		_, r := summarizeDoctor(with(allOK, "Node capacity", doctor.StatusFail), true)
+		_, r := summarizeDoctor(with(allOK, "Node capacity", doctor.StatusFail), tokenOK)
 		if r.status != doctor.StatusFail || !strings.Contains(r.remedy, "Docker Desktop") {
 			t.Errorf("want ready Fail with a raise-allocation remedy, got %v remedy=%q", r.status, r.remedy)
 		}
 	})
 
 	t.Run("component down → ready Fail (reinstall/support)", func(t *testing.T) {
-		_, r := summarizeDoctor(with(allOK, "Pod health", doctor.StatusFail), true)
+		_, r := summarizeDoctor(with(allOK, "Pod health", doctor.StatusFail), tokenOK)
 		if r.status != doctor.StatusFail || !strings.Contains(r.remedy, "tracebloc.io/i.sh") {
 			t.Errorf("want ready Fail with a reinstall remedy, got %v remedy=%q", r.status, r.remedy)
 		}
@@ -225,7 +225,7 @@ func TestSummarizeDoctor(t *testing.T) {
 				noEnv[i].Reach = doctor.ReachNoEnv
 			}
 		}
-		c, r := summarizeDoctor(noEnv, true)
+		c, r := summarizeDoctor(noEnv, tokenOK)
 		if c.status != doctor.StatusFail || !strings.Contains(c.text, "No secure environment") {
 			t.Errorf("no-env → want connected Fail 'No secure environment', got %v %q", c.status, c.text)
 		}
@@ -244,12 +244,44 @@ func TestSummarizeDoctor(t *testing.T) {
 	// is not-ready, and must not be silently dropped from the rollup (Bugbot #365).
 	t.Run("images can't be pulled → ready Fail", func(t *testing.T) {
 		withPull := append(append([]doctor.Result{}, allOK...), res("Image pull secret", doctor.StatusFail))
-		_, r := summarizeDoctor(withPull, true)
+		_, r := summarizeDoctor(withPull, tokenOK)
 		if r.status != doctor.StatusFail || !strings.Contains(r.text, "images can't be pulled") {
 			t.Errorf("image-pull down → want ready Fail 'images can't be pulled', got %v %q", r.status, r.text)
 		}
 		if !strings.Contains(r.remedy, "--diagnose") {
 			t.Errorf("image-pull remedy should point at --diagnose, got %q", r.remedy)
+		}
+	})
+
+	// A backend that ANSWERED with an error (5xx/403/decode) is a tracebloc-side
+	// problem — it must not be blamed on the user's network with a proxy remedy
+	// (Bugbot #365).
+	t.Run("backend answered with an error → connected Fail (support, not network)", func(t *testing.T) {
+		c, r := summarizeDoctor(allOK, tokenServerErr)
+		if c.status != doctor.StatusFail || !strings.Contains(c.text, "server error") {
+			t.Errorf("server-err → want connected Fail 'server error', got %v %q", c.status, c.text)
+		}
+		if strings.Contains(c.remedy, "PROXY") || strings.Contains(c.remedy, "network") {
+			t.Errorf("server-err remedy must not blame the network, got %q", c.remedy)
+		}
+		if !strings.Contains(c.remedy, "--diagnose") {
+			t.Errorf("server-err remedy should point at support/--diagnose, got %q", c.remedy)
+		}
+		if r.status != doctor.StatusUnknown {
+			t.Errorf("server-err → ready should be can't-check (Unknown), got %v", r.status)
+		}
+	})
+
+	// Disconnected but the local cluster is healthy: Ready must NOT show a green
+	// ✔ next to a Connected ✖ — training can't complete while disconnected
+	// (Bugbot #365).
+	t.Run("disconnected but cluster healthy → ready not a false check", func(t *testing.T) {
+		c, r := summarizeDoctor(with(allOK, "Service Bus egress (requests-proxy)", doctor.StatusFail), tokenOK)
+		if c.status != doctor.StatusFail {
+			t.Fatalf("precondition: want connected Fail (service bus down), got %v", c.status)
+		}
+		if r.status == doctor.StatusOK {
+			t.Errorf("ready must not be a green check while disconnected, got OK %q", r.text)
 		}
 	})
 }
