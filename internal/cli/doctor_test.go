@@ -288,16 +288,41 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
-	// Pods stuck Pending past the grace window surface as Pod-health StatusWarn
-	// (not Fail). Training still can't schedule, so the rollup must NOT report ✔
-	// "Ready to run training" — that false green was the Bugbot finding.
+	// Pod health has TWO StatusWarn sources (checkPods): pods stuck Pending, and a
+	// failure to list pods at all (e.g. RBAC). They must roll up differently.
+	warnPods := func(detail string) []doctor.Result {
+		out := with(allOK, "Pod health", doctor.StatusWarn)
+		for i := range out {
+			if out[i].Name == "Pod health" {
+				out[i].Detail = detail
+			}
+		}
+		return out
+	}
+
+	// Pods stuck Pending past the grace window: training can't schedule, so the
+	// rollup must NOT report ✔ "Ready to run training" — that false green was the
+	// original Bugbot finding.
 	t.Run("pods stuck pending (warn) → ready Fail, not a false green", func(t *testing.T) {
-		_, r := summarizeDoctor(with(allOK, "Pod health", doctor.StatusWarn), tokenOK)
-		if r.status == doctor.StatusOK {
-			t.Fatalf("stuck-pending pods must not roll up to Ready, got %v %q", r.status, r.text)
+		_, r := summarizeDoctor(warnPods("Pending > 5m0s: [trainer-x]"), tokenOK)
+		if r.status != doctor.StatusFail {
+			t.Fatalf("stuck-pending pods must roll up to not-ready, got %v %q", r.status, r.text)
 		}
 		if !strings.Contains(r.text, "Not ready") {
 			t.Errorf("want a Not-ready readiness line for stuck-pending pods, got %q", r.text)
+		}
+	})
+
+	// The other Pod-health Warn source, "could not list pods" (RBAC), is a
+	// can't-check — it must NOT get the stuck-pending/compute (Docker Desktop)
+	// remedy (Bugbot follow-up).
+	t.Run("pod-health warn = could not list pods (RBAC) → can't-check, not stuck-pending", func(t *testing.T) {
+		_, r := summarizeDoctor(warnPods("could not list pods: pods is forbidden"), tokenOK)
+		if r.status == doctor.StatusFail {
+			t.Errorf("a can't-list-pods warn must not be a hard not-ready, got %v %q", r.status, r.text)
+		}
+		if strings.Contains(r.remedy, "Docker Desktop") {
+			t.Errorf("must not give the stuck-pending/compute remedy for a read failure, got remedy=%q", r.remedy)
 		}
 	})
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -339,6 +340,14 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — part of your secure environment isn't running.",
 			fmt.Sprintf("Reinstall with `%s`, or email support@tracebloc.io with `%s doctor --diagnose`.", installCmd, launcher())}
+	case by["Pod health"].Status == doctor.StatusWarn && strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
+		// checkPods returns StatusWarn for TWO different situations: pods stuck
+		// Pending (below) AND a failure to list pods at all (e.g. RBAC, doctor.go
+		// checkPods). For the latter we simply can't tell whether training can run,
+		// so report an honest can't-check — never the stuck-pending/compute remedy,
+		// which would misdiagnose a permissions problem (Bugbot).
+		ready = healthLine{doctor.StatusUnknown,
+			"Ready to run training — couldn't check your workloads (run with --verbose)", ""}
 	case by["Pod health"].Status == doctor.StatusWarn:
 		// Pods stuck Pending past the grace window (unschedulable / image can't
 		// pull) mean training can't actually schedule — so this is NOT ready, even
