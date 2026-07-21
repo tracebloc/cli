@@ -37,7 +37,7 @@ func connectIngestTarget(ctx context.Context, a *runDataIngestArgs) (target *clu
 	//    Errors mirror that command's exit-code contract (3 for
 	//    kubeconfig, 4 for missing release) so behaviour is
 	//    consistent across pre-flight commands.
-	// Connecting to the workspace + discovering its shared storage is
+	// Connecting to the secure environment + discovering its shared storage is
 	// Kubernetes plumbing (release / PVC / jobs-manager) the happy path keeps
 	// quiet — it's no longer a numbered step (RFC-0002 §6), and --verbose adds
 	// the release/PVC detail below. But the discovery itself is several blocking
@@ -48,7 +48,7 @@ func connectIngestTarget(ctx context.Context, a *runDataIngestArgs) (target *clu
 	// namespace-fallback note mid-call, and a spinner's \r redraw would clobber
 	// it. ALL the logic below (discovery + the exit-6 destination guard) is
 	// unchanged; only the presentation moved.
-	a.Printer.Infof("Connecting to your workspace…")
+	a.Printer.Infof("Connecting to your secure environment…")
 	// 6. PVC discovery (needPVC) confirms the chart's shared-data PVC is
 	//    Bound before we waste time provisioning a Pod that can't mount it.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
@@ -127,7 +127,7 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 	//     The chart's helm flow uses the same token-mint code path.
 	a.Printer.Step(3, 3, "Validate and load")
 	if a.Detach {
-		a.Printer.Hintf("Submitting the run — with --detach it keeps running on your workspace after this command returns; the reconnect command is shown below.")
+		a.Printer.Hintf("Submitting the run — with --detach it keeps running on your secure environment after this command returns; the reconnect command is shown below.")
 	} else {
 		a.Printer.Hintf("Submitting the run, then following along as tracebloc validates your data and loads it into the table — progress streams below.")
 		a.Printer.Hintf("This follows the run for up to an hour; a longer run keeps going on its own (or start it with --detach and check back later).")
@@ -150,7 +150,7 @@ func runIngestionRun(ctx context.Context, out io.Writer, a runDataIngestArgs, ta
 	// silent (RFC-0002 "progress on every wait"). The submit POST itself is a
 	// separate ~30s synchronous wait; its spinner lives in submit.Run, next to
 	// the POST it covers.
-	connectSpin := a.Printer.Spinner("Connecting to your workspace to submit the run", "")
+	connectSpin := a.Printer.Spinner("Connecting to your secure environment to submit the run", "")
 	pf, err := portForwardJobsManagerFn(ctx, cs, resolved.RestConfig,
 		resolved.Namespace, release.JobsManagerServiceName, release.JobsManagerPort)
 	connectSpin.Stop()
@@ -258,7 +258,7 @@ func shouldReclaimStaging(status string) bool {
 	return status == "succeeded"
 }
 
-// printClusterSummary shows the discovered workspace target. It's Kubernetes
+// printClusterSummary shows the discovered secure environment target. It's Kubernetes
 // plumbing (release / jobs-manager / shared PVC) the happy path hides, so the
 // whole block — header, fields, and the RWO-PVC note — prints only under
 // --verbose (RFC-0002 §6). Discovery + guards are unchanged; this is
@@ -349,7 +349,7 @@ func existingTableAction(a *runDataIngestArgs, existingTable string) (proceed bo
 		return ok, nil
 	}
 	return false, &exitError{code: exitTableExists, err: fmt.Errorf(
-		"table %q already exists in this workspace. Re-ingesting the same table doesn't merge or replace — "+
+		"table %q already exists in this secure environment. Re-ingesting the same table doesn't merge or replace — "+
 			"the run would fail after uploading everything. Re-run with --overwrite to replace it, "+
 			"or pick a different --name. (`tracebloc data delete %s` also removes it.)",
 		existingTable, existingTable)}

@@ -93,14 +93,14 @@ func newDataIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ingest <dataset>",
 		Aliases: []string{"push"},
-		Short:   "Ingest a local dataset into your workspace",
+		Short:   "Ingest a local dataset into your secure environment",
 		// The task COUNT and the text-family subdir names are derived from the
 		// registry / vendored layout contract (push.SupportedCategoryIDs +
 		// push.TextSidecarDir) rather than hardcoded, so the help can't drift
 		// from what the CLI actually supports (cli#215): the count used to read
 		// a stale "9", and the text example showed texts/ for every text task
 		// even though masked_language_modeling stages into sequences/.
-		Long: fmt.Sprintf(`Ingests a local dataset into your workspace's storage,
+		Long: fmt.Sprintf(`Ingests a local dataset into your secure environment's storage,
 submits the ingestion run, and follows it to completion (streaming
 progress + the final summary). Your data never leaves your own
 infrastructure. Supports %[1]d tasks across the image, text, and

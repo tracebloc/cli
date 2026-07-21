@@ -25,11 +25,11 @@ func newDataCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "data",
 		Aliases: []string{"dataset"},
-		Short:   "Manage the datasets in your workspace",
-		Long: `Commands for ingesting and managing the datasets your workspace holds —
+		Short:   "Manage the datasets in your secure environment",
+		Long: `Commands for ingesting and managing the datasets your secure environment holds —
 the data models train on. It stays on your infrastructure.
 
-` + "`data ingest`" + ` ingests a local dataset into your workspace's storage,
+` + "`data ingest`" + ` ingests a local dataset into your secure environment's storage,
 submits the ingestion run, and watches it to completion (streaming
 logs + the final summary). ` + "`data validate`" + ` checks an ingest.yaml
 locally first.
@@ -147,8 +147,8 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 	//    live-only steps (stage + ingest) the customer just skipped.
 	if a.DryRun {
 		a.Printer.Newline()
-		a.Printer.Successf("Dry-run complete — your data and workspace check out; nothing was created.")
-		a.Printer.Hintf("A real run continues with step 2 (copy into your workspace) and step 3 (validate and load).")
+		a.Printer.Successf("Dry-run complete — your data and secure environment check out; nothing was created.")
+		a.Printer.Hintf("A real run continues with step 2 (copy into your secure environment) and step 3 (validate and load).")
 		if a.OutputJSON {
 			writePushJSON(a.JSONOut, "dry-run", spec, nil, "", "")
 			jsonEmitted = true
@@ -196,8 +196,8 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 	//    Exit code 7 ("staging failed") is distinct from the
 	//    pre-flight codes so customers can branch on whether the
 	//    failure was their environment vs the actual data transfer.
-	a.Printer.Step(2, 3, "Copy into your workspace")
-	a.Printer.Hintf("Your files are copied securely into your workspace's storage — set up and cleaned up for you.")
+	a.Printer.Step(2, 3, "Copy into your secure environment")
+	a.Printer.Hintf("Your files are copied securely into your secure environment's storage — set up and cleaned up for you.")
 	progress := push.NewProgress(out, layout.TotalBytes,
 		fmt.Sprintf("Copying %s", a.Spec.Table))
 	// Defer Finish so a failure path that returns BEFORE

@@ -6,3 +6,10 @@
 # CI + release infrastructure. Changes here can break the release
 # pipeline; route them to platform reviewers explicitly.
 /.github/      @tracebloc/maintainers
+
+# Style-system enforcement (STYLE.md). The guard, the style reference, and the
+# pinned brand values decide what output regressions CI blocks; a change here
+# changes the rules themselves, so it must be code-owner reviewed.
+/scripts/check-style.sh            @tracebloc/maintainers
+/STYLE.md                          @tracebloc/maintainers
+/internal/ui/brand_tones_test.go   @tracebloc/maintainers

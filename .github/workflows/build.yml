@@ -51,6 +51,7 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck dash
           shellcheck --shell=sh --severity=error scripts/install.sh
+          shellcheck --shell=bash --severity=error scripts/check-style.sh
           dash -n scripts/install.sh
           bash -n scripts/tests/install-verify.sh
       - name: Verification harness (mandatory cosign / fail-closed)
@@ -179,6 +180,13 @@ jobs:
         # deliberate, reviewed edit to scripts/file-budget.sh. Keeps the next
         # 1500-line data.go from growing quietly (backend#1106 WS-B).
         run: ./scripts/file-budget.sh
+
+      - name: Style + terminology guard
+        # Enforces the terminal style system (STYLE.md): no hardcoded brand colour
+        # outside the tone engine (internal/ui), no status/traffic-light emoji, and
+        # "secure environment" not "workspace" in user-facing text. Mechanical
+        # checks only — role/wording judgement stays with review.
+        run: bash scripts/check-style.sh
 
   govulncheck:
     timeout-minutes: 10

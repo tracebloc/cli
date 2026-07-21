@@ -95,7 +95,7 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 	a.Printer.Banner("tracebloc", "data ingest")
 	a.Printer.Para(strings.TrimSpace(`
 This ingests a dataset so models can train on it. Your files never leave your
-own infrastructure — tracebloc copies them into your workspace's storage,
+own infrastructure — tracebloc copies them into your secure environment's storage,
 checks them, and loads them into a table your training runs read from. Other
 collaborators can train against that table without ever seeing the raw files.`))
 	a.Printer.Hintf("Learn more: https://docs.tracebloc.io")
@@ -285,7 +285,7 @@ collaborators can train against that table without ever seeing the raw files.`))
 	}
 
 	a.Printer.Step(1, 3, "Check your data")
-	a.Printer.Hintf("Reading your files locally first — nothing has touched your workspace yet — so a layout or settings problem shows up right away.")
+	a.Printer.Hintf("Reading your files locally first — nothing has touched your secure environment yet — so a layout or settings problem shows up right away.")
 
 	// 3a. Per-category spec resolution from the local data, so the
 	//     synthesized spec carries the right fields before validation.
