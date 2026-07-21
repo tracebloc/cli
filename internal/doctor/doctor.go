@@ -519,7 +519,9 @@ func backendHost(clientEnv string) string {
 // weights egress MID-RUN; it does not block scheduling (experiments do not
 // "stay Pending" for this). Ready here is the Deployment's ReadyReplicas, which
 // (absent a readiness probe — backend#1143) only means the container started,
-// not that Service Bus egress actually works; the OK detail says so plainly.
+// not that Service Bus egress actually works. So a Ready relay returns a neutral
+// StatusUnknown ("running, egress not actively verified"), never a ✔ (cli#351);
+// the real ✔ arrives once the chart ships that probe and doctor consumes it.
 func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string, release *cluster.ParentRelease) Result {
 	const name = "Service Bus egress (requests-proxy)"
 	dep := findDeployment(ctx, cs, ns, release, "requests-proxy")
@@ -539,7 +541,14 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 			Remedy: "While requests-proxy is down, in-flight training can't relay epoch results/FLOPs to Service Bus — result egress stalls (scheduling is unaffected). kubectl describe deploy " + dep.Name + " -n " + ns,
 		}
 	}
-	return Result{Name: name, Status: StatusOK, Detail: "requests-proxy Deployment Ready — relays result/FLOPs egress to Service Bus (deployment-ready only; egress not directly probed)"}
+	// Present and Ready — but readiness ≠ egress works (see the doc comment). Do
+	// not green this off readiness; report a neutral, honest "unknown" so doctor
+	// never claims Service Bus egress is verified when it hasn't been (cli#351).
+	return Result{
+		Name:   name,
+		Status: StatusUnknown,
+		Detail: "requests-proxy is running, but egress to Service Bus is not actively verified — readiness only confirms the relay started, not that it can reach Service Bus",
+	}
 }
 
 // checkNodeFit verifies at least one Ready node can satisfy the resource
