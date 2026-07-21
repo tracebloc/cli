@@ -268,9 +268,14 @@ func isUnreachable(err error) bool {
 	return false
 }
 
-// isLoopback reports whether serverURL points at the local machine (127.0.0.1 /
-// localhost / ::1) — a k3d/kind/Docker-Desktop cluster, whose "isn't answering"
-// almost always means the container runtime or the cluster is simply stopped.
+// isLoopback reports whether serverURL points at the local machine — a
+// k3d/kind/Docker-Desktop cluster, whose "isn't answering" almost always means
+// the container runtime or the cluster is simply stopped, so the remedy is
+// "start Docker Desktop". It covers the loopback addresses (127.0.0.0/8, ::1,
+// localhost), the unspecified/wildcard bind addresses k3d writes into a
+// kubeconfig when no explicit host is pinned (0.0.0.0, ::), and Docker Desktop's
+// host alias (host.docker.internal). No genuinely-remote cluster is ever reached
+// through any of these, so treating them as local carries no false-positive risk.
 func isLoopback(serverURL string) bool {
 	if serverURL == "" {
 		return false
@@ -279,12 +284,12 @@ func isLoopback(serverURL string) bool {
 	if err != nil {
 		return false
 	}
-	host := u.Hostname()
-	if host == "localhost" {
+	switch u.Hostname() {
+	case "localhost", "host.docker.internal":
 		return true
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
+	if ip := net.ParseIP(u.Hostname()); ip != nil {
+		return ip.IsLoopback() || ip.IsUnspecified()
 	}
 	return false
 }
