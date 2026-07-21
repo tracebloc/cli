@@ -140,12 +140,10 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	return nil
 }
 
-// modalityOrder is the fixed display order of the modality groups.
-var modalityOrder = []string{"Image", "Text", "Tabular", "Time-series", "Other"}
-
 // renderDataList prints the human-facing listing: a summary line, then the
-// datasets grouped by modality with per-dataset detail. Split out so it's
-// unit-testable with a buffer-backed Printer.
+// datasets grouped by their real task (or inferred modality when the task
+// wasn't recorded) with per-dataset detail. Split out so it's unit-testable
+// with a buffer-backed Printer.
 func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, showAll bool) {
 	var shown, system []push.DatasetInfo
 	var totalBytes int64
@@ -184,9 +182,12 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 	// too rather than pinned to a guessed constant.
 	nameW, fmtW, recW, sizeW := 8, 10, 6, 4
 	groups := map[string][]push.DatasetInfo{}
+	groupRank := map[string]int{} // group label → modality rank, for ordering
 	for _, d := range shown {
 		m := datasetModality(d)
-		groups[m] = append(groups[m], d)
+		label := groupLabel(d, m)
+		groups[label] = append(groups[label], d)
+		groupRank[label] = modalityRank(m)
 		if l := dispW(d.Name); l > nameW {
 			nameW = l
 		}
@@ -209,15 +210,24 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 		nameW = 24
 	}
 
-	for _, m := range modalityOrder {
-		ds := groups[m]
-		if len(ds) == 0 {
-			continue
+	// Order groups by modality family (Image→Text→Tabular→Time-series→Other),
+	// then label — so tasks in the same family cluster and the order is stable.
+	labels := make([]string, 0, len(groups))
+	for l := range groups {
+		labels = append(labels, l)
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		if ri, rj := groupRank[labels[i]], groupRank[labels[j]]; ri != rj {
+			return ri < rj
 		}
+		return labels[i] < labels[j]
+	})
+	for _, label := range labels {
+		ds := groups[label]
 		sort.Slice(ds, func(i, j int) bool { return ds[i].Name < ds[j].Name })
-		p.Section(fmt.Sprintf("%s · %d", m, len(ds)))
+		p.Section(fmt.Sprintf("%s · %d", label, len(ds)))
 		for _, d := range ds {
-			p.Para(datasetRow(d, m, nameW, recW, sizeW, fmtW))
+			p.Para(datasetRow(d, datasetModality(d), nameW, recW, sizeW, fmtW))
 		}
 	}
 
@@ -310,10 +320,38 @@ var frameworkCols = map[string]bool{
 	"extension": true, "annotation": true, "ingestor_id": true,
 }
 
-// datasetModality infers the modality family from the on-disk shape: the file
-// extension for file-bearing tasks, else the presence of time/sequence columns.
-// Best-effort — the specific task isn't stored in the cluster DB.
+// taskModality maps each known ingest task (data-ingestors TaskCategory) to its
+// modality family. When the run journal recorded a task this is authoritative —
+// the modality is looked up, not inferred.
+var taskModality = map[string]string{
+	"image_classification":         "Image",
+	"object_detection":             "Image",
+	"keypoint_detection":           "Image",
+	"semantic_segmentation":        "Image",
+	"text_classification":          "Text",
+	"token_classification":         "Text",
+	"sentence_pair_classification": "Text",
+	"masked_language_modeling":     "Text",
+	"causal_language_modeling":     "Text",
+	"seq2seq":                      "Text",
+	"embeddings":                   "Text",
+	"tabular_classification":       "Tabular",
+	"tabular_regression":           "Tabular",
+	"time_series_forecasting":      "Time-series",
+	"time_series_classification":   "Time-series",
+	"time_to_event_prediction":     "Time-series",
+}
+
+// datasetModality returns the modality family. When the ingest task is known
+// (recorded in the run journal) it's the authoritative map above; otherwise it
+// falls back to inferring from the on-disk shape — the file extension for
+// file-bearing tasks, else the presence of time/sequence columns.
 func datasetModality(d push.DatasetInfo) string {
+	if d.Task != "" {
+		if m, ok := taskModality[strings.ToLower(strings.TrimSpace(d.Task))]; ok {
+			return m
+		}
+	}
 	switch strings.ToLower(d.Extension) {
 	case "jpg", "jpeg", "png":
 		return "Image"
@@ -332,6 +370,42 @@ func datasetModality(d push.DatasetInfo) string {
 		return "Tabular"
 	}
 	return "Other"
+}
+
+// groupLabel is the section header a dataset is grouped under: its real task
+// (humanized) when the journal recorded one, else the inferred modality family.
+func groupLabel(d push.DatasetInfo, modality string) string {
+	if d.Task != "" {
+		return humanizeTask(d.Task)
+	}
+	return modality
+}
+
+// humanizeTask renders an ingest task id ("image_classification") as a section
+// title ("Image classification").
+func humanizeTask(task string) string {
+	s := strings.ReplaceAll(strings.TrimSpace(task), "_", " ")
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// modalityRank orders the modality families so a group's position is stable and
+// related tasks cluster together.
+func modalityRank(modality string) int {
+	switch modality {
+	case "Image":
+		return 0
+	case "Text":
+		return 1
+	case "Tabular":
+		return 2
+	case "Time-series":
+		return 3
+	default: // Other
+		return 4
+	}
 }
 
 // hasCol reports whether cols contains name (case-insensitive, trimmed).
@@ -375,16 +449,23 @@ func formatCell(d push.DatasetInfo, modality string) string {
 	var base string
 	switch modality {
 	case "Image", "Text":
-		// Modality is extension-driven, so the extension is always set here.
+		// Usually the recorded file extension. When the modality came from the
+		// task (not the extension), a file dataset whose extension wasn't
+		// recorded still lands here — fall back to "files" rather than blank.
 		base = strings.ToLower(d.Extension)
+		if base == "" {
+			base = "files"
+		}
 	case "Tabular", "Time-series":
 		base = fmt.Sprintf("csv · %d cols", featureColCount(d.Columns))
 	default:
-		// Undetermined modality. A populated table with a filename column is
-		// still clearly file-based — its extension just wasn't recorded — so
-		// say "files" rather than "—". Anything else is genuinely unknown (e.g.
-		// an empty table); don't imply "csv".
-		if d.Records > 0 && hasCol(d.Columns, "filename") {
+		// Undetermined modality. Row-based tasks (with user feature columns)
+		// resolve to Tabular/Time-series, so a populated table left here is a
+		// file dataset whose type we couldn't pin down (e.g. extension not
+		// recorded) — say "files". An empty table is genuinely unknown; don't
+		// imply "csv". (A `filename` column can't gate this — it's a framework
+		// column on every table.)
+		if d.Records > 0 {
 			return "files"
 		}
 		return "—"
@@ -434,6 +515,7 @@ func ingestedISO(epoch int64) string {
 
 type datasetJSON struct {
 	Name      string `json:"name"`
+	Task      string `json:"task,omitempty"` // real ingest task; omitted for pre-persistence datasets
 	Modality  string `json:"modality"`
 	Intent    string `json:"intent,omitempty"`
 	Records   int64  `json:"records"`
@@ -463,6 +545,7 @@ func writeDataListJSON(w io.Writer, namespace, release string, infos []push.Data
 		names = append(names, d.Name)
 		details = append(details, datasetJSON{
 			Name:      d.Name,
+			Task:      d.Task,
 			Modality:  m,
 			Intent:    d.Intent,
 			Records:   d.Records,

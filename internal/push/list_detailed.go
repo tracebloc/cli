@@ -14,17 +14,19 @@ import (
 )
 
 // DatasetInfo is one dataset's metadata for the rich `data list` view. It is
-// assembled from two read-only queries against the mysql pod: an
-// information_schema pass (name/size/create-time/columns) and a per-table data
-// pass (intent/record-count/classes/extension). Everything here already exists
-// in the ingested tables — no backend round-trip.
+// assembled from read-only queries against the mysql pod: an information_schema
+// pass (name/db-size/create-time/columns), a per-table data pass
+// (intent/record-count/classes/extension), and the ingest-run journal (task).
+// Everything here already exists in the cluster — no backend round-trip.
 type DatasetInfo struct {
 	Name        string   // table name = dataset name
 	Intent      string   // "train" / "test" / "" (from the data_intent column)
+	Task        string   // the ingest task/category (e.g. image_classification) from the run journal; "" if not recorded (pre-persistence datasets)
 	Records     int64    // COUNT(*) — images / documents / rows, per modality
 	Classes     int64    // COUNT(DISTINCT label); 0 when unlabelled
 	Extension   string   // per-row file extension (jpg/png/txt); "" for CSV tasks
-	SizeBytes   int64    // real dataset size from a du of the shared PVC; 0 if unavailable
+	SizeBytes   int64    // dataset size: du of the shared PVC for file datasets, else the DB data_length; 0 if unavailable
+	DBBytes     int64    // information_schema.data_length — the size source for row-based (non-file) datasets
 	CreatedUnix int64    // create_time as a UTC epoch (tz-safe) — the sole time SoT, for both "ago" and JSON
 	Columns     []string // all column names — drives modality inference
 	System      bool     // a framework table (no data_id), e.g. the ingest-run journal
@@ -47,17 +49,30 @@ func ListDatasetsDetailed(ctx context.Context, cs kubernetes.Interface, cfg *res
 	if err != nil {
 		return nil, err
 	}
-	// Real per-dataset sizes come from a du of the shared PVC (where the files
-	// live), not the DB. Best-effort: if the jobs-manager pod or the du isn't
-	// reachable, the listing still renders — those datasets just show no size.
-	if sizes := datasetSizesFromShared(ctx, exec, cs, namespace); sizes != nil {
-		for i := range infos {
-			if b, ok := sizes[infos[i].Name]; ok {
-				infos[i].SizeBytes = b
-			}
+	applyDatasetSizes(infos, datasetSizesFromShared(ctx, exec, cs, namespace))
+	return infos, nil
+}
+
+// applyDatasetSizes picks each dataset's size from where its data actually
+// lives. File-bearing datasets keep their bytes on the shared PVC, so the real
+// size is the du of that PVC (duSizes) — the DB holds only metadata rows.
+// Row-based datasets (tabular / time-series) live entirely in the table, so
+// their information_schema.data_length (DBBytes) IS the size.
+//
+// The file-vs-row signal is the per-row file Extension, NOT a `filename`
+// column: filename/extension/annotation are framework columns present on EVERY
+// dataset table (tabular included), so only a non-empty extension actually
+// marks staged files. du is best-effort: a file dataset with no du entry
+// (jobs-manager unreachable) shows no size rather than the misleading
+// metadata-row DBBytes.
+func applyDatasetSizes(infos []DatasetInfo, duSizes map[string]int64) {
+	for i := range infos {
+		if b, ok := duSizes[infos[i].Name]; ok {
+			infos[i].SizeBytes = b // file dataset: real PVC size
+		} else if infos[i].Extension == "" {
+			infos[i].SizeBytes = infos[i].DBBytes // row-based: DB data_length
 		}
 	}
-	return infos, nil
 }
 
 // datasetSizesFromShared returns real dataset byte sizes by du-ing the shared
@@ -114,16 +129,18 @@ func listDatasetsDetailedWith(ctx context.Context, exec Executor, namespace, pod
 
 // queryDatasetsDetailed runs the schema pass then the per-table data pass once.
 func queryDatasetsDetailed(ctx context.Context, exec Executor, namespace, pod, container string) ([]DatasetInfo, error) {
-	// Size is NOT taken from information_schema: for a file-bearing dataset the
-	// DB holds only metadata rows (the images/text live on the shared PVC), and
-	// for a tiny table InnoDB reports its padded page allocation, not the logical
-	// size — both misleading. Real sizes come from a `du` of the PVC below.
+	// data_length is fetched but used ONLY for row-based datasets (tabular /
+	// time-series), whose data really lives in the table. For a file-bearing
+	// dataset it's just the metadata rows (images/text live on the PVC) and for
+	// a tiny table it's InnoDB's padded page allocation — both misleading — so
+	// those fall back to a `du` of the PVC in ListDatasetsDetailed.
 	// Raise group_concat_max_len (default 1024) so a wide table's column list
 	// isn't truncated mid-name — that would under-count feature columns and drop
 	// late modality markers. Runs as a leading statement over the same stdin.
 	schemaQ := "SET SESSION group_concat_max_len = 1048576; " +
 		"SELECT t.table_name," +
 		" COALESCE(MAX(UNIX_TIMESTAMP(t.create_time)),0)," + // tz-safe epoch — sole time SoT
+		" COALESCE(MAX(t.data_length),0)," + // DB size — used for row-based datasets
 		" COALESCE(GROUP_CONCAT(c.column_name ORDER BY c.ordinal_position SEPARATOR ','),'')" +
 		" FROM information_schema.tables t" +
 		" LEFT JOIN information_schema.columns c" +
@@ -187,7 +204,60 @@ func queryDatasetsDetailed(ctx context.Context, exec Executor, namespace, pod, c
 		}
 		applyDataRows(infos, dataOut)
 	}
+	applyTaskLabels(ctx, exec, namespace, pod, container, infos)
 	return infos, nil
+}
+
+// applyTaskLabels tags each dataset with its ingest task from the run journal
+// (tracebloc_ingest_runs.task, persisted by data-ingestors). Best-effort
+// enrichment: a cluster whose ingestor predates the task column, or a dataset
+// ingested before it shipped, keeps an empty Task and the caller falls back to
+// inferred modality. Guarded on the column's presence — known from the schema
+// pass — so a pre-persistence journal is never queried for a column it lacks.
+func applyTaskLabels(ctx context.Context, exec Executor, namespace, pod, container string, infos []DatasetInfo) {
+	hasTaskColumn := false
+	for i := range infos {
+		if infos[i].Name == ingestRunsTable && hasColumn(infos[i].Columns, "task") {
+			hasTaskColumn = true
+			break
+		}
+	}
+	if !hasTaskColumn {
+		return
+	}
+	out, err := runMySQLQuery(ctx, exec, namespace, pod, container, fmt.Sprintf(
+		"SELECT table_name, COALESCE(MAX(task),'') FROM `%s`.`%s` "+
+			"WHERE task IS NOT NULL GROUP BY table_name",
+		IngestionDatabase, ingestRunsTable))
+	if err != nil {
+		return // best-effort: the listing still renders with inferred modality
+	}
+	tasks := parseTaskRows(out)
+	for i := range infos {
+		if t, ok := tasks[infos[i].Name]; ok {
+			infos[i].Task = t
+		}
+	}
+}
+
+// parseTaskRows parses the "table_name\ttask" TSV into a name→task map, skipping
+// blank tasks (a run journalled by a pre-persistence ingestor).
+func parseTaskRows(raw string) map[string]string {
+	m := map[string]string{}
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) < 2 {
+			continue
+		}
+		if task := strings.TrimSpace(f[1]); task != "" {
+			m[strings.TrimSpace(f[0])] = task
+		}
+	}
+	return m
 }
 
 // runMySQLQuery feeds the query to `mysql -N` over stdin (not -e) so table names
@@ -204,7 +274,7 @@ func runMySQLQuery(ctx context.Context, exec Executor, namespace, pod, container
 }
 
 // parseSchemaRows turns the `mysql -N` TSV of the schema query into DatasetInfos
-// (name, create-time epoch, columns). Malformed/short lines are skipped.
+// (name, create-time epoch, DB size, columns). Malformed/short lines are skipped.
 func parseSchemaRows(raw string) []DatasetInfo {
 	var out []DatasetInfo
 	for _, line := range strings.Split(raw, "\n") {
@@ -213,12 +283,13 @@ func parseSchemaRows(raw string) []DatasetInfo {
 			continue
 		}
 		f := strings.Split(line, "\t")
-		if len(f) < 3 {
+		if len(f) < 4 {
 			continue
 		}
 		d := DatasetInfo{Name: strings.TrimSpace(f[0])}
 		d.CreatedUnix, _ = strconv.ParseInt(strings.TrimSpace(f[1]), 10, 64)
-		if cols := strings.TrimSpace(f[2]); cols != "" {
+		d.DBBytes, _ = strconv.ParseInt(strings.TrimSpace(f[2]), 10, 64)
+		if cols := strings.TrimSpace(f[3]); cols != "" {
 			d.Columns = strings.Split(cols, ",")
 		}
 		out = append(out, d)
