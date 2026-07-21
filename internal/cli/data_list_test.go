@@ -170,12 +170,14 @@ func TestDatasetModality(t *testing.T) {
 		{push.DatasetInfo{Columns: []string{"age", "income"}, Records: 3}, "Tabular"},
 		// empty (0-row) file dataset: NULL extension, no schema cols → undetermined
 		{push.DatasetInfo{Records: 0, Columns: []string{"id", "label", "filename", "extension"}}, "Other"},
-		// A recorded task is authoritative — looked up, not inferred — and wins
-		// even over a misleading on-disk shape.
+		// A recorded task is authoritative — taken from the registry, not
+		// inferred — and wins even over a misleading on-disk shape.
 		{push.DatasetInfo{Task: "object_detection", Extension: "jpg"}, "Image"},
 		{push.DatasetInfo{Task: "embeddings"}, "Text"},
 		{push.DatasetInfo{Task: "tabular_regression"}, "Tabular"},
-		{push.DatasetInfo{Task: "time_to_event_prediction"}, "Time-series"},
+		// time-series tasks are FamilyTabular in the registry → "Tabular".
+		{push.DatasetInfo{Task: "time_to_event_prediction"}, "Tabular"},
+		{push.DatasetInfo{Task: "time_series_classification", Columns: []string{"sequence_id"}}, "Tabular"},
 		{push.DatasetInfo{Task: "semantic_segmentation", Records: 5, Columns: []string{"a", "b"}}, "Image"},
 		// Unknown task string → fall back to shape inference.
 		{push.DatasetInfo{Task: "mystery_task", Extension: "jpg"}, "Image"},
@@ -187,21 +189,30 @@ func TestDatasetModality(t *testing.T) {
 	}
 }
 
-func TestHumanizeTask(t *testing.T) {
-	for in, want := range map[string]string{
-		"image_classification":       "Image classification",
-		"time_to_event_prediction":   "Time to event prediction",
-		"seq2seq":                    "Seq2seq",
-		"time_series_classification": "Time series classification",
-	} {
-		if got := humanizeTask(in); got != want {
-			t.Errorf("humanizeTask(%q) = %q, want %q", in, got, want)
+// groupLabel uses the category registry's canonical label for a known task (so
+// headers match the rest of the CLI), the raw id for an unknown task, and the
+// inferred modality when no task was recorded.
+func TestGroupLabel(t *testing.T) {
+	cases := []struct {
+		d        push.DatasetInfo
+		modality string
+		want     string
+	}{
+		{push.DatasetInfo{Task: "image_classification"}, "Image", "Image classification"},
+		{push.DatasetInfo{Task: "time_series_classification"}, "Tabular", "Time-series classification"},
+		{push.DatasetInfo{Task: "seq2seq"}, "Text", "Sequence-to-sequence"},
+		{push.DatasetInfo{Task: "mystery_task"}, "Other", "mystery_task"}, // unknown → verbatim
+		{push.DatasetInfo{Task: ""}, "Tabular", "Tabular"},                // no task → modality
+	}
+	for _, c := range cases {
+		if got := groupLabel(c.d, c.modality); got != c.want {
+			t.Errorf("groupLabel(task=%q) = %q, want %q", c.d.Task, got, c.want)
 		}
 	}
 }
 
-// Datasets with a recorded task group under the humanized task header (not the
-// generic modality), ordered by modality family (Image before Time-series).
+// Datasets with a recorded task group under the registry's task label (not the
+// generic modality), ordered by modality family (Image before Tabular family).
 func TestRenderDataList_GroupsByTask(t *testing.T) {
 	infos := []push.DatasetInfo{
 		{Name: "sepsis_train", Task: "time_series_classification", Intent: "train", Records: 4000, Classes: 2, SizeBytes: 20480,
@@ -214,8 +225,8 @@ func TestRenderDataList_GroupsByTask(t *testing.T) {
 	out := buf.String()
 
 	for _, want := range []string{
-		"Image classification · 1",       // humanized task header, not "Image"
-		"Time series classification · 1", // "
+		"Image classification · 1",       // registry label, not the bare "Image"
+		"Time-series classification · 1", // canonical hyphenated label from the registry
 		"xray_train", "50 images",
 		"sepsis_train", "4000 rows", // time-series counts rows
 	} {
@@ -223,11 +234,11 @@ func TestRenderDataList_GroupsByTask(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "\nImage · ") || strings.Contains(out, "Time-series · ") {
-		t.Errorf("known-task datasets must not fall back to modality headers:\n%s", out)
+	if strings.Contains(out, "\nImage · ") || strings.Contains(out, "\nTabular · ") {
+		t.Errorf("known-task datasets must not fall back to bare modality headers:\n%s", out)
 	}
-	if strings.Index(out, "Image classification") > strings.Index(out, "Time series classification") {
-		t.Errorf("Image family should sort before Time-series:\n%s", out)
+	if strings.Index(out, "Image classification") > strings.Index(out, "Time-series classification") {
+		t.Errorf("Image family should sort before the tabular family:\n%s", out)
 	}
 }
 

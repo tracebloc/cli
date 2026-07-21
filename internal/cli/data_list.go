@@ -320,37 +320,21 @@ var frameworkCols = map[string]bool{
 	"extension": true, "annotation": true, "ingestor_id": true,
 }
 
-// taskModality maps each known ingest task (data-ingestors TaskCategory) to its
-// modality family. When the run journal recorded a task this is authoritative —
-// the modality is looked up, not inferred.
-var taskModality = map[string]string{
-	"image_classification":         "Image",
-	"object_detection":             "Image",
-	"keypoint_detection":           "Image",
-	"semantic_segmentation":        "Image",
-	"text_classification":          "Text",
-	"token_classification":         "Text",
-	"sentence_pair_classification": "Text",
-	"masked_language_modeling":     "Text",
-	"causal_language_modeling":     "Text",
-	"seq2seq":                      "Text",
-	"embeddings":                   "Text",
-	"tabular_classification":       "Tabular",
-	"tabular_regression":           "Tabular",
-	"time_series_forecasting":      "Time-series",
-	"time_series_classification":   "Time-series",
-	"time_to_event_prediction":     "Time-series",
-}
-
 // datasetModality returns the modality family. When the ingest task is known
-// (recorded in the run journal) it's the authoritative map above; otherwise it
-// falls back to inferring from the on-disk shape — the file extension for
-// file-bearing tasks, else the presence of time/sequence columns.
+// (recorded in the run journal) it's taken from the category registry — the
+// same source of truth `data ingest` uses (cli#74), so it can't drift as tasks
+// are added. Time-series tasks are FamilyTabular there, so a known one reports
+// "Tabular"; the "Time-series" bucket below is only the inference fallback for
+// datasets ingested before the task was recorded. Falls back to inferring from
+// the on-disk shape: the file extension, else time/sequence columns.
 func datasetModality(d push.DatasetInfo) string {
-	if d.Task != "" {
-		if m, ok := taskModality[strings.ToLower(strings.TrimSpace(d.Task))]; ok {
-			return m
-		}
+	switch {
+	case push.IsImage(d.Task):
+		return "Image"
+	case push.IsText(d.Task):
+		return "Text"
+	case push.IsTabular(d.Task):
+		return "Tabular"
 	}
 	switch strings.ToLower(d.Extension) {
 	case "jpg", "jpeg", "png":
@@ -372,23 +356,19 @@ func datasetModality(d push.DatasetInfo) string {
 	return "Other"
 }
 
-// groupLabel is the section header a dataset is grouped under: its real task
-// (humanized) when the journal recorded one, else the inferred modality family.
+// groupLabel is the section header a dataset is grouped under: its real task's
+// registry label ("Time-series classification", "Sequence-to-sequence") when
+// the journal recorded a known task, the raw task id for a task the registry
+// doesn't know, else the inferred modality family. Using the registry label
+// keeps the header identical to the rest of the CLI rather than re-deriving it.
 func groupLabel(d push.DatasetInfo, modality string) string {
+	if spec, ok := push.Lookup(d.Task); ok {
+		return spec.Label
+	}
 	if d.Task != "" {
-		return humanizeTask(d.Task)
+		return d.Task
 	}
 	return modality
-}
-
-// humanizeTask renders an ingest task id ("image_classification") as a section
-// title ("Image classification").
-func humanizeTask(task string) string {
-	s := strings.ReplaceAll(strings.TrimSpace(task), "_", " ")
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // modalityRank orders the modality families so a group's position is stable and
