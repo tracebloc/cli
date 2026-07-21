@@ -245,3 +245,61 @@ func TestRunClusterDoctor_DiagnoseBundle(t *testing.T) {
 		}
 	}
 }
+
+// --diagnose must still leave a bundle when the run exits EARLY (here a clientset
+// failure) — that's exactly when a remedy tells the user to run it. The early-exit
+// code (3) is preserved: the bundle write doesn't mask it (Bugbot #365).
+func TestRunClusterDoctor_DiagnoseOnEarlyExit(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "x", Email: "a@b.io", ActiveClientID: "5"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"email":"a@b.io","account":"Acme"}`)) // session healthy
+	})
+	origLoad, origCS := loadClusterFn, newClientsetFn
+	t.Cleanup(func() { loadClusterFn, newClientsetFn = origLoad, origCS })
+	loadClusterFn = func(cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+		return &cluster.ResolvedConfig{Namespace: "default", Context: "test-ctx"}, nil
+	}
+	newClientsetFn = func(*cluster.ResolvedConfig) (kubernetes.Interface, error) {
+		return nil, errors.New("bad rest config")
+	}
+
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	var buf bytes.Buffer
+	err = runClusterDoctor(context.Background(), ui.New(&buf, ui.WithColor(false)), "", "", "", true)
+
+	// The early-exit code survives the bundle write (not masked to 0 or the write code).
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 3 {
+		t.Fatalf("clientset-fail + --diagnose → want exit 3 preserved, got %v", err)
+	}
+	if !strings.Contains(buf.String(), "Couldn't connect to your secure environment") {
+		t.Errorf("want the connect-failure message, got:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "Wrote a support bundle") {
+		t.Errorf("--diagnose on an early exit should still write a bundle, got:\n%s", buf.String())
+	}
+	entries, _ := os.ReadDir(tmp)
+	found := false
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "tracebloc-doctor-") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no support bundle written on early exit (entries: %v)", entries)
+	}
+}

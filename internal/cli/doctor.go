@@ -80,7 +80,7 @@ func runClusterDoctor(
 	p *ui.Printer,
 	kubeconfigPath, contextOverride, nsOverride string,
 	diagnose bool,
-) error {
+) (rerr error) {
 	// 1. Who you are — a local config read (instant), so we can answer even
 	//    before any cluster is reachable (RFC-0001 §8.5).
 	cfg, err := config.Load()
@@ -98,13 +98,34 @@ func runClusterDoctor(
 		p.Para("Signed in")
 	}
 
+	// Keep whatever we learn from here on, so `--diagnose` can always leave a
+	// bundle — even on an early exit (a soft session fault, no environment, a
+	// clientset error), which is exactly when a remedy tells the user to run it.
+	// Registered after the sign-in gate on purpose: --diagnose needs an
+	// authenticated context, and "not signed in" is answered by `login`, not a
+	// bundle. The deferred write only sets the exit code when nothing worse did,
+	// so a bundle hiccup never masks a real Fail verdict.
+	var (
+		tok              = tokenOK
+		resolved         *cluster.ResolvedConfig
+		results          []doctor.Result
+		connected, ready healthLine
+	)
+	if diagnose {
+		defer func() {
+			p.Newline()
+			if werr := writeDiagnoseBundle(p, resolved, results, tok, connected, ready); werr != nil && rerr == nil {
+				rerr = werr
+			}
+		}()
+	}
+
 	// 2. Is the session still good with tracebloc? A 401 (expired/revoked) or a
 	//    426 (CLI too old) is a hard stop with a one-command fix. Anything else
 	//    folds into the Connected line below — but a backend that ANSWERED with
 	//    an error (5xx/403/decode) is a tracebloc-side problem, distinct from a
 	//    network failure to reach it at all. Conflating the two would blame the
 	//    user's network (and hand them a proxy remedy) for tracebloc's own error.
-	tok := tokenOK
 	apiClient := newAPIClient(cfg.CurrentEnv)
 	apiClient.Token = cfg.Current().Token
 	if _, werr := apiClient.WhoAmI(ctx); werr != nil {
@@ -133,7 +154,7 @@ func runClusterDoctor(
 	//    soft tokenUnreachable/tokenServerErr states reach here.)
 	opts := cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride, Namespace: nsOverride}
 	bindActiveClientNamespace(&opts)
-	resolved, err := loadClusterFn(opts)
+	resolved, err = loadClusterFn(opts)
 	if err != nil {
 		p.Newline()
 		noteSessionProblem(p, tok)
@@ -152,8 +173,8 @@ func runClusterDoctor(
 
 	// 4. Probe the cluster and roll the granular checks up into the two plain
 	//    lines the owner acts on (the granular results stay for --verbose/--diagnose).
-	results := doctorRunFn(ctx, cs, doctor.Options{Namespace: resolved.Namespace, ServerURL: resolved.ServerURL})
-	connected, ready := summarizeDoctor(results, tok)
+	results = doctorRunFn(ctx, cs, doctor.Options{Namespace: resolved.Namespace, ServerURL: resolved.ServerURL})
+	connected, ready = summarizeDoctor(results, tok)
 
 	p.Newline()
 	renderHealth(p, connected)
@@ -161,16 +182,8 @@ func runClusterDoctor(
 	if p.Verbose() {
 		renderDoctorDetails(p, resolved, results)
 	}
-
-	// 5. --diagnose: write the full bundle (session + verdict + technical detail)
-	//    for support. It's additive — the run still ends on the real verdict and
-	//    exit code below, so `--diagnose` never masks a failing check as a 0.
-	if diagnose {
-		p.Newline()
-		if werr := writeDiagnoseBundle(p, resolved, results, tok, connected, ready); werr != nil {
-			return werr
-		}
-	}
+	// --diagnose writes the support bundle via the deferred writer registered
+	// above, so it fires on this path and on every early exit alike.
 
 	// 6. Verdict + exit code (0 healthy, 2 a problem).
 	p.Newline()
@@ -366,11 +379,19 @@ func writeDiagnoseBundle(p *ui.Printer, resolved *cluster.ResolvedConfig, result
 	fmt.Fprintf(&buf, "tracebloc doctor — support bundle (%s)\n\n", time.Now().Format(time.RFC3339))
 	bp := ui.New(&buf, ui.WithColor(false), ui.WithVerbose(true))
 	// Session + rolled-up verdict first — the state support reads before the raw
-	// Kubernetes detail, and the reason each remedy sends them here.
+	// Kubernetes detail, and the reason each remedy sends them here. On an early
+	// exit (no environment, clientset error) the roll-up never ran, so record the
+	// session state and note the short-circuit instead of empty verdict lines.
 	bp.Detailf("session:   %s", tokenLabel(tok))
-	bp.Detailf("connected: %s — %s", connected.status, connected.text)
-	bp.Detailf("ready:     %s — %s", ready.status, ready.text)
-	renderDoctorDetails(bp, resolved, results)
+	if connected.text != "" {
+		bp.Detailf("connected: %s — %s", connected.status, connected.text)
+		bp.Detailf("ready:     %s — %s", ready.status, ready.text)
+	} else {
+		bp.Detailf("outcome:   exited before the environment could be probed")
+	}
+	if resolved != nil {
+		renderDoctorDetails(bp, resolved, results)
+	}
 
 	name := fmt.Sprintf("tracebloc-doctor-%s.txt", time.Now().Format("20060102-150405"))
 	if werr := os.WriteFile(name, buf.Bytes(), 0o600); werr != nil {
