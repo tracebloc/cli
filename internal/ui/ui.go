@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,9 +33,33 @@ import (
 // same underlying writer (neither is fmt.Fprintf).
 type Printer struct {
 	w       io.Writer
-	color   bool
+	color   bool      // colorized at all? (paint + the spinner gate on this)
+	mode    colorMode // none / 16-color / 24-bit truecolor — how brand hues render
+	bg      termBg    // dark or light terminal — picks the legible shade of each hue
 	verbose bool
 }
+
+// colorMode is how much color the terminal supports and wants. It drives whether
+// a brand hue renders as exact 24-bit hex, the nearest ANSI-16 fallback, or not
+// at all (NO_COLOR / pipe / TERM=dumb / --plain).
+type colorMode uint8
+
+const (
+	modeNone colorMode = iota // no color
+	mode16                    // 16-color ANSI (the terminal's own cyan/green/…)
+	modeTrue                  // 24-bit truecolor (exact brand hex)
+)
+
+// termBg is the terminal's background, dark or light. Bright brand shades that
+// pop on dark are unreadable on white, so light terminals get the deep shades
+// (primary.700 / secondary.700) instead. Detected best-effort from COLORFGBG;
+// defaults to dark, the developer norm.
+type termBg uint8
+
+const (
+	bgDark termBg = iota
+	bgLight
+)
 
 // Option customizes a Printer at construction. This is the functional-
 // options pattern: rather than a widening New(w, color, ...) signature
@@ -47,7 +72,17 @@ type Option func(*Printer)
 // detection. Wire a --plain flag to WithColor(false); NO_COLOR is
 // already honored by the default detection.
 func WithColor(on bool) Option {
-	return func(p *Printer) { p.color = on }
+	return func(p *Printer) {
+		if on {
+			// Force color on even for a non-TTY writer (tests, an explicit
+			// --color): pick truecolor when the environment advertises it, else
+			// 16-color. NO_COLOR/TTY no longer gate — the caller has decided.
+			p.mode = envMode()
+		} else {
+			p.mode = modeNone
+		}
+		p.color = p.mode != modeNone
+	}
 }
 
 // WithVerbose enables verbose output: Detailf lines print only when on. Wire it
@@ -62,27 +97,59 @@ func WithVerbose(on bool) Option {
 // (https://no-color.org). Options are applied after auto-detection, so
 // WithColor wins over it.
 func New(w io.Writer, opts ...Option) *Printer {
-	p := &Printer{w: w, color: autoColor(w)}
+	m := detectMode(w)
+	p := &Printer{w: w, mode: m, color: m != modeNone, bg: detectBg()}
 	for _, opt := range opts {
 		opt(p)
 	}
 	return p
 }
 
-// autoColor reports whether to colorize for w: only when NO_COLOR is
-// unset AND w is an *os.File pointing at a terminal. A bytes.Buffer
-// (tests), a pipe, or a redirect to a file all fail the *os.File +
-// IsTerminal check and get plain output — the conservative default,
-// same test internal/push.isTTY uses.
-func autoColor(w io.Writer) bool {
+// detectMode reports how to colorize for w. It stays plain (modeNone) when
+// NO_COLOR is set, TERM=dumb, or w is not a terminal — a bytes.Buffer (tests),
+// a pipe, or a redirect all fail the *os.File + IsTerminal check, the same
+// conservative default internal/push.isTTY uses. On a real terminal it upgrades
+// to truecolor when the environment advertises it (envMode).
+func detectMode(w io.Writer) colorMode {
 	if _, ok := os.LookupEnv("NO_COLOR"); ok {
-		return false
+		return modeNone
+	}
+	if os.Getenv("TERM") == "dumb" {
+		return modeNone
 	}
 	f, ok := w.(*os.File)
-	if !ok {
-		return false
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return modeNone
 	}
-	return term.IsTerminal(int(f.Fd()))
+	return envMode()
+}
+
+// envMode picks the richest palette the environment advertises, ignoring TTY /
+// NO_COLOR (those are decided upstream). COLORTERM=truecolor|24bit is the de-facto
+// truecolor signal (set by iTerm2, VS Code, Windows Terminal, most modern terms);
+// everything else falls back to the terminal's own 16-color cyan/green.
+func envMode() colorMode {
+	switch os.Getenv("COLORTERM") {
+	case "truecolor", "24bit":
+		return modeTrue
+	}
+	return mode16
+}
+
+// detectBg reports the terminal background so brand hues render in a shade that
+// stays legible on it. COLORFGBG (set by Konsole, rxvt, iTerm2, …) is "fg;bg"
+// where a trailing 7 or 15 is a light background. Unknown → dark, the dev norm.
+func detectBg() termBg {
+	v := os.Getenv("COLORFGBG")
+	if v == "" {
+		return bgDark
+	}
+	parts := strings.Split(v, ";")
+	switch parts[len(parts)-1] {
+	case "7", "15":
+		return bgLight
+	}
+	return bgDark
 }
 
 // paint wraps s in the given SGR attributes when this Printer is in
@@ -99,6 +166,74 @@ func (p *Printer) paint(s string, attrs ...color.Attribute) string {
 	return c.Sprint(s)
 }
 
+// ── Brand tones ──────────────────────────────────────────────────────────────
+// Each semantic role maps to a tone: the exact 24-bit hex on a dark and on a
+// light terminal (from the design-system primary/secondary ramps), plus the
+// nearest ANSI-16 attribute for terminals without truecolor. Meaning never rests
+// on hue alone — headings/commands also carry Bold and alerts carry a distinct
+// glyph — so the output still reads under NO_COLOR or for a colour-blind reader.
+type tone struct {
+	dark, light string          // 24-bit hex (no '#'); "" = structural, no hue
+	c16         color.Attribute // ANSI-16 fallback
+	bold        bool
+	underline   bool
+}
+
+var (
+	toneHeading = tone{"01a5cc", "01637a", color.FgCyan, true, false}   // primary — structure/headings
+	toneCommand = tone{"91e947", "578c2b", color.FgGreen, true, false}  // secondary — the thing to run
+	toneDesc    = tone{"a7ed6c", "578c2b", color.FgGreen, false, false} // soft lime — supporting text (decision B)
+	toneAccent  = tone{"01a5cc", "01637a", color.FgCyan, false, false}  // cyan prompt guidance
+	toneGo      = tone{"91e947", "578c2b", color.FgGreen, false, false} // ✔ / ● — "good/go", brand lime (decision A)
+	toneWarn    = tone{"ffc62b", "8a6a00", color.FgYellow, false, false}
+	toneErr     = tone{"f64c4c", "c0271f", color.FgRed, true, false}  // ✖ error (bold)
+	toneErrSoft = tone{"f64c4c", "c0271f", color.FgRed, false, false} // ✗ offline (lighter, non-bold)
+	toneLabel   = tone{"8e8e8e", "6b6b6b", color.Faint, false, false} // dim metadata labels
+)
+
+// hue renders s in a brand tone: exact 24-bit hex (dark or light shade) when the
+// terminal supports truecolor, the ANSI-16 fallback otherwise, and plain text when
+// color is off. This is the single brand-colour chokepoint.
+func (p *Printer) hue(s string, t tone) string {
+	if p.mode == modeNone {
+		return s
+	}
+	var c *color.Color
+	if p.mode == modeTrue && t.dark != "" {
+		h := t.dark
+		if p.bg == bgLight {
+			h = t.light
+		}
+		r, g, b := rgbOf(h)
+		c = color.RGB(r, g, b)
+	} else {
+		c = color.New(t.c16)
+	}
+	if t.bold {
+		c.Add(color.Bold)
+	}
+	if t.underline {
+		c.Add(color.Underline)
+	}
+	c.EnableColor()
+	return c.Sprint(s)
+}
+
+// rgbOf splits a 6-digit hex ("01a5cc") into r,g,b; a malformed value yields
+// black rather than a panic.
+func rgbOf(h string) (int, int, int) {
+	v, err := strconv.ParseUint(h, 16, 32)
+	if err != nil {
+		return 0, 0, 0
+	}
+	return int(v>>16) & 0xff, int(v>>8) & 0xff, int(v) & 0xff
+}
+
+// Command styles a command the user should run in the action tone (lime, bold),
+// for use inline in prose — e.g. the "run `tracebloc doctor`" tail of a status
+// line. MenuRow already applies this tone to whole command rows.
+func (p *Printer) Command(s string) string { return p.hue(s, toneCommand) }
+
 // out is the single write path. The (n, err) result is discarded
 // explicitly: a failed write to the terminal (closed pipe, /dev/full)
 // can't be acted on mid-render and shouldn't crash the command — the
@@ -111,7 +246,7 @@ func (p *Printer) out(format string, a ...any) {
 // Banner prints the branded intro block: a bold-cyan title, a dim rule,
 // and an optional subtitle. Mirrors common.sh print_banner.
 func (p *Printer) Banner(title, subtitle string) {
-	p.out("\n  %s\n", p.paint(title, color.FgCyan, color.Bold))
+	p.out("\n  %s\n", p.hue(title, toneHeading))
 	p.out("  %s\n", p.paint("────────────────────────────────────────", color.Faint))
 	if subtitle != "" {
 		p.out("  %s\n", subtitle)
@@ -132,7 +267,7 @@ func (p *Printer) Para(text string) {
 // Step prints a major-step header: "Step n/total  label" in bold cyan.
 // Mirrors common.sh step().
 func (p *Printer) Step(n, total int, label string) {
-	head := p.paint(fmt.Sprintf("Step %d/%d", n, total), color.FgCyan, color.Bold)
+	head := p.hue(fmt.Sprintf("Step %d/%d", n, total), toneHeading)
 	p.out("\n%s  %s\n", head, p.paint(label, color.Bold))
 }
 
@@ -140,12 +275,12 @@ func (p *Printer) Step(n, total int, label string) {
 // `f` + (format, args) signature is Go's convention for "takes a format
 // string" (cf. fmt.Printf vs fmt.Print).
 func (p *Printer) Successf(format string, a ...any) {
-	p.out("  %s %s\n", p.paint("✔", color.FgGreen), fmt.Sprintf(format, a...))
+	p.out("  %s %s\n", p.hue("✔", toneGo), fmt.Sprintf(format, a...))
 }
 
 // Warnf prints a non-blocking warning with a yellow ⚠.
 func (p *Printer) Warnf(format string, a ...any) {
-	p.out("  %s  %s\n", p.paint("⚠", color.FgYellow), fmt.Sprintf(format, a...))
+	p.out("  %s  %s\n", p.hue("⚠", toneWarn), fmt.Sprintf(format, a...))
 }
 
 // Infof prints supplementary detail with a dim · bullet.
@@ -158,7 +293,7 @@ func (p *Printer) Infof(format string, a ...any) {
 // description dimmed — so the command clearly stands out against it. Used by the
 // home screen's command buckets.
 func (p *Printer) MenuRow(width int, cmd, desc string) {
-	p.out("  %s %-*s    %s\n", p.paint("·", color.Faint), width, cmd, p.paint(desc, color.Faint))
+	p.out("  %s %s    %s\n", p.paint("·", color.Faint), p.hue(fmt.Sprintf("%-*s", width, cmd), toneCommand), p.hue(desc, toneDesc))
 }
 
 // CheckLine, CrossLine, and WarnLine render the status-aware home screen's
@@ -170,19 +305,19 @@ func (p *Printer) MenuRow(width int, cmd, desc string) {
 
 // CheckLine prints an affirmative status line led by a green ✓.
 func (p *Printer) CheckLine(format string, a ...any) {
-	p.out("  %s %s\n", p.paint("✓", color.FgGreen), fmt.Sprintf(format, a...))
+	p.out("  %s %s\n", p.hue("✓", toneGo), fmt.Sprintf(format, a...))
 }
 
 // CrossLine prints a negative status line led by a red ✗ (lighter and
 // non-bold, unlike Errorf's ✖) — e.g. "not signed in" or an offline environment.
 func (p *Printer) CrossLine(format string, a ...any) {
-	p.out("  %s %s\n", p.paint("✗", color.FgRed), fmt.Sprintf(format, a...))
+	p.out("  %s %s\n", p.hue("✗", toneErrSoft), fmt.Sprintf(format, a...))
 }
 
 // WarnLine prints a caution status line led by a yellow ⚠, single-spaced to
 // align with CheckLine/CrossLine (Warnf double-spaces for standalone warnings).
 func (p *Printer) WarnLine(format string, a ...any) {
-	p.out("  %s %s\n", p.paint("⚠", color.FgYellow), fmt.Sprintf(format, a...))
+	p.out("  %s %s\n", p.hue("⚠", toneWarn), fmt.Sprintf(format, a...))
 }
 
 // Detailf prints an indented, dim step-detail line — but ONLY in verbose mode
@@ -204,7 +339,7 @@ func (p *Printer) Verbose() bool { return p.verbose }
 // it does NOT exit — surfacing the message is the UI's job; the command
 // still returns an *exitError so main() owns the process exit code.
 func (p *Printer) Errorf(format string, a ...any) {
-	p.out("  %s\n", p.paint("✖ "+fmt.Sprintf(format, a...), color.FgRed, color.Bold))
+	p.out("  %s\n", p.hue("✖ "+fmt.Sprintf(format, a...), toneErr))
 }
 
 // Hintf prints dim contextual help (e.g. the line under a prompt).
@@ -217,7 +352,7 @@ func (p *Printer) Hintf(format string, a ...any) {
 // above the prompt. Distinct from Hintf (dim) — prompt guidance is meant
 // to be read, not skimmed past.
 func (p *Printer) PromptHint(format string, a ...any) {
-	p.out("\n  %s\n", p.paint(fmt.Sprintf(format, a...), color.FgCyan))
+	p.out("\n  %s\n", p.hue(fmt.Sprintf(format, a...), toneAccent))
 }
 
 // Newline emits a single blank line. Used to detach a closing line or
@@ -232,24 +367,25 @@ func (p *Printer) PromptHeader(label string) {
 	p.out("\n  %s\n", p.paint(label, color.Bold, color.FgWhite))
 }
 
-// Section prints a bold section header preceded by a blank line. Used
-// to group related Field rows (e.g. "Target cluster").
+// Section prints a section header preceded by a blank line — the screen's
+// structural spine, so it's cyan + bold (the heading tone). Used to group
+// related Field rows (e.g. "Target cluster", "Your secure environment").
 func (p *Printer) Section(title string) {
-	p.out("\n  %s\n", p.paint(title, color.Bold))
+	p.out("\n  %s\n", p.hue(title, toneHeading))
 }
 
 // Field prints an aligned, dim-labelled key/value row beneath a
 // Section: "    label:        value". The label is padded to a fixed
 // width so values line up within a section.
 func (p *Printer) Field(label, value string) {
-	p.out("    %s %s\n", p.paint(fmt.Sprintf("%-14s", label+":"), color.Faint), value)
+	p.out("    %s %s\n", p.hue(fmt.Sprintf("%-14s", label+":"), toneLabel), value)
 }
 
 // Stat prints an aligned "label   value" row with a dimmed, fixed-width label,
 // so a short block of them lines up. Unlike Field's compact 14-col key, Stat
 // fits full-sentence labels (e.g. the resources view's two lines).
 func (p *Printer) Stat(label, value string) {
-	p.out("  %s  %s\n", p.paint(fmt.Sprintf("%-42s", label), color.Faint), value)
+	p.out("  %s  %s\n", p.hue(fmt.Sprintf("%-42s", label), toneLabel), value)
 }
 
 // Action prints an imperative instruction row — a bold verb label and its value,

@@ -88,7 +88,7 @@ func TestSectionAndField_Plain(t *testing.T) {
 }
 
 // TestNoColorEnv_DefaultsPlain exercises the NO_COLOR branch of
-// autoColor: with it set, a freshly-constructed Printer stays plain.
+// detectMode: with it set, a freshly-constructed Printer stays plain.
 // (t.Setenv restores the prior value when the test ends.)
 func TestNoColorEnv_DefaultsPlain(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")

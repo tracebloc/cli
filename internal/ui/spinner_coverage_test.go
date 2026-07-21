@@ -26,17 +26,17 @@ func TestAutoColor(t *testing.T) {
 		}
 	})
 
-	// NO_COLOR set → false regardless of the writer.
+	// NO_COLOR set → modeNone regardless of the writer.
 	_ = os.Setenv("NO_COLOR", "1")
-	if autoColor(os.Stdout) {
-		t.Error("NO_COLOR set → autoColor must be false")
+	if detectMode(os.Stdout) != modeNone {
+		t.Error("NO_COLOR set → detectMode must be modeNone")
 	}
 
 	// NO_COLOR unset from here on.
 	_ = os.Unsetenv("NO_COLOR")
-	// A non-*os.File writer (a buffer) → false.
-	if autoColor(&bytes.Buffer{}) {
-		t.Error("a non-*os.File writer → false")
+	// A non-*os.File writer (a buffer) → modeNone.
+	if detectMode(&bytes.Buffer{}) != modeNone {
+		t.Error("a non-*os.File writer → modeNone")
 	}
 	// An *os.File that isn't a terminal (a regular temp file) → false.
 	f, err := os.CreateTemp(t.TempDir(), "ui-*")
@@ -44,8 +44,8 @@ func TestAutoColor(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	if autoColor(f) {
-		t.Error("a non-terminal *os.File → false")
+	if detectMode(f) != modeNone {
+		t.Error("a non-terminal *os.File → modeNone")
 	}
 }
 
