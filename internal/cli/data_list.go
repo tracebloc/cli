@@ -223,7 +223,10 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 
 	if showAll && len(system) > 0 {
 		// The system group is its own sub-table (name + size only), so size its
-		// two columns to its own rows rather than the shown datasets'.
+		// two columns to its own rows rather than the shown datasets'. No cap:
+		// system names are framework-generated and short, and padRight doesn't
+		// truncate — a cap here would only reintroduce the overflow it implies
+		// it prevents.
 		sysNameW, sysSizeW := 8, 4
 		for _, d := range system {
 			if l := dispW(d.Name); l > sysNameW {
@@ -232,9 +235,6 @@ func renderDataList(p *ui.Printer, namespace string, infos []push.DatasetInfo, s
 			if l := dispW(sizeCell(d)); l > sysSizeW {
 				sysSizeW = l
 			}
-		}
-		if sysNameW > 24 {
-			sysNameW = 24
 		}
 		sort.Slice(system, func(i, j int) bool { return system[i].Name < system[j].Name })
 		p.Section(fmt.Sprintf("System · %d", len(system)))
@@ -419,6 +419,17 @@ func relativeTime(epoch int64) string {
 	}
 }
 
+// ingestedISO renders the ingest time as an explicit UTC RFC3339 stamp from the
+// same epoch relativeTime uses. Deriving it from the epoch (not a session-tz
+// DATE_FORMAT string) keeps JSON consumers and the human "ago" text in
+// agreement regardless of the MySQL session timezone. Empty when unknown.
+func ingestedISO(epoch int64) string {
+	if epoch <= 0 {
+		return ""
+	}
+	return time.Unix(epoch, 0).UTC().Format(time.RFC3339)
+}
+
 // ── JSON output (owned by the CLI layer) ──
 
 type datasetJSON struct {
@@ -458,7 +469,7 @@ func writeDataListJSON(w io.Writer, namespace, release string, infos []push.Data
 			Classes:   d.Classes,
 			Format:    formatCell(d, m),
 			SizeBytes: d.SizeBytes,
-			Ingested:  d.CreatedAt,
+			Ingested:  ingestedISO(d.CreatedUnix),
 			System:    d.System,
 		})
 	}

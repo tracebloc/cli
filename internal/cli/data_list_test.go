@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/ui"
@@ -18,7 +19,8 @@ import (
 func sampleInfos() []push.DatasetInfo {
 	return []push.DatasetInfo{
 		{Name: "image_train", Intent: "train", Records: 20, Classes: 2, Extension: "jpg", SizeBytes: 13210,
-			Columns: []string{"id", "label", "data_intent", "data_id", "filename", "extension"}},
+			CreatedUnix: 1721556000,
+			Columns:     []string{"id", "label", "data_intent", "data_id", "filename", "extension"}},
 		{Name: "text_test", Intent: "test", Records: 10, Classes: 2, Extension: "txt", SizeBytes: 770,
 			Columns: []string{"id", "label", "data_intent", "data_id", "filename", "extension"}},
 		{Name: "tabular_train", Intent: "train", Records: 20, Classes: 2, Extension: "", SizeBytes: 206,
@@ -236,6 +238,16 @@ func TestWriteDataListJSON(t *testing.T) {
 	}
 	if img == nil || img.Modality != "Image" || img.Records != 20 || img.Format != "jpg · 2 classes" {
 		t.Errorf("image dataset detail wrong: %+v", img)
+	}
+	// `ingested` must be timezone-explicit (UTC, Z-suffixed RFC3339) so JSON
+	// consumers can't misread it as a naive local time. (Bugbot: JSON tz.)
+	if img != nil {
+		if !strings.HasSuffix(img.Ingested, "Z") {
+			t.Errorf("ingested %q must be Z-suffixed UTC, not a naive timestamp", img.Ingested)
+		}
+		if _, err := time.Parse(time.RFC3339, img.Ingested); err != nil {
+			t.Errorf("ingested %q is not valid RFC3339: %v", img.Ingested, err)
+		}
 	}
 
 	buf.Reset()

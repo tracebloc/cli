@@ -2,6 +2,7 @@ package push
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -9,46 +10,48 @@ import (
 
 // seqExecutor is an Executor that returns queued stdout per call and captures
 // the SQL each call received on stdin — enough to drive the two-query
-// listDatasetsDetailedWith path.
+// listDatasetsDetailedWith path. Calls whose index is in errCalls return an
+// error instead, to exercise the retry-on-vanished-table path.
 type seqExecutor struct {
-	outs    [][]byte // stdout for call 0, 1, …
-	queries []string // stdin (the SQL) captured per call
-	call    int
-	err     error
+	outs     [][]byte     // stdout for call 0, 1, …
+	queries  []string     // stdin (the SQL) captured per call
+	errCalls map[int]bool // 0-based call indices that should fail
+	call     int
 }
 
 func (e *seqExecutor) Exec(_ context.Context, _, _, _ string, _ []string,
 	stdin io.Reader, stdout, _ io.Writer) error {
+	idx := e.call
+	e.call++
 	if stdin != nil {
 		b, _ := io.ReadAll(stdin)
 		e.queries = append(e.queries, string(b))
 	}
-	if e.err != nil {
-		return e.err
+	if e.errCalls[idx] {
+		return fmt.Errorf("simulated exec failure on call %d", idx)
 	}
-	if e.call < len(e.outs) && stdout != nil {
-		_, _ = stdout.Write(e.outs[e.call])
+	if idx < len(e.outs) && stdout != nil {
+		_, _ = stdout.Write(e.outs[idx])
 	}
-	e.call++
 	return nil
 }
 
 func TestParseSchemaRows(t *testing.T) {
-	raw := "image_train\t2026-07-21T10:00:00\t1721556000\tid,label,data_id,extension\n" +
-		"empty_cols\t\t0\t\n" +
+	raw := "image_train\t1721556000\tid,label,data_id,extension\n" +
+		"empty_cols\t0\t\n" +
 		"  \n" // blank line skipped
 	got := parseSchemaRows(raw)
 	if len(got) != 2 {
 		t.Fatalf("want 2 rows, got %d: %#v", len(got), got)
 	}
 	d := got[0]
-	if d.Name != "image_train" || d.CreatedAt != "2026-07-21T10:00:00" || d.CreatedUnix != 1721556000 {
+	if d.Name != "image_train" || d.CreatedUnix != 1721556000 {
 		t.Errorf("row0 wrong: %+v", d)
 	}
 	if len(d.Columns) != 4 || d.Columns[0] != "id" {
 		t.Errorf("row0 columns wrong: %#v", d.Columns)
 	}
-	if got[1].Name != "empty_cols" || len(got[1].Columns) != 0 {
+	if got[1].Name != "empty_cols" || got[1].CreatedUnix != 0 || len(got[1].Columns) != 0 {
 		t.Errorf("row1 (no columns) wrong: %+v", got[1])
 	}
 }
@@ -87,8 +90,8 @@ func TestParseDuOutput(t *testing.T) {
 // from the second (data) query, whose SQL selects data_intent — which a system
 // table lacks.
 func TestListDatasetsDetailedWith(t *testing.T) {
-	schema := "image_train\t2026-07-21T10:00:00\t1721556000\tid,label,data_intent,data_id,filename,extension\n" +
-		"tracebloc_ingest_runs\t2026-07-21T09:00:00\t1721552400\tingestor_id,table_name,registered\n"
+	schema := "image_train\t1721556000\tid,label,data_intent,data_id,filename,extension\n" +
+		"tracebloc_ingest_runs\t1721552400\tingestor_id,table_name,registered\n"
 	data := "image_train\ttrain\t20\t2\t.jpg\n" // leading dot must be stripped
 	fe := &seqExecutor{outs: [][]byte{[]byte(schema), []byte(data)}}
 
@@ -129,5 +132,32 @@ func TestListDatasetsDetailedWith(t *testing.T) {
 	}
 	if strings.Contains(fe.queries[1], "tracebloc_ingest_runs") {
 		t.Errorf("data query must exclude the system table (no data_id): %s", fe.queries[1])
+	}
+}
+
+// A table dropped between the schema snapshot and the data pass fails the whole
+// UNION ALL; listDatasetsDetailedWith retries with a fresh snapshot, which no
+// longer lists the vanished table, and succeeds.
+func TestListDatasetsDetailedWith_RetriesOnVanishedTable(t *testing.T) {
+	// Attempt 1 lists a + b; its data query (call 1) fails as if b was just
+	// dropped. Attempt 2's fresh snapshot lists only a, and its data succeeds.
+	schema1 := "a\t1721556000\tdata_id,label,data_intent\n" +
+		"b\t1721556000\tdata_id,label,data_intent\n"
+	schema2 := "a\t1721556000\tdata_id,label,data_intent\n"
+	data2 := "a\ttrain\t7\t2\t\n"
+	fe := &seqExecutor{
+		outs:     [][]byte{[]byte(schema1), nil, []byte(schema2), []byte(data2)},
+		errCalls: map[int]bool{1: true}, // the first data query fails
+	}
+
+	infos, err := listDatasetsDetailedWith(context.Background(), fe, "ns", "mysql-0", "mysql")
+	if err != nil {
+		t.Fatalf("expected retry to succeed after a vanished table, got: %v", err)
+	}
+	if len(infos) != 1 || infos[0].Name != "a" || infos[0].Records != 7 {
+		t.Fatalf("want dataset a with 7 records after retry, got: %#v", infos)
+	}
+	if fe.call != 4 {
+		t.Errorf("want 4 execs (schema, failed data, schema, data), got %d", fe.call)
 	}
 }

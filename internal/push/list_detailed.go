@@ -25,8 +25,7 @@ type DatasetInfo struct {
 	Classes     int64    // COUNT(DISTINCT label); 0 when unlabelled
 	Extension   string   // per-row file extension (jpg/png/txt); "" for CSV tasks
 	SizeBytes   int64    // real dataset size from a du of the shared PVC; 0 if unavailable
-	CreatedAt   string   // table create_time, "YYYY-MM-DDTHH:MM:SS" (empty if unknown) — for display/JSON
-	CreatedUnix int64    // create_time as a UTC epoch (tz-safe) — for relative "ago" math
+	CreatedUnix int64    // create_time as a UTC epoch (tz-safe) — the sole time SoT, for both "ago" and JSON
 	Columns     []string // all column names — drives modality inference
 	System      bool     // a framework table (no data_id), e.g. the ingest-run journal
 }
@@ -100,8 +99,21 @@ func parseDuOutput(raw string) map[string]int64 {
 }
 
 // listDatasetsDetailedWith runs the two queries through the given Executor so
-// the exec + parse path is unit-testable with a fake Executor.
+// the exec + parse path is unit-testable with a fake Executor. A dataset table
+// can be dropped (a concurrent `data delete`) between the schema snapshot and
+// the data pass, which would fail the whole UNION ALL; retry the pair once — a
+// fresh snapshot drops the vanished table and the rebuilt data query succeeds. A
+// genuinely unreachable mysql fails the retry too and the error surfaces.
 func listDatasetsDetailedWith(ctx context.Context, exec Executor, namespace, pod, container string) ([]DatasetInfo, error) {
+	infos, err := queryDatasetsDetailed(ctx, exec, namespace, pod, container)
+	if err != nil {
+		infos, err = queryDatasetsDetailed(ctx, exec, namespace, pod, container)
+	}
+	return infos, err
+}
+
+// queryDatasetsDetailed runs the schema pass then the per-table data pass once.
+func queryDatasetsDetailed(ctx context.Context, exec Executor, namespace, pod, container string) ([]DatasetInfo, error) {
 	// Size is NOT taken from information_schema: for a file-bearing dataset the
 	// DB holds only metadata rows (the images/text live on the shared PVC), and
 	// for a tiny table InnoDB reports its padded page allocation, not the logical
@@ -111,8 +123,7 @@ func listDatasetsDetailedWith(ctx context.Context, exec Executor, namespace, pod
 	// late modality markers. Runs as a leading statement over the same stdin.
 	schemaQ := "SET SESSION group_concat_max_len = 1048576; " +
 		"SELECT t.table_name," +
-		" COALESCE(MAX(DATE_FORMAT(t.create_time,'%Y-%m-%dT%H:%i:%s')),'')," +
-		" COALESCE(MAX(UNIX_TIMESTAMP(t.create_time)),0)," + // tz-safe epoch for "ago" math
+		" COALESCE(MAX(UNIX_TIMESTAMP(t.create_time)),0)," + // tz-safe epoch — sole time SoT
 		" COALESCE(GROUP_CONCAT(c.column_name ORDER BY c.ordinal_position SEPARATOR ','),'')" +
 		" FROM information_schema.tables t" +
 		" LEFT JOIN information_schema.columns c" +
@@ -193,7 +204,7 @@ func runMySQLQuery(ctx context.Context, exec Executor, namespace, pod, container
 }
 
 // parseSchemaRows turns the `mysql -N` TSV of the schema query into DatasetInfos
-// (name, size, create-time, columns). Malformed/short lines are skipped.
+// (name, create-time epoch, columns). Malformed/short lines are skipped.
 func parseSchemaRows(raw string) []DatasetInfo {
 	var out []DatasetInfo
 	for _, line := range strings.Split(raw, "\n") {
@@ -202,12 +213,12 @@ func parseSchemaRows(raw string) []DatasetInfo {
 			continue
 		}
 		f := strings.Split(line, "\t")
-		if len(f) < 4 {
+		if len(f) < 3 {
 			continue
 		}
-		d := DatasetInfo{Name: strings.TrimSpace(f[0]), CreatedAt: strings.TrimSpace(f[1])}
-		d.CreatedUnix, _ = strconv.ParseInt(strings.TrimSpace(f[2]), 10, 64)
-		if cols := strings.TrimSpace(f[3]); cols != "" {
+		d := DatasetInfo{Name: strings.TrimSpace(f[0])}
+		d.CreatedUnix, _ = strconv.ParseInt(strings.TrimSpace(f[1]), 10, 64)
+		if cols := strings.TrimSpace(f[2]); cols != "" {
 			d.Columns = strings.Split(cols, ",")
 		}
 		out = append(out, d)
