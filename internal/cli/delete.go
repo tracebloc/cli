@@ -153,10 +153,17 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 			// will 403/404 if it isn't really ours).
 			p.Hintf("This secure environment isn't in the signed-in account — continuing; if that's unexpected, check you're logged into the right account.")
 		case pc.NumRunningExperiments > 0:
+			// Resolve the launcher the way resources/home do — advertise `tb` only
+			// when the real alias exists (not every install has it), else the name
+			// the user invoked — so the suggested command is always copy-pasteable.
+			relaunch := invokedName()
+			if tbAliasAvailable() {
+				relaunch = binTB
+			}
 			return &exitError{code: exitFailure, err: fmt.Errorf(
 				"your secure environment %q has %d training run(s) active — offboarding would stop them. "+
-					"Wait for them to finish or cancel them, then run `tb delete` again — or `tb delete --force` to stop them and offboard now",
-				name, pc.NumRunningExperiments)}
+					"Wait for them to finish or cancel them, then run `%s delete` again — or `%s delete --force` to stop them and offboard now",
+				name, pc.NumRunningExperiments, relaunch, relaunch)}
 		}
 	}
 
