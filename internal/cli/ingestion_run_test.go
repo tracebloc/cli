@@ -204,7 +204,7 @@ func TestRunIngestionRun_SubmitConnectUsesSpinner(t *testing.T) {
 		t.Fatalf("runIngestionRun: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "Connecting to your workspace to submit the run") {
+	if !strings.Contains(out, "Connecting to your secure environment to submit the run") {
 		t.Errorf("submit-connect wait is missing its status message:\n%q", out)
 	}
 	// A spinner redraws/clears its line with a carriage return; a plain Infof

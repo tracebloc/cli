@@ -180,6 +180,13 @@ jobs:
         # 1500-line data.go from growing quietly (backend#1106 WS-B).
         run: ./scripts/file-budget.sh
 
+      - name: Style + terminology guard
+        # Enforces the terminal style system (STYLE.md): no hardcoded brand colour
+        # outside the tone engine (internal/ui), no status/traffic-light emoji, and
+        # "secure environment" not "workspace" in user-facing text. Mechanical
+        # checks only — role/wording judgement stays with review.
+        run: bash scripts/check-style.sh
+
   govulncheck:
     timeout-minutes: 10
     name: govulncheck
