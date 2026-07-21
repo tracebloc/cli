@@ -98,27 +98,14 @@ func runClusterDoctor(
 		p.Para("Signed in")
 	}
 
-	// Keep whatever we learn from here on, so `--diagnose` can always leave a
-	// bundle — even on an early exit (a soft session fault, no environment, a
-	// clientset error), which is exactly when a remedy tells the user to run it.
-	// Registered after the sign-in gate on purpose: --diagnose needs an
-	// authenticated context, and "not signed in" is answered by `login`, not a
-	// bundle. The deferred write only sets the exit code when nothing worse did,
-	// so a bundle hiccup never masks a real Fail verdict.
+	// State we accumulate so `--diagnose` can leave a bundle from wherever we
+	// exit. tok is declared here because the session probe below sets it.
 	var (
 		tok              = tokenOK
 		resolved         *cluster.ResolvedConfig
 		results          []doctor.Result
 		connected, ready healthLine
 	)
-	if diagnose {
-		defer func() {
-			p.Newline()
-			if werr := writeDiagnoseBundle(p, resolved, results, tok, connected, ready); werr != nil && rerr == nil {
-				rerr = werr
-			}
-		}()
-	}
 
 	// 2. Is the session still good with tracebloc? A 401 (expired/revoked) or a
 	//    426 (CLI too old) is a hard stop with a one-command fix. Anything else
@@ -145,6 +132,24 @@ func runClusterDoctor(
 		default:
 			tok = tokenUnreachable // couldn't reach tracebloc at all (network/proxy)
 		}
+	}
+
+	// Register the --diagnose bundle writer now that the session outcome is known.
+	// Placed AFTER the 401/426 hard stops (which return above): a bundle is
+	// pointless for those one-command fixes (login / update), and — crucially —
+	// writing one there would record "session: confirmed" for an expired or
+	// upgrade-required session, misleading triage. For every path past here tok is
+	// accurate, so `--diagnose` always leaves a truthful bundle (even on the
+	// no-environment / clientset-error exits, exactly where a remedy sends the
+	// user). The write only sets the exit code when nothing worse already did, so
+	// a bundle hiccup never masks a real Fail verdict.
+	if diagnose {
+		defer func() {
+			p.Newline()
+			if werr := writeDiagnoseBundle(p, resolved, results, tok, connected, ready); werr != nil && rerr == nil {
+				rerr = werr
+			}
+		}()
 	}
 
 	// 3. Find the secure environment (local kubeconfig read). If it isn't here,

@@ -89,6 +89,43 @@ func TestDoctor_OutOfDate426(t *testing.T) {
 	}
 }
 
+// A 401 hard stop with --diagnose must NOT write a bundle: the fix is `login`
+// (no bundle needed), and one written here would falsely record "session:
+// confirmed" for an expired session. The defer is registered after the session
+// probe precisely so 401/426 return first (Bugbot #365).
+func TestDoctor_DiagnoseNotWrittenOnExpiredSession(t *testing.T) {
+	signedInConfig(t)
+	stubBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"detail":"Invalid token."}`))
+	})
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	var out bytes.Buffer
+	err = runClusterDoctor(context.Background(), ui.New(&out, ui.WithColor(false)), "", "", "", true)
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("401 + --diagnose → want exit 2, got %v", err)
+	}
+	if strings.Contains(out.String(), "Wrote a support bundle") {
+		t.Errorf("must not write a bundle on an expired session, got:\n%s", out.String())
+	}
+	entries, _ := os.ReadDir(tmp)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "tracebloc-doctor-") {
+			t.Errorf("a bundle file was written on 401 (%s) — should be none", e.Name())
+		}
+	}
+}
+
 // A bad kubeconfig, with auth healthy, is a local-environment problem (exit 3)
 // framed as "no secure environment here yet" — not a Kubernetes error dump.
 func TestDoctor_KubeconfigFailIsLocalEnv(t *testing.T) {
