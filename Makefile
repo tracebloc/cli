@@ -25,7 +25,7 @@ GOIMPORTS_VERSION   ?= v0.48.0
 # ---- top-level targets -------------------------------------------
 
 .PHONY: ci
-ci: vet test lint fmt-check schema-check vulncheck file-budget deadcode
+ci: vet test lint fmt-check schema-check vulncheck file-budget deadcode check-style
 	@echo "==> ci: all green"
 
 .PHONY: build
@@ -175,6 +175,14 @@ schema-sync:
 .PHONY: file-budget
 file-budget:
 	./scripts/file-budget.sh
+
+# check-style: enforce the terminal style system + terminology (STYLE.md) —
+# no hardcoded brand colour outside internal/ui, no status emoji, "secure
+# environment" not "workspace". Mirrors the Lint job's guard so `make ci`
+# matches CI. Mechanical only; role/wording judgement stays with review.
+.PHONY: check-style
+check-style:
+	./scripts/check-style.sh
 
 # ---- cleanup -----------------------------------------------------
 

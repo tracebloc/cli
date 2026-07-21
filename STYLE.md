@@ -59,7 +59,8 @@ word in output text only.
 
 `scripts/check-style.sh` (CI Lint job, blocking) catches the **mechanical**
 violations: hardcoded brand colour outside `internal/ui`, status emoji, and
-`workspace` in user-facing text. Run it locally with `bash scripts/check-style.sh`.
+`workspace` in user-facing text. Run it locally with `make check-style` (also part
+of `make ci`) or directly: `bash scripts/check-style.sh`.
 
 It can't police **judgement** — using the right *role* for a token (a command in
 the command tone, not the heading tone), or the softer terminology calls. Those
