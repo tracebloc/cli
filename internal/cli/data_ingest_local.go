@@ -93,8 +93,8 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 	}
 
 	a.Printer.Newline()
-	a.Printer.Para("Ingest a dataset — your files never leave this machine.")
-	a.Printer.Hintf("Learn how: https://docs.tracebloc.io/create-use-case/prepare-dataset")
+	a.Printer.Para("Ingest datasets to your secure environment.")
+	a.Printer.Hintf("For help: https://docs.tracebloc.io/create-use-case/prepare-dataset")
 
 	// 0. Guided mode: prompt for any missing core inputs before
 	//    validation. Flags already provided win; non-TTY / --no-input

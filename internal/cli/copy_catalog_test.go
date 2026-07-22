@@ -126,8 +126,8 @@ func TestCopyCatalog(t *testing.T) {
 		var b bytes.Buffer
 		p := ui.New(&b, ui.WithColor(false))
 		p.Newline()
-		p.Para("Ingest a dataset — your files never leave this machine.")
-		p.Hintf("Learn how: https://docs.tracebloc.io/create-use-case/prepare-dataset")
+		p.Para("Ingest datasets to your secure environment.")
+		p.Hintf("For help: https://docs.tracebloc.io/create-use-case/prepare-dataset")
 		pr := &catalogPrompter{w: &b, answers: answers}
 		a := &runDataIngestArgs{}
 		if err := runInteractive(p, pr, a, false /*taskSet*/); err != nil {
@@ -393,14 +393,15 @@ func (c *catalogPrompter) Select(label, _ string, _ []string, def string) (strin
 	return ans, nil
 }
 
-// Confirm keeps its label (a short y/n with no header of its own — matches the
-// non-bare surveyPrompter Confirm).
-func (c *catalogPrompter) Confirm(label string, def bool) (bool, error) {
+// Confirm is bare in the guided flow too: the question ("Proceed with the
+// ingest?") is printed by the CLI as its own header, so the prompt shows only
+// the answer — matching the bare surveyPrompter.
+func (c *catalogPrompter) Confirm(_ string, def bool) (bool, error) {
 	ans := "No"
 	if def {
 		ans = "Yes"
 	}
-	fmt.Fprintf(c.w, "? %s %s\n", label, ans)
+	c.answerLine(ans)
 	return def, nil
 }
 

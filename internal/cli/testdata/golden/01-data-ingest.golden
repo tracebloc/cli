@@ -13,20 +13,24 @@ deprecated alias of the verb.)
 
 $ tb data ingest   # guided · tabular classification
 
-  Ingest a dataset — your files never leave this machine.
-  Learn how: https://docs.tracebloc.io/create-use-case/prepare-dataset
+  Ingest datasets to your secure environment.
+  For help: https://docs.tracebloc.io/create-use-case/prepare-dataset
 
   Step 1 of 5 · Do you want to ingest training or test data?
+
 ? train
 
   Step 2 of 5 · Please name the dataset.
+
 ? hospital_train
 
   Step 3 of 5 · Where is your data?
+
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
+
 ? ~/datasets/hospital
   ✔ Found a CSV table — this is tabular data.
 
@@ -41,11 +45,15 @@ $ tb data ingest   # guided · tabular classification
 ? tabular_classification
 
   Step 5 of 5 · Which column holds the label?
+
   The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
+
 ? churned
 
   Column types
+
   We infer each column's type from your CSV. Press Enter to accept, or type overrides like age:INT,price:FLOAT.
+
 ?
 
   Review
@@ -55,24 +63,31 @@ $ tb data ingest   # guided · tabular classification
     path:          ~/datasets/hospital
     label column:  churned
     schema:        infer from CSV
-? Proceed with the ingest? Yes
+
+  Proceed with the ingest?
+
+? Yes
 
 $ tb data ingest   # guided · image classification
 
-  Ingest a dataset — your files never leave this machine.
-  Learn how: https://docs.tracebloc.io/create-use-case/prepare-dataset
+  Ingest datasets to your secure environment.
+  For help: https://docs.tracebloc.io/create-use-case/prepare-dataset
 
   Step 1 of 5 · Do you want to ingest training or test data?
+
 ? train
 
   Step 2 of 5 · Please name the dataset.
+
 ? xray_train
 
   Step 3 of 5 · Where is your data?
+
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
+
 ? ~/datasets/hospital
   ✔ Found labels.csv and an images/ folder — this is image data.
 
@@ -86,11 +101,15 @@ $ tb data ingest   # guided · image classification
 ? image_classification
 
   Step 5 of 5 · Which column holds the label?
+
   The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
+
 ? label
 
   Image resolution
+
   The size your images already are, as WxH — tracebloc checks every image matches and never resizes. Press Enter to read it from your first image.  e.g. 224x224
+
 ? 224x224
 
   Review
@@ -100,7 +119,10 @@ $ tb data ingest   # guided · image classification
     path:          ~/datasets/hospital
     label column:  label
     resolution:    224x224
-? Proceed with the ingest? Yes
+
+  Proceed with the ingest?
+
+? Yes
 
 
 ------------------------------------------------------------
