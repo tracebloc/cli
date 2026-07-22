@@ -387,13 +387,26 @@ verify_cosign_signature
 PREFIX="$INSTALL_PREFIX"
 if ! mkdir -p "$PREFIX" 2>/dev/null || [ ! -w "$PREFIX" ]; then
     # The customer's chosen prefix isn't usable (no write perms on
-    # parent, /usr/local/bin without sudo, etc.). Fall back to a
-    # per-user dir; the PATH-advice block below tells them how to
-    # pick it up.
-    FALLBACK="$HOME/.local/bin"
-    echo "Note: $PREFIX isn't writable (couldn't mkdir or no -w); falling back to $FALLBACK"
-    mkdir -p "$FALLBACK"
-    PREFIX="$FALLBACK"
+    # parent, /usr/local/bin without sudo, etc.). Prefer ~/bin when it
+    # already exists on $PATH and is writable: the binary is then usable
+    # in THIS shell (and every new one) with NO rc edit and no new
+    # terminal — the least-privilege install's B2 goal (RFC 0001). We
+    # only consider the conventional general-purpose ~/bin, never a
+    # language-specific dir that merely happens to be on PATH (~/.cargo/bin,
+    # ~/go/bin, …). Otherwise fall back to ~/.local/bin, which the
+    # PATH-advice block below wires into the shell rc.
+    home_bin="${HOME%/}/bin"
+    home_bin_on_path=no
+    case ":$PATH:" in *":$home_bin:"*) home_bin_on_path=yes ;; esac
+    if [ "$home_bin_on_path" = yes ] && [ -d "$home_bin" ] && [ -w "$home_bin" ]; then
+        echo "Note: $PREFIX isn't writable; installing to $home_bin (already on your PATH)."
+        PREFIX="$home_bin"
+    else
+        FALLBACK="$HOME/.local/bin"
+        echo "Note: $PREFIX isn't writable (couldn't mkdir or no -w); falling back to $FALLBACK"
+        mkdir -p "$FALLBACK"
+        PREFIX="$FALLBACK"
+    fi
 fi
 
 chmod +x "$TMP/$BINARY_FILE"
