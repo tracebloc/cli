@@ -122,7 +122,7 @@ func TestCopyCatalog(t *testing.T) {
 	// picker, the task-specific questions, the review, and the confirm. The intro
 	// preamble mirrors data_ingest_local.go (its text is drift-guarded by the
 	// backstop); the temp data dir is normalised to a stable placeholder.
-	driveIngest := func(dir string, answers map[string]string) string {
+	driveIngest := func(dir, shownPath string, answers map[string]string) string {
 		var b bytes.Buffer
 		p := ui.New(&b, ui.WithColor(false))
 		p.Newline()
@@ -133,18 +133,19 @@ func TestCopyCatalog(t *testing.T) {
 		if err := runInteractive(p, pr, a, false /*taskSet*/); err != nil {
 			t.Fatalf("driveIngest(%s): %v", dir, err)
 		}
-		return strings.ReplaceAll(b.String(), dir, "~/datasets/hospital")
+		return strings.ReplaceAll(b.String(), dir, shownPath)
 	}
 	tabDir := tabularDir(t)
 	imgDir := imageDirLayout(t)
-	tabularIngest := driveIngest(tabDir, map[string]string{
+	txtDir := textDirLayout(t)
+	tabularIngest := driveIngest(tabDir, "~/data/patients", map[string]string{
 		"Do you want to ingest training or test data?": "train",
 		"Please name the dataset.":                     "hospital_train",
 		"Where is your data?":                          tabDir,
 		"Which task?":                                  "tabular_classification",
 		"Which column holds the label?":                "churned",
 	})
-	imageIngest := driveIngest(imgDir, map[string]string{
+	imageIngest := driveIngest(imgDir, "~/data/xray", map[string]string{
 		"Do you want to ingest training or test data?": "train",
 		"Please name the dataset.":                     "xray_train",
 		"Where is your data?":                          imgDir,
@@ -152,12 +153,23 @@ func TestCopyCatalog(t *testing.T) {
 		"Which column holds the label?":                "label",
 		"Image resolution":                             "224x224",
 	})
+	// Text family: text_classification shows the label question; the picker lists
+	// every text task + blurb. (Self-supervised text — masked/causal LM, seq2seq
+	// — skips the label step; that path is covered by the backstop.)
+	textIngest := driveIngest(txtDir, "~/data/reviews", map[string]string{
+		"Do you want to ingest training or test data?": "train",
+		"Please name the dataset.":                     "reviews_train",
+		"Where is your data?":                          txtDir,
+		"Which task?":                                  "text_classification",
+		"Which column holds the label?":                "label",
+	})
 	dataIngestFile := doc(
 		"tb data ingest — stage a dataset into your secure environment",
-		"What you see when you run `tb data ingest` with no flags: a short intro, then a\nfive-step guided setup. Every question is shown below, in order, driven through\nthe real flow for two tasks (tabular + image) so the task-specific questions are\nvisible. Each question prints as a `Step N of 5 · …` header (task-specific\nrefinements as their own header); the supporting line sits beneath it, and the\n`?` line shows your answer. Passing flags (--as, --task, a path, …) skips the\nmatching questions. The remaining tasks' extra questions (keypoints, label\npolicy, time column) and every prompt's `?`-help text are in\nzz-all-strings.golden. (`tb ingest` is a hidden deprecated alias; `push` is a\ndeprecated alias of the verb.)",
+		"What you see when you run `tb data ingest` with no flags: a short intro, then a\nfive-step guided setup. Every question is shown below, in order, driven through\nthe real flow for one task in each family (tabular, image, text) so the\ntask-specific questions are visible. Each question prints as a `Step N of 5 · …`\nheader (task-specific refinements as their own header); the supporting line sits\nbeneath it, and the `?` line shows your answer. Passing flags (--as, --task, a\npath, …) skips the matching questions. The other tasks' extra questions\n(keypoints, label policy, time column) and self-supervised text (which skips the\nlabel step) are in zz-all-strings.golden. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
 		[]run{
 			{"tb data ingest   # guided · tabular classification", tabularIngest},
 			{"tb data ingest   # guided · image classification", imageIngest},
+			{"tb data ingest   # guided · text classification", textIngest},
 		},
 		[]run{
 			{"tracebloc data ingest --help", help("data", "ingest")},
