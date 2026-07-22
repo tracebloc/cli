@@ -358,18 +358,27 @@ func TestCopyCatalog(t *testing.T) {
 		[]run{{"tracebloc version --help", help("version")}},
 	)
 
+	// ── 11 prepare-host ──────────────────────────────────────────────────────────
+	prepareHostFile := doc(
+		"tb prepare-host — one-time admin step so a non-admin can install",
+		"What you see when you run `tb prepare-host` — the one-time administrator step\nthat readies a shared / HPC host so a non-admin user can then install tracebloc\nwith no root. It re-runs the installer's verified prepare-host step; the\nprivileged prep + its progress stream from the installer (not CLI copy). Only the\n--help is byte-exact below.",
+		nil,
+		[]run{{"tracebloc prepare-host --help", help("prepare-host")}},
+	)
+
 	files := map[string]string{
-		"00-home.golden":        homeFile,
-		"01-data-ingest.golden": dataIngestFile,
-		"02-data-list.golden":   dataListFile,
-		"03-data-delete.golden": dataDeleteFile,
-		"04-resources.golden":   resourcesFile,
-		"05-doctor.golden":      doctorFile,
-		"06-delete.golden":      deleteFile,
-		"07-login.golden":       loginFile,
-		"08-client.golden":      clientFile,
-		"09-cluster.golden":     clusterFile,
-		"10-version.golden":     versionFile,
+		"00-home.golden":         homeFile,
+		"01-data-ingest.golden":  dataIngestFile,
+		"02-data-list.golden":    dataListFile,
+		"03-data-delete.golden":  dataDeleteFile,
+		"04-resources.golden":    resourcesFile,
+		"05-doctor.golden":       doctorFile,
+		"06-delete.golden":       deleteFile,
+		"07-login.golden":        loginFile,
+		"08-client.golden":       clientFile,
+		"09-cluster.golden":      clusterFile,
+		"10-version.golden":      versionFile,
+		"11-prepare-host.golden": prepareHostFile,
 		"zz-all-strings.golden": "every user-facing string in the source (AST-harvested — all arguments to the\n" +
 			"Printer methods + errors.New/fmt.Errorf/fmt.Sprintf, plus the text/remedy\n" +
 			"fields of healthLine{} and doctor.Result{} literals, both \"…\" and `…` raw\n" +

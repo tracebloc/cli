@@ -104,6 +104,7 @@ Helm, no YAML, no kubectl needed.`,
 	// `client` and NOT `client delete --uninstall`: one machine owns one client,
 	// so this removes tracebloc from the host and avoids colliding with `data delete`.
 	root.AddCommand(newDeleteCmd())
+	root.AddCommand(newPrepareHostCmd())
 
 	// Bare `tracebloc` (no subcommand) renders a status-aware home screen —
 	// where you stand (signed in? environment live?) then the commands —
