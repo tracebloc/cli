@@ -301,6 +301,7 @@ screen. %s/%d are runtime placeholders.
 "We infer each column's type from your CSV. Press Enter to accept, or type overrides like age:INT,price:FLOAT."
 "Welcome to your secure environment for AI, %s 👋"
 "What kind of data is this?"
+"What kind of machine learning task is this data for?"
 "What's next"
 "Where is your data?"
 "Which task?"

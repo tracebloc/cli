@@ -477,15 +477,15 @@ func (c *catalogPrompter) Select(label, _ string, _ []string, def string) (strin
 	return ans, nil
 }
 
-// Confirm is bare in the guided flow too: the question ("Proceed with the
-// ingest?") is printed by the CLI as its own header, so the prompt shows only
-// the answer — matching the bare surveyPrompter.
-func (c *catalogPrompter) Confirm(_ string, def bool) (bool, error) {
+// Confirm keeps its label (never bare — see surveyPrompter.Confirm): a y/N
+// prompt has no header of its own, so survey draws "? <question> <answer>".
+// Mirror that here so the catalog shows the confirm question.
+func (c *catalogPrompter) Confirm(label string, def bool) (bool, error) {
 	ans := "No"
 	if def {
 		ans = "Yes"
 	}
-	c.answerLine(ans)
+	fmt.Fprintf(c.w, "? %s %s\n", label, ans)
 	return def, nil
 }
 
@@ -501,7 +501,8 @@ func harvestMessages(t *testing.T) []string {
 	methods := map[string]bool{
 		"Successf": true, "Warnf": true, "Errorf": true, "Infof": true, "Hintf": true,
 		"Detailf": true, "Para": true, "Section": true, "PromptHint": true, "PromptHeader": true,
-		"WarnLine": true, "CrossLine": true, "CheckLine": true, "Step": true, "Action": true,
+		"PromptStep": true,
+		"WarnLine":   true, "CrossLine": true, "CheckLine": true, "Step": true, "Action": true,
 		"Stat": true, "Field": true, "MenuRow": true, "Banner": true, "Command": true,
 		// prompter seam (survey) — question labels + help text for every guided
 		// flow (ingest, client create, delete), incl. flows not driven as a screen.

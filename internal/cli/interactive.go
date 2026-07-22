@@ -81,8 +81,12 @@ func (s surveyPrompter) Select(label, help string, options []string, def string)
 }
 
 func (s surveyPrompter) Confirm(label string, def bool) (bool, error) {
+	// Confirm always keeps its label (never bare): a y/N prompt has no step
+	// header of its own, and the overwrite-replace confirm fires later, during
+	// the cluster phase, with nothing printed before it — a bare "? (y/N)"
+	// there would be a label-less destructive prompt.
 	ans := def
-	if err := survey.AskOne(&survey.Confirm{Message: s.message(label), Default: def}, &ans); err != nil {
+	if err := survey.AskOne(&survey.Confirm{Message: label, Default: def}, &ans); err != nil {
 		return false, mapErr(err)
 	}
 	return ans, nil
@@ -224,7 +228,10 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	// — an ingest fully specified by flags (on a TTY) isn't nagged.
 	if prompted {
 		renderReview(p, a)
-		p.Section("Proceed with the ingest?")
+		a.ReviewShown = true
+		// No header here: Confirm keeps its own label ("Proceed with the
+		// ingest?"), so a Section would just duplicate it. One blank line for
+		// breathing room between the Review block and the y/N prompt.
 		p.Newline()
 		ok, err := pr.Confirm("Proceed with the ingest?", true)
 		if err != nil {

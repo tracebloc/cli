@@ -480,10 +480,12 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 		return nil, nil, nil, false, perr
 	}
 
-	// Interactive runs already echoed name/task/intent/label in the pre-confirm
-	// Review, so suppress the duplicate "Ingest settings" block here; the
-	// flag-only path (no Review) still shows it.
-	printLocalSummary(a.Printer, layout, spec, a.Prompter == nil)
+	// Interactive runs that prompted already echoed name/task/intent/label in
+	// the pre-confirm Review, so suppress the duplicate "Ingest settings" block
+	// here. A run that showed no Review (non-interactive, OR a fully flagged
+	// run on a TTY) still shows it — gate on whether the Review rendered, not on
+	// whether a Prompter exists.
+	printLocalSummary(a.Printer, layout, spec, !a.ReviewShown)
 
 	return layout, spec, specBytes, false, nil
 }
@@ -492,10 +494,11 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 // path) the ingest settings it assembled — the detail under step 1 ("Check your
 // data"). Mirrors `cluster info`'s section/Field layout.
 //
-// showSettings gates the "Ingest settings" block: the guided flow already
-// showed those exact fields in its pre-confirm Review, so repeating them here
-// is noise — the caller passes false when interactive. The flag-only path
-// (no Review) passes true, so those users still see the resolved settings once.
+// showSettings gates the "Ingest settings" block: when the guided flow already
+// showed those exact fields in its pre-confirm Review, repeating them here is
+// noise — the caller passes false in that case. Any run without a Review (a
+// non-interactive run, or a fully flagged run on a TTY that prompted nothing)
+// passes true, so those users still see the resolved settings once.
 func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]any, showSettings bool) {
 	cat, _ := spec["category"].(string)
 

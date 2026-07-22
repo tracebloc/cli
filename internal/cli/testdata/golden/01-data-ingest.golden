@@ -68,9 +68,7 @@ $ tb data ingest   # guided · tabular classification
     label column:  churned
     schema:        infer from CSV
 
-  Proceed with the ingest?
-
-? Yes
+? Proceed with the ingest? Yes
 
 $ tb data ingest   # guided · image classification
 
@@ -124,9 +122,7 @@ $ tb data ingest   # guided · image classification
     label column:  label
     resolution:    224x224
 
-  Proceed with the ingest?
-
-? Yes
+? Proceed with the ingest? Yes
 
 $ tb data ingest   # guided · text classification
 
@@ -176,9 +172,7 @@ $ tb data ingest   # guided · text classification
     path:          ~/data/reviews
     label column:  label
 
-  Proceed with the ingest?
-
-? Yes
+? Proceed with the ingest? Yes
 
 $ tb data ingest   # after you confirm — the run (tabular)
 
