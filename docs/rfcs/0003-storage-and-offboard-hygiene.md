@@ -1,6 +1,7 @@
 # RFC 0003 — The secure environment: dataset storage, offboard hygiene & the boundary
 
-> **Status: DRAFT v2.1 — decisions recorded 2026-07-22.** Owner: @LukasWodka.
+> **Status: DECIDED — v2.2, decisions D1–D15 locked 2026-07-22; execution
+> tickets filed and cross-linked in §10/§12.** Owner: @LukasWodka.
 > Co-design & validation: @saadqbal.
 >
 > **v2.1 same-day errata:** the §3.1/§6.4 weight-lifecycle claims were
@@ -406,28 +407,28 @@ seal check.
 
 | # | Decision (v1 ref) | Outcome |
 |---|---|---|
-| D1 | Local storage target (§7.2) | **Option C — node-local**, validated in client#368 |
+| D1 | Local storage target (§7.2) | **Option C — node-local**, validated in client#368 → client#367 |
 | D2 | Drop `chmod 777` (§7.3) | **Yes — by construction with C** (load-bearing on hostpath, cannot ship separately) |
-| D3 | Offboard clean-slate (§7.1) | **Leftover-guard yes; heavy multi-path wipe no; verify-before-✔** (cli#389) |
+| D3 | Offboard clean-slate (§7.1) | **Leftover-guard yes; heavy multi-path wipe no; verify-before-✔** (guard: client#376; verify: cli#389) |
 | D4 | Migration (§7.5) | **No data-copier**; guard prevents stranding; installs move to C on delete+reinstall |
 | D5 | At-rest encryption (§7.4) | **Phase 2**; recommend host FDE; keep wording honest |
-| D6 | Egress lockdown flip | **Separate ticket**; golden-box claim gated on it (§8.1) |
-| D7 | Model IP — now | **Watermarking + audit** (§6.3) |
-| D8 | Weights at rest | **Edge: nothing rests by architecture (verified) — lifecycle hygiene only; envelope encryption + crypto-shredding re-aimed at the platform-side store** (§6.4) |
-| D9 | Dataset scoping | **Scoped mounts → per-dataset PVCs under C** (§7.1) |
-| D10 | DB scoping | **Per-experiment DB credentials, table-scoped grants** (§7.2) |
-| D11 | Pod hardening | **Close legacy carve-out; no SA token; read-only floor** (§7.3) |
-| D12 | Conformance | **Guarantee matrix + seal check + verify k3d enforcement** (§8.2–8.4) |
-| D13 | Score/tamper integrity | **Separate RFC** — versioning+integrity root cause, not storage (§11) |
+| D6 | Egress lockdown flip | **client-runtime#199**; golden-box claim gated on it (§8.1) |
+| D7 | Model IP — now | **Watermarking + audit** (§6.3) → backend#1183 |
+| D8 | Weights at rest | **Edge: nothing rests by architecture (verified) — lifecycle hygiene (client-runtime#200); platform-side envelope encryption + crypto-shredding (backend#1182)** (§6.4) |
+| D9 | Dataset scoping | **Scoped mounts → per-dataset PVCs under C** (§7.1) → client-runtime#203 |
+| D10 | DB scoping | **Per-experiment DB credentials, table-scoped grants** (§7.2) → backend#1181 |
+| D11 | Pod hardening | **Close legacy carve-out; no SA token; read-only floor** (§7.3) → client-runtime#201 + #202 |
+| D12 | Conformance | **Guarantee matrix + seal check + verify k3d enforcement** (§8.2–8.4) → backend#1184 + cli#393 |
+| D13 | Score/tamper integrity | **Separate RFC** — versioning+integrity root cause, not storage (§11) → backend#1185 |
 | D14 | Confidential compute | **Phase 2 — deferred for capacity**; Azure confidential-GPU pilot first; tiering as bridge (§6.5) |
-| D15 | Node-local default (was O1) | **Flip node-local to default for local installs** after one green training run on node-local; single-node topology change in release notes |
+| D15 | Node-local default (was O1) | **Flip node-local to default for local installs** after one green training run on node-local (gate: backend#1180); checklist on client#367 |
 
 Open items:
 
 | # | Question | Recommendation |
 |---|---|---|
-| O2 | Platform-side weight retention: when does crypto-shred fire on the averaging-share store (experiment completion? grace window? audit needs?) | Shred at completion + configurable grace window |
-| O4 | Watermarking mechanics & owner (backend work) | Scope inside the D7 ticket |
+| O2 | Platform-side weight retention: when does crypto-shred fire on the averaging-share store (experiment completion? grace window? audit needs?) | Shred at completion + configurable grace window — decided inside backend#1182 |
+| O4 | Watermarking mechanics & owner (backend work) | Scope inside backend#1183 |
 
 Resolved since v2: **O1 → D15** (decided). **O3** dissolved by the
 verified architecture — there is no in-environment at-rest weight store
@@ -448,20 +449,25 @@ needing key custody; platform-side keys live in the backend's KMS.
 
 ## 12. Rollout sequence
 
-1. Land this RFC with the §10 decision log.
+1. Land this RFC with the §10 decision log. Execution epic: backend#1151.
 2. cli#389 (verify-before-✔) and client#368 (flag-gated C) merge on their
    own review tracks.
-3. Build the **installer leftover-guard** (D3).
-4. **Egress-lockdown flip** (D6) proceeds on its own ticket, per fleet.
-5. One green **training run on node-local** → flip the default (D15), with
-   the single-node topology change in release notes.
-6. **Scoping & hygiene epic** (D8–D11) as backend#1151 children: job-TTL +
-   scratch hygiene on the edge; platform-side weight-store encryption +
-   crypto-shred (backend/averaging); scoped mounts; per-experiment DB
-   grants; pod-hardening completion; watermarking (D7).
-7. **Seal check + guarantee matrix** (D12).
+3. Build the **installer leftover-guard** (D3 — client#376).
+4. **Egress-lockdown flip** (D6 — client-runtime#199), per fleet.
+5. One green **training run on node-local** (gate: backend#1180) → flip the
+   default (D15 — checklist on client#367), single-node topology change in
+   release notes.
+6. **Scoping & hygiene** (D8–D11) as backend#1151 children: job-TTL +
+   scratch hygiene (client-runtime#200); platform-side weight-store
+   encryption + crypto-shred (backend#1182); scoped mounts
+   (client-runtime#203); per-experiment DB grants (backend#1181);
+   pod-hardening completion (client-runtime#201, #202); watermarking
+   (D7 — backend#1183).
+7. **Seal check + guarantee matrix** (D12 — backend#1184, CLI surfacing
+   cli#393).
 8. Phase 2 when capacity allows: TEE pilot on Azure confidential GPU (D14);
-   at-rest encryption revisit (D5).
+   at-rest encryption revisit (D5). Docs/messaging: backend#1185 (integrity
+   RFC), backend#1186 (§9 alignment).
 
 ## 13. Appendix — evidence (refreshed 2026-07-22; line numbers as of that date)
 
