@@ -63,7 +63,21 @@ func NewProgress(out io.Writer, totalBytes int64, description string) Progress {
 			progressbar.OptionShowBytes(true),
 			progressbar.OptionShowCount(),
 			progressbar.OptionThrottle(100), // ms — keep CPU low
-			progressbar.OptionSetRenderBlankState(true),
+			// Render nothing until the first byte flows. The caller
+			// builds this bar up front (data.go), but Stage then prints
+			// several setup lines ("Opened a secure channel…",
+			// "Preparing the copy…") and waits up to StagePodReadyTimeout
+			// for the Pod before a single byte moves. A blank-state 0%
+			// bar painted at construction would (a) sit frozen through
+			// that multi-minute wait, reading as "stuck", and (b) get
+			// clobbered mid-line by those setup lines — schollz redraws
+			// with \r while the setup lines are plain \n writes to the
+			// same terminal, so the two collide on one line
+			// ("…[0s:0s]Opened a secure channel…"). Deferring the first
+			// render to the first Add() — which happens inside
+			// StreamLayout, after every setup line has printed — lets the
+			// bar own its own line cleanly.
+			progressbar.OptionSetRenderBlankState(false),
 			progressbar.OptionSetWidth(40),
 			progressbar.OptionClearOnFinish(),
 		),
