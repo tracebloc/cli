@@ -325,11 +325,29 @@ func TestCopyCatalog(t *testing.T) {
 	)
 
 	// ── 08 client ──────────────────────────────────────────────────────────────────
+	// The seal check (client status --seal) renders through the pure
+	// renderSealResult, so all three verdicts are pinned as stable screens: the
+	// live run streams the same header/check/verdict pieces (plus a per-check
+	// spinner line, catalogued in the backstop).
+	sealSealed := sealModel{envName: "lukas-macbook", checks: []sealCheck{
+		{name: "egress-enforcement-check", passed: true},
+		{name: "egress-reachability-check", passed: true},
+	}}
+	sealUnsealed := sealModel{envName: "lukas-macbook", checks: []sealCheck{
+		{name: "egress-enforcement-check", passed: false,
+			detail: "job failed: BackoffLimitExceeded",
+			hint:   "see why: kubectl logs -n lukas-macbook job/lukas-macbook-egress-enforcement-check"},
+		{name: "egress-reachability-check", passed: true},
+	}}
+	sealUnknown := sealModel{envName: "lukas-macbook"}
 	clientFile := doc(
 		"tb client — register / list / inspect environments",
-		"What you see under `tb client`. `tb client create` shows a review (below) before\nit registers a new secure environment. `tb client list` / `tb client status` read\nlive backend state, so they aren't stable screens — their strings are in\nzz-all-strings.golden.",
+		"What you see under `tb client`. `tb client create` shows a review (below) before\nit registers a new secure environment. `tb client status --seal` verifies the\nenvironment's protections by running the chart's conformance checks (the seal\ncheck) — all three verdicts are shown: sealed, unsealed (with the per-check\nfailure + fix hint), and unknown (a chart with no checks is honestly NOT called\nsealed). `tb client list` / plain `tb client status` read live backend state, so\nthey aren't stable screens — their strings are in zz-all-strings.golden.",
 		[]run{
 			{"tb client create   # review, before you confirm", rndr(func(p *ui.Printer) { renderClientReview(p, "lukas-macbook", "lukas-macbook", "DE", "a1b2c3d4") })},
+			{"tb client status --seal   # sealed — every conformance check passed", rndr(func(p *ui.Printer) { renderSealResult(p, sealSealed) })},
+			{"tb client status --seal   # unsealed — a protection is not enforced", rndr(func(p *ui.Printer) { renderSealResult(p, sealUnsealed) })},
+			{"tb client status --seal   # unknown — this chart ships no conformance checks", rndr(func(p *ui.Printer) { renderSealResult(p, sealUnknown) })},
 		},
 		[]run{
 			{"tracebloc client --help", help("client")},
@@ -393,6 +411,11 @@ func TestCopyCatalog(t *testing.T) {
 		},
 		"02-data-list.golden": {"tracebloc data list --help"},
 		"05-doctor.golden":    {"Connected to tracebloc", "Everything looks good"},
+		"08-client.golden": { // the seal check's three verdicts (cli#393)
+			"Sealed — all 2 conformance checks passed",
+			"Unsealed — 1 of 2 conformance checks failed",
+			"Seal unknown — this chart ships no conformance checks",
+		},
 	}
 	for name, needles := range mustRender {
 		got := files[name]
@@ -504,6 +527,10 @@ func harvestMessages(t *testing.T) []string {
 		"PromptStep": true,
 		"WarnLine":   true, "CrossLine": true, "CheckLine": true, "Step": true, "Action": true,
 		"Stat": true, "Field": true, "MenuRow": true, "Banner": true, "Command": true,
+		// Spinner — live-wait lines ("Waiting for tracebloc to confirm…",
+		// "Checking <check>…") print as a static line on non-TTY runs, so their
+		// copy is user-facing too.
+		"Spinner": true,
 		// prompter seam (survey) — question labels + help text for every guided
 		// flow (ingest, client create, delete), incl. flows not driven as a screen.
 		"Input": true, "Select": true, "Confirm": true,
