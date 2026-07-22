@@ -1,7 +1,12 @@
 # RFC 0003 — The secure environment: dataset storage, offboard hygiene & the boundary
 
-> **Status: DRAFT v2 — decisions recorded 2026-07-22.** Owner: @LukasWodka.
+> **Status: DRAFT v2.1 — decisions recorded 2026-07-22.** Owner: @LukasWodka.
 > Co-design & validation: @saadqbal.
+>
+> **v2.1 same-day errata:** the §3.1/§6.4 weight-lifecycle claims were
+> re-verified against the code — **weights do not rest durably in the
+> environment** (per-cycle scratch only; the durable store is
+> platform-side). D8 re-aimed accordingly; O1 decided → D15.
 >
 > **v1 → v2.** v1 (2026-07-21) framed two problems — offboard hygiene and
 > dataset storage — and left §7 as a decision menu. v2 records the decisions
@@ -81,9 +86,18 @@ datasets, and the model provider's model IP. Adversary by adversary:
 
 ### 3.1 Where data and weights physically live
 - MySQL runs **in-cluster**; ingested datasets are tables in the
-  `training_test_datasets` database. Weight files at rest also live inside
-  the environment (DB/data volume): an environment runs **tens of
-  concurrent trainings**, so weights cannot simply be held in memory.
+  `training_test_datasets` database.
+- **Model weights do not rest durably in the environment** (verified
+  against the code 2026-07-22). Each training pod downloads its current
+  weights from the backend at cycle start (ZIP transport envelope → a
+  framework file, e.g. `.pkl`/`.safetensors`), writes them **only into its
+  own per-experiment scratch** (`EXPERIMENT_SCRATCH_PATH`, an emptyDir that
+  dies with the pod; legacy images fall back to the image filesystem), and
+  uploads the result back to the backend after the cycle. The durable,
+  cross-cycle weight store is **platform-side** (tracebloc's averaging
+  share: `{edge}_{exp}_{cycle}_weights.pkl` under `SHARE_PATH`) — outside
+  the environment. N concurrent trainings = N pods, each holding only its
+  own current file; nothing accumulates in the environment.
 - The MySQL PersistentVolume uses a **hostPath** under
   `/tracebloc/<release>/mysql`; the local k3d cluster **bind-mounts
   `~/.tracebloc → /tracebloc`** (`HOST_DATA_DIR`, default
@@ -221,11 +235,12 @@ crypto for the volume is not warranted for a local dev tool unless the
 threat model changes — and the real answer to "protected from a local
 admin" is §6.5, not filesystem crypto.
 
-**Open (O1):** flip node-local from flag-gated (`TB_STORAGE_MODE`) to
-**default** for local installs — the step that actually delivers this RFC
-to users. Recommendation: flip after one green end-to-end **training run**
-on node-local (the only client#368-checklist item not yet exercised; it was
-blocked by an orthogonal dev auth issue, not by storage).
+**Decided (D15, 2026-07-22):** node-local flips from flag-gated
+(`TB_STORAGE_MODE`) to **default** for local installs — the step that
+actually delivers this RFC to users — after one green end-to-end
+**training run** on node-local (the only client#368-checklist item not yet
+exercised; it was blocked by an orthogonal dev auth issue, not by
+storage). The single-node topology change (C1) goes in the release notes.
 
 ## 6. Model IP protection — two-sided trust (new in v2)
 
@@ -261,20 +276,30 @@ credible commercially.
    (`EXPERIMENT_SCRATCH_PATH`, an `emptyDir`) and dies with the pod —
    already true on new-architecture images; close the legacy-image
    carve-out (D11).
-3. **At rest: envelope encryption + crypto-shredding.** An environment runs
-   tens of concurrent trainings, so weight files cannot live in RAM — they
-   rest in the environment's DB / data volume. Therefore: store weight
-   blobs as **ciphertext**; the per-experiment data-encryption key
-   (~32 bytes) is issued by the backend at cycle start and held **only in
-   memory**, never persisted inside the environment. N concurrent
-   experiments cost N small keys in RAM — not N weight files. On experiment
-   completion (or offboard, or revocation) the key is discarded and the
-   backend refuses re-issue: every at-rest copy — including disk snapshots
-   and backups — becomes unrecoverable. **Crypto-shredding is deletion that
-   is instant, size-independent, and verifiable**, and it upgrades what
-   "delete" means for weights on top of §4/§5.
-4. **Lifecycle:** TTL finished Jobs (`ttlSecondsAfterFinished`); offboard
-   already prunes images (§3.4).
+3. **At rest in the environment — corrected in v2.1 after code
+   verification.** The edge has **no durable weight store to encrypt**:
+   weights arrive per cycle, exist only in the pod's own scratch and
+   process memory, and the durable store is platform-side (§3.1). v2's
+   proposal to envelope-encrypt an in-environment weight DB targeted a
+   store that does not exist — the architecture is already stronger than
+   that proposal assumed. What remains on the edge is **lifecycle
+   hygiene**: `ttlSecondsAfterFinished` on finished Jobs (an emptyDir
+   survives until its pod object is deleted), closing the legacy
+   image-filesystem fallback (D11), offboard's existing image prune
+   (§3.4), and — optional, marginal against the §6.2 ceiling — encrypting
+   the scratch file with a per-pod in-memory key.
+4. **The platform-side store is where envelope encryption +
+   crypto-shredding apply.** The durable `{edge}_{exp}_{cycle}_weights.pkl`
+   files under the averaging share are opaque bytes: encrypt on receipt,
+   decrypt in memory for averaging, per-experiment key in the backend's
+   KMS, discard the key on experiment deletion → every copy (including
+   backups/snapshots) becomes unrecoverable, instantly and verifiably.
+   Feasible as a contained change at the existing weight-file I/O choke
+   points (deserialization is already confined via `safe_unpickle` on both
+   edge and averaging). This protects vendor IP **on tracebloc
+   infrastructure** and makes experiment deletion verifiable — but it is a
+   **platform ticket (backend/averaging), not part of the environment
+   boundary** this RFC defines.
 
 Stated ceiling: root can still capture plaintext *during* execution — 6.4
 stops casual and after-the-fact access, not a determined owner. That gap
@@ -388,22 +413,25 @@ seal check.
 | D5 | At-rest encryption (§7.4) | **Phase 2**; recommend host FDE; keep wording honest |
 | D6 | Egress lockdown flip | **Separate ticket**; golden-box claim gated on it (§8.1) |
 | D7 | Model IP — now | **Watermarking + audit** (§6.3) |
-| D8 | Weights at rest | **Envelope encryption + crypto-shredding — keys in memory, not weight files** (§6.4) |
+| D8 | Weights at rest | **Edge: nothing rests by architecture (verified) — lifecycle hygiene only; envelope encryption + crypto-shredding re-aimed at the platform-side store** (§6.4) |
 | D9 | Dataset scoping | **Scoped mounts → per-dataset PVCs under C** (§7.1) |
 | D10 | DB scoping | **Per-experiment DB credentials, table-scoped grants** (§7.2) |
 | D11 | Pod hardening | **Close legacy carve-out; no SA token; read-only floor** (§7.3) |
 | D12 | Conformance | **Guarantee matrix + seal check + verify k3d enforcement** (§8.2–8.4) |
 | D13 | Score/tamper integrity | **Separate RFC** — versioning+integrity root cause, not storage (§11) |
 | D14 | Confidential compute | **Phase 2 — deferred for capacity**; Azure confidential-GPU pilot first; tiering as bridge (§6.5) |
+| D15 | Node-local default (was O1) | **Flip node-local to default for local installs** after one green training run on node-local; single-node topology change in release notes |
 
 Open items:
 
 | # | Question | Recommendation |
 |---|---|---|
-| O1 | Flip node-local to **default** for local installs (also flips default local topology to single-node) | Yes — after one green training run on node-local |
-| O2 | Weight retention: exactly when does crypto-shred fire (experiment completion? grace window? resume/audit needs?) | Shred at completion + configurable grace window |
-| O3 | DEK custody: backend-issued per cycle vs in-environment key service | Backend-issued — revocation/offboard instant; the environment already requires backend egress |
+| O2 | Platform-side weight retention: when does crypto-shred fire on the averaging-share store (experiment completion? grace window? audit needs?) | Shred at completion + configurable grace window |
 | O4 | Watermarking mechanics & owner (backend work) | Scope inside the D7 ticket |
+
+Resolved since v2: **O1 → D15** (decided). **O3** dissolved by the
+verified architecture — there is no in-environment at-rest weight store
+needing key custody; platform-side keys live in the backend's KMS.
 
 ## 11. Non-goals
 
@@ -425,11 +453,12 @@ Open items:
    own review tracks.
 3. Build the **installer leftover-guard** (D3).
 4. **Egress-lockdown flip** (D6) proceeds on its own ticket, per fleet.
-5. One green **training run on node-local** → flip the default (O1), with
+5. One green **training run on node-local** → flip the default (D15), with
    the single-node topology change in release notes.
-6. **Scoping & hygiene epic** (D8–D11) as backend#1151 children:
-   envelope-encrypted weights + crypto-shred; scoped mounts; per-experiment
-   DB grants; pod-hardening completion; watermarking (D7).
+6. **Scoping & hygiene epic** (D8–D11) as backend#1151 children: job-TTL +
+   scratch hygiene on the edge; platform-side weight-store encryption +
+   crypto-shred (backend/averaging); scoped mounts; per-experiment DB
+   grants; pod-hardening completion; watermarking (D7).
 7. **Seal check + guarantee matrix** (D12).
 8. Phase 2 when capacity allows: TEE pilot on Azure confidential GPU (D14);
    at-rest encryption revisit (D5).
@@ -444,6 +473,14 @@ Open items:
 - `client/scripts/lib/cluster.sh:312` — `-v "${HOST_DATASET_DIR}:/tracebloc-data@all"` (cluster-wide dataset-source mount)
 - `client/client/values.yaml` — `networkPolicy.training.{enabled,allowExternalHttps,enforcementProbeHost,clusterCidrs}`, `egressProxy.{enabled,routeWorkloads}`, `egressReachabilityCheck` (lockdown built, ships permissive; §3.5/§8.1)
 - `client-runtime/jobs_manager.py` (~:825-885) — `EXPERIMENT_SCRATCH_PATH` emptyDir scratch, `readOnlyRootFilesystem`, read-only shared mounts; legacy-image carve-out (~:77, :829)
+- `tracebloc-client/core/weights/base.py:117-146, :340` — per-cycle weight
+  download (backend → ZIP envelope → `{scratch}/{exp}_{model}_weights.<ext>`)
+  and upload back to the backend; stale-sibling cleanup between formats
+- `tracebloc-client/core/utils/general.py:21-33` — `get_experiment_path()`:
+  `EXPERIMENT_SCRATCH_PATH` (emptyDir) or legacy image-filesystem fallback
+- `averaging-service/service/safe_unpickle.py` — the durable, platform-side
+  weight store: `{edge}_{exp}_{cycle}_weights.pkl` under `SHARE_PATH`;
+  deserialization confined on both sides (edge: backend#946)
 - `cli/internal/cli/delete.go` — teardown order; wipe verified before ✔ as of cli#389
 - Validation evidence — client#368 comments (2026-07-22): single-node node-local install on dev; PVCs on `local-path`; real ingest-jobs sharing the data PVC; stop/start survives; delete destroys volume + data; prototype fix `5e4ea45` (second `_ensure_tracebloc_dirs` call site)
 - Repro (2026-07-21): `tracebloc delete --force --yes` → `~/.tracebloc` gone, 0 `.ibd` survivors; earlier "survival" = flat/per-release transition artifact + second CLI binary
