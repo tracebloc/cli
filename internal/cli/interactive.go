@@ -123,12 +123,15 @@ func isInteractiveTTY() bool {
 func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bool) error {
 	prompted := false
 
-	// The guided flow is a five-step setup: intent → name → path → task →
-	// task-specific details. Each question prints as its own step header
-	// (PromptStep), with any supporting line beneath it and an answer-only
-	// prompt (the prompter runs bare — see surveyPrompter). Task-specific
-	// extras beyond the label (schema, resolution, …) are refinements under
-	// step 5 and aren't separately numbered.
+	// The guided flow is a four-step setup: intent → name → path → task. Each
+	// question prints as its own step header (PromptStep), with any supporting
+	// line beneath it and an answer-only prompt (the prompter runs bare — see
+	// surveyPrompter). Everything task-dependent comes AFTER the four steps as
+	// unnumbered refinements (Section headers): the label column, and per-task
+	// extras like schema, resolution, keypoints. These aren't numbered because
+	// which ones apply — and whether any apply at all — depends on the task
+	// picked at step 4 (self-supervised text has no label and no extras), so a
+	// fixed "of N" couldn't be honest about them.
 	//
 	// Spacing is uniform (STYLE.md "Guided-prompt spacing"): the header carries
 	// its own leading blank; then one blank line, the optional supporting text,
@@ -138,7 +141,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 
 	// Step 1 — intent: what this data is for.
 	if a.Spec.Intent == "" {
-		p.PromptStep(1, 5, "Do you want to ingest training or test data?")
+		p.PromptStep(1, 4, "Do you want to ingest training or test data?")
 		p.Newline()
 		ans, err := pr.Select("Do you want to ingest training or test data?", "which split this data is",
 			[]string{"train", "test"}, "train")
@@ -152,7 +155,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	// Step 2 — name. No auto-fill; the character rules surface only if the
 	// name is rejected (see ValidateTableName), so the prompt stays clean.
 	if a.Spec.Table == "" {
-		p.PromptStep(2, 5, "Please name the dataset.")
+		p.PromptStep(2, 4, "Please name the dataset.")
 		p.Newline()
 		ans, err := pr.Input("Please name the dataset.",
 			"letters, digits, and underscores; start with a letter or underscore  e.g. churn_train", "",
@@ -167,7 +170,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	// Step 3 — path. Show what "file or folder" means per modality, then
 	// detect the family from the layout and echo it back.
 	if a.LocalPath == "" {
-		p.PromptStep(3, 5, "Where is your data?")
+		p.PromptStep(3, 4, "Where is your data?")
 		p.Newline()
 		p.Hintf("Give the path to a file or a folder — whichever holds your data:")
 		p.Infof("Tabular   one CSV file                        e.g. ~/data/patients.csv")
@@ -310,7 +313,7 @@ func pickTask(p *ui.Printer, pr prompter, fam push.Family) (string, error) {
 	}
 	width += 3
 
-	p.PromptStep(4, 5, "What kind of machine learning task is this data for?")
+	p.PromptStep(4, 4, "What kind of machine learning task is this data for?")
 	p.Newline()
 	for _, s := range available {
 		p.Para(fmt.Sprintf("  %-*s%s", width, s.ID, s.Blurb))
@@ -352,13 +355,16 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 	cat := a.Spec.Category
 	prompted := false
 
-	// Label column — the answer the model learns to produce. Skipped for
-	// self-supervised text (MLM/CLM: the target comes from the text itself,
-	// there's no label column). Interactive picks from the REAL CSV header
-	// row so the choice exact-matches a column that exists — killing the
-	// case-mismatch silent-null-label class (data-ingestors#340) that
-	// free-typing "Label" against a "label" header would cause. Wording is
-	// per-task: a class to sort into vs a numeric value to predict (§8).
+	// Label column — the answer the model learns to produce. The first
+	// task-specific refinement (unnumbered Section, like the extras below), not
+	// a numbered core step: it's skipped for self-supervised text (MLM/CLM: the
+	// target comes from the text itself, there's no label column), so numbering
+	// it "of N" would promise a step that flow never reaches. Interactive picks
+	// from the REAL CSV header row so the choice exact-matches a column that
+	// exists — killing the case-mismatch silent-null-label class
+	// (data-ingestors#340) that free-typing "Label" against a "label" header
+	// would cause. Wording is per-task: a class to sort into vs a numeric value
+	// to predict (§8).
 	if !push.SelfSupervisedText(cat) && a.Spec.LabelColumn == "" {
 		question := "Which column holds the label?"
 		desc := "The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned"
@@ -366,7 +372,7 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			question = "Which column holds the value to predict?"
 			desc = "The number the model learns to predict.  e.g. price, age, days_to_event"
 		}
-		p.PromptStep(5, 5, question)
+		p.Section(question)
 		p.Newline()
 		p.Hintf("%s", desc)
 		p.Newline()
@@ -378,8 +384,8 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 		prompted = true
 	}
 
-	// Task-specific refinements — shown under step 5, each with its own cyan
-	// header (Section) rather than a step number, since which ones appear
+	// Further task-specific refinements — like the label above, each gets its
+	// own Section header rather than a step number, since which ones appear
 	// depends on the task.
 	switch {
 	case push.IsImage(cat):

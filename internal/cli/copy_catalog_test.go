@@ -211,7 +211,7 @@ func TestCopyCatalog(t *testing.T) {
 	}
 	dataIngestFile := doc(
 		"tb data ingest — stage a dataset into your secure environment",
-		"What you see when you run `tb data ingest` with no flags: a short intro, a\nfive-step guided setup, then — after you confirm — the run itself. The setup is\ndriven through the real flow for one task in each family (tabular, image, text)\nso the task-specific questions are visible; each question prints as a\n`Step N of 5 · …` header (task-specific refinements as their own header), the\nsupporting line beneath it, and the `?` line shows your answer. The run (shown\nonce, for tabular) is the three steps + the final summary as the CLI renders\nthem. Passing flags (--as, --task, a path, …) skips the matching questions. The\nother tasks' extra questions (keypoints, label policy, time column),\nself-supervised text (which skips the label step), and the failure-summary\nwordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams\nthrough (MySQL waits, the 📊 banner, per-validator lines) is the engine's own\nstdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
+		"What you see when you run `tb data ingest` with no flags: a short intro, a\nfour-step guided setup (intent, name, path, task) then the task-specific\nquestions, and — after you confirm — the run itself. The setup is\ndriven through the real flow for one task in each family (tabular, image, text)\nso the task-specific questions are visible; each core question prints as a\n`Step N of 4 · …` header, the task-specific ones (the label column, and extras\nlike resolution or schema) as their own header, the\nsupporting line beneath it, and the `?` line shows your answer. The run (shown\nonce, for tabular) is the three steps + the final summary as the CLI renders\nthem. Passing flags (--as, --task, a path, …) skips the matching questions. The\nother tasks' extra questions (keypoints, label policy, time column),\nself-supervised text (which skips the label question), and the failure-summary\nwordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams\nthrough (MySQL waits, the 📊 banner, per-validator lines) is the engine's own\nstdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
 		[]run{
 			{"tb data ingest   # guided · tabular classification", tabularIngest},
 			{"tb data ingest   # guided · image classification", imageIngest},
@@ -387,7 +387,7 @@ func TestCopyCatalog(t *testing.T) {
 		"00-home.golden": {"tracebloc --help"},
 		"01-data-ingest.golden": {
 			"Ingest datasets to your secure environment.", // intro
-			"Step 1 of 5 ·", "Step 5 of 5 ·", // the guided questionnaire
+			"Step 1 of 4 ·", "Step 4 of 4 ·", // the guided questionnaire
 			"Review", "Proceed with the ingest?", // review + confirm
 			"Step 1/3", "Step 3/3", "Ingestion summary", "What's next", // the run
 		},

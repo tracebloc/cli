@@ -1,15 +1,17 @@
 tb data ingest — stage a dataset into your secure environment
 =============================================================
 What you see when you run `tb data ingest` with no flags: a short intro, a
-five-step guided setup, then — after you confirm — the run itself. The setup is
+four-step guided setup (intent, name, path, task) then the task-specific
+questions, and — after you confirm — the run itself. The setup is
 driven through the real flow for one task in each family (tabular, image, text)
-so the task-specific questions are visible; each question prints as a
-`Step N of 5 · …` header (task-specific refinements as their own header), the
+so the task-specific questions are visible; each core question prints as a
+`Step N of 4 · …` header, the task-specific ones (the label column, and extras
+like resolution or schema) as their own header, the
 supporting line beneath it, and the `?` line shows your answer. The run (shown
 once, for tabular) is the three steps + the final summary as the CLI renders
 them. Passing flags (--as, --task, a path, …) skips the matching questions. The
 other tasks' extra questions (keypoints, label policy, time column),
-self-supervised text (which skips the label step), and the failure-summary
+self-supervised text (which skips the label question), and the failure-summary
 wordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams
 through (MySQL waits, the 📊 banner, per-validator lines) is the engine's own
 stdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated
@@ -20,15 +22,15 @@ $ tb data ingest   # guided · tabular classification
   Ingest datasets to your secure environment.
   For help: https://docs.tracebloc.io/create-use-case/prepare-dataset
 
-  Step 1 of 5 · Do you want to ingest training or test data?
+  Step 1 of 4 · Do you want to ingest training or test data?
 
 ? train
 
-  Step 2 of 5 · Please name the dataset.
+  Step 2 of 4 · Please name the dataset.
 
 ? hospital_train
 
-  Step 3 of 5 · Where is your data?
+  Step 3 of 4 · Where is your data?
 
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
@@ -38,7 +40,7 @@ $ tb data ingest   # guided · tabular classification
 ? ~/data/patients
   ✔ Found a CSV table — this is tabular data.
 
-  Step 4 of 5 · What kind of machine learning task is this data for?
+  Step 4 of 4 · What kind of machine learning task is this data for?
 
     tabular_classification       predict a class from table columns
     tabular_regression           predict a number from table columns
@@ -48,7 +50,7 @@ $ tb data ingest   # guided · tabular classification
 
 ? tabular_classification
 
-  Step 5 of 5 · Which column holds the label?
+  Which column holds the label?
 
   The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
 
@@ -75,15 +77,15 @@ $ tb data ingest   # guided · image classification
   Ingest datasets to your secure environment.
   For help: https://docs.tracebloc.io/create-use-case/prepare-dataset
 
-  Step 1 of 5 · Do you want to ingest training or test data?
+  Step 1 of 4 · Do you want to ingest training or test data?
 
 ? train
 
-  Step 2 of 5 · Please name the dataset.
+  Step 2 of 4 · Please name the dataset.
 
 ? xray_train
 
-  Step 3 of 5 · Where is your data?
+  Step 3 of 4 · Where is your data?
 
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
@@ -93,7 +95,7 @@ $ tb data ingest   # guided · image classification
 ? ~/data/xray
   ✔ Found labels.csv and an images/ folder — this is image data.
 
-  Step 4 of 5 · What kind of machine learning task is this data for?
+  Step 4 of 4 · What kind of machine learning task is this data for?
 
     image_classification    sort images into classes
     object_detection        draw boxes around objects in an image
@@ -102,7 +104,7 @@ $ tb data ingest   # guided · image classification
 
 ? image_classification
 
-  Step 5 of 5 · Which column holds the label?
+  Which column holds the label?
 
   The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
 
@@ -129,15 +131,15 @@ $ tb data ingest   # guided · text classification
   Ingest datasets to your secure environment.
   For help: https://docs.tracebloc.io/create-use-case/prepare-dataset
 
-  Step 1 of 5 · Do you want to ingest training or test data?
+  Step 1 of 4 · Do you want to ingest training or test data?
 
 ? train
 
-  Step 2 of 5 · Please name the dataset.
+  Step 2 of 4 · Please name the dataset.
 
 ? reviews_train
 
-  Step 3 of 5 · Where is your data?
+  Step 3 of 4 · Where is your data?
 
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
@@ -147,7 +149,7 @@ $ tb data ingest   # guided · text classification
 ? ~/data/reviews
   ✔ Found labels.csv and a texts/ folder — this looks like text data.
 
-  Step 4 of 5 · What kind of machine learning task is this data for?
+  Step 4 of 4 · What kind of machine learning task is this data for?
 
     text_classification            sort text snippets into classes
     masked_language_modeling       predict masked-out words — no labels needed
@@ -159,7 +161,7 @@ $ tb data ingest   # guided · text classification
 
 ? text_classification
 
-  Step 5 of 5 · Which column holds the label?
+  Which column holds the label?
 
   The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
 
