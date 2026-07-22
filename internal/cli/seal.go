@@ -35,7 +35,7 @@ var (
 
 // sealCheck is one conformance check's outcome, ready to render.
 type sealCheck struct {
-	name   string // display name (chart's seal-name annotation, else the de-prefixed hook name)
+	name   string // display name (chart's seal-check-name label, else the de-prefixed hook name)
 	passed bool
 	detail string // one-line failure detail ("" when passed)
 	hint   string // one-line remediation pointer ("" when passed)
@@ -79,14 +79,24 @@ func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOpt
 		return binding.explain(err)
 	}
 	tt := helm.TestTarget{
-		Release:     target.Release.ReleaseName,
-		Namespace:   target.Resolved.Namespace,
-		Kubeconfig:  opts.Path,
-		KubeContext: opts.Context,
+		Release:    target.Release.ReleaseName,
+		Namespace:  target.Resolved.Namespace,
+		Kubeconfig: opts.Path,
+		// The RESOLVED context, not the raw --context flag: with the flag
+		// omitted the raw value is empty and helm would fall back to its own
+		// ambient resolution (including $HELM_KUBECONTEXT), which can point at
+		// a different cluster than the one discovery just used. Same pinning
+		// `resources set` does (Bugbot).
+		KubeContext: target.Resolved.Context,
 	}
 
 	hooks, herr := listTestHooksFn(ctx, tt)
 	if herr != nil {
+		// Ctrl-C while enumerating is a cancelled run, not an enumeration
+		// failure — exit quietly, matching the per-check loop below (Bugbot).
+		if ctx.Err() != nil {
+			return &exitError{code: exitInterrupted}
+		}
 		// Can't even enumerate the checks — that's an error, not a verdict:
 		// printing "unsealed" (or worse, "unknown") off a helm failure would
 		// misstate what we know about the environment.

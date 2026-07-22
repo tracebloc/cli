@@ -15,13 +15,15 @@ import (
 
 // stubSealTarget fakes cluster resolution for the seal check (no kubeconfig,
 // no apiserver): the release "acme" in namespace "acme" — the same fake-target
-// pattern the data-delete tests use.
+// pattern the data-delete tests use. The resolved context is deliberately
+// distinct from any --context flag a test passes, so asserts can prove helm is
+// pinned to the RESOLVED context, never the raw flag (Bugbot).
 func stubSealTarget(t *testing.T) {
 	t.Helper()
 	orig := resolveClusterTargetFn
 	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _ bool) (*clusterTarget, error) {
 		return &clusterTarget{
-			Resolved: &cluster.ResolvedConfig{Context: "ctx", Namespace: "acme"},
+			Resolved: &cluster.ResolvedConfig{Context: "resolved-ctx", Namespace: "acme"},
 			Release:  &cluster.ParentRelease{ReleaseName: "acme"},
 		}, nil
 	}
@@ -104,7 +106,10 @@ func TestSeal_AllPass_Sealed(t *testing.T) {
 	if len(s.runs) != 2 || s.runs[0] != "acme-egress-enforcement-check" || s.runs[1] != "acme-egress-reachability-check" {
 		t.Errorf("helm test runs = %v", s.runs)
 	}
-	wantTT := helm.TestTarget{Release: "acme", Namespace: "acme", Kubeconfig: "/tmp/kc", KubeContext: "kind-acme"}
+	// KubeContext is the RESOLVED context — never the raw --context flag
+	// ("kind-acme" here), which would be empty when omitted and let helm fall
+	// back to its own ambient resolution ($HELM_KUBECONTEXT included).
+	wantTT := helm.TestTarget{Release: "acme", Namespace: "acme", Kubeconfig: "/tmp/kc", KubeContext: "resolved-ctx"}
 	if s.listGot != wantTT || s.runGot != wantTT {
 		t.Errorf("helm targets = list %+v run %+v, want %+v", s.listGot, s.runGot, wantTT)
 	}
@@ -316,6 +321,31 @@ func TestSeal_ResolveErrorPropagates(t *testing.T) {
 	_, err := runSeal(t, 0)
 	if got := ExitCodeFromError(err); got != exitNoWorkspace {
 		t.Fatalf("exit code = %d, want %d (%v)", got, exitNoWorkspace, err)
+	}
+}
+
+// Ctrl-C while the hooks are being enumerated exits quietly (130), not as an
+// enumeration failure — same quiet-exit contract as mid-suite below (Bugbot).
+func TestSeal_CancelledDuringListing_QuietExit(t *testing.T) {
+	stubSealTarget(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	origList := listTestHooksFn
+	listTestHooksFn = func(_ context.Context, _ helm.TestTarget) ([]helm.TestHook, error) {
+		cancel() // the user hits Ctrl-C while `helm get hooks` runs
+		return nil, errors.New("context canceled")
+	}
+	t.Cleanup(func() { listTestHooksFn = origList })
+
+	var out bytes.Buffer
+	err := runSealCheck(ctx, ui.New(&out), cluster.KubeconfigOptions{}, 0)
+	if got := ExitCodeFromError(err); got != exitInterrupted {
+		t.Fatalf("exit code = %d, want %d (%v)", got, exitInterrupted, err)
+	}
+	if !IsSilentError(err) {
+		t.Fatalf("Ctrl-C must exit quietly, got: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("nothing may render on a cancelled enumeration, got:\n%s", out.String())
 	}
 }
 
