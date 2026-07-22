@@ -191,13 +191,6 @@ Step 1/3  Check your data
     columns:       7
     total size:    51.57 KiB
 
-  Ingest settings
-    name:          hospital_train
-    task:          tabular_classification
-    intent:        train
-    label column:  churned
-    destination:   /data/shared/hospital_train
-
 Step 2/3  Copy into your secure environment
   Your files are copied securely into your secure environment's storage — set up and cleaned up for you.
 
@@ -210,11 +203,6 @@ Step 3/3  Validate and load
     ingestor ID:   80c224bd-202b-4a6f-9362-61c84599f334
     total records: 849
     inserted:      849
-    sent to API:   849
-    skipped:       0
-    file failures: 0
-    DB failures:   0
-    success rate:  100.0%
 
   What's next
   · Your data is registered as a dataset. View it at https://ai.tracebloc.io/metadata

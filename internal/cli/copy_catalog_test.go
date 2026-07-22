@@ -191,7 +191,10 @@ func TestCopyCatalog(t *testing.T) {
 		}
 		p.Step(1, 3, "Check your data")
 		p.Hintf("Reading your files locally first — nothing has touched your secure environment yet — so a layout or settings problem shows up right away.")
-		printLocalSummary(p, layout, spec)
+		// Guided path: the Review already echoed the settings, so the duplicate
+		// "Ingest settings" block is suppressed (showSettings=false). The flag-only
+		// path passes true; that block's copy is in zz-all-strings.golden.
+		printLocalSummary(p, layout, spec, false)
 		p.Step(2, 3, "Copy into your secure environment")
 		p.Hintf("Your files are copied securely into your secure environment's storage — set up and cleaned up for you.")
 		p.Step(3, 3, "Validate and load")

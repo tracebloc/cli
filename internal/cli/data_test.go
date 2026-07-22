@@ -589,7 +589,7 @@ func TestPrintLocalSummary_ShowsDetectedExtension(t *testing.T) {
 		"table": "t", "category": "image_classification", "intent": "train",
 		"spec": map[string]any{"file_options": map[string]any{"extension": ".png"}},
 	}
-	printLocalSummary(p, layout, spec)
+	printLocalSummary(p, layout, spec, true)
 	if !strings.Contains(buf.String(), "1 files (.png)") {
 		t.Errorf("summary missing detected extension:\n%s", buf.String())
 	}

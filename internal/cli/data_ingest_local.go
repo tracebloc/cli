@@ -480,15 +480,23 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 		return nil, nil, nil, false, perr
 	}
 
-	printLocalSummary(a.Printer, layout, spec)
+	// Interactive runs already echoed name/task/intent/label in the pre-confirm
+	// Review, so suppress the duplicate "Ingest settings" block here; the
+	// flag-only path (no Review) still shows it.
+	printLocalSummary(a.Printer, layout, spec, a.Prompter == nil)
 
 	return layout, spec, specBytes, false, nil
 }
 
-// printLocalSummary shows what the CLI found on disk plus the ingest
-// settings it assembled — the detail under step 1 ("Check your data").
-// Mirrors `cluster info`'s section/Field layout.
-func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]any) {
+// printLocalSummary shows what the CLI found on disk plus (for the flag-only
+// path) the ingest settings it assembled — the detail under step 1 ("Check your
+// data"). Mirrors `cluster info`'s section/Field layout.
+//
+// showSettings gates the "Ingest settings" block: the guided flow already
+// showed those exact fields in its pre-confirm Review, so repeating them here
+// is noise — the caller passes false when interactive. The flag-only path
+// (no Review) passes true, so those users still see the resolved settings once.
+func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]any, showSettings bool) {
 	cat, _ := spec["category"].(string)
 
 	p.Section("Local dataset")
@@ -522,6 +530,10 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 		}
 	}
 	p.Field("total size", push.HumanBytes(layout.TotalBytes))
+
+	if !showSettings {
+		return
+	}
 
 	p.Section("Ingest settings")
 	p.Field("name", fmt.Sprintf("%v", spec["table"]))
