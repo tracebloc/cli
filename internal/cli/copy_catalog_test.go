@@ -115,16 +115,52 @@ func TestCopyCatalog(t *testing.T) {
 		[]run{{"tracebloc --help", help()}},
 	)
 
-	// ── 01 data ingest — stage a dataset ────────────────────────────────────────
-	ingestReview := &runDataIngestArgs{
-		LocalPath: "./data",
-		Spec:      push.SpecArgs{Table: "xray_train", Category: "image_classification", Intent: "train"},
+	// ── 01 data ingest — stage a dataset (the guided questionnaire) ──────────────
+	// driveIngest runs the REAL guided flow (runInteractive) with a prompter that
+	// prints each question as the terminal shows it, so the transcript is every
+	// prompt in order: intro, the core questions, the family sniff/echo, the task
+	// picker, the task-specific questions, the review, and the confirm. The intro
+	// preamble mirrors data_ingest_local.go (its text is drift-guarded by the
+	// backstop); the temp data dir is normalised to a stable placeholder.
+	driveIngest := func(dir string, answers map[string]string) string {
+		var b bytes.Buffer
+		p := ui.New(&b, ui.WithColor(false))
+		p.Newline()
+		p.Para("This ingests a dataset so models can train on it. Your files never leave your\n" +
+			"own infrastructure — tracebloc copies them into your secure environment's storage,\n" +
+			"checks them, and loads them into a table your training runs read from. Other\n" +
+			"collaborators can train against that table without ever seeing the raw files.")
+		p.Hintf("Learn more: https://docs.tracebloc.io")
+		pr := &catalogPrompter{w: &b, answers: answers}
+		a := &runDataIngestArgs{}
+		if err := runInteractive(p, pr, a, false /*taskSet*/); err != nil {
+			t.Fatalf("driveIngest(%s): %v", dir, err)
+		}
+		return strings.ReplaceAll(b.String(), dir, "~/datasets/hospital")
 	}
+	tabDir := tabularDir(t)
+	imgDir := imageDirLayout(t)
+	tabularIngest := driveIngest(tabDir, map[string]string{
+		"Is this training or test data?":       "train",
+		"What should we call this dataset?":    "hospital_train",
+		"Where is your data? (file or folder)": tabDir,
+		"Which task?":                          "Tabular classification",
+		"Which column holds the class?":        "churned",
+	})
+	imageIngest := driveIngest(imgDir, map[string]string{
+		"Is this training or test data?":                                  "train",
+		"What should we call this dataset?":                               "xray_train",
+		"Where is your data? (file or folder)":                            imgDir,
+		"Which task?":                                                     "Image classification",
+		"Which column holds the class?":                                   "label",
+		"Image resolution as WxH (blank = read it from your first image)": "224x224",
+	})
 	dataIngestFile := doc(
 		"tb data ingest — stage a dataset into your secure environment",
-		"What you see when you run `tb data ingest <path>`. The pre-flight review (below)\nis shown before you confirm. The live run then streams step lines (Checking →\nCopying → Registering), a progress bar, and any validation error — those aren't a\nstable screen, so every one of their strings is in zz-all-strings.golden.\n(`tb ingest` is a hidden deprecated alias of `tb data ingest`; `push` is a\ndeprecated alias of the verb.)",
+		"What you see when you run `tb data ingest` with no flags: a short intro, then a\nguided questionnaire. Every question is shown below, in order, driven through the\nreal flow for two tasks (tabular + image) so the task-specific questions are\nvisible. Each prompt shows `? <question> <answer>`; the line above it is the\nquestion's one-line description. Passing flags (--as, --task, a path, …) skips\nthe matching questions. The remaining tasks' extra questions (keypoints, label\npolicy, time column) and every prompt's `?`-help text are in\nzz-all-strings.golden. (`tb ingest` is a hidden deprecated alias; `push` is a\ndeprecated alias of the verb.)",
 		[]run{
-			{"tb data ingest ./data --as train:xray_train --task image_classification   # pre-flight review, before you confirm", rndr(func(p *ui.Printer) { renderReview(p, ingestReview) })},
+			{"tb data ingest   # guided · tabular classification", tabularIngest},
+			{"tb data ingest   # guided · image classification", imageIngest},
 		},
 		[]run{
 			{"tracebloc data ingest --help", help("data", "ingest")},
@@ -319,6 +355,53 @@ func quoteAll(in []string) []string {
 	return out
 }
 
+// catalogPrompter is the prompter seam's catalog double: it prints each question
+// the way the terminal shows it ("? <question> <answer>") and returns a scripted
+// answer, so driving the REAL runInteractive produces a byte-exact transcript of
+// the guided flow — every prompt, in order. The description line above each
+// question is the real p.PromptHint in runInteractive; only the "? …" line is
+// rendered here (survey draws it in production).
+type catalogPrompter struct {
+	w       *bytes.Buffer
+	answers map[string]string
+}
+
+func (c *catalogPrompter) pick(label, def string) string {
+	if a, ok := c.answers[label]; ok {
+		return a
+	}
+	return def
+}
+
+func (c *catalogPrompter) show(label, ans string) {
+	if ans == "" {
+		fmt.Fprintf(c.w, "? %s\n", label)
+		return
+	}
+	fmt.Fprintf(c.w, "? %s %s\n", label, ans)
+}
+
+func (c *catalogPrompter) Input(label, _, def string, _ func(string) error) (string, error) {
+	ans := c.pick(label, def)
+	c.show(label, ans)
+	return ans, nil
+}
+
+func (c *catalogPrompter) Select(label, _ string, _ []string, def string) (string, error) {
+	ans := c.pick(label, def)
+	c.show(label, ans)
+	return ans, nil
+}
+
+func (c *catalogPrompter) Confirm(label string, def bool) (bool, error) {
+	ans := "No"
+	if def {
+		ans = "Yes"
+	}
+	c.show(label, ans)
+	return def, nil
+}
+
 // harvestMessages parses the user-facing packages and returns every string
 // literal that reaches a user: ALL arguments to a Printer method or an error /
 // format constructor (errors.New, fmt.Errorf, fmt.Sprintf), PLUS the string
@@ -333,6 +416,9 @@ func harvestMessages(t *testing.T) []string {
 		"Detailf": true, "Para": true, "Section": true, "PromptHint": true, "PromptHeader": true,
 		"WarnLine": true, "CrossLine": true, "CheckLine": true, "Step": true, "Action": true,
 		"Stat": true, "Field": true, "MenuRow": true, "Banner": true, "Command": true,
+		// prompter seam (survey) — question labels + help text for every guided
+		// flow (ingest, client create, delete), incl. flows not driven as a screen.
+		"Input": true, "Select": true, "Confirm": true,
 	}
 	isCopyCall := func(call *ast.CallExpr) bool {
 		sel, ok := call.Fun.(*ast.SelectorExpr)

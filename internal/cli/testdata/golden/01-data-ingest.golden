@@ -1,20 +1,103 @@
 tb data ingest — stage a dataset into your secure environment
 =============================================================
-What you see when you run `tb data ingest <path>`. The pre-flight review (below)
-is shown before you confirm. The live run then streams step lines (Checking →
-Copying → Registering), a progress bar, and any validation error — those aren't a
-stable screen, so every one of their strings is in zz-all-strings.golden.
-(`tb ingest` is a hidden deprecated alias of `tb data ingest`; `push` is a
+What you see when you run `tb data ingest` with no flags: a short intro, then a
+guided questionnaire. Every question is shown below, in order, driven through the
+real flow for two tasks (tabular + image) so the task-specific questions are
+visible. Each prompt shows `? <question> <answer>`; the line above it is the
+question's one-line description. Passing flags (--as, --task, a path, …) skips
+the matching questions. The remaining tasks' extra questions (keypoints, label
+policy, time column) and every prompt's `?`-help text are in
+zz-all-strings.golden. (`tb ingest` is a hidden deprecated alias; `push` is a
 deprecated alias of the verb.)
 
-$ tb data ingest ./data --as train:xray_train --task image_classification   # pre-flight review, before you confirm
+$ tb data ingest   # guided · tabular classification
+
+  This ingests a dataset so models can train on it. Your files never leave your
+  own infrastructure — tracebloc copies them into your secure environment's storage,
+  checks them, and loads them into a table your training runs read from. Other
+  collaborators can train against that table without ever seeing the raw files.
+  Learn more: https://docs.tracebloc.io
+
+  Let's set up your data ingest
+  Press Enter to accept a default; Ctrl-C to cancel.
+
+  Whether this split trains the model or evaluates it.
+? Is this training or test data? train
+
+  A name for this dataset — you'll reference it by this name when you start a training run. Start with a letter or underscore, then letters, digits, underscores.  e.g. churn_train
+? What should we call this dataset? hospital_train
+
+  The file or folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn
+? Where is your data? (file or folder) ~/datasets/hospital
+  ✔ Found a CSV table — this is tabular data.
+
+  Tasks for tabular data
+  Available now:
+  · Tabular classification — predict a class from table columns · tabular_classification
+  · Tabular regression — predict a number from table columns · tabular_regression
+  · Time-series forecasting — predict future values from past ones · time_series_forecasting
+  · Time-series classification — predict a class for each whole sequence · time_series_classification
+  · Survival analysis — predict how long until an event happens · time_to_event_prediction
+? Which task? Tabular classification
+
+  The column in your CSV with the answer the model learns to produce.
+? Which column holds the class? churned
+
+  Override the column types the CLI would infer. Blank = infer from the CSV.  e.g. age:INT,price:FLOAT,city:VARCHAR
+? Column schema as col:TYPE,... (blank = infer from the CSV)
+
+  Review
+    name:          hospital_train
+    task:          tabular_classification
+    intent:        train
+    path:          ~/datasets/hospital
+    label column:  churned
+    schema:        infer from CSV
+? Proceed with the ingest? Yes
+
+$ tb data ingest   # guided · image classification
+
+  This ingests a dataset so models can train on it. Your files never leave your
+  own infrastructure — tracebloc copies them into your secure environment's storage,
+  checks them, and loads them into a table your training runs read from. Other
+  collaborators can train against that table without ever seeing the raw files.
+  Learn more: https://docs.tracebloc.io
+
+  Let's set up your data ingest
+  Press Enter to accept a default; Ctrl-C to cancel.
+
+  Whether this split trains the model or evaluates it.
+? Is this training or test data? train
+
+  A name for this dataset — you'll reference it by this name when you start a training run. Start with a letter or underscore, then letters, digits, underscores.  e.g. churn_train
+? What should we call this dataset? xray_train
+
+  The file or folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn
+? Where is your data? (file or folder) ~/datasets/hospital
+  ✔ Found labels.csv and an images/ folder — this is image data.
+
+  Tasks for image data
+  Available now:
+  · Image classification — sort images into classes · image_classification
+  · Object detection — draw boxes around objects in an image · object_detection
+  · Keypoint detection — locate landmark points on an image (e.g. pose) · keypoint_detection
+  · Semantic segmentation — label every pixel in an image · semantic_segmentation
+? Which task? Image classification
+
+  The column in your CSV with the answer the model learns to produce.
+? Which column holds the class? label
+
+  The resolution your images already are. tracebloc never resizes — it checks every image is exactly this size and rejects any that differ. Blank = read it from your first image.  e.g. 224x224
+? Image resolution as WxH (blank = read it from your first image) 224x224
 
   Review
     name:          xray_train
     task:          image_classification
     intent:        train
-    path:          ./data
-    resolution:    auto-detect
+    path:          ~/datasets/hospital
+    label column:  label
+    resolution:    224x224
+? Proceed with the ingest? Yes
 
 
 ------------------------------------------------------------
