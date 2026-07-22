@@ -15,3 +15,12 @@ internal/submit/watch.go: JobOutcome.String
 # code), so they are unreachable from main by design.
 internal/push/preflight.go: ReadLabelValues
 internal/push/tabular.go: inferColumnType
+# Retained UI primitive + registry metadata the ingest redesign stopped
+# rendering, both still pinned by tests:
+#  - PromptHeader (bold label before a prompt): the guided ingest flow moved to
+#    PromptStep, but this stays available for other prompt surfaces (color_matrix_test).
+#  - CategorySpec.DisplayName: the task picker now lists raw task IDs (approved
+#    design), but the friendly gloss-over-label metadata is kept — pinned by
+#    preview_test.TestDisplayNameGlosses — so re-showing glosses is a one-liner.
+internal/ui/ui.go: Printer.PromptHeader
+internal/push/category.go: CategorySpec.DisplayName

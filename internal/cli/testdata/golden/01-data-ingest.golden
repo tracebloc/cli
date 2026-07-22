@@ -1,50 +1,52 @@
 tb data ingest — stage a dataset into your secure environment
 =============================================================
 What you see when you run `tb data ingest` with no flags: a short intro, then a
-guided questionnaire. Every question is shown below, in order, driven through the
-real flow for two tasks (tabular + image) so the task-specific questions are
-visible. Each prompt shows `? <question> <answer>`; the line above it is the
-question's one-line description. Passing flags (--as, --task, a path, …) skips
-the matching questions. The remaining tasks' extra questions (keypoints, label
+five-step guided setup. Every question is shown below, in order, driven through
+the real flow for two tasks (tabular + image) so the task-specific questions are
+visible. Each question prints as a `Step N of 5 · …` header (task-specific
+refinements as their own header); the supporting line sits beneath it, and the
+`?` line shows your answer. Passing flags (--as, --task, a path, …) skips the
+matching questions. The remaining tasks' extra questions (keypoints, label
 policy, time column) and every prompt's `?`-help text are in
 zz-all-strings.golden. (`tb ingest` is a hidden deprecated alias; `push` is a
 deprecated alias of the verb.)
 
 $ tb data ingest   # guided · tabular classification
 
-  This ingests a dataset so models can train on it. Your files never leave your
-  own infrastructure — tracebloc copies them into your secure environment's storage,
-  checks them, and loads them into a table your training runs read from. Other
-  collaborators can train against that table without ever seeing the raw files.
-  Learn more: https://docs.tracebloc.io
+  Ingest a dataset — your files never leave this machine.
+  Learn how: https://docs.tracebloc.io/create-use-case/prepare-dataset
 
-  Let's set up your data ingest
-  Press Enter to accept a default; Ctrl-C to cancel.
+  Step 1 of 5 · Do you want to ingest training or test data?
+? train
 
-  Whether this split trains the model or evaluates it.
-? Is this training or test data? train
+  Step 2 of 5 · Please name the dataset.
+? hospital_train
 
-  A name for this dataset — you'll reference it by this name when you start a training run. Start with a letter or underscore, then letters, digits, underscores.  e.g. churn_train
-? What should we call this dataset? hospital_train
-
-  The file or folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn
-? Where is your data? (file or folder) ~/datasets/hospital
+  Step 3 of 5 · Where is your data?
+  Give the path to a file or a folder — whichever holds your data:
+  · Tabular   one CSV file                        e.g. ~/data/patients.csv
+  · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
+? ~/datasets/hospital
   ✔ Found a CSV table — this is tabular data.
 
-  Tasks for tabular data
-  Available now:
-  · Tabular classification — predict a class from table columns · tabular_classification
-  · Tabular regression — predict a number from table columns · tabular_regression
-  · Time-series forecasting — predict future values from past ones · time_series_forecasting
-  · Time-series classification — predict a class for each whole sequence · time_series_classification
-  · Survival analysis — predict how long until an event happens · time_to_event_prediction
-? Which task? Tabular classification
+  Step 4 of 5 · What kind of machine learning task is this data for?
 
-  The column in your CSV with the answer the model learns to produce.
-? Which column holds the class? churned
+    tabular_classification       predict a class from table columns
+    tabular_regression           predict a number from table columns
+    time_series_forecasting      predict future values from past ones
+    time_series_classification   predict a class for each whole sequence
+    time_to_event_prediction     predict how long until an event happens
 
-  Override the column types the CLI would infer. Blank = infer from the CSV.  e.g. age:INT,price:FLOAT,city:VARCHAR
-? Column schema as col:TYPE,... (blank = infer from the CSV)
+? tabular_classification
+
+  Step 5 of 5 · Which column holds the label?
+  The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
+? churned
+
+  Column types
+  We infer each column's type from your CSV. Press Enter to accept, or type overrides like age:INT,price:FLOAT.
+?
 
   Review
     name:          hospital_train
@@ -57,38 +59,39 @@ $ tb data ingest   # guided · tabular classification
 
 $ tb data ingest   # guided · image classification
 
-  This ingests a dataset so models can train on it. Your files never leave your
-  own infrastructure — tracebloc copies them into your secure environment's storage,
-  checks them, and loads them into a table your training runs read from. Other
-  collaborators can train against that table without ever seeing the raw files.
-  Learn more: https://docs.tracebloc.io
+  Ingest a dataset — your files never leave this machine.
+  Learn how: https://docs.tracebloc.io/create-use-case/prepare-dataset
 
-  Let's set up your data ingest
-  Press Enter to accept a default; Ctrl-C to cancel.
+  Step 1 of 5 · Do you want to ingest training or test data?
+? train
 
-  Whether this split trains the model or evaluates it.
-? Is this training or test data? train
+  Step 2 of 5 · Please name the dataset.
+? xray_train
 
-  A name for this dataset — you'll reference it by this name when you start a training run. Start with a letter or underscore, then letters, digits, underscores.  e.g. churn_train
-? What should we call this dataset? xray_train
-
-  The file or folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn
-? Where is your data? (file or folder) ~/datasets/hospital
+  Step 3 of 5 · Where is your data?
+  Give the path to a file or a folder — whichever holds your data:
+  · Tabular   one CSV file                        e.g. ~/data/patients.csv
+  · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
+? ~/datasets/hospital
   ✔ Found labels.csv and an images/ folder — this is image data.
 
-  Tasks for image data
-  Available now:
-  · Image classification — sort images into classes · image_classification
-  · Object detection — draw boxes around objects in an image · object_detection
-  · Keypoint detection — locate landmark points on an image (e.g. pose) · keypoint_detection
-  · Semantic segmentation — label every pixel in an image · semantic_segmentation
-? Which task? Image classification
+  Step 4 of 5 · What kind of machine learning task is this data for?
 
-  The column in your CSV with the answer the model learns to produce.
-? Which column holds the class? label
+    image_classification    sort images into classes
+    object_detection        draw boxes around objects in an image
+    keypoint_detection      locate landmark points on an image (e.g. pose)
+    semantic_segmentation   label every pixel in an image
 
-  The resolution your images already are. tracebloc never resizes — it checks every image is exactly this size and rejects any that differ. Blank = read it from your first image.  e.g. 224x224
-? Image resolution as WxH (blank = read it from your first image) 224x224
+? image_classification
+
+  Step 5 of 5 · Which column holds the label?
+  The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
+? label
+
+  Image resolution
+  The size your images already are, as WxH — tracebloc checks every image matches and never resizes. Press Enter to read it from your first image.  e.g. 224x224
+? 224x224
 
   Review
     name:          xray_train

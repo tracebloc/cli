@@ -126,11 +126,8 @@ func TestCopyCatalog(t *testing.T) {
 		var b bytes.Buffer
 		p := ui.New(&b, ui.WithColor(false))
 		p.Newline()
-		p.Para("This ingests a dataset so models can train on it. Your files never leave your\n" +
-			"own infrastructure — tracebloc copies them into your secure environment's storage,\n" +
-			"checks them, and loads them into a table your training runs read from. Other\n" +
-			"collaborators can train against that table without ever seeing the raw files.")
-		p.Hintf("Learn more: https://docs.tracebloc.io")
+		p.Para("Ingest a dataset — your files never leave this machine.")
+		p.Hintf("Learn how: https://docs.tracebloc.io/create-use-case/prepare-dataset")
 		pr := &catalogPrompter{w: &b, answers: answers}
 		a := &runDataIngestArgs{}
 		if err := runInteractive(p, pr, a, false /*taskSet*/); err != nil {
@@ -141,23 +138,23 @@ func TestCopyCatalog(t *testing.T) {
 	tabDir := tabularDir(t)
 	imgDir := imageDirLayout(t)
 	tabularIngest := driveIngest(tabDir, map[string]string{
-		"Is this training or test data?":       "train",
-		"What should we call this dataset?":    "hospital_train",
-		"Where is your data? (file or folder)": tabDir,
-		"Which task?":                          "Tabular classification",
-		"Which column holds the class?":        "churned",
+		"Do you want to ingest training or test data?": "train",
+		"Please name the dataset.":                     "hospital_train",
+		"Where is your data?":                          tabDir,
+		"Which task?":                                  "tabular_classification",
+		"Which column holds the label?":                "churned",
 	})
 	imageIngest := driveIngest(imgDir, map[string]string{
-		"Is this training or test data?":                                  "train",
-		"What should we call this dataset?":                               "xray_train",
-		"Where is your data? (file or folder)":                            imgDir,
-		"Which task?":                                                     "Image classification",
-		"Which column holds the class?":                                   "label",
-		"Image resolution as WxH (blank = read it from your first image)": "224x224",
+		"Do you want to ingest training or test data?": "train",
+		"Please name the dataset.":                     "xray_train",
+		"Where is your data?":                          imgDir,
+		"Which task?":                                  "image_classification",
+		"Which column holds the label?":                "label",
+		"Image resolution":                             "224x224",
 	})
 	dataIngestFile := doc(
 		"tb data ingest — stage a dataset into your secure environment",
-		"What you see when you run `tb data ingest` with no flags: a short intro, then a\nguided questionnaire. Every question is shown below, in order, driven through the\nreal flow for two tasks (tabular + image) so the task-specific questions are\nvisible. Each prompt shows `? <question> <answer>`; the line above it is the\nquestion's one-line description. Passing flags (--as, --task, a path, …) skips\nthe matching questions. The remaining tasks' extra questions (keypoints, label\npolicy, time column) and every prompt's `?`-help text are in\nzz-all-strings.golden. (`tb ingest` is a hidden deprecated alias; `push` is a\ndeprecated alias of the verb.)",
+		"What you see when you run `tb data ingest` with no flags: a short intro, then a\nfive-step guided setup. Every question is shown below, in order, driven through\nthe real flow for two tasks (tabular + image) so the task-specific questions are\nvisible. Each question prints as a `Step N of 5 · …` header (task-specific\nrefinements as their own header); the supporting line sits beneath it, and the\n`?` line shows your answer. Passing flags (--as, --task, a path, …) skips the\nmatching questions. The remaining tasks' extra questions (keypoints, label\npolicy, time column) and every prompt's `?`-help text are in\nzz-all-strings.golden. (`tb ingest` is a hidden deprecated alias; `push` is a\ndeprecated alias of the verb.)",
 		[]run{
 			{"tb data ingest   # guided · tabular classification", tabularIngest},
 			{"tb data ingest   # guided · image classification", imageIngest},
@@ -373,32 +370,37 @@ func (c *catalogPrompter) pick(label, def string) string {
 	return def
 }
 
-func (c *catalogPrompter) show(label, ans string) {
+// answerLine renders the input line the way the bare surveyPrompter does for the
+// guided flow: the question is already printed by the CLI (PromptStep/Section),
+// so the prompt shows only "? <answer>" (or "?" on a blank/accept-default).
+func (c *catalogPrompter) answerLine(ans string) {
 	if ans == "" {
-		fmt.Fprintf(c.w, "? %s\n", label)
+		fmt.Fprintf(c.w, "?\n")
 		return
 	}
-	fmt.Fprintf(c.w, "? %s %s\n", label, ans)
+	fmt.Fprintf(c.w, "? %s\n", ans)
 }
 
 func (c *catalogPrompter) Input(label, _, def string, _ func(string) error) (string, error) {
 	ans := c.pick(label, def)
-	c.show(label, ans)
+	c.answerLine(ans)
 	return ans, nil
 }
 
 func (c *catalogPrompter) Select(label, _ string, _ []string, def string) (string, error) {
 	ans := c.pick(label, def)
-	c.show(label, ans)
+	c.answerLine(ans)
 	return ans, nil
 }
 
+// Confirm keeps its label (a short y/n with no header of its own — matches the
+// non-bare surveyPrompter Confirm).
 func (c *catalogPrompter) Confirm(label string, def bool) (bool, error) {
 	ans := "No"
 	if def {
 		ans = "Yes"
 	}
-	c.show(label, ans)
+	fmt.Fprintf(c.w, "? %s %s\n", label, ans)
 	return def, nil
 }
 

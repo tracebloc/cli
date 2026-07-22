@@ -93,12 +93,8 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 	}
 
 	a.Printer.Newline()
-	a.Printer.Para(strings.TrimSpace(`
-This ingests a dataset so models can train on it. Your files never leave your
-own infrastructure — tracebloc copies them into your secure environment's storage,
-checks them, and loads them into a table your training runs read from. Other
-collaborators can train against that table without ever seeing the raw files.`))
-	a.Printer.Hintf("Learn more: https://docs.tracebloc.io")
+	a.Printer.Para("Ingest a dataset — your files never leave this machine.")
+	a.Printer.Hintf("Learn how: https://docs.tracebloc.io/create-use-case/prepare-dataset")
 
 	// 0. Guided mode: prompt for any missing core inputs before
 	//    validation. Flags already provided win; non-TTY / --no-input

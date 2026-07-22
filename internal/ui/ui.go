@@ -260,6 +260,14 @@ func (p *Printer) Step(n, total int, label string) {
 	p.out("\n%s  %s\n", head, p.paint(label, color.Bold))
 }
 
+// PromptStep prints the header for one guided-setup question: a blank line, then
+// "Step n of total · question" in the heading tone (cyan bold) — the dominant
+// line. Any supporting hint (Hintf/Infof) and the input prompt render beneath
+// it, so the question reads first and the guidance is clearly secondary.
+func (p *Printer) PromptStep(n, total int, question string) {
+	p.out("\n  %s\n", p.hue(fmt.Sprintf("Step %d of %d · %s", n, total, question), toneHeading))
+}
+
 // Successf prints a completed-item line with a green ✔. The trailing
 // `f` + (format, args) signature is Go's convention for "takes a format
 // string" (cf. fmt.Printf vs fmt.Print).

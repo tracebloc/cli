@@ -203,7 +203,9 @@ Exit codes:
 			interactive := !noInput && !outputJSON && isInteractiveTTY()
 			var pr prompter
 			if interactive {
-				pr = surveyPrompter{}
+				// bare: the guided flow prints each question as a step header
+				// (PromptStep), so the prompt line itself stays answer-only.
+				pr = surveyPrompter{bare: true}
 			}
 			// In --output-json mode, human output goes to stderr so
 			// stdout carries only the JSON result.

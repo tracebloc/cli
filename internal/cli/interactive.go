@@ -38,11 +38,24 @@ type prompter interface {
 
 // surveyPrompter is the production prompter, backed by
 // AlecAivazis/survey/v2 against the real terminal.
-type surveyPrompter struct{}
+//
+// bare drops the question text from the prompt line (survey's Message), for
+// flows where the CLI already prints the question itself as a step header
+// (the guided ingest flow, via PromptStep) — so the prompt reads "? <answer>"
+// with no duplicate question. Confirm always keeps its label (a short y/n with
+// no header of its own).
+type surveyPrompter struct{ bare bool }
 
-func (surveyPrompter) Input(label, help, def string, validate func(string) error) (string, error) {
+func (s surveyPrompter) message(label string) string {
+	if s.bare {
+		return ""
+	}
+	return label
+}
+
+func (s surveyPrompter) Input(label, help, def string, validate func(string) error) (string, error) {
 	var ans string
-	q := &survey.Input{Message: label, Help: help, Default: def}
+	q := &survey.Input{Message: s.message(label), Help: help, Default: def}
 	var opts []survey.AskOpt
 	if validate != nil {
 		// survey hands the validator the raw answer as interface{};
@@ -58,9 +71,9 @@ func (surveyPrompter) Input(label, help, def string, validate func(string) error
 	return ans, nil
 }
 
-func (surveyPrompter) Select(label, help string, options []string, def string) (string, error) {
+func (s surveyPrompter) Select(label, help string, options []string, def string) (string, error) {
 	var ans string
-	q := &survey.Select{Message: label, Help: help, Options: options, Default: def}
+	q := &survey.Select{Message: s.message(label), Help: help, Options: options, Default: def}
 	if err := survey.AskOne(q, &ans); err != nil {
 		return "", mapErr(err)
 	}
@@ -104,14 +117,19 @@ func isInteractiveTTY() bool {
 //
 // Mutates a through the pointer.
 func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bool) error {
-	p.PromptHeader("Let's set up your data ingest")
-	p.Hintf("Press Enter to accept a default; Ctrl-C to cancel.")
 	prompted := false
 
-	// (a) intent — the first thing to settle: what this data is for.
+	// The guided flow is a five-step setup: intent → name → path → task →
+	// task-specific details. Each question prints as its own step header
+	// (PromptStep), with any supporting line beneath it and an answer-only
+	// prompt (the prompter runs bare — see surveyPrompter). Task-specific
+	// extras beyond the label (schema, resolution, …) are refinements under
+	// step 5 and aren't separately numbered.
+
+	// Step 1 — intent: what this data is for.
 	if a.Spec.Intent == "" {
-		p.PromptHint("Whether this split trains the model or evaluates it.")
-		ans, err := pr.Select("Is this training or test data?", "which split this data is",
+		p.PromptStep(1, 5, "Do you want to ingest training or test data?")
+		ans, err := pr.Select("Do you want to ingest training or test data?", "which split this data is",
 			[]string{"train", "test"}, "train")
 		if err != nil {
 			return err
@@ -120,12 +138,12 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		prompted = true
 	}
 
-	// (b) name — no auto-fill: the example lives in the hint, so the user
-	// types their own name rather than editing a pre-filled default.
+	// Step 2 — name. No auto-fill; the character rules surface only if the
+	// name is rejected (see ValidateTableName), so the prompt stays clean.
 	if a.Spec.Table == "" {
-		p.PromptHint("A name for this dataset — you'll reference it by this name when you start a training run. Start with a letter or underscore, then letters, digits, underscores.  e.g. churn_train")
-		ans, err := pr.Input("What should we call this dataset?",
-			"MySQL identifier + PVC subdir; start with a letter or underscore, then letters, digits, underscore", "",
+		p.PromptStep(2, 5, "Please name the dataset.")
+		ans, err := pr.Input("Please name the dataset.",
+			"letters, digits, and underscores; start with a letter or underscore  e.g. churn_train", "",
 			push.ValidateTableName)
 		if err != nil {
 			return err
@@ -134,10 +152,15 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		prompted = true
 	}
 
-	// (c) path — then detect the family from the layout and echo it back.
+	// Step 3 — path. Show what "file or folder" means per modality, then
+	// detect the family from the layout and echo it back.
 	if a.LocalPath == "" {
-		p.PromptHint("The file or folder holding your data — a single .csv for a table, or labels.csv + an images/ folder for images.  e.g. ~/datasets/churn")
-		ans, err := pr.Input("Where is your data? (file or folder)", "e.g. ./my-data", "", validateDatasetPath)
+		p.PromptStep(3, 5, "Where is your data?")
+		p.Hintf("Give the path to a file or a folder — whichever holds your data:")
+		p.Infof("Tabular   one CSV file                        e.g. ~/data/patients.csv")
+		p.Infof("Images    a folder with labels.csv + images/   e.g. ~/data/xray/")
+		p.Infof("Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/")
+		ans, err := pr.Input("Where is your data?", "e.g. ~/data/patients.csv or ~/data/xray/", "", validateDatasetPath)
 		if err != nil {
 			return err
 		}
@@ -219,7 +242,8 @@ func resolveFamily(p *ui.Printer, pr prompter, path string) (push.Family, error)
 		// user what looks off so they can fix the layout.
 		p.Warnf("%s", s.Hint)
 	}
-	p.PromptHint("We couldn't tell the data type from what's there — which is it?")
+	p.Section("What kind of data is this?")
+	p.Hintf("We couldn't tell from the layout — tabular = a CSV table; image = labels.csv + images/; text = labels.csv + texts/.")
 	opts := push.FamilyNouns()
 	ans, err := pr.Select("What kind of data is this?",
 		"tabular = a CSV table; image = labels.csv + images/; text = labels.csv + texts/",
@@ -250,38 +274,51 @@ func pickTask(p *ui.Printer, pr prompter, fam push.Family) (string, error) {
 		return "", fmt.Errorf("no CLI-supported tasks for %s data yet", push.FamilyNoun(fam))
 	}
 
-	p.Section(fmt.Sprintf("Tasks for %s data", push.FamilyNoun(fam)))
-	p.Hintf("Available now:")
+	// Align the task IDs into a column so the blurbs line up, sized to the
+	// longest ID shown (available + pending).
+	width := 0
 	for _, s := range available {
-		p.Infof("%s — %s · %s", s.DisplayName(), s.Blurb, s.ID)
-	}
-	if len(pending) > 0 {
-		p.Hintf("Not yet in the CLI:")
-		for _, s := range pending {
-			p.Hintf("  %s — %s · %s  (%s)", s.DisplayName(), s.Blurb, s.ID, s.UnsupportedNote)
+		if len(s.ID) > width {
+			width = len(s.ID)
 		}
 	}
+	for _, s := range pending {
+		if len(s.ID) > width {
+			width = len(s.ID)
+		}
+	}
+	width += 3
 
+	p.PromptStep(4, 5, "What kind of machine learning task is this data for?")
+	p.Newline()
+	for _, s := range available {
+		p.Para(fmt.Sprintf("  %-*s%s", width, s.ID, s.Blurb))
+	}
+	if len(pending) > 0 {
+		p.Newline()
+		p.Hintf("Not yet in the CLI:")
+		for _, s := range pending {
+			p.Hintf("  %-*s%s  (%s)", width, s.ID, s.Blurb, s.UnsupportedNote)
+		}
+	}
+	p.Newline()
+
+	// The options ARE task IDs (what the list shows and what the user picks),
+	// so the answer is the category directly. Guard an unexpected answer by
+	// falling back to the first available — never return an empty category.
 	opts := make([]string, len(available))
 	for i, s := range available {
-		opts[i] = s.DisplayName()
+		opts[i] = s.ID
 	}
 	ans, err := pr.Select("Which task?", "pick the task this data is for", opts, opts[0])
 	if err != nil {
 		return "", err
 	}
-	// Map the answer back to a task by POSITION, not through a
-	// DisplayName→ID map: two tasks in a family could in principle share a
-	// display name, and a map would silently keep only the last, returning the
-	// wrong ID for the first. Matching the offered option by index returns the
-	// one the user actually saw (the list above is in this same order).
-	for i, o := range opts {
-		if o == ans {
-			return available[i].ID, nil
+	for _, id := range opts {
+		if id == ans {
+			return ans, nil
 		}
 	}
-	// Defensive: an answer that isn't one of the offered options. Never return
-	// an empty category — fall back to the first available.
 	return available[0].ID, nil
 }
 
@@ -302,11 +339,14 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 	// free-typing "Label" against a "label" header would cause. Wording is
 	// per-task: a class to sort into vs a numeric value to predict (§8).
 	if !push.SelfSupervisedText(cat) && a.Spec.LabelColumn == "" {
-		question := "Which column holds the class?"
+		question := "Which column holds the label?"
+		desc := "The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned"
 		if push.IsRegressionClass(cat) {
 			question = "Which column holds the value to predict?"
+			desc = "The number the model learns to predict.  e.g. price, age, days_to_event"
 		}
-		p.PromptHint("The column in your CSV with the answer the model learns to produce.")
+		p.PromptStep(5, 5, question)
+		p.Hintf("%s", desc)
 		ans, err := promptLabelColumn(pr, cat, a.LocalPath, question)
 		if err != nil {
 			return prompted, err
@@ -315,11 +355,15 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 		prompted = true
 	}
 
+	// Task-specific refinements — shown under step 5, each with its own cyan
+	// header (Section) rather than a step number, since which ones appear
+	// depends on the task.
 	switch {
 	case push.IsImage(cat):
 		if cat == "keypoint_detection" && a.Spec.NumberOfKeypoints <= 0 {
-			p.PromptHint("How many keypoints each sample is annotated with — dataset-specific, no default.  e.g. 17 for COCO human pose")
-			ans, err := pr.Input("Number of keypoints per sample",
+			p.Section("How many keypoints per sample?")
+			p.Hintf("The number of landmark points each sample is annotated with — dataset-specific.  e.g. 17 for COCO human pose")
+			ans, err := pr.Input("How many keypoints per sample?",
 				"e.g. 17 for COCO pose", "", validatePositiveInt)
 			if err != nil {
 				return prompted, err
@@ -329,8 +373,9 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			prompted = true
 		}
 		if a.TargetSizeFlag == "" {
-			p.PromptHint("The resolution your images already are. tracebloc never resizes — it checks every image is exactly this size and rejects any that differ. Blank = read it from your first image.  e.g. 224x224")
-			ans, err := pr.Input("Image resolution as WxH (blank = read it from your first image)",
+			p.Section("Image resolution")
+			p.Hintf("The size your images already are, as WxH — tracebloc checks every image matches and never resizes. Press Enter to read it from your first image.  e.g. 224x224")
+			ans, err := pr.Input("Image resolution",
 				"the size your images already are; tracebloc checks it, it never resizes", "",
 				validateOptionalTargetSize)
 			if err != nil {
@@ -341,9 +386,9 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 		}
 	case push.IsTabular(cat):
 		if a.SchemaFlag == "" {
-			p.PromptHint("Override the column types the CLI would infer. Blank = infer from the CSV.  e.g. age:INT,price:FLOAT,city:VARCHAR")
-			ans, err := pr.Input("Column schema as col:TYPE,... (blank = infer from the CSV)",
-				"e.g. age:INT,price:FLOAT", "", validateOptionalSchema)
+			p.Section("Column types")
+			p.Hintf("We infer each column's type from your CSV. Press Enter to accept, or type overrides like age:INT,price:FLOAT.")
+			ans, err := pr.Input("Column types", "e.g. age:INT,price:FLOAT", "", validateOptionalSchema)
 			if err != nil {
 				return prompted, err
 			}
@@ -351,7 +396,8 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			prompted = true
 		}
 		if push.IsRegressionClass(cat) && a.Spec.LabelPolicy == "" {
-			p.PromptHint("Regression targets are continuous. 'bucket' groups them into ranges before they leave the cluster; 'passthrough' keeps raw values.")
+			p.Section("Label policy")
+			p.Hintf("Regression targets are continuous. 'bucket' groups them into ranges before they leave the cluster; 'passthrough' keeps raw values.")
 			ans, err := pr.Select("Label policy",
 				"bucket bins the target before it leaves the cluster",
 				[]string{"bucket", "passthrough"}, "bucket")
@@ -362,7 +408,8 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			prompted = true
 		}
 		if cat == "time_to_event_prediction" && a.Spec.TimeColumn == "" {
-			p.PromptHint("The column holding the duration / time-to-event.  e.g. time, tenure_days")
+			p.Section("Time column")
+			p.Hintf("The column holding the duration / time-to-event.  e.g. time, tenure_days")
 			ans, err := pr.Input("Time column", "the duration/time column name", "time", nil)
 			if err != nil {
 				return prompted, err
