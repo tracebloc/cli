@@ -64,6 +64,13 @@ func main() {
 		GitSHA:    gitSHA,
 		BuildDate: buildDate,
 	}).ExecuteContext(ctx)
+
+	// F1: after the command runs, a quiet once-a-day nudge if a newer release
+	// exists (best-effort; silent on dev builds, off a terminal, in CI, or with
+	// TRACEBLOC_NO_UPDATE_CHECK). Printed before the error handling so on success
+	// it's the last line, and on failure the error stays the most prominent one.
+	cli.MaybeNotifyUpdate(version, os.Stderr)
+
 	if err == nil {
 		return
 	}
