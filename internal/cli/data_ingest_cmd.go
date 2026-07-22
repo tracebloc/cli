@@ -203,7 +203,9 @@ Exit codes:
 			interactive := !noInput && !outputJSON && isInteractiveTTY()
 			var pr prompter
 			if interactive {
-				pr = surveyPrompter{}
+				// bare: the guided flow prints each question as a step header
+				// (PromptStep), so the prompt line itself stays answer-only.
+				pr = surveyPrompter{bare: true}
 			}
 			// In --output-json mode, human output goes to stderr so
 			// stdout carries only the JSON result.
@@ -344,6 +346,14 @@ type runDataIngestArgs struct {
 	Interactive bool
 	Prompter    prompter
 	TaskSet     bool
+
+	// ReviewShown records whether the guided flow rendered the pre-confirm
+	// Review (it only does when it actually prompted for something). It gates
+	// the duplicate "Ingest settings" block in printLocalSummary: suppress it
+	// only when the Review already showed those fields. A fully flagged run —
+	// even on a TTY with a Prompter set — prompts nothing, shows no Review, so
+	// it must still print the settings once (like the non-interactive path).
+	ReviewShown bool
 
 	// ChangedFlags records which CLI flags were EXPLICITLY set
 	// (cmd.Flags().Changed), decoupling "was it passed" from "is its value

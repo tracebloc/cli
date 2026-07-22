@@ -93,12 +93,8 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 	}
 
 	a.Printer.Newline()
-	a.Printer.Para(strings.TrimSpace(`
-This ingests a dataset so models can train on it. Your files never leave your
-own infrastructure — tracebloc copies them into your secure environment's storage,
-checks them, and loads them into a table your training runs read from. Other
-collaborators can train against that table without ever seeing the raw files.`))
-	a.Printer.Hintf("Learn more: https://docs.tracebloc.io")
+	a.Printer.Para("Ingest datasets to your secure environment.")
+	a.Printer.Hintf("For help: https://docs.tracebloc.io/create-use-case/prepare-dataset")
 
 	// 0. Guided mode: prompt for any missing core inputs before
 	//    validation. Flags already provided win; non-TTY / --no-input
@@ -484,15 +480,26 @@ collaborators can train against that table without ever seeing the raw files.`))
 		return nil, nil, nil, false, perr
 	}
 
-	printLocalSummary(a.Printer, layout, spec)
+	// Interactive runs that prompted already echoed name/task/intent/label in
+	// the pre-confirm Review, so suppress the duplicate "Ingest settings" block
+	// here. A run that showed no Review (non-interactive, OR a fully flagged
+	// run on a TTY) still shows it — gate on whether the Review rendered, not on
+	// whether a Prompter exists.
+	printLocalSummary(a.Printer, layout, spec, !a.ReviewShown)
 
 	return layout, spec, specBytes, false, nil
 }
 
-// printLocalSummary shows what the CLI found on disk plus the ingest
-// settings it assembled — the detail under step 1 ("Check your data").
-// Mirrors `cluster info`'s section/Field layout.
-func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]any) {
+// printLocalSummary shows what the CLI found on disk plus (for the flag-only
+// path) the ingest settings it assembled — the detail under step 1 ("Check your
+// data"). Mirrors `cluster info`'s section/Field layout.
+//
+// showSettings gates the "Ingest settings" block: when the guided flow already
+// showed those exact fields in its pre-confirm Review, repeating them here is
+// noise — the caller passes false in that case. Any run without a Review (a
+// non-interactive run, or a fully flagged run on a TTY that prompted nothing)
+// passes true, so those users still see the resolved settings once.
+func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]any, showSettings bool) {
 	cat, _ := spec["category"].(string)
 
 	p.Section("Local dataset")
@@ -526,6 +533,10 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 		}
 	}
 	p.Field("total size", push.HumanBytes(layout.TotalBytes))
+
+	if !showSettings {
+		return
+	}
 
 	p.Section("Ingest settings")
 	p.Field("name", fmt.Sprintf("%v", spec["table"]))

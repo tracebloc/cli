@@ -1,0 +1,58 @@
+tb login / logout — sign in and out
+===================================
+What you see when you run `tb login`. Sign-in is a device flow: the CLI prints an
+"Open <url>" line and an "Enter <code>" line, waits, then confirms — that copy
+streams during the flow (not a stable screen), so it's in zz-all-strings.golden.
+`tb auth status` reports who you're signed in as.
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc login --help
+Sign in to tracebloc. The CLI prints a URL + short code; open the URL
+on any device (your laptop or phone), sign in the way you already do
+(password, Google, or GitHub), and approve the code. The CLI stores a
+user token in ~/.tracebloc (mode 0600).
+
+Works on a headless / SSH box — the browser and the CLI need not share a
+machine. Honors HTTP(S)_PROXY / NO_PROXY for corporate-proxy networks.
+
+Usage:
+  tracebloc login [flags]
+
+Flags:
+      --env string   backend environment: dev|stg|prod (default: $CLIENT_ENV, then prod)
+  -h, --help         help for login
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+$ tracebloc logout --help
+Sign out (revoke the token server-side and clear it locally)
+
+Usage:
+  tracebloc logout [flags]
+
+Flags:
+  -h, --help   help for logout
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+$ tracebloc auth status --help
+Show whether you're signed in, and to which backend
+
+Usage:
+  tracebloc auth status [flags]
+
+Flags:
+      --check        exit 0 only if signed in with a backend-valid token, else 1; silent unless --verbose
+      --env string   backend environment the check targets: dev|stg|prod (default: $CLIENT_ENV, then prod)
+  -h, --help         help for status
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)

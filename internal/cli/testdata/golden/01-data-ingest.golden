@@ -1,0 +1,332 @@
+tb data ingest — stage a dataset into your secure environment
+=============================================================
+What you see when you run `tb data ingest` with no flags: a short intro, a
+four-step guided setup (intent, name, path, task) then the task-specific
+questions, and — after you confirm — the run itself. The setup is
+driven through the real flow for one task in each family (tabular, image, text)
+so the task-specific questions are visible; each core question prints as a
+`Step N of 4 · …` header, the task-specific ones (the label column, and extras
+like resolution or schema) as their own header, the
+supporting line beneath it, and the `?` line shows your answer. The run (shown
+once, for tabular) is the three steps + the final summary as the CLI renders
+them. Passing flags (--as, --task, a path, …) skips the matching questions. The
+other tasks' extra questions (keypoints, label policy, time column),
+self-supervised text (which skips the label question), and the failure-summary
+wordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams
+through (MySQL waits, the 📊 banner, per-validator lines) is the engine's own
+stdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated
+alias; `push` is a deprecated alias of the verb.)
+
+$ tb data ingest   # guided · tabular classification
+
+  Ingest datasets to your secure environment.
+  For help: https://docs.tracebloc.io/create-use-case/prepare-dataset
+
+  Step 1 of 4 · Do you want to ingest training or test data?
+
+? train
+
+  Step 2 of 4 · Please name the dataset.
+
+? hospital_train
+
+  Step 3 of 4 · Where is your data?
+
+  Give the path to a file or a folder — whichever holds your data:
+  · Tabular   one CSV file                        e.g. ~/data/patients.csv
+  · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
+
+? ~/data/patients
+  ✔ Found a CSV table — this is tabular data.
+
+  Step 4 of 4 · What kind of machine learning task is this data for?
+
+    tabular_classification       predict a class from table columns
+    tabular_regression           predict a number from table columns
+    time_series_forecasting      predict future values from past ones
+    time_series_classification   predict a class for each whole sequence
+    time_to_event_prediction     predict how long until an event happens
+
+? tabular_classification
+
+  Which column holds the label?
+
+  The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
+
+? churned
+
+  Column types
+
+  We infer each column's type from your CSV. Press Enter to accept, or type overrides like age:INT,price:FLOAT.
+
+?
+
+  Review
+    name:          hospital_train
+    task:          tabular_classification
+    intent:        train
+    path:          ~/data/patients
+    label column:  churned
+    schema:        infer from CSV
+
+? Proceed with the ingest? Yes
+
+$ tb data ingest   # guided · image classification
+
+  Ingest datasets to your secure environment.
+  For help: https://docs.tracebloc.io/create-use-case/prepare-dataset
+
+  Step 1 of 4 · Do you want to ingest training or test data?
+
+? train
+
+  Step 2 of 4 · Please name the dataset.
+
+? xray_train
+
+  Step 3 of 4 · Where is your data?
+
+  Give the path to a file or a folder — whichever holds your data:
+  · Tabular   one CSV file                        e.g. ~/data/patients.csv
+  · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
+
+? ~/data/xray
+  ✔ Found labels.csv and an images/ folder — this is image data.
+
+  Step 4 of 4 · What kind of machine learning task is this data for?
+
+    image_classification    sort images into classes
+    object_detection        draw boxes around objects in an image
+    keypoint_detection      locate landmark points on an image (e.g. pose)
+    semantic_segmentation   label every pixel in an image
+
+? image_classification
+
+  Which column holds the label?
+
+  The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
+
+? label
+
+  Image resolution
+
+  The size your images already are, as WxH — tracebloc checks every image matches and never resizes. Press Enter to read it from your first image.  e.g. 224x224
+
+? 224x224
+
+  Review
+    name:          xray_train
+    task:          image_classification
+    intent:        train
+    path:          ~/data/xray
+    label column:  label
+    resolution:    224x224
+
+? Proceed with the ingest? Yes
+
+$ tb data ingest   # guided · text classification
+
+  Ingest datasets to your secure environment.
+  For help: https://docs.tracebloc.io/create-use-case/prepare-dataset
+
+  Step 1 of 4 · Do you want to ingest training or test data?
+
+? train
+
+  Step 2 of 4 · Please name the dataset.
+
+? reviews_train
+
+  Step 3 of 4 · Where is your data?
+
+  Give the path to a file or a folder — whichever holds your data:
+  · Tabular   one CSV file                        e.g. ~/data/patients.csv
+  · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
+
+? ~/data/reviews
+  ✔ Found labels.csv and a texts/ folder — this looks like text data.
+
+  Step 4 of 4 · What kind of machine learning task is this data for?
+
+    text_classification            sort text snippets into classes
+    masked_language_modeling       predict masked-out words — no labels needed
+    causal_language_modeling       predict the next word in a sequence
+    seq2seq                        map an input sequence to an output one
+    token_classification           label each word in a sequence
+    sentence_pair_classification   label how two texts relate
+    embeddings                     learn vector representations from text pairs
+
+? text_classification
+
+  Which column holds the label?
+
+  The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
+
+? label
+
+  Review
+    name:          reviews_train
+    task:          text_classification
+    intent:        train
+    path:          ~/data/reviews
+    label column:  label
+
+? Proceed with the ingest? Yes
+
+$ tb data ingest   # after you confirm — the run (tabular)
+
+Step 1/3  Check your data
+  Reading your files locally first — nothing has touched your secure environment yet — so a layout or settings problem shows up right away.
+
+  Local dataset
+    root:          ~/data/patients
+    data CSV:      ~/data/patients/data.csv
+    columns:       7
+    total size:    51.57 KiB
+
+Step 2/3  Copy into your secure environment
+  Your files are copied securely into your secure environment's storage — set up and cleaned up for you.
+
+Step 3/3  Validate and load
+  Submitting the run, then following along as tracebloc validates your data and loads it into the table — progress streams below.
+  This follows the run for up to an hour; a longer run keeps going on its own (or start it with --detach and check back later).
+  ✔ Ingestion complete — ingested 849 of 849 records (100.0%)
+
+  Ingestion summary
+    ingestor ID:   80c224bd-202b-4a6f-9362-61c84599f334
+    total records: 849
+    inserted:      849
+
+  What's next
+  · Your data is registered as a dataset. View it at https://ai.tracebloc.io/metadata
+  · To train or benchmark models on it, create a use case at https://ai.tracebloc.io/my-use-cases
+  Pick this dataset when you set it up.
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc data ingest --help
+Ingests a local dataset into your secure environment's storage,
+submits the ingestion run, and follows it to completion (streaming
+progress + the final summary). Your data never leaves your own
+infrastructure. Supports 16 tasks across the image, text, and
+tabular / time-series families; pick one with --task.
+
+<dataset> is the data itself. What it looks like depends on the task:
+
+  tabular / time-series — the dataset is a single CSV. Pass the .csv
+  file directly, or a folder holding exactly one .csv:
+
+      churn.csv                (the .csv file itself)
+    or
+      churn/
+        data.csv               (the one .csv in the folder)
+
+  image (classification, object/keypoint detection) — a folder with
+  labels.csv + an images/ subfolder:
+
+      cats_dogs/
+        labels.csv             (required)
+        images/                (required)
+          001.jpg
+          ...
+
+  text (classification, masked language modeling) — a folder with
+  labels.csv + a texts/ subfolder (masked language modeling uses sequences/):
+
+      reviews/
+        labels.csv             (required)
+        texts/                 (required — sequences/ for masked language modeling)
+          001.txt
+          ...
+
+A bare .csv file is accepted only for the tabular / time-series family;
+image and text datasets must be a folder.
+
+Accepted image extensions: .jpg, .jpeg, or .png (case-insensitive).
+All images in one dataset must share a single type — the cluster
+validates the type it was told to expect.
+
+v0.1 caps the dataset at 1 GiB total + 500 MiB per file. Larger
+datasets need the v0.2 cloud-source story (S3/GCS/HTTPS sources) —
+see tracebloc/client#147 non-goals.
+
+Exit codes:
+  0   files staged + ingested successfully (or --detach: just staged + submitted)
+  2   schema validation failed (synthesized spec rejected) or
+      v0.1-unsupported task passed
+  3   local-layout or kubeconfig error
+  4   cluster reachable but no tracebloc client / shared storage missing
+  5   ingestor SA token couldn't be obtained, or jobs-manager
+      rejected the token (401/403)
+  6   destination table already exists (re-run with --overwrite to
+      replace it, or pick a different --name)
+  7   pre-flight succeeded but staging the files failed
+      (Pod creation, image pull, exec stream, or remote tar error) —
+      or, with --overwrite, removing the old table failed
+  8   jobs-manager rejected the submit (4xx/5xx other than auth)
+  9   ingestion Job exited non-zero, or completed with row-level
+      failures the summary panel reports
+
+Usage:
+  tracebloc data ingest <dataset> [flags]
+
+Aliases:
+  ingest, push
+
+Flags:
+      --context string                              name of the kubeconfig context to use (default: kubeconfig's current-context)
+      --detach kubectl logs -f -n <ns> job/<name>   exit immediately after jobs-manager accepts the run (no log streaming, no summary panel). Use for CI scenarios; reconnect later with kubectl logs -f -n <ns> job/<name>.
+      --dry-run                                     validate + discover + walk, but don't create any cluster resources
+  -h, --help                                        help for ingest
+      --idempotency-key string                      reuse this idempotency key across retry attempts (default: fresh per invocation). jobs-manager treats a duplicate key as a replay and attaches to the existing Job rather than spawning a new one — useful for at-most-once-across-attempts semantics.
+      --image-digest images.ingestor.digest         pin the ingestor container image to a specific digest (default: jobs-manager picks the cluster-configured images.ingestor.digest). Format: sha256:<hex>.
+      --intent string                               is this training or test data? train|test (default train)
+      --kubeconfig string                           path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+      --label-column string                         name of the label/target column (in labels.csv for image tasks, in the data CSV for tabular)
+      --label-policy string                         regression-class only (tabular_regression, time_series_forecasting, time_to_event_prediction): passthrough|bucket (default bucket — bins the target so the raw value never leaves the cluster)
+      --min-size string                             image tasks only: reject images smaller than WxH before the ingest (e.g. 64x64). Set it to the smallest size your model can train on — raise or lower it freely. Default: unset (no local size check).
+      --name string                                 a name for this dataset — start with a letter or underscore, then letters/digits/underscores — you'll reference it by this name when you start a training run
+  -n, --namespace string                            namespace where your tracebloc client is installed
+      --no-input                                    disable interactive prompts; fail on missing required values (for CI/scripts)
+      --number-of-keypoints int                     keypoint_detection only: number of keypoints per sample (required; e.g. 17 for COCO pose)
+      --output-json                                 emit a machine-readable JSON result on stdout (human output → stderr; implies --no-input)
+      --overwrite tracebloc data delete             replace the destination table if it already exists: its current table + files are removed first (same as tracebloc data delete), then the new data is ingested. Not combinable with --idempotency-key
+      --schema string                               tabular/time-series only: column types as col:TYPE,col:TYPE (e.g. age:INT,price:FLOAT). Default: inferred from the CSV (INT/BIGINT/FLOAT/BOOLEAN/DATE/DATETIME/VARCHAR(n)).
+      --stage-pod-image string                      override the ephemeral stage Pod's image (default: digest-pinned alpine 3.20 baked into the CLI). Pin by digest in your override too — tag-only refs drift silently.
+      --target-size string                          image tasks only: the resolution your images already are, as WxH (e.g. 512x512). tracebloc never resizes — it checks every image is exactly this size and rejects any that differ. Default: read from your first image.
+      --task string                                 the task this data is for, one of: image_classification, object_detection, keypoint_detection, text_classification, masked_language_modeling, tabular_classification, tabular_regression, time_series_forecasting, time_series_classification, time_to_event_prediction, causal_language_modeling, seq2seq, token_classification, sentence_pair_classification, embeddings, semantic_segmentation. Omit it on a terminal to pick interactively.
+      --time-column string                          time_to_event_prediction only: name of the time/duration column (default: a column named "time")
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+$ tracebloc data validate --help
+Reads <path>, parses it as YAML, and validates it against the bundled
+ingest.v1.json schema (synced from tracebloc/data-ingestors). Prints
+violations in the same JSON-pointer-prefixed format the cluster's
+jobs-manager uses, and exits non-zero if any are found.
+
+Useful as a pre-flight before running `tracebloc data ingest` —
+millisecond local feedback instead of a multi-second cluster round
+trip.
+
+Exit codes:
+  0   YAML parses and validates cleanly
+  2   YAML parses but has schema violations (printed to stderr)
+  3   YAML doesn't parse or file isn't readable
+
+Usage:
+  tracebloc data validate <path> [flags]
+
+Flags:
+  -h, --help   help for validate
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)

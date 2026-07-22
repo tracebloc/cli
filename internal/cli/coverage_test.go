@@ -53,7 +53,7 @@ func TestPrintPushPreflight_RendersKeyFacts(t *testing.T) {
 	// TestPrintClusterSummary_VerboseOnly). The local summary shows regardless.
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false), ui.WithVerbose(true))
-	printLocalSummary(p, layout, spec)
+	printLocalSummary(p, layout, spec, true)
 	printClusterSummary(p, release, pvc)
 	out := buf.String()
 
