@@ -111,13 +111,8 @@ func ValidateTableName(table string) error {
 	}
 	if !tableNamePattern.MatchString(table) {
 		return fmt.Errorf(
-			"table name %q is invalid: must start with a letter or "+
-				"underscore, then letters, digits, and underscores only "+
-				"(matches [A-Za-z_][A-Za-z0-9_]*). The table name is "+
-				"used both as the MySQL table identifier and as the "+
-				"/data/shared/<table>/ subdirectory on the cluster PVC, "+
-				"so a leading digit, slashes, dots, and path-traversal "+
-				"sequences are rejected.",
+			"%q won't work — use letters, digits, and underscores, "+
+				"starting with a letter or underscore (e.g. churn_train)",
 			table)
 	}
 	return nil

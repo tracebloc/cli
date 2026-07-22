@@ -1,0 +1,69 @@
+tb delete — remove tracebloc from this machine
+==============================================
+What you see when you run `tb delete`. The pre-flight summary (below) is shown
+before you confirm, for both keep-data and remove-data. The confirmation prompt
+and the teardown progress stream during the flow — those strings are in
+zz-all-strings.golden.
+
+$ tb delete   # summary · keep my data
+
+  This will remove
+  · This machine's credential — so tracebloc can no longer reach it
+  · Your secure environment "lukas-macbook" and everything it runs on this machine
+  · tracebloc's downloaded images
+  · The tracebloc CLI (your local data & config are kept — --keep-data)
+
+  Kept on tracebloc
+  · Your use cases and the models trained here
+  · Your dataset records (marked unavailable, not deleted)
+
+  Left alone
+  · Docker and related tools — remove them yourself if you no longer need them
+
+$ tb delete --remove-data   # summary · remove my data too
+
+  This will remove
+  · This machine's credential — so tracebloc can no longer reach it
+  · Your secure environment "lukas-macbook" and everything it runs on this machine
+  · tracebloc's downloaded images
+  · Your local data & config (~/.tracebloc) and the tracebloc CLI — can't be undone
+
+  Kept on tracebloc
+  · Your use cases and the models trained here
+  · Your dataset records (marked unavailable, not deleted)
+
+  Left alone
+  · Docker and related tools — remove them yourself if you no longer need them
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc delete --help
+Removes tracebloc from this machine: revokes the machine credential,
+uninstalls the Helm release, deletes the local cluster, reclaims the tracebloc
+container images, and clears local state — then removes the CLI itself.
+
+Your use cases, datasets' catalog entries, and the models trained here are KEPT
+on tracebloc as a record (a colleague's model must not vanish because you
+reclaimed this box). System software the installer laid down — Docker, kubectl,
+k3d, helm, NVIDIA drivers — is left in place; remove it yourself if unused.
+
+Destructive: on a single-host install the on-prem datasets live on this machine
+and are erased. Not undoable.
+
+Usage:
+  tracebloc delete [flags]
+
+Flags:
+      --context string      kubeconfig context for the target cluster (default: current-context)
+      --force               offboard even if tracebloc still reports this client online
+  -h, --help                help for delete
+      --keep-data           uninstall the software but keep ~/.tracebloc (local config + on-host datasets)
+      --kubeconfig string   path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace of this machine's tracebloc release (default: the active client's namespace)
+      --yes                 skip the typed-name confirmation (for automation)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)

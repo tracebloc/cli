@@ -30,13 +30,35 @@ or hex elsewhere. The tone table (`internal/ui/ui.go`) maps each role:
 | Error ✖ | `Errorf` (`toneErr`) | red `#f64c4c` | bold glyph |
 | Label : value | `Field`, `Stat` (`toneLabel`) | dim neutral | — |
 
-**No emoji.** The lime `●` is the online indicator (not 🟢).
+**Emoji are welcome** — used with intent, for warmth (👋 greeting, 💚 sign-off,
+🚀 sent) and for status (🟢 online, 🟡 starting, 🔴 offline, ⚠ caution). They're a
+brand touch, not policed by the guard — just don't overuse them.
 
 The engine renders exact 24-bit hex on truecolor terminals, the **deep shade**
 (`#01637a` / `#578c2b`) on light backgrounds, the nearest ANSI-16 otherwise, and
 nothing when colour is off (`NO_COLOR` / non-TTY / `TERM=dumb` / `--plain`). The
 exact brand SGR is pinned by `internal/ui/brand_tones_test.go`, so a drift in the
 tone table fails CI. The installer mirrors this in `scripts/lib/common.sh`.
+
+## Guided-prompt spacing
+
+Interactive flows (the `tb data ingest` questionnaire, and any future guided
+flow) use one uniform rhythm so every question reads the same:
+
+- **One blank line before each question header** — a `Step N of M · <question>`
+  (`PromptStep`) or an unnumbered refinement/confirm header (`Section`). The
+  header method emits this leading blank itself.
+- **One blank line between the header and its supporting text** (the hint /
+  examples / option list), when there is any.
+- **One blank line before the `?` prompt line.** With no supporting text, that
+  single blank sits directly between the header and the prompt.
+- **A result that belongs to an answer attaches to it with no blank** — e.g. the
+  `✔ Found a CSV table …` sniff echo sits directly under the path answer.
+
+So: `header → blank → [supporting text → blank] → ? prompt`. The prompt line is
+answer-only (`? train`); the question lives in the header (the prompter runs
+`bare`), never repeated on the `?` line. Keep it uniform — don't hand-tune the
+spacing of individual questions.
 
 ## Terminology
 
@@ -58,8 +80,8 @@ word in output text only.
 ## What's enforced vs reviewed
 
 `scripts/check-style.sh` (CI Lint job, blocking) catches the **mechanical**
-violations: hardcoded brand colour outside `internal/ui`, status emoji, and
-`workspace` in user-facing text. Run it locally with `make check-style` (also part
+violations: hardcoded brand colour outside `internal/ui`, and `workspace` in
+user-facing text. Run it locally with `make check-style` (also part
 of `make ci`) or directly: `bash scripts/check-style.sh`.
 
 It can't police **judgement** — using the right *role* for a token (a command in

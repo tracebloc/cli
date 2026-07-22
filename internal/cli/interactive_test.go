@@ -103,11 +103,11 @@ func textDirLayout(t *testing.T) string {
 func TestRunInteractive_PromptOrder(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Is this training or test data?":       "test",
-		"What should we call this dataset?":    "churn_train",
-		"Where is your data? (file or folder)": dir,
-		"Which task?":                          "Tabular classification",
-		"Which column holds the class?":        "churned",
+		"Do you want to ingest training or test data?": "test",
+		"Please name the dataset.":                     "churn_train",
+		"Where is your data?":                          dir,
+		"Which task?":                                  "tabular_classification",
+		"Which column holds the label?":                "churned",
 	}}
 	a := &runDataIngestArgs{}
 	if err := runInteractive(discardPrinter(), f, a, false /*taskSet*/); err != nil {
@@ -117,11 +117,11 @@ func TestRunInteractive_PromptOrder(t *testing.T) {
 	// The four core questions must appear in data-first order, ahead of the
 	// label question.
 	want := []string{
-		"Is this training or test data?",
-		"What should we call this dataset?",
-		"Where is your data? (file or folder)",
+		"Do you want to ingest training or test data?",
+		"Please name the dataset.",
+		"Where is your data?",
 		"Which task?",
-		"Which column holds the class?",
+		"Which column holds the label?",
 	}
 	if !orderedSubsequence(f.asked, want) {
 		t.Errorf("prompt order = %v, want subsequence %v", f.asked, want)
@@ -139,11 +139,11 @@ func TestRunInteractive_PromptOrder(t *testing.T) {
 func TestRunInteractive_PathPromptCopyIsFileOrFolder(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Is this training or test data?":       "train",
-		"What should we call this dataset?":    "churn",
-		"Where is your data? (file or folder)": dir,
-		"Which task?":                          "Tabular classification",
-		"Which column holds the class?":        "churned",
+		"Do you want to ingest training or test data?": "train",
+		"Please name the dataset.":                     "churn",
+		"Where is your data?":                          dir,
+		"Which task?":                                  "tabular_classification",
+		"Which column holds the label?":                "churned",
 	}}
 	a := &runDataIngestArgs{}
 	if err := runInteractive(discardPrinter(), f, a, false /*taskSet*/); err != nil {
@@ -151,7 +151,7 @@ func TestRunInteractive_PathPromptCopyIsFileOrFolder(t *testing.T) {
 	}
 	found := false
 	for _, label := range f.asked {
-		if label == "Where is your data? (file or folder)" {
+		if label == "Where is your data?" {
 			found = true
 		}
 		if strings.Contains(label, "the folder holding it") {
@@ -168,8 +168,8 @@ func TestRunInteractive_PathPromptCopyIsFileOrFolder(t *testing.T) {
 func TestRunInteractive_SniffEchoesFamily(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"What should we call this dataset?": "t",
-		"Which column holds the class?":     "churned",
+		"Please name the dataset.":      "t",
+		"Which column holds the label?": "churned",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
 	var buf bytes.Buffer
@@ -195,10 +195,10 @@ func TestRunInteractive_SniffEchoesFamily(t *testing.T) {
 func TestRunInteractive_SniffIsHintNotLock(t *testing.T) {
 	empty := t.TempDir() // no csv, no images/, no texts/ → ambiguous
 	f := &fakePrompter{answers: map[string]string{
-		"What should we call this dataset?": "t",
-		"What kind of data is this?":        "image",
-		"Which task?":                       "Image classification",
-		"Which column holds the class?":     "label",
+		"Please name the dataset.":      "t",
+		"What kind of data is this?":    "image",
+		"Which task?":                   "image_classification",
+		"Which column holds the label?": "label",
 	}}
 	a := &runDataIngestArgs{LocalPath: empty, Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
@@ -268,8 +268,8 @@ func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 func TestRunInteractive_ExplicitTaskSkipsSniff(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"What should we call this dataset?": "t",
-		"Which column holds the class?":     "churned",
+		"Please name the dataset.":      "t",
+		"Which column holds the label?": "churned",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -298,7 +298,7 @@ func TestPickTask_FamilyScoped(t *testing.T) {
 	// Text family: all tasks are available now — fill-mask (gloss),
 	// classification, the two structured-pair tasks, and the two seq tasks;
 	// image/tabular tasks must not appear.
-	f := &fakePrompter{answers: map[string]string{"Which task?": "Text classification"}}
+	f := &fakePrompter{answers: map[string]string{"Which task?": "text_classification"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
 	id, err := pickTask(p, f, push.FamilyText)
@@ -310,14 +310,13 @@ func TestPickTask_FamilyScoped(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"Tasks for text data",
-		"Available now:",
-		"fill-mask",                    // MLM gloss (available)
-		"Text classification",          // label
-		"translation / summarization",  // seq2seq gloss (now available)
+		"What kind of machine learning task is this data for?",
+		"masked_language_modeling",     // MLM gloss (available)
+		"text_classification",          // label
+		"seq2seq",                      // seq2seq gloss (now available)
 		"token_classification",         // now available
 		"sentence_pair_classification", // now available
-		"Embeddings",                   // now available
+		"embeddings",                   // now available
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("picker output missing %q:\n%s", want, out)
@@ -328,7 +327,7 @@ func TestPickTask_FamilyScoped(t *testing.T) {
 		t.Errorf("text picker should have no pending section now:\n%s", out)
 	}
 	// Other families must not leak in.
-	for _, unwanted := range []string{"Image classification", "Tabular classification", "Survival analysis"} {
+	for _, unwanted := range []string{"image_classification", "tabular_classification", "time_to_event_prediction"} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("text picker leaked a non-text task %q:\n%s", unwanted, out)
 		}
@@ -339,7 +338,7 @@ func TestPickTask_FamilyScoped(t *testing.T) {
 // image task is available in the CLI, so the image picker lists them all under
 // "Available now:" with no greyed "Not yet in the CLI" pending section.
 func TestPickTask_ImageAllAvailable(t *testing.T) {
-	f := &fakePrompter{answers: map[string]string{"Which task?": "Image classification"}}
+	f := &fakePrompter{answers: map[string]string{"Which task?": "image_classification"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
 	if _, err := pickTask(p, f, push.FamilyImage); err != nil {
@@ -347,9 +346,8 @@ func TestPickTask_ImageAllAvailable(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"Available now:",
-		"Image classification",
-		"Semantic segmentation", // now selectable, no longer pending
+		"image_classification",
+		"semantic_segmentation", // now selectable, no longer pending
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("image picker missing %q:\n%s", want, out)
@@ -366,7 +364,7 @@ func TestPickTask_ImageAllAvailable(t *testing.T) {
 // TestPickTask_TabularGloss: the tabular picker shows the survival-analysis
 // gloss for time_to_event_prediction and can select it back to its id.
 func TestPickTask_TabularGloss(t *testing.T) {
-	f := &fakePrompter{answers: map[string]string{"Which task?": "Survival analysis"}}
+	f := &fakePrompter{answers: map[string]string{"Which task?": "time_to_event_prediction"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
 	id, err := pickTask(p, f, push.FamilyTabular)
@@ -376,7 +374,7 @@ func TestPickTask_TabularGloss(t *testing.T) {
 	if id != "time_to_event_prediction" {
 		t.Errorf("id = %q, want time_to_event_prediction", id)
 	}
-	if !strings.Contains(buf.String(), "Survival analysis") {
+	if !strings.Contains(buf.String(), "time_to_event_prediction") {
 		t.Errorf("tabular picker missing the survival-analysis gloss:\n%s", buf.String())
 	}
 }
@@ -388,9 +386,9 @@ func TestRunInteractive_LabelSelectFromHeaders(t *testing.T) {
 	dir := tabularDir(t) // header: age,income,churned
 	// Script an answer that only works if the options were the real headers.
 	f := &fakePrompter{answers: map[string]string{
-		"What should we call this dataset?": "t",
-		"Which task?":                       "Tabular classification",
-		"Which column holds the class?":     "income",
+		"Please name the dataset.":      "t",
+		"Which task?":                   "tabular_classification",
+		"Which column holds the label?": "income",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
@@ -418,7 +416,7 @@ func TestRunInteractive_RegressionLabelWording(t *testing.T) {
 	if !contains(f.asked, "Which column holds the value to predict?") {
 		t.Errorf("regression should ask for the value to predict; asked=%v", f.asked)
 	}
-	if contains(f.asked, "Which column holds the class?") {
+	if contains(f.asked, "Which column holds the label?") {
 		t.Errorf("regression must not use the class wording")
 	}
 	if a.Spec.LabelColumn != "income" {
@@ -432,7 +430,7 @@ func TestRunInteractive_RegressionLabelWording(t *testing.T) {
 func TestRunInteractive_LabelFreeTextFallback(t *testing.T) {
 	empty := t.TempDir() // no labels.csv → PreviewLabelHeaders errors
 	f := &fakePrompter{answers: map[string]string{
-		"Which column holds the class?": "my_label",
+		"Which column holds the label?": "my_label",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: empty,
@@ -451,8 +449,8 @@ func TestRunInteractive_LabelFreeTextFallback(t *testing.T) {
 func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 	dir := textDirLayout(t)
 	f := &fakePrompter{answers: map[string]string{
-		"What should we call this dataset?": "mlm_train",
-		"Which task?":                       "fill-mask",
+		"Please name the dataset.": "mlm_train",
+		"Which task?":              "masked_language_modeling",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
@@ -492,8 +490,8 @@ func TestRunInteractive_SkipsProvidedValues(t *testing.T) {
 func TestRunInteractive_Keypoint(t *testing.T) {
 	dir := imageDirLayout(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Number of keypoints per sample": "17",
-		"Which column holds the class?":  "image_label",
+		"How many keypoints per sample?": "17",
+		"Which column holds the label?":  "image_label",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -540,8 +538,8 @@ func TestRunInteractive_Cancel(t *testing.T) {
 	no := false
 	f := &fakePrompter{
 		answers: map[string]string{
-			"What should we call this dataset?": "t",
-			"Which column holds the class?":     "churned",
+			"Please name the dataset.":      "t",
+			"Which column holds the label?": "churned",
 		},
 		confirm: &no,
 	}
@@ -554,7 +552,7 @@ func TestRunInteractive_Cancel(t *testing.T) {
 // TestRunInteractive_RejectsBadName: the name prompt runs
 // push.ValidateTableName, so an unsafe name surfaces as an error.
 func TestRunInteractive_RejectsBadName(t *testing.T) {
-	f := &fakePrompter{answers: map[string]string{"What should we call this dataset?": "../bad"}}
+	f := &fakePrompter{answers: map[string]string{"Please name the dataset.": "../bad"}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a, true); err == nil {
 		t.Fatal("expected an error for an invalid name, got nil")
@@ -566,8 +564,8 @@ func TestRunInteractive_RejectsBadName(t *testing.T) {
 // directory (empty path → Abs("") → cwd).
 func TestRunInteractive_RejectsEmptyPath(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{
-		"What should we call this dataset?":    "t",
-		"Where is your data? (file or folder)": "   ",
+		"Please name the dataset.": "t",
+		"Where is your data?":      "   ",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a, false); err == nil {
@@ -583,9 +581,9 @@ func TestRunInteractive_RejectsEmptyPath(t *testing.T) {
 func TestRunInteractive_TrimsPath(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"What should we call this dataset?":    "t",
-		"Where is your data? (file or folder)": "  " + dir + "  ",
-		"Which column holds the class?":        "churned",
+		"Please name the dataset.":      "t",
+		"Where is your data?":           "  " + dir + "  ",
+		"Which column holds the label?": "churned",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
@@ -601,21 +599,23 @@ func TestRunInteractive_TrimsPath(t *testing.T) {
 	}
 }
 
-// TestRunInteractive_ShowsExampleHints: the name and path prompts carry a
-// visible example, so the guided flow teaches as it goes.
+// TestRunInteractive_ShowsExampleHints: the path and schema steps carry a
+// visible example, so the guided flow teaches as it goes. (LocalPath is left
+// empty so the path step — and its per-modality examples — actually renders.)
 func TestRunInteractive_ShowsExampleHints(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"What should we call this dataset?": "churn_train",
-		"Which column holds the class?":     "churned",
+		"Please name the dataset.":      "churn_train",
+		"Where is your data?":           dir,
+		"Which column holds the label?": "churned",
 	}}
-	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
+	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
 	if err := runInteractive(p, f, a, false); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
-	for _, want := range []string{"e.g. churn_train", "age:INT"} {
+	for _, want := range []string{"~/data/patients.csv", "age:INT"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("interactive output missing hint %q:\n%s", want, buf.String())
 		}

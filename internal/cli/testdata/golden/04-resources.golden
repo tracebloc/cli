@@ -1,0 +1,90 @@
+tb resources — see / change what a training run may use
+=======================================================
+What you see when you run `tb resources`. The view reads live cluster capacity,
+so it isn't a stable screen: it prints "Your secure environment is equipped
+with: …", "A training run is allocated up to: …", and a hint to run
+`tb resources set` — all indexed in zz-all-strings.golden. `tb resources set` is
+a guided walkthrough (prompts stream during the flow; also in the backstop).
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc resources --help
+Shows, in plain terms, how much of this machine tracebloc may use:
+
+  • Your secure environment — the CPU and memory it can schedule
+  • Each training run — the per-run ceiling every run may use (cluster-wide)
+
+No Kubernetes concepts, no YAML — one number for your environment and one for
+each training run's share of it.
+
+Raise the share with `tracebloc resources set`. Run with --verbose for the
+per-node breakdown and the raw values.
+
+Exit codes:
+  0   shown
+  3   kubeconfig could not be loaded / cluster unreachable
+  4   cluster reachable but no tracebloc client found here
+
+Usage:
+  tracebloc resources [flags]
+  tracebloc resources [command]
+
+Available Commands:
+  set         Raise how much of this machine tracebloc may use
+
+Flags:
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+  -h, --help                help for resources
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace where your tracebloc client is installed (default: the context's namespace, or 'default')
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+Use "tracebloc resources [command] --help" for more information about a command.
+
+$ tracebloc resources set --help
+Raise the per-training-run ceiling — how much of this machine a single
+training run may use.
+
+Run it on a terminal with no flags for a guided walkthrough:
+
+  tracebloc resources set
+
+Or set it directly (for scripts / non-interactive shells):
+
+  tracebloc resources set --cores 4 --memory 16Gi   an explicit per-run ceiling
+  tracebloc resources set --cores 4                 change CPU only, keep the rest
+  tracebloc resources set max                       let a run use the whole machine
+
+The number you set is what ONE training run may use. tracebloc keeps a small fixed
+amount (about 1 core and 3 GiB) for itself on top — you never have to subtract it.
+The new ceiling applies to your NEXT training run; a run already going keeps its
+size.
+
+Exit codes:
+  0   applied (or nothing to change)
+  2   the requested size doesn't fit this machine / bad input
+  3   kubeconfig could not be loaded / cluster unreachable
+  4   cluster reachable but no tracebloc client found here
+
+Usage:
+  tracebloc resources set [max] [flags]
+
+Flags:
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+      --cores string        CPU cores one training run may use (e.g. 4)
+      --dry-run             show exactly what would change and apply nothing
+      --gpus int            whole GPUs one training run may use (only on a GPU machine)
+  -h, --help                help for set
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+      --memory string       memory one training run may use (e.g. 16 or 16Gi — the number is GiB)
+  -n, --namespace string    namespace where your tracebloc client is installed (default: the context's namespace, or 'default')
+      --yes                 skip the confirmation prompt (for automation)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)

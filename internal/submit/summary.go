@@ -425,11 +425,23 @@ func RenderSummary(p *ui.Printer, s *Summary) {
 	}
 	p.Field("total records", commaSep(s.TotalRecords))
 	p.Field("inserted", commaSep(s.InsertedRecords))
-	p.Field("sent to API", commaSep(s.APISentRecords))
-	p.Field("skipped", commaSep(s.SkippedRecords))
-	p.Field("file failures", commaSep(s.FileTransferFailures))
-	p.Field("DB failures", commaSep(s.FailedRecords))
-	p.Field("success rate", fmt.Sprintf("%.1f%%", s.SuccessRate()))
+	// Everything below is a SHORTFALL — shown only when it actually happened.
+	// A clean run says it all in the headline (X of Y, %), so zero-row failure
+	// counters, a "sent to API" that equals inserted, and a redundant
+	// success-rate line would just be noise. The api-sync shortfall is kept
+	// because it's the one failure mode the headline (inserted/total) can't show.
+	if s.APISentRecords < s.InsertedRecords {
+		p.Field("sent to API", commaSep(s.APISentRecords))
+	}
+	if s.SkippedRecords > 0 {
+		p.Field("skipped", commaSep(s.SkippedRecords))
+	}
+	if s.FileTransferFailures > 0 {
+		p.Field("file failures", commaSep(s.FileTransferFailures))
+	}
+	if s.FailedRecords > 0 {
+		p.Field("DB failures", commaSep(s.FailedRecords))
+	}
 
 	p.Section("What's next")
 	p.Infof("Your data is registered as a dataset. View it at https://ai.tracebloc.io/metadata")

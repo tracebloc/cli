@@ -1,0 +1,27 @@
+tb version — print the CLI version
+==================================
+What you see when you run `tb version`. It prints one line:
+
+    tracebloc <version> (<git-sha>, built <date>, <go-version> on <os>/<arch>)
+
+The go-version and os/arch are filled in at runtime, so the exact line varies by
+machine (that's why it isn't pinned byte-exact here). `--output-json` emits the
+same fields as indented JSON. Only the --help is byte-exact below.
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc version --help
+Print the tracebloc CLI version, git SHA, and build date
+
+Usage:
+  tracebloc version [flags]
+
+Flags:
+  -h, --help          help for version
+      --output-json   emit the version payload as indented JSON instead of a single human-readable line
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)

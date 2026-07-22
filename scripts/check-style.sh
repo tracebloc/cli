@@ -7,11 +7,12 @@
 #  locally:  make check-style   (or: bash scripts/check-style.sh)
 #  Exit 0 = clean, 1 = violations found, 2 = the guard itself errored (fail-closed).
 #
-#  Three mechanical checks (semantic calls — role misuse, judgement-y wording —
-#  stay with CODEOWNERS review + STYLE.md; a grep can't police those):
-#    1. No hardcoded brand colour outside the colour engine (internal/ui).
-#    2. No status / traffic-light emoji — the lime dot is the online indicator.
-#    3. No 'workspace' in user-facing text — the term is "secure environment".
+#  Two mechanical checks (semantic calls — role misuse, judgement-y wording —
+#  stay with CODEOWNERS review + STYLE.md; a grep can't police those). Emoji are
+#  intentionally NOT policed — they're welcome (see STYLE.md):
+#    1. No hardcoded brand colour outside the colour engine (internal/ui). New
+#       output must go through the Printer tones, never a re-hardcoded hex/RGB.
+#    2. No 'workspace' in user-facing text — the term is "secure environment".
 #       Matched as a whole word, so the exitNoWorkspace code identifier is exempt;
 #       comments and _test.go files are exempt too.
 #
@@ -35,9 +36,9 @@ hits=''
 # + opt-out lines removed). grep exit 2+ (bad regex/flags/tree) → fail closed.
 scan() {
   local re="$1" flags="${2:-}" out rc
-  # shellcheck disable=SC2086
   # No 2>/dev/null: let a real grep error surface on stderr — rc>=2 below turns
   # it into a fail-closed exit, so the error is visible AND fatal, never a silent pass.
+  # shellcheck disable=SC2086
   out="$(grep -rnE $flags --include='*.go' "$re" internal/)"
   rc=$?
   if [[ "$rc" -ge 2 ]]; then
@@ -64,13 +65,7 @@ scan "$brand" '-i'
 report "hardcoded brand colour — use the Printer tones in ${ENGINE}, don't re-hardcode hex/RGB" \
   "$(printf '%s' "$hits" | grep -vE "^${ENGINE}" || true)"
 
-# 2) Status / traffic-light emoji. Pattern built from bytes so this source stays
-#    emoji-free (green/red/yellow/orange circles).
-emoji="$(printf '\360\237\237\242|\360\237\224\264|\360\237\237\241|\360\237\237\240')"
-scan "$emoji"
-report "status emoji — use the lime online dot (see STYLE.md), not traffic-light emoji" "$hits"
-
-# 3) Banned terminology in user-facing text: 'workspace' -> 'secure environment'.
+# 2) Banned terminology in user-facing text: 'workspace' -> 'secure environment'.
 #    -w matches whole words only (exitNoWorkspace is exempt); skip comment lines
 #    (content starts with //, anchored to the file:line: prefix).
 scan 'workspace' '-iw'
