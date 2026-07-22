@@ -15,6 +15,7 @@ import (
 
 	"github.com/tracebloc/cli/internal/doctor"
 	"github.com/tracebloc/cli/internal/push"
+	"github.com/tracebloc/cli/internal/submit"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -163,13 +164,56 @@ func TestCopyCatalog(t *testing.T) {
 		"Which task?":                                  "text_classification",
 		"Which column holds the label?":                "label",
 	})
+	// execIngest renders the run that follows the confirm — the three steps and
+	// the final summary. printLocalSummary + submit.RenderSummary are the REAL
+	// renderers (drift-caught); the step headers/hints mirror the run
+	// orchestration (their strings are drift-guarded by zz-all-strings). The raw
+	// ingestor stream the CLI streams through (MySQL waits, the 📊 banner,
+	// per-validator lines) is the *ingestor's* stdout — not CLI copy — so it
+	// isn't shown: this is the CLI's own view of the run.
+	execIngest := func() string {
+		var b bytes.Buffer
+		p := ui.New(&b, ui.WithColor(false))
+		layout := &push.LocalLayout{
+			Root:       "~/data/patients",
+			LabelsCSV:  "~/data/patients/data.csv",
+			TotalBytes: 52807,
+		}
+		spec := map[string]any{
+			"category": "tabular_classification",
+			"table":    "hospital_train",
+			"intent":   "train",
+			"label":    "churned",
+			"schema": map[string]string{
+				"age": "INT", "income": "FLOAT", "tenure": "INT", "balance": "FLOAT",
+				"products": "INT", "active": "INT", "region": "VARCHAR(16)",
+			},
+		}
+		p.Step(1, 3, "Check your data")
+		p.Hintf("Reading your files locally first — nothing has touched your secure environment yet — so a layout or settings problem shows up right away.")
+		printLocalSummary(p, layout, spec)
+		p.Step(2, 3, "Copy into your secure environment")
+		p.Hintf("Your files are copied securely into your secure environment's storage — set up and cleaned up for you.")
+		p.Step(3, 3, "Validate and load")
+		p.Hintf("Submitting the run, then following along as tracebloc validates your data and loads it into the table — progress streams below.")
+		p.Hintf("This follows the run for up to an hour; a longer run keeps going on its own (or start it with --detach and check back later).")
+		submit.RenderSummary(p, &submit.Summary{
+			IngestorID:       "80c224bd-202b-4a6f-9362-61c84599f334",
+			TotalRecords:     849,
+			ProcessedRecords: 849,
+			InsertedRecords:  849,
+			APISentRecords:   849,
+		})
+		return b.String()
+	}
 	dataIngestFile := doc(
 		"tb data ingest — stage a dataset into your secure environment",
-		"What you see when you run `tb data ingest` with no flags: a short intro, then a\nfive-step guided setup. Every question is shown below, in order, driven through\nthe real flow for one task in each family (tabular, image, text) so the\ntask-specific questions are visible. Each question prints as a `Step N of 5 · …`\nheader (task-specific refinements as their own header); the supporting line sits\nbeneath it, and the `?` line shows your answer. Passing flags (--as, --task, a\npath, …) skips the matching questions. The other tasks' extra questions\n(keypoints, label policy, time column) and self-supervised text (which skips the\nlabel step) are in zz-all-strings.golden. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
+		"What you see when you run `tb data ingest` with no flags: a short intro, a\nfive-step guided setup, then — after you confirm — the run itself. The setup is\ndriven through the real flow for one task in each family (tabular, image, text)\nso the task-specific questions are visible; each question prints as a\n`Step N of 5 · …` header (task-specific refinements as their own header), the\nsupporting line beneath it, and the `?` line shows your answer. The run (shown\nonce, for tabular) is the three steps + the final summary as the CLI renders\nthem. Passing flags (--as, --task, a path, …) skips the matching questions. The\nother tasks' extra questions (keypoints, label policy, time column),\nself-supervised text (which skips the label step), and the failure-summary\nwordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams\nthrough (MySQL waits, the 📊 banner, per-validator lines) is the engine's own\nstdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
 		[]run{
 			{"tb data ingest   # guided · tabular classification", tabularIngest},
 			{"tb data ingest   # guided · image classification", imageIngest},
 			{"tb data ingest   # guided · text classification", textIngest},
+			{"tb data ingest   # after you confirm — the run (tabular)", execIngest()},
 		},
 		[]run{
 			{"tracebloc data ingest --help", help("data", "ingest")},
@@ -329,6 +373,31 @@ func TestCopyCatalog(t *testing.T) {
 			"strings). The completeness backstop: catches the failure remedies and the\n" +
 			"multi-step flows (ingest steps, login, progress, confirmations) not shown as a\n" +
 			"screen. %s/%d are runtime placeholders.\n\n" + strings.Join(quoteAll(harvestMessages(t)), "\n") + "\n",
+	}
+
+	// Coverage guarantee: a command's PRIMARY PATH must be rendered as a screen,
+	// not left to the string backstop — so a dropped/half-rendered flow fails the
+	// test instead of silently vanishing from the catalog (which is how the whole
+	// ingest execution went missing once). Each entry names markers that must
+	// appear in that file's rendered content; add one when a file gains a phase.
+	mustRender := map[string][]string{
+		"00-home.golden": {"tracebloc --help"},
+		"01-data-ingest.golden": {
+			"Ingest datasets to your secure environment.", // intro
+			"Step 1 of 5 ·", "Step 5 of 5 ·", // the guided questionnaire
+			"Review", "Proceed with the ingest?", // review + confirm
+			"Step 1/3", "Step 3/3", "Ingestion summary", "What's next", // the run
+		},
+		"02-data-list.golden": {"tracebloc data list --help"},
+		"05-doctor.golden":    {"Connected to tracebloc", "Everything looks good"},
+	}
+	for name, needles := range mustRender {
+		got := files[name]
+		for _, n := range needles {
+			if !strings.Contains(got, n) {
+				t.Errorf("%s is missing required primary-path copy %q — a screen may have been dropped or half-rendered", name, n)
+			}
+		}
 	}
 
 	update := os.Getenv("TB_UPDATE_GOLDEN") != ""

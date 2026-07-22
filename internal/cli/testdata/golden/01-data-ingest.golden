@@ -1,14 +1,18 @@
 tb data ingest — stage a dataset into your secure environment
 =============================================================
-What you see when you run `tb data ingest` with no flags: a short intro, then a
-five-step guided setup. Every question is shown below, in order, driven through
-the real flow for one task in each family (tabular, image, text) so the
-task-specific questions are visible. Each question prints as a `Step N of 5 · …`
-header (task-specific refinements as their own header); the supporting line sits
-beneath it, and the `?` line shows your answer. Passing flags (--as, --task, a
-path, …) skips the matching questions. The other tasks' extra questions
-(keypoints, label policy, time column) and self-supervised text (which skips the
-label step) are in zz-all-strings.golden. (`tb ingest` is a hidden deprecated
+What you see when you run `tb data ingest` with no flags: a short intro, a
+five-step guided setup, then — after you confirm — the run itself. The setup is
+driven through the real flow for one task in each family (tabular, image, text)
+so the task-specific questions are visible; each question prints as a
+`Step N of 5 · …` header (task-specific refinements as their own header), the
+supporting line beneath it, and the `?` line shows your answer. The run (shown
+once, for tabular) is the three steps + the final summary as the CLI renders
+them. Passing flags (--as, --task, a path, …) skips the matching questions. The
+other tasks' extra questions (keypoints, label policy, time column),
+self-supervised text (which skips the label step), and the failure-summary
+wordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams
+through (MySQL waits, the 📊 banner, per-validator lines) is the engine's own
+stdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated
 alias; `push` is a deprecated alias of the verb.)
 
 $ tb data ingest   # guided · tabular classification
@@ -175,6 +179,47 @@ $ tb data ingest   # guided · text classification
   Proceed with the ingest?
 
 ? Yes
+
+$ tb data ingest   # after you confirm — the run (tabular)
+
+Step 1/3  Check your data
+  Reading your files locally first — nothing has touched your secure environment yet — so a layout or settings problem shows up right away.
+
+  Local dataset
+    root:          ~/data/patients
+    data CSV:      ~/data/patients/data.csv
+    columns:       7
+    total size:    51.57 KiB
+
+  Ingest settings
+    name:          hospital_train
+    task:          tabular_classification
+    intent:        train
+    label column:  churned
+    destination:   /data/shared/hospital_train
+
+Step 2/3  Copy into your secure environment
+  Your files are copied securely into your secure environment's storage — set up and cleaned up for you.
+
+Step 3/3  Validate and load
+  Submitting the run, then following along as tracebloc validates your data and loads it into the table — progress streams below.
+  This follows the run for up to an hour; a longer run keeps going on its own (or start it with --detach and check back later).
+  ✔ Ingestion complete — ingested 849 of 849 records (100.0%)
+
+  Ingestion summary
+    ingestor ID:   80c224bd-202b-4a6f-9362-61c84599f334
+    total records: 849
+    inserted:      849
+    sent to API:   849
+    skipped:       0
+    file failures: 0
+    DB failures:   0
+    success rate:  100.0%
+
+  What's next
+  · Your data is registered as a dataset. View it at https://ai.tracebloc.io/metadata
+  · To train or benchmark models on it, create a use case at https://ai.tracebloc.io/my-use-cases
+  Pick this dataset when you set it up.
 
 
 ------------------------------------------------------------
