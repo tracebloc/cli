@@ -27,10 +27,12 @@ func (f *sealRunner) install(t *testing.T) {
 	t.Cleanup(func() { Runner = orig })
 }
 
-// hooksYAML mirrors what `helm get hooks` prints for the client chart: the two
-// conformance Jobs (one carrying the full seal contract — label + name + hint
-// annotations — one bare), a non-test hook that must be filtered out, and a
-// legacy `test-success` Pod that must still count as a test.
+// hooksYAML mirrors what `helm get hooks` prints for the client chart
+// (docs/SEAL-CHECK.md contract): two conformance Jobs carrying the seal
+// labels (one also with the CLI's optional hint annotation), a non-runnable
+// aux test hook (the storage check's ServiceAccount, negative hook-weight), a
+// non-test hook that must be filtered out, and a legacy `test-success` Pod
+// that must still count as a test.
 const hooksYAML = `---
 # Source: client/templates/egress-enforcement-check.yaml
 apiVersion: batch/v1
@@ -41,10 +43,10 @@ metadata:
   labels:
     app.kubernetes.io/instance: acme
     tracebloc.io/seal-check: "true"
+    tracebloc.io/seal-check-name: egress-enforcement
   annotations:
     "helm.sh/hook": test
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
-    tracebloc.io/seal-name: egress lockdown enforced
     tracebloc.io/seal-hint: ensure the CNI enforces egress NetworkPolicy, then re-run
 spec:
   backoffLimit: 0
@@ -57,10 +59,21 @@ metadata:
   namespace: acme
   labels:
     app.kubernetes.io/instance: acme
+    tracebloc.io/seal-check: "true"
+    tracebloc.io/seal-check-name: backend-reachability
   annotations:
     "helm.sh/hook": test
 spec:
   backoffLimit: 0
+---
+# Source: client/templates/storage-assertions-check.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: acme-storage-assertions-check
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-6"
 ---
 # Source: client/templates/some-migration.yaml
 apiVersion: batch/v1
@@ -98,23 +111,27 @@ func TestListTestHooks_ParsesAndFilters(t *testing.T) {
 		t.Fatalf("helm argv = %v, want %v", f.calls, want)
 	}
 
-	if len(hooks) != 3 {
-		t.Fatalf("got %d hooks (%+v), want 3 (the pre-upgrade hook filtered out)", len(hooks), hooks)
+	if len(hooks) != 4 {
+		t.Fatalf("got %d hooks (%+v), want 4 (the pre-upgrade hook filtered out)", len(hooks), hooks)
 	}
 	enf := hooks[0]
-	if enf.Name != "acme-egress-enforcement-check" || enf.Kind != "Job" || !enf.SealCheck {
+	if enf.Name != "acme-egress-enforcement-check" || enf.Kind != "Job" || !enf.SealCheck || !enf.Runnable() {
 		t.Errorf("enforcement hook parsed wrong: %+v", enf)
 	}
-	if enf.SealName != "egress lockdown enforced" ||
+	if enf.SealName != "egress-enforcement" ||
 		enf.SealHint != "ensure the CNI enforces egress NetworkPolicy, then re-run" {
-		t.Errorf("seal annotations parsed wrong: %+v", enf)
+		t.Errorf("seal name label / hint annotation parsed wrong: %+v", enf)
 	}
 	reach := hooks[1]
-	if reach.Name != "acme-egress-reachability-check" || reach.SealCheck || reach.SealName != "" || reach.SealHint != "" {
-		t.Errorf("bare hook parsed wrong: %+v", reach)
+	if reach.SealName != "backend-reachability" || !reach.SealCheck || reach.SealHint != "" {
+		t.Errorf("reachability hook parsed wrong: %+v", reach)
 	}
-	legacy := hooks[2]
-	if legacy.Name != "acme-legacy-probe" || legacy.Kind != "Pod" {
+	sa := hooks[2]
+	if sa.Kind != "ServiceAccount" || sa.SealCheck || sa.Runnable() {
+		t.Errorf("aux ServiceAccount hook parsed wrong (must be non-runnable, unlabelled): %+v", sa)
+	}
+	legacy := hooks[3]
+	if legacy.Name != "acme-legacy-probe" || legacy.Kind != "Pod" || !legacy.Runnable() {
 		t.Errorf("legacy test-success hook parsed wrong: %+v", legacy)
 	}
 }
@@ -154,14 +171,17 @@ func TestListTestHooks_BadYAMLFailsClosed(t *testing.T) {
 func TestRunTest_Argv(t *testing.T) {
 	f := &sealRunner{out: "NAME: acme\n"}
 	f.install(t)
+	// One check plus an aux plumbing hook: both must land in ONE --filter
+	// (comma-OR), so helm creates the check's dependencies but runs no other check.
 	out, err := RunTest(context.Background(), TestTarget{
 		Release: "acme", Namespace: "acme", Kubeconfig: "/tmp/kc", KubeContext: "kind-acme",
-	}, "acme-egress-reachability-check", 2*time.Minute)
+	}, []string{"acme-storage-assertions-check", "acme-storage-assertions-sa"}, 2*time.Minute)
 	if err != nil || out != "NAME: acme\n" {
 		t.Fatalf("RunTest = %q, %v", out, err)
 	}
 	want := []string{"helm", "test", "acme", "--namespace", "acme",
-		"--filter", "name=acme-egress-reachability-check", "--timeout", "2m0s",
+		"--filter", "name=acme-storage-assertions-check,name=acme-storage-assertions-sa",
+		"--timeout", "2m0s",
 		"--kubeconfig", "/tmp/kc", "--kube-context", "kind-acme"}
 	if len(f.calls) != 1 || strings.Join(f.calls[0], " ") != strings.Join(want, " ") {
 		t.Fatalf("helm argv = %v, want %v", f.calls, want)
@@ -176,7 +196,7 @@ func TestRunTest_PassesThroughFailure(t *testing.T) {
 		err: errors.New("exit status 1"),
 	}
 	f.install(t)
-	out, err := RunTest(context.Background(), TestTarget{Release: "acme", Namespace: "acme"}, "acme-x", 0)
+	out, err := RunTest(context.Background(), TestTarget{Release: "acme", Namespace: "acme"}, []string{"acme-x"}, 0)
 	if err == nil || err.Error() != "exit status 1" {
 		t.Fatalf("want the raw runner error, got: %v", err)
 	}

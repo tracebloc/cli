@@ -29,13 +29,14 @@ func stubSealTarget(t *testing.T) {
 }
 
 // stubSealHelm fakes the two helm seams: the hook listing and the per-check
-// run. run receives the hook name and reports that check's outcome; it also
-// records every (target, hook) invocation for order/argv assertions.
+// run. The run fake keys the scripted outcome on the CHECK hook (names[0])
+// and records every invocation's full filter list for aux-plumbing asserts.
 type stubSealHelm struct {
 	hooks    []helm.TestHook
 	listErr  error
 	listGot  helm.TestTarget
-	runs     []string
+	runs     []string   // names[0] of each run — the check under test
+	filters  [][]string // the full names list of each run (check + aux)
 	runGot   helm.TestTarget
 	runOut   map[string]string
 	runErr   map[string]error
@@ -49,22 +50,24 @@ func (s *stubSealHelm) install(t *testing.T) {
 		s.listGot = tt
 		return s.hooks, s.listErr
 	}
-	runHelmTestFn = func(_ context.Context, tt helm.TestTarget, hookName string, timeout time.Duration) (string, error) {
+	runHelmTestFn = func(_ context.Context, tt helm.TestTarget, names []string, timeout time.Duration) (string, error) {
 		s.runGot = tt
-		s.runs = append(s.runs, hookName)
+		s.runs = append(s.runs, names[0])
+		s.filters = append(s.filters, names)
 		s.timeouts = append(s.timeouts, timeout)
-		return s.runOut[hookName], s.runErr[hookName]
+		return s.runOut[names[0]], s.runErr[names[0]]
 	}
 	t.Cleanup(func() { listTestHooksFn, runHelmTestFn = origList, origRun })
 }
 
-// sealHooks is the chart's suite as the parallel chart work labels it: both
-// conformance Jobs carrying tracebloc.io/seal-check=true, one with a hint.
+// sealHooks is the chart's suite as docs/SEAL-CHECK.md labels it: conformance
+// Jobs carrying tracebloc.io/seal-check=true + the seal-check-name identifier
+// (one also carrying the CLI's optional hint annotation).
 func sealHooks() []helm.TestHook {
 	return []helm.TestHook{
-		{Kind: "Job", Name: "acme-egress-enforcement-check", SealCheck: true,
+		{Kind: "Job", Name: "acme-egress-enforcement-check", SealCheck: true, SealName: "egress-enforcement",
 			SealHint: "ensure the CNI enforces egress NetworkPolicy, then re-run"},
-		{Kind: "Job", Name: "acme-egress-reachability-check", SealCheck: true},
+		{Kind: "Job", Name: "acme-egress-reachability-check", SealCheck: true, SealName: "backend-reachability"},
 	}
 }
 
@@ -90,8 +93,8 @@ func TestSeal_AllPass_Sealed(t *testing.T) {
 	}
 	for _, want := range []string{
 		`Seal check — secure environment "acme"`,
-		"✓ egress-enforcement-check",
-		"✓ egress-reachability-check",
+		"✓ egress-enforcement",
+		"✓ backend-reachability",
 		"Sealed — all 2 conformance checks passed",
 	} {
 		if !strings.Contains(out, want) {
@@ -132,9 +135,9 @@ func TestSeal_OneFails_Unsealed_AllChecksStillRun(t *testing.T) {
 		t.Fatalf("verdict already rendered — the exit error must be silent, got: %v", err)
 	}
 	for _, want := range []string{
-		"✗ egress-enforcement-check — job failed: BackoffLimitExceeded",
+		"✗ egress-enforcement — job failed: BackoffLimitExceeded",
 		"ensure the CNI enforces egress NetworkPolicy, then re-run",
-		"✓ egress-reachability-check", // the suite kept going past the failure
+		"✓ backend-reachability", // the suite kept going past the failure
 		"Unsealed — 1 of 2 conformance checks failed",
 	} {
 		if !strings.Contains(out, want) {
@@ -165,28 +168,37 @@ func TestSeal_FailureHintFallsBackToKubectlLogs(t *testing.T) {
 	}
 }
 
-// No test hooks at all → honestly UNKNOWN: exit 2 (a script must not read
+// No runnable checks → honestly UNKNOWN: exit 2 (a script must not read
 // "couldn't verify" as sealed), the word "sealed" only in the disclaimer.
-func TestSeal_NoChecks_Unknown(t *testing.T) {
-	stubSealTarget(t)
-	s := &stubSealHelm{}
-	s.install(t)
+// Both shapes: a chart with no test hooks at all, and one whose only test
+// hooks are non-runnable plumbing (an SA alone verifies nothing).
+func TestSeal_NoRunnableChecks_Unknown(t *testing.T) {
+	for name, hooks := range map[string][]helm.TestHook{
+		"no hooks":      nil,
+		"plumbing only": {{Kind: "ServiceAccount", Name: "acme-storage-assertions-sa"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubSealTarget(t)
+			s := &stubSealHelm{hooks: hooks}
+			s.install(t)
 
-	out, err := runSeal(t, 0)
-	if got := ExitCodeFromError(err); got != exitChecksFailed {
-		t.Fatalf("exit code = %d, want %d", got, exitChecksFailed)
-	}
-	if !IsSilentError(err) {
-		t.Fatalf("unknown verdict is rendered, not errored — got: %v", err)
-	}
-	if !strings.Contains(out, "Seal unknown — this chart ships no conformance checks") {
-		t.Errorf("output missing the unknown verdict:\n%s", out)
-	}
-	if strings.Contains(out, "Sealed — all") {
-		t.Errorf("an unverifiable environment must never be claimed sealed:\n%s", out)
-	}
-	if len(s.runs) != 0 {
-		t.Errorf("nothing to run, but helm test ran: %v", s.runs)
+			out, err := runSeal(t, 0)
+			if got := ExitCodeFromError(err); got != exitChecksFailed {
+				t.Fatalf("exit code = %d, want %d", got, exitChecksFailed)
+			}
+			if !IsSilentError(err) {
+				t.Fatalf("unknown verdict is rendered, not errored — got: %v", err)
+			}
+			if !strings.Contains(out, "Seal unknown — this chart ships no conformance checks") {
+				t.Errorf("output missing the unknown verdict:\n%s", out)
+			}
+			if strings.Contains(out, "Sealed — all") {
+				t.Errorf("an unverifiable environment must never be claimed sealed:\n%s", out)
+			}
+			if len(s.runs) != 0 {
+				t.Errorf("nothing to run, but helm test ran: %v", s.runs)
+			}
+		})
 	}
 }
 
@@ -237,17 +249,34 @@ func TestSeal_LabeledSubsetOnly(t *testing.T) {
 	}
 }
 
-// The chart's seal-name annotation overrides the de-prefixed hook name.
-func TestSeal_SealNameAnnotationWins(t *testing.T) {
+// Non-runnable test hooks — the storage check's ServiceAccount/RBAC plumbing
+// at negative hook-weight — are never checks (no line, no verdict weight), but
+// they must ride along in EVERY per-check filter: helm's --filter excludes
+// unlisted test hooks, and running a check without its plumbing strands it and
+// would report a false Unsealed.
+func TestSeal_AuxPlumbingCarriedNotCounted(t *testing.T) {
 	stubSealTarget(t)
-	s := &stubSealHelm{hooks: []helm.TestHook{
-		{Kind: "Job", Name: "acme-egress-enforcement-check", SealCheck: true, SealName: "egress lockdown enforced"},
-	}}
+	s := &stubSealHelm{hooks: append(sealHooks(),
+		helm.TestHook{Kind: "ServiceAccount", Name: "acme-storage-assertions-sa"},
+		helm.TestHook{Kind: "Role", Name: "acme-storage-assertions-role"},
+	)}
 	s.install(t)
 
-	out, _ := runSeal(t, 0)
-	if !strings.Contains(out, "✓ egress lockdown enforced") {
-		t.Errorf("output missing the annotated check name:\n%s", out)
+	out, err := runSeal(t, 0)
+	if err != nil {
+		t.Fatalf("want exit 0, got: %v", err)
+	}
+	if !strings.Contains(out, "Sealed — all 2 conformance checks passed") {
+		t.Errorf("aux hooks must not count as checks:\n%s", out)
+	}
+	if len(s.filters) != 2 {
+		t.Fatalf("want 2 check runs, got %v", s.filters)
+	}
+	for i, f := range s.filters {
+		want := []string{s.runs[i], "acme-storage-assertions-sa", "acme-storage-assertions-role"}
+		if strings.Join(f, ",") != strings.Join(want, ",") {
+			t.Errorf("run %d filter = %v, want %v (check first, then the aux plumbing)", i, f, want)
+		}
 	}
 }
 
@@ -301,7 +330,7 @@ func TestSeal_CancelledMidSuite_NoVerdict(t *testing.T) {
 		return sealHooks(), nil
 	}
 	ran := 0
-	runHelmTestFn = func(_ context.Context, _ helm.TestTarget, _ string, _ time.Duration) (string, error) {
+	runHelmTestFn = func(_ context.Context, _ helm.TestTarget, _ []string, _ time.Duration) (string, error) {
 		ran++
 		cancel() // the user hits Ctrl-C while the first check runs
 		return "", errors.New("context canceled")

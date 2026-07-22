@@ -20,8 +20,8 @@ $ tb client status --seal   # sealed — every conformance check passed
 
   Seal check — secure environment "lukas-macbook"
 
-  ✓ egress-enforcement-check
-  ✓ egress-reachability-check
+  ✓ egress-enforcement
+  ✓ backend-reachability
 
   ✔ Sealed — all 2 conformance checks passed. This environment's protections are enforced.
 
@@ -29,9 +29,9 @@ $ tb client status --seal   # unsealed — a protection is not enforced
 
   Seal check — secure environment "lukas-macbook"
 
-  ✗ egress-enforcement-check — job failed: BackoffLimitExceeded
+  ✗ egress-enforcement — job failed: BackoffLimitExceeded
       see why: kubectl logs -n lukas-macbook job/lukas-macbook-egress-enforcement-check
-  ✓ egress-reachability-check
+  ✓ backend-reachability
 
   ✖ Unsealed — 1 of 2 conformance checks failed. This environment's protections are not all enforced.
   Fix the failing checks above, then re-run `tracebloc client status --seal` to confirm the seal.

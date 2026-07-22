@@ -330,14 +330,14 @@ func TestCopyCatalog(t *testing.T) {
 	// live run streams the same header/check/verdict pieces (plus a per-check
 	// spinner line, catalogued in the backstop).
 	sealSealed := sealModel{envName: "lukas-macbook", checks: []sealCheck{
-		{name: "egress-enforcement-check", passed: true},
-		{name: "egress-reachability-check", passed: true},
+		{name: "egress-enforcement", passed: true},
+		{name: "backend-reachability", passed: true},
 	}}
 	sealUnsealed := sealModel{envName: "lukas-macbook", checks: []sealCheck{
-		{name: "egress-enforcement-check", passed: false,
+		{name: "egress-enforcement", passed: false,
 			detail: "job failed: BackoffLimitExceeded",
 			hint:   "see why: kubectl logs -n lukas-macbook job/lukas-macbook-egress-enforcement-check"},
-		{name: "egress-reachability-check", passed: true},
+		{name: "backend-reachability", passed: true},
 	}}
 	sealUnknown := sealModel{envName: "lukas-macbook"}
 	clientFile := doc(

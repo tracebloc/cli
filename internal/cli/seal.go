@@ -93,7 +93,7 @@ func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOpt
 		return &exitError{code: exitFailure, err: fmt.Errorf(
 			"couldn't read the chart's conformance checks: %w", herr)}
 	}
-	suite, fallback := sealSuite(hooks)
+	suite, aux, fallback := sealSuite(hooks)
 	model := sealModel{envName: sealEnvName(target, binding), fallback: fallback}
 
 	if len(suite) == 0 {
@@ -105,7 +105,10 @@ func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOpt
 	for _, h := range suite {
 		name := sealCheckName(h, tt.Release)
 		sp := p.Spinner(fmt.Sprintf("Checking %s…", name), "")
-		out, terr := runHelmTestFn(ctx, tt, h.Name, timeout)
+		// The filter carries the check plus the aux plumbing hooks (see
+		// helm.RunTest) — but never the other checks, so this check's verdict
+		// stays its own.
+		out, terr := runHelmTestFn(ctx, tt, append([]string{h.Name}, aux...), timeout)
 		sp.Stop()
 		// Ctrl-C (or a parent deadline) mid-suite is a cancelled run, not a
 		// verdict: every remaining check would "fail" on the dead context and
@@ -129,19 +132,34 @@ func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOpt
 	return nil
 }
 
-// sealSuite picks the checks to run: the hooks the chart labels as the
-// seal-check suite; when the chart doesn't label any (an older chart), ALL of
-// its helm tests, reported as a fallback so the output says which contract ran.
-func sealSuite(hooks []helm.TestHook) (suite []helm.TestHook, fallback bool) {
+// sealSuite splits the release's test hooks into the checks to run and the
+// aux plumbing to carry along on every run:
+//
+//   - suite: the RUNNABLE hooks (Jobs/Pods) the chart labels as the seal-check
+//     suite; when the chart labels none (an older chart), ALL of its runnable
+//     helm tests, reported as a fallback so the output says which contract ran.
+//   - aux: the non-runnable test hooks (a check's ServiceAccount/RBAC, created
+//     at negative hook-weight). Never checks themselves — an SA can't "pass" —
+//     but helm's --filter would exclude them from a per-check run and strand
+//     the check without its plumbing, so every RunTest lists them too.
+func sealSuite(hooks []helm.TestHook) (suite []helm.TestHook, aux []string, fallback bool) {
+	var runnable []helm.TestHook
 	for _, h := range hooks {
+		if h.Runnable() {
+			runnable = append(runnable, h)
+		} else {
+			aux = append(aux, h.Name)
+		}
+	}
+	for _, h := range runnable {
 		if h.SealCheck {
 			suite = append(suite, h)
 		}
 	}
 	if len(suite) > 0 {
-		return suite, false
+		return suite, aux, false
 	}
-	return hooks, len(hooks) > 0
+	return runnable, aux, len(runnable) > 0
 }
 
 // sealEnvName names the environment under test: the active client's display
@@ -154,9 +172,10 @@ func sealEnvName(target *clusterTarget, binding activeClientBinding) string {
 	return target.Resolved.Namespace
 }
 
-// sealCheckName is a check's display name: the chart's seal-name annotation
-// when present, else the hook name with the release prefix trimmed (the
-// chart's hooks are named "<release>-<check>").
+// sealCheckName is a check's display name: the chart's seal-check-name label
+// when present (the stable per-check identifier, e.g. "egress-enforcement"),
+// else the hook name with the release prefix trimmed (the chart's hooks are
+// named "<release>-<check>").
 func sealCheckName(h helm.TestHook, release string) string {
 	if h.SealName != "" {
 		return h.SealName
