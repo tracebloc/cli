@@ -1,0 +1,85 @@
+tb doctor — is my secure environment healthy?
+=============================================
+What you see when you run `tb doctor`. The two rollup lines (Connected, Ready)
+plus a verdict are shown below for the healthy and the can't-fully-check cases.
+The failure variants (Not connected — …, Not ready — …) and their remedies vary
+with the reachability classification and embed the launcher name, so the full set
+is indexed in zz-all-strings.golden. --verbose adds a Kubernetes breakdown
+(context/server/namespace + each granular check); those strings are in the
+backstop too.
+
+$ tb doctor   # healthy
+  Signed in as lukas@tracebloc.io
+  Secure environment "hello-world"
+
+  ✔ Connected to tracebloc
+  ✔ Ready to run training
+
+  ✔ Everything looks good — you're ready to run training.
+
+$ tb doctor   # connected, but a check couldn't complete (e.g. RBAC)
+  Signed in as lukas@tracebloc.io
+  Secure environment "hello-world"
+
+  ✔ Connected to tracebloc
+  · Ready to run training — couldn't check your workloads (run with --verbose)
+
+  · No problems found, but some checks couldn't finish — re-run with --verbose for detail.
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc doctor --help
+Checks, in plain terms, whether your secure environment is connected to
+tracebloc and ready to run training — and if something's wrong, exactly what to
+do about it.
+
+  --verbose    the full technical breakdown (for support)
+  --diagnose   write a redacted support bundle to email to tracebloc
+
+Exit codes:
+  0   healthy
+  2   a problem was found
+  3   couldn't read your local config
+
+Usage:
+  tracebloc doctor [flags]
+
+Flags:
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+      --diagnose            write a redacted support bundle for tracebloc support and exit
+  -h, --help                help for doctor
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace where your secure environment is installed (default: your active client's)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+$ tracebloc cluster doctor --help
+Checks, in plain terms, whether your secure environment is connected to
+tracebloc and ready to run training — and if something's wrong, exactly what to
+do about it.
+
+  --verbose    the full technical breakdown (for support)
+  --diagnose   write a redacted support bundle to email to tracebloc
+
+Exit codes:
+  0   healthy
+  2   a problem was found
+  3   couldn't read your local config
+
+Usage:
+  tracebloc cluster doctor [flags]
+
+Flags:
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+      --diagnose            write a redacted support bundle for tracebloc support and exit
+  -h, --help                help for doctor
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace where your secure environment is installed (default: your active client's)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)

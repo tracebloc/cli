@@ -1,0 +1,91 @@
+tb client — register / list / inspect environments
+==================================================
+What you see under `tb client`. `tb client create` shows a review (below) before
+it registers a new secure environment. `tb client list` / `tb client status` read
+live backend state, so they aren't stable screens — their strings are in
+zz-all-strings.golden.
+
+$ tb client create   # review, before you confirm
+
+  Review
+    name:          lukas-macbook
+    namespace:     lukas-macbook
+    location:      DE
+    cluster:       a1b2c3d4  (anchors this client — re-runs adopt it)
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc client --help
+Provision a tracebloc client for this machine. Requires sign-in first
+(`tracebloc login`). To remove tracebloc from this machine, use
+`tracebloc delete`.
+
+Usage:
+  tracebloc client [flags]
+  tracebloc client [command]
+
+Available Commands:
+  status      Show whether tracebloc can see this machine's client (online)
+
+Flags:
+  -h, --help   help for client
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+Use "tracebloc client [command] --help" for more information about a command.
+
+$ tracebloc client create --help
+Provision a tracebloc client for this machine (auto-named; no flags required)
+
+Usage:
+  tracebloc client create [flags]
+
+Flags:
+      --context string           kubeconfig context for the target cluster (default: current-context)
+      --credential-file string   write the machine credential to this path (mode 0600, sourceable env) instead of printing it — for the installer to feed the chart (never shown on the terminal)
+  -h, --help                     help for create
+      --kubeconfig string        path to the kubeconfig for the target cluster (default: $KUBECONFIG, then ~/.kube/config) — read to anchor the client to this cluster
+      --location string          optional location zone for carbon reporting, e.g. DE (default: $TRACEBLOC_CLIENT_LOCATION; omitted if unset)
+      --name string              client name (default: $TRACEBLOC_CLIENT_NAME, else auto-generated <firstname>-NN; shown on your dashboard + carbon reports)
+      --yes                      skip the confirmation prompt
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+$ tracebloc client list --help
+List the clients in your account
+
+Usage:
+  tracebloc client list [flags]
+
+Aliases:
+  list, ls
+
+Flags:
+  -h, --help   help for list
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
+
+$ tracebloc client status --help
+Report tracebloc's view of this machine's active client — online, offline,
+or pending. With --wait, poll until tracebloc reports it online (exit 0) or the
+timeout elapses (non-zero), to confirm the client connected after setup.
+
+Usage:
+  tracebloc client status [flags]
+
+Flags:
+  -h, --help               help for status
+      --timeout duration   with --wait, give up after this long (default 2m0s)
+      --wait               poll until tracebloc reports this client online
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)

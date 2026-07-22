@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tracebloc/cli/internal/doctor"
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/ui"
 )
@@ -19,17 +21,19 @@ import (
 // TestCopyCatalog generates the copy catalog under testdata/golden/ — ONE file
 // per command, so every user-facing string can be reviewed a screen at a time
 // without deploying. Each file leads with what you see when you RUN the command
-// (byte-exact, colour off), covers every state/path, and ends with its `--help`.
-// zz-all-strings.golden is a completeness backstop: every user-facing string in
-// the source, so nothing is missed even on a rare path.
+// (byte-exact, colour off), covers every state/path we can render deterministically,
+// and ends with the command's `--help`. Copy that only appears mid-flow (ingest
+// steps + progress, the login device flow, delete confirmation, and every
+// failure remedy — many of which embed the launcher name, which varies by
+// install) can't be pinned as a stable screen; zz-all-strings.golden is the
+// completeness backstop for those — every user-facing string in the source.
 //
 // The test fails on drift; regenerate after an intentional copy change:
 //
 //	TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestCopyCatalog
 //
-// Files are ordered by how often a user hits them (00 = most). More command
-// files (ingest run, resources, doctor, delete, login) land as their driven
-// transcripts are wired; this generator makes adding one a single entry below.
+// Files are ordered by how often a user hits them (00 = most). Adding a command
+// is a single entry in the files map below.
 func TestCopyCatalog(t *testing.T) {
 	bi := BuildInfo{Version: "1.4.4", GitSHA: "0000000", BuildDate: "2026-01-01"}
 
@@ -51,12 +55,14 @@ func TestCopyCatalog(t *testing.T) {
 		return b.String()
 	}
 
-	// doc assembles one command file: a title, then labelled `$ cmd` blocks
-	// (verbatim output), then the command's --help at the bottom.
+	// doc assembles one command file: a title, a "when you see this" note, then
+	// labelled `$ cmd` blocks (verbatim output), then the command's --help
+	// block(s) at the bottom (one command can have several — e.g. client has
+	// create/list/status).
 	type run struct {
 		cmd, out string // "$ <cmd>" then verbatim <out>
 	}
-	doc := func(title, whenSeen string, runs []run, helpCmd string, helpOut string) string {
+	doc := func(title, whenSeen string, runs []run, helps []run) string {
 		var s strings.Builder
 		s.WriteString(title + "\n" + strings.Repeat("=", len([]rune(title))) + "\n")
 		s.WriteString(whenSeen + "\n")
@@ -64,15 +70,20 @@ func TestCopyCatalog(t *testing.T) {
 			s.WriteString("\n$ " + r.cmd + "\n")
 			s.WriteString(r.out)
 		}
-		if helpOut != "" {
+		if len(helps) > 0 {
 			s.WriteString("\n\n" + strings.Repeat("-", 60) + "\n--help\n" + strings.Repeat("-", 60) + "\n")
-			s.WriteString("$ " + helpCmd + "\n")
-			s.WriteString(helpOut)
+			for i, h := range helps {
+				if i > 0 {
+					s.WriteString("\n")
+				}
+				s.WriteString("$ " + h.cmd + "\n")
+				s.WriteString(h.out)
+			}
 		}
 		return s.String()
 	}
 
-	// ── home models (every state resolveHomeModel can produce) ──────────────────
+	// ── 00 home — every state resolveHomeModel can produce ──────────────────────
 	online := homeModel{
 		state: homeOnline, email: "lukas@tracebloc.io", name: "Lukas", envName: "hello-world",
 		compute: computeInfo{CPU: 12, MemGiB: 23}, hasCompute: true, inv: binTB, fullMenu: true, hasResources: true,
@@ -101,10 +112,27 @@ func TestCopyCatalog(t *testing.T) {
 			{"tb   # signed in · no secure environment on this machine", rndr(func(p *ui.Printer) { renderHome(p, noEnv) })},
 			{"tb   # not signed in", rndr(func(p *ui.Printer) { renderHome(p, signedOut) })},
 		},
-		"tracebloc --help", help(),
+		[]run{{"tracebloc --help", help()}},
 	)
 
-	// ── data list ───────────────────────────────────────────────────────────────
+	// ── 01 data ingest — stage a dataset ────────────────────────────────────────
+	ingestReview := &runDataIngestArgs{
+		LocalPath: "./data",
+		Spec:      push.SpecArgs{Table: "xray_train", Category: "image_classification", Intent: "train"},
+	}
+	dataIngestFile := doc(
+		"tb data ingest — stage a dataset into your secure environment",
+		"What you see when you run `tb data ingest <path>`. The pre-flight review (below)\nis shown before you confirm. The live run then streams step lines (Checking →\nCopying → Registering), a progress bar, and any validation error — those aren't a\nstable screen, so every one of their strings is in zz-all-strings.golden.\n(`tb ingest` is a hidden deprecated alias of `tb data ingest`; `push` is a\ndeprecated alias of the verb.)",
+		[]run{
+			{"tb data ingest ./data --as train:xray_train --task image_classification   # pre-flight review, before you confirm", rndr(func(p *ui.Printer) { renderReview(p, ingestReview) })},
+		},
+		[]run{
+			{"tracebloc data ingest --help", help("data", "ingest")},
+			{"tracebloc data validate --help", help("data", "validate")},
+		},
+	)
+
+	// ── 02 data list ────────────────────────────────────────────────────────────
 	sample := []push.DatasetInfo{
 		{Name: "xray_train", Intent: "train", Task: "image_classification", Records: 12000, Classes: 2, Extension: "jpg", SizeBytes: 1 << 30},
 		{Name: "xray_test", Intent: "test", Task: "image_classification", Records: 3000, Classes: 2, Extension: "jpg", SizeBytes: 256 << 20},
@@ -118,15 +146,144 @@ func TestCopyCatalog(t *testing.T) {
 			{"tb data list   # with datasets (system tables hidden)", rndr(func(p *ui.Printer) { renderDataList(p, "hello-world", sample, false) })},
 			{"tb data list --all   # including system tables", rndr(func(p *ui.Printer) { renderDataList(p, "hello-world", sample, true) })},
 		},
-		"tracebloc data list --help", help("data", "list"),
+		[]run{{"tracebloc data list --help", help("data", "list")}},
+	)
+
+	// ── 03 data delete ──────────────────────────────────────────────────────────
+	dataDeleteFile := doc(
+		"tb data delete — delete a dataset",
+		"What you see when you run `tb data delete <dataset>`. The command confirms before\nit deletes; the confirmation prompt, the progress, and the success/failure lines\nstream during the flow (not a stable screen) — they're all in zz-all-strings.golden.",
+		nil,
+		[]run{{"tracebloc data delete --help", help("data", "delete")}},
+	)
+
+	// ── 04 resources ─────────────────────────────────────────────────────────────
+	resourcesFile := doc(
+		"tb resources — see / change what a training run may use",
+		"What you see when you run `tb resources`. The view reads live cluster capacity,\nso it isn't a stable screen: it prints \"Your secure environment is equipped\nwith: …\", \"A training run is allocated up to: …\", and a hint to run\n`tb resources set` — all indexed in zz-all-strings.golden. `tb resources set` is\na guided walkthrough (prompts stream during the flow; also in the backstop).",
+		nil,
+		[]run{
+			{"tracebloc resources --help", help("resources")},
+			{"tracebloc resources set --help", help("resources", "set")},
+		},
+	)
+
+	// ── 05 doctor ────────────────────────────────────────────────────────────────
+	// doctorRollup mirrors runDoctor's rollup tail (doctor.go ~197-224) using the
+	// REAL summarizeDoctor + renderHealth + doctorVerdict, so this copy is
+	// drift-caught. Only launcher-free rollups are rendered here — the failure
+	// lines ("Not connected — …", "Not ready — …") and their remedies embed the
+	// launcher name (tb vs tracebloc, install-dependent) and so are catalogued in
+	// zz-all-strings.golden instead.
+	doctorRollup := func(p *ui.Printer, email, envName string, results []doctor.Result, tok tokenState) {
+		p.Para("Signed in as " + email)
+		p.Para(fmt.Sprintf("Secure environment %q", envName))
+		connected, ready := summarizeDoctor(results, tok)
+		p.Newline()
+		renderHealth(p, connected)
+		renderHealth(p, ready)
+		p.Newline()
+		fail, allGood := doctorVerdict(connected.status, ready.status)
+		switch {
+		case fail:
+			p.Hintf("Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())
+		case allGood:
+			p.Successf("Everything looks good — you're ready to run training.")
+		default:
+			p.Infof("No problems found, but some checks couldn't finish — re-run with --verbose for detail.")
+		}
+	}
+	// Connected + readiness unknown: Pod health warns with a list failure, which
+	// summarizeDoctor maps to an honest "couldn't check your workloads".
+	cantCheck := []doctor.Result{{Name: "Pod health", Status: doctor.StatusWarn, Detail: "could not list pods: forbidden"}}
+	doctorFile := doc(
+		"tb doctor — is my secure environment healthy?",
+		"What you see when you run `tb doctor`. The two rollup lines (Connected, Ready)\nplus a verdict are shown below for the healthy and the can't-fully-check cases.\nThe failure variants (Not connected — …, Not ready — …) and their remedies vary\nwith the reachability classification and embed the launcher name, so the full set\nis indexed in zz-all-strings.golden. --verbose adds a Kubernetes breakdown\n(context/server/namespace + each granular check); those strings are in the\nbackstop too.",
+		[]run{
+			{"tb doctor   # healthy", rndr(func(p *ui.Printer) { doctorRollup(p, "lukas@tracebloc.io", "hello-world", nil, tokenOK) })},
+			{"tb doctor   # connected, but a check couldn't complete (e.g. RBAC)", rndr(func(p *ui.Printer) { doctorRollup(p, "lukas@tracebloc.io", "hello-world", cantCheck, tokenOK) })},
+		},
+		[]run{
+			{"tracebloc doctor --help", help("doctor")},
+			{"tracebloc cluster doctor --help", help("cluster", "doctor")},
+		},
+	)
+
+	// ── 06 delete (offboard this machine) ─────────────────────────────────────────
+	deleteFile := doc(
+		"tb delete — remove tracebloc from this machine",
+		"What you see when you run `tb delete`. The pre-flight summary (below) is shown\nbefore you confirm, for both keep-data and remove-data. The confirmation prompt\nand the teardown progress stream during the flow — those strings are in\nzz-all-strings.golden.",
+		[]run{
+			{"tb delete   # summary · keep my data", rndr(func(p *ui.Printer) { renderOffboardSummary(p, "lukas-macbook", true) })},
+			{"tb delete --remove-data   # summary · remove my data too", rndr(func(p *ui.Printer) { renderOffboardSummary(p, "lukas-macbook", false) })},
+		},
+		[]run{{"tracebloc delete --help", help("delete")}},
+	)
+
+	// ── 07 login / logout / auth ──────────────────────────────────────────────────
+	loginFile := doc(
+		"tb login / logout — sign in and out",
+		"What you see when you run `tb login`. Sign-in is a device flow: the CLI prints an\n\"Open <url>\" line and an \"Enter <code>\" line, waits, then confirms — that copy\nstreams during the flow (not a stable screen), so it's in zz-all-strings.golden.\n`tb auth status` reports who you're signed in as.",
+		nil,
+		[]run{
+			{"tracebloc login --help", help("login")},
+			{"tracebloc logout --help", help("logout")},
+			{"tracebloc auth status --help", help("auth", "status")},
+		},
+	)
+
+	// ── 08 client ──────────────────────────────────────────────────────────────────
+	clientFile := doc(
+		"tb client — register / list / inspect environments",
+		"What you see under `tb client`. `tb client create` shows a review (below) before\nit registers a new secure environment. `tb client list` / `tb client status` read\nlive backend state, so they aren't stable screens — their strings are in\nzz-all-strings.golden.",
+		[]run{
+			{"tb client create   # review, before you confirm", rndr(func(p *ui.Printer) { renderClientReview(p, "lukas-macbook", "lukas-macbook", "DE", "a1b2c3d4") })},
+		},
+		[]run{
+			{"tracebloc client --help", help("client")},
+			{"tracebloc client create --help", help("client", "create")},
+			{"tracebloc client list --help", help("client", "list")},
+			{"tracebloc client status --help", help("client", "status")},
+		},
+	)
+
+	// ── 09 cluster ───────────────────────────────────────────────────────────────
+	clusterFile := doc(
+		"tb cluster — low-level cluster info",
+		"What you see under `tb cluster`. `tb cluster info` reads live cluster state, so\nit isn't a stable screen; its strings are in zz-all-strings.golden. (`tb cluster\ndoctor` is the same health check as `tb doctor` — see 05-doctor.)",
+		nil,
+		[]run{
+			{"tracebloc cluster --help", help("cluster")},
+			{"tracebloc cluster info --help", help("cluster", "info")},
+		},
+	)
+
+	// ── 10 version ───────────────────────────────────────────────────────────────
+	versionFile := doc(
+		"tb version — print the CLI version",
+		"What you see when you run `tb version`. It prints one line:\n\n    tracebloc <version> (<git-sha>, built <date>, <go-version> on <os>/<arch>)\n\nThe go-version and os/arch are filled in at runtime, so the exact line varies by\nmachine (that's why it isn't pinned byte-exact here). `--output-json` emits the\nsame fields as indented JSON. Only the --help is byte-exact below.",
+		nil,
+		[]run{{"tracebloc version --help", help("version")}},
 	)
 
 	files := map[string]string{
-		"00-home.golden":      homeFile,
-		"02-data-list.golden": dataListFile,
-		"zz-all-strings.golden": "every user-facing string in the source (AST-harvested — all arguments, both\n" +
-			`"…" and ` + "`…`" + " raw strings). The completeness backstop: catches error paths and\nthe multi-step flows (ingest steps, login, progress) not shown as a screen.\n" +
-			"%s/%d are runtime placeholders.\n\n" + strings.Join(quoteAll(harvestMessages(t)), "\n") + "\n",
+		"00-home.golden":        homeFile,
+		"01-data-ingest.golden": dataIngestFile,
+		"02-data-list.golden":   dataListFile,
+		"03-data-delete.golden": dataDeleteFile,
+		"04-resources.golden":   resourcesFile,
+		"05-doctor.golden":      doctorFile,
+		"06-delete.golden":      deleteFile,
+		"07-login.golden":       loginFile,
+		"08-client.golden":      clientFile,
+		"09-cluster.golden":     clusterFile,
+		"10-version.golden":     versionFile,
+		"zz-all-strings.golden": "every user-facing string in the source (AST-harvested — all arguments to the\n" +
+			"Printer methods + errors.New/fmt.Errorf/fmt.Sprintf, plus the text/remedy\n" +
+			"fields of healthLine{} and doctor.Result{} literals, both \"…\" and `…` raw\n" +
+			"strings). The completeness backstop: catches the failure remedies and the\n" +
+			"multi-step flows (ingest steps, login, progress, confirmations) not shown as a\n" +
+			"screen. %s/%d are runtime placeholders.\n\n" + strings.Join(quoteAll(harvestMessages(t)), "\n") + "\n",
 	}
 
 	update := os.Getenv("TB_UPDATE_GOLDEN") != ""
@@ -163,9 +320,12 @@ func quoteAll(in []string) []string {
 }
 
 // harvestMessages parses the user-facing packages and returns every string
-// literal passed to a Printer method or an error constructor — ALL arguments
-// (Step labels, MenuRow descriptions, Field values included), both "…" and `…`
-// raw strings. Deduped + sorted.
+// literal that reaches a user: ALL arguments to a Printer method or an error /
+// format constructor (errors.New, fmt.Errorf, fmt.Sprintf), PLUS the string
+// fields of healthLine{} and doctor.Result{} composite literals — those carry
+// user-facing text (the doctor rollup lines, check details + remedies) that is
+// never passed to a Printer call, so an arguments-only harvest would miss it.
+// Both "…" and `…` raw strings; deduped + sorted.
 func harvestMessages(t *testing.T) []string {
 	t.Helper()
 	methods := map[string]bool{
@@ -183,11 +343,43 @@ func harvestMessages(t *testing.T) []string {
 			return true
 		}
 		if x, ok := sel.X.(*ast.Ident); ok {
-			return (x.Name == "errors" && sel.Sel.Name == "New") || (x.Name == "fmt" && sel.Sel.Name == "Errorf")
+			return (x.Name == "errors" && sel.Sel.Name == "New") ||
+				(x.Name == "fmt" && (sel.Sel.Name == "Errorf" || sel.Sel.Name == "Sprintf"))
 		}
 		return false
 	}
+	// healthLine{} (this package) and doctor.Result{} (this package as
+	// doctor.Result, the doctor package as a bare Result) hold user-facing text
+	// in struct fields, not call arguments.
+	isCopyStruct := func(t ast.Expr) bool {
+		switch tt := t.(type) {
+		case *ast.Ident:
+			return tt.Name == "healthLine" || tt.Name == "Result"
+		case *ast.SelectorExpr:
+			return tt.Sel.Name == "Result"
+		}
+		return false
+	}
+
 	seen := map[string]struct{}{}
+	collect := func(exprs []ast.Expr) {
+		for _, arg := range exprs {
+			lit, ok := arg.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				continue
+			}
+			s, uerr := strconv.Unquote(lit.Value)
+			if uerr != nil {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			// Skip empties and format-only fragments (e.g. "%s", " ") — no words.
+			if len([]rune(s)) < 4 || !strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyz") {
+				continue
+			}
+			seen[s] = struct{}{}
+		}
+	}
 	fset := token.NewFileSet()
 	for _, dir := range []string{".", "../submit", "../push", "../doctor", "../cluster"} {
 		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
@@ -199,24 +391,21 @@ func harvestMessages(t *testing.T) []string {
 				return nil
 			}
 			ast.Inspect(f, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok || !isCopyCall(call) {
-					return true
-				}
-				for _, arg := range call.Args {
-					lit, ok := arg.(*ast.BasicLit)
-					if !ok || lit.Kind != token.STRING {
-						continue
+				switch node := n.(type) {
+				case *ast.CallExpr:
+					if isCopyCall(node) {
+						collect(node.Args)
 					}
-					s, uerr := strconv.Unquote(lit.Value)
-					if uerr != nil {
-						continue
+				case *ast.CompositeLit:
+					if isCopyStruct(node.Type) {
+						for _, el := range node.Elts {
+							if kv, ok := el.(*ast.KeyValueExpr); ok {
+								collect([]ast.Expr{kv.Value})
+							} else {
+								collect([]ast.Expr{el})
+							}
+						}
 					}
-					s = strings.TrimSpace(s)
-					if len([]rune(s)) < 4 || !strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyz") {
-						continue
-					}
-					seen[s] = struct{}{}
 				}
 				return true
 			})

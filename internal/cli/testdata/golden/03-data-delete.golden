@@ -1,0 +1,50 @@
+tb data delete — delete a dataset
+=================================
+What you see when you run `tb data delete <dataset>`. The command confirms before
+it deletes; the confirmation prompt, the progress, and the success/failure lines
+stream during the flow (not a stable screen) — they're all in zz-all-strings.golden.
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc data delete --help
+Removes the in-cluster artifacts a previous `data ingest` created
+for a table: the MySQL table in training_test_datasets and the dataset's
+directories on the shared PVC. Destructive and not undoable.
+
+The dataset's catalog metadata on the tracebloc backend is never removed — it
+is kept as a record on tracebloc, marked unavailable, so a collaborator's run
+that referenced it still has its history.
+
+Exit codes:
+  0  artifacts removed (or --dry-run, or the user declined)
+  2  invalid table name
+  3  kubeconfig error, or refused (no confirmation off a terminal)
+  4  cluster reachable but no tracebloc client / shared storage missing,
+     or the client's dataset list couldn't be read (can't confirm the target)
+  5  no dataset by that name on this client (nothing to delete)
+  7  teardown failed mid-flight (table drop or PVC rm errored)
+
+With --output-json, stdout carries exactly one JSON result object per run
+(human output goes to stderr) and the exit codes above are unchanged; see
+docs/json-output.md for the shape and the stability promise.
+
+Usage:
+  tracebloc data delete <table> [flags]
+
+Aliases:
+  delete, rm
+
+Flags:
+      --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
+      --dry-run             show what would be deleted without deleting anything
+  -h, --help                help for delete
+      --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    namespace where your tracebloc client is installed
+      --output-json         emit the delete result as JSON on stdout (human output → stderr; never prompts — pass --yes to delete, or --dry-run)
+  -y, --yes                 skip the confirmation prompt (required when not on a terminal)
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
