@@ -12,7 +12,11 @@ import (
 // step. Like `tracebloc upgrade`, this deliberately delegates to the verified
 // installer (cosign-checked) instead of re-implementing any privileged host prep
 // in the CLI — the privileged surface stays in one audited place.
-const prepareHostInstallerCmd = "curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+// `set -o pipefail` is essential: without it, if curl fails (network/DNS/HTTP
+// error) the downstream `bash -s` still gets empty stdin and exits 0, so the
+// whole pipeline — and c.Run() — succeeds while prepare-host never ran (Bugbot
+// #394). With pipefail, curl's non-zero propagates and we surface the failure.
+const prepareHostInstallerCmd = "set -o pipefail; curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
 
 // newPrepareHostCmd builds `tracebloc prepare-host` — the one-time administrator
 // step that readies a machine so a non-admin user can then install tracebloc
