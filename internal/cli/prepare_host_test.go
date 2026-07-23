@@ -81,11 +81,36 @@ func TestPrepareHostInterrupted(t *testing.T) {
 
 func TestPrepareHostCmdMetadata(t *testing.T) {
 	c := newPrepareHostCmd()
-	if c.Use != "prepare-host" {
-		t.Errorf("Use = %q, want prepare-host", c.Use)
+	if !strings.HasPrefix(c.Use, "prepare-host") {
+		t.Errorf("Use = %q, want it to start with prepare-host", c.Use)
 	}
-	// NoArgs: prepare-host takes no positional arguments.
-	if err := c.Args(c, []string{"unexpected"}); err == nil {
-		t.Error("prepare-host should reject positional arguments (cobra.NoArgs)")
+	// MaximumNArgs(1): the optional researcher username. Zero or one arg is fine;
+	// two is rejected (Bugbot / Divya #377: name the researcher to grant access).
+	if err := c.Args(c, []string{}); err != nil {
+		t.Errorf("prepare-host must accept zero args: %v", err)
+	}
+	if err := c.Args(c, []string{"alice"}); err != nil {
+		t.Errorf("prepare-host must accept one username arg: %v", err)
+	}
+	if err := c.Args(c, []string{"alice", "bob"}); err == nil {
+		t.Error("prepare-host should reject more than one positional argument")
+	}
+}
+
+// The researcher username is passed to the installer as TB_PREPARE_USER, so it
+// must be validated: accept real Linux usernames, reject shell-metacharacter /
+// empty / overlong input (Divya #377).
+func TestPrepareHostUserValidation(t *testing.T) {
+	valid := []string{"alice", "bob123", "a.b_c-d", "R2D2", "svc_account"}
+	for _, u := range valid {
+		if !prepareHostUserRe.MatchString(u) {
+			t.Errorf("username %q should be valid", u)
+		}
+	}
+	invalid := []string{"", "-leading", ".dot", "has space", "semi;colon", "a/b", "$(whoami)", "a`b`", "toolong_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	for _, u := range invalid {
+		if prepareHostUserRe.MatchString(u) {
+			t.Errorf("username %q should be rejected", u)
+		}
 	}
 }

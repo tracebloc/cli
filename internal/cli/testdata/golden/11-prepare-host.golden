@@ -15,15 +15,24 @@ Prepares a host that a non-admin user can't install on directly.
 
 Run this ONCE, as an administrator, on a machine where the person who will use
 tracebloc has no root or sudo — a shared server, an HPC login node. It installs
-the container runtime and its prerequisites and grants that user access to it;
-afterwards they install tracebloc with no administrator rights at all.
+the container runtime and its prerequisites.
+
+Pass that person's username to also grant them container-runtime (docker-group)
+access, so they can then install tracebloc at Tier 0 with no administrator
+rights at all:
+
+    sudo tracebloc prepare-host alice
+
+Without a username it installs only the runtime + prerequisites and tells you
+how to grant a user access afterwards. NOTE: the username is the RESEARCHER who
+will use tracebloc — not you, the admin running this.
 
 It re-runs the official installer's prepare-host step (verified with cosign). It
 does NOT create your secure environment or sign you in — it only prepares the
 host, so it's safe to run on a shared machine. Safe to re-run.
 
 Usage:
-  tracebloc prepare-host [flags]
+  tracebloc prepare-host [researcher-username] [flags]
 
 Flags:
   -h, --help   help for prepare-host

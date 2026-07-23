@@ -6,10 +6,17 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// prepareHostUserRe validates the researcher username before we pass it to the
+// installer as TB_PREPARE_USER. Conservative Linux-username shape: starts
+// alphanumeric, then letters/digits/._- (usermod quotes it, but reject nonsense
+// early with a clear error rather than a confusing failure deep in the installer).
+var prepareHostUserRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$`)
 
 // prepareHostInstallerCmd runs the official installer's admin-only prepare-host
 // step. Like `tracebloc upgrade`, this deliberately delegates to the verified
@@ -83,27 +90,48 @@ func prepareHostInterrupted(ctx context.Context, runErr error) bool {
 // with no root at all.
 func newPrepareHostCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "prepare-host",
+		Use:   "prepare-host [researcher-username]",
 		Short: "Prepare this machine so a non-admin user can install tracebloc (run once, as an administrator)",
 		Long: `Prepares a host that a non-admin user can't install on directly.
 
 Run this ONCE, as an administrator, on a machine where the person who will use
 tracebloc has no root or sudo — a shared server, an HPC login node. It installs
-the container runtime and its prerequisites and grants that user access to it;
-afterwards they install tracebloc with no administrator rights at all.
+the container runtime and its prerequisites.
+
+Pass that person's username to also grant them container-runtime (docker-group)
+access, so they can then install tracebloc at Tier 0 with no administrator
+rights at all:
+
+    sudo tracebloc prepare-host alice
+
+Without a username it installs only the runtime + prerequisites and tells you
+how to grant a user access afterwards. NOTE: the username is the RESEARCHER who
+will use tracebloc — not you, the admin running this.
 
 It re-runs the official installer's prepare-host step (verified with cosign). It
 does NOT create your secure environment or sign you in — it only prepares the
 host, so it's safe to run on a shared machine. Safe to re-run.`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
 			p := printerFor(cmd)
-			p.Newline()
-			p.Para("Preparing this host — re-running the installer's prepare-host step (installs the container runtime and prerequisites; needs administrator rights once).")
 			p.Newline()
 			ctx := cmd.Context()
 			c := prepareHostCmd(ctx)
 			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+			if len(args) == 1 {
+				user := args[0]
+				if !prepareHostUserRe.MatchString(user) {
+					return &exitError{code: exitBadInput, err: fmt.Errorf("invalid username %q — expected a Linux username (letters, digits, '.', '_', '-')", user)}
+				}
+				// The installer reads TB_PREPARE_USER to pick who gets docker-group
+				// access. Pass it through the environment (not the command string), so
+				// it can't be shell-interpreted; the installer quotes it for usermod.
+				c.Env = append(os.Environ(), "TB_PREPARE_USER="+user)
+				p.Para(fmt.Sprintf("Preparing this host and granting %s container-runtime access — re-running the installer's prepare-host step (needs administrator rights once).", user))
+			} else {
+				p.Para("Preparing this host — re-running the installer's prepare-host step (installs the container runtime and prerequisites; needs administrator rights once). Pass a researcher's username to also grant them access: tracebloc prepare-host <username>")
+			}
+			p.Newline()
 			if err := c.Run(); err != nil {
 				// User aborted (Ctrl-C) or the parent context was cancelled: exit
 				// quietly with 130 like the other cancellable paths, not a scary
