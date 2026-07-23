@@ -401,10 +401,6 @@ if ! mkdir -p "$PREFIX" 2>/dev/null || [ ! -w "$PREFIX" ]; then
     if [ "$home_bin_on_path" = yes ] && [ -d "$home_bin" ] && [ -w "$home_bin" ]; then
         echo "Note: $PREFIX isn't writable; installing to $home_bin (already on your PATH)."
         PREFIX="$home_bin"
-        # We chose this dir BECAUSE it's already on $PATH (the user configured it),
-        # so the binary is usable now and in their shells — the persist step below
-        # must NOT rewrite their rc or tell them to open a new terminal (B2 #392).
-        PREFIX_PRESELECTED_ON_PATH=1
     else
         FALLBACK="$HOME/.local/bin"
         echo "Note: $PREFIX isn't writable (couldn't mkdir or no -w); falling back to $FALLBACK"
@@ -457,18 +453,18 @@ echo ""
 # misclassify "/home/u/.local/bin" via a "/home/u//*" pattern it won't match.)
 home_dir="${HOME%/}"
 persist=no
-if [ "${PREFIX_PRESELECTED_ON_PATH:-0}" = "1" ]; then
-    # Chose ~/bin precisely because it's ALREADY on the user's $PATH — usable now
-    # and in their shells, so skip the rc edit + the "open a new terminal" nudge
-    # entirely (RFC 0001 B2 / Bugbot #392). Same no-message outcome as an on-PATH
-    # /usr/local/bin.
-    persist=no
-else
-    case "$PREFIX" in
-        "$home_dir"/*) persist=yes ;;
-        *) case ":$PATH:" in *":$PREFIX:"*) ;; *) persist=yes ;; esac ;;
-    esac
-fi
+case "$PREFIX" in
+    "$home_dir"/*) persist=yes ;;
+    *) case ":$PATH:" in *":$PREFIX:"*) ;; *) persist=yes ;; esac ;;
+esac
+
+# Is $PREFIX on the CURRENT shell's PATH? If so the binary is usable right now
+# (this covers the ~/bin-already-on-PATH case). We still persist a $HOME prefix
+# to the rc (a current-$PATH hit may be session-only — a one-off export, direnv —
+# that new terminals won't have; Bugbot #392 r2), but the message must say
+# "ready now" instead of nagging "open a new terminal" for a dir that IS on PATH.
+on_path=no
+case ":$PATH:" in *":$PREFIX:"*) on_path=yes ;; esac
 
 if [ "$persist" = "yes" ]; then
     shell_name="$(basename "${SHELL:-sh}")"
@@ -515,12 +511,23 @@ if [ "$persist" = "yes" ]; then
     echo ""
     case "$state" in
         added)
-            echo "Added $PREFIX to your PATH in $rc."
-            echo "Open a new terminal — or load it now:  . \"$rc\""
+            if [ "$on_path" = yes ]; then
+                # Usable in THIS shell already; the rc line is just so new
+                # terminals find it too (covers a session-only $PATH hit).
+                echo "tracebloc is ready to use now."
+                echo "Also added $PREFIX to $rc so new terminals find it too."
+            else
+                echo "Added $PREFIX to your PATH in $rc."
+                echo "Open a new terminal — or load it now:  . \"$rc\""
+            fi
             ;;
         present)
-            echo "$PREFIX is already in your PATH config ($rc) — nothing to add."
-            echo "If a new terminal can't find it yet, open one — or load it now:  . \"$rc\""
+            if [ "$on_path" = yes ]; then
+                echo "tracebloc is ready to use now ($PREFIX is on your PATH)."
+            else
+                echo "$PREFIX is already in your PATH config ($rc) — nothing to add."
+                echo "If a new terminal can't find it yet, open one — or load it now:  . \"$rc\""
+            fi
             ;;
         *)
             echo "Note: the installer couldn't update your shell config ($rc)."
