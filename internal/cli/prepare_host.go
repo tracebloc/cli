@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
 
 	"github.com/spf13/cobra"
 )
@@ -38,24 +37,19 @@ bash "$tmp" prepare-host`
 // terminal for any interactive prompt.
 const prepareHostManualHint = "bash <(curl -fsSL https://tracebloc.io/i.sh) prepare-host"
 
-// prepareHostCmd builds the exec.Cmd that runs the installer. It puts the whole
-// job in its own process group (Setpgid) and, on context cancel (Ctrl-C / parent
-// shutdown), signals the WHOLE group rather than just the top-level `bash`
-// (Bugbot #394). Without this, cancelling the CLI killed only the immediate
-// `bash -c`, leaving the `curl` and the `bash "$tmp"` prepare-host child — which
-// does privileged host prep — running detached after the CLI had already
-// reported failure and exited. Group-signalling stops the privileged work when
-// the user aborts.
+// prepareHostCmd builds the exec.Cmd that runs the installer. On Unix,
+// configureProcessGroup puts the whole job in its own process group and, on
+// context cancel (Ctrl-C / parent shutdown), signals the WHOLE group rather than
+// just the top-level `bash` (Bugbot #394) — otherwise cancelling the CLI killed
+// only the immediate `bash -c`, leaving the `curl` and the `bash "$tmp"`
+// prepare-host child (which does privileged host prep) running detached. The
+// process-group primitives (syscall.Setpgid / syscall.Kill) are POSIX-only, so
+// that logic lives in prepare_host_unix.go; on Windows configureProcessGroup is
+// a no-op (exec.CommandContext still kills the top-level process on cancel, and
+// prepare-host is a Linux host operation regardless).
 func prepareHostCmd(ctx context.Context) *exec.Cmd {
 	c := exec.CommandContext(ctx, "bash", "-c", prepareHostInstallerCmd)
-	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	c.Cancel = func() error {
-		if c.Process == nil {
-			return nil
-		}
-		// Negative PID → signal the entire process group we created above.
-		return syscall.Kill(-c.Process.Pid, syscall.SIGINT)
-	}
+	configureProcessGroup(c)
 	return c
 }
 
