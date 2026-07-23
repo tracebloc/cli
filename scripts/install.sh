@@ -401,6 +401,10 @@ if ! mkdir -p "$PREFIX" 2>/dev/null || [ ! -w "$PREFIX" ]; then
     if [ "$home_bin_on_path" = yes ] && [ -d "$home_bin" ] && [ -w "$home_bin" ]; then
         echo "Note: $PREFIX isn't writable; installing to $home_bin (already on your PATH)."
         PREFIX="$home_bin"
+        # We chose this dir BECAUSE it's already on $PATH (the user configured it),
+        # so the binary is usable now and in their shells — the persist step below
+        # must NOT rewrite their rc or tell them to open a new terminal (B2 #392).
+        PREFIX_PRESELECTED_ON_PATH=1
     else
         FALLBACK="$HOME/.local/bin"
         echo "Note: $PREFIX isn't writable (couldn't mkdir or no -w); falling back to $FALLBACK"
@@ -453,10 +457,18 @@ echo ""
 # misclassify "/home/u/.local/bin" via a "/home/u//*" pattern it won't match.)
 home_dir="${HOME%/}"
 persist=no
-case "$PREFIX" in
-    "$home_dir"/*) persist=yes ;;
-    *) case ":$PATH:" in *":$PREFIX:"*) ;; *) persist=yes ;; esac ;;
-esac
+if [ "${PREFIX_PRESELECTED_ON_PATH:-0}" = "1" ]; then
+    # Chose ~/bin precisely because it's ALREADY on the user's $PATH — usable now
+    # and in their shells, so skip the rc edit + the "open a new terminal" nudge
+    # entirely (RFC 0001 B2 / Bugbot #392). Same no-message outcome as an on-PATH
+    # /usr/local/bin.
+    persist=no
+else
+    case "$PREFIX" in
+        "$home_dir"/*) persist=yes ;;
+        *) case ":$PATH:" in *":$PREFIX:"*) ;; *) persist=yes ;; esac ;;
+    esac
+fi
 
 if [ "$persist" = "yes" ]; then
     shell_name="$(basename "${SHELL:-sh}")"
