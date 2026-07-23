@@ -111,6 +111,36 @@ func TestLatestReleaseVersion_StaleCacheFetchesAndRewrites(t *testing.T) {
 	}
 }
 
+// A failed fetch must fall back to the stale cache AND re-stamp CheckedAt, so
+// the once-per-interval throttle holds while offline — otherwise the cache stays
+// expired and every command re-hits the network and eats the timeout.
+func TestLatestReleaseVersion_FailedFetchRefreshesThrottle(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	swapURL(t, bad.URL)
+
+	// Stale cache (older than the interval) forces a fetch, which fails.
+	stale := time.Now().Add(-48 * time.Hour)
+	if err := writeUpdateCache(updateCachePath(), updateCache{CheckedAt: stale, Latest: "0.9.9"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := latestReleaseVersion(); got != "0.9.9" {
+		t.Errorf("latestReleaseVersion = %q, want 0.9.9 (stale fallback)", got)
+	}
+	// CheckedAt must now be fresh so the next call is served from cache without
+	// re-hitting the network.
+	c, ok := readUpdateCache(updateCachePath())
+	if !ok || c.Latest != "0.9.9" {
+		t.Fatalf("cache after failed fetch = %+v ok=%v, want Latest 0.9.9", c, ok)
+	}
+	if time.Since(c.CheckedAt) > time.Minute {
+		t.Errorf("CheckedAt not refreshed on failed fetch: %v", c.CheckedAt)
+	}
+}
+
 func TestUpdateChecksAllowed_SkipConditions(t *testing.T) {
 	var buf bytes.Buffer // non-*os.File → never a terminal
 	t.Setenv("CI", "")

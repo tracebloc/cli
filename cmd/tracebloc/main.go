@@ -59,17 +59,22 @@ func main() {
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	err := cli.NewRootCmd(cli.BuildInfo{
+	executed, err := cli.NewRootCmd(cli.BuildInfo{
 		Version:   version,
 		GitSHA:    gitSHA,
 		BuildDate: buildDate,
-	}).ExecuteContext(ctx)
+	}).ExecuteContextC(ctx)
 
 	// F1: after the command runs, a quiet once-a-day nudge if a newer release
 	// exists (best-effort; silent on dev builds, off a terminal, in CI, or with
 	// TRACEBLOC_NO_UPDATE_CHECK). Printed before the error handling so on success
 	// it's the last line, and on failure the error stays the most prominent one.
-	cli.MaybeNotifyUpdate(version, os.Stderr)
+	// Skipped right after `tracebloc upgrade`: that command swaps this very
+	// binary, so the still-running old process would otherwise nudge about the
+	// release it just installed.
+	if !cli.SkipUpdateNudge(executed) {
+		cli.MaybeNotifyUpdate(version, os.Stderr)
+	}
 
 	if err == nil {
 		return

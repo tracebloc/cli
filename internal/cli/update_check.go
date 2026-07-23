@@ -83,7 +83,12 @@ func latestReleaseVersion() string {
 	latest, err := fetchLatestRelease(latestReleaseURL, updateCheckTimeout)
 	if err != nil {
 		if c, ok := readUpdateCache(path); ok {
-			return c.Latest // stale, but better than nothing and won't re-hit until interval
+			// Stale, but better than nothing. Re-stamp CheckedAt to now so the
+			// once-per-interval throttle actually holds — otherwise the cache
+			// stays expired and every command re-hits the network (and eats the
+			// full updateCheckTimeout) while offline or rate-limited.
+			_ = writeUpdateCache(path, updateCache{CheckedAt: time.Now(), Latest: c.Latest})
+			return c.Latest
 		}
 		return ""
 	}
