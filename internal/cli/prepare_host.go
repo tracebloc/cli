@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -37,19 +38,24 @@ bash "$tmp" prepare-host`
 // terminal for any interactive prompt.
 const prepareHostManualHint = "bash <(curl -fsSL https://tracebloc.io/i.sh) prepare-host"
 
-// prepareHostCmd builds the exec.Cmd that runs the installer. On Unix,
-// configureProcessGroup puts the whole job in its own process group and, on
-// context cancel (Ctrl-C / parent shutdown), signals the WHOLE group rather than
-// just the top-level `bash` (Bugbot #394) — otherwise cancelling the CLI killed
-// only the immediate `bash -c`, leaving the `curl` and the `bash "$tmp"`
-// prepare-host child (which does privileged host prep) running detached. The
-// process-group primitives (syscall.Setpgid / syscall.Kill) are POSIX-only, so
-// that logic lives in prepare_host_unix.go; on Windows configureProcessGroup is
-// a no-op (exec.CommandContext still kills the top-level process on cancel, and
-// prepare-host is a Linux host operation regardless).
+// prepareHostCmd builds the exec.Cmd that runs the installer.
+//
+// It deliberately does NOT put the installer in its own process group. The
+// installer is interactive (prepare-host may prompt, e.g. which non-admin user
+// gets runtime access), and stdin is the TTY — a child in a *background* process
+// group that reads the terminal gets SIGTTIN and hangs (Bugbot #394). Staying in
+// the CLI's foreground group means prompts work AND a terminal Ctrl-C delivers
+// SIGINT to the whole pipeline (the `bash -c`, the `curl`, and the `bash "$tmp"`
+// prepare-host child) in one go — no orphaned privileged work.
+//
+// WaitDelay bounds teardown on a *programmatic* cancel (parent shutdown / a
+// SIGTERM to the CLI alone): CommandContext SIGKILLs the process and, after the
+// delay, force-closes the I/O pipes so Wait can't block forever behind a child
+// that traps signals. We rely on the default SIGKILL rather than a custom
+// SIGINT-only Cancel (which a privileged child could ignore, hanging Wait).
 func prepareHostCmd(ctx context.Context) *exec.Cmd {
 	c := exec.CommandContext(ctx, "bash", "-c", prepareHostInstallerCmd)
-	configureProcessGroup(c)
+	c.WaitDelay = 5 * time.Second
 	return c
 }
 
@@ -76,9 +82,16 @@ host, so it's safe to run on a shared machine. Safe to re-run.`,
 			p.Newline()
 			p.Para("Preparing this host — re-running the installer's prepare-host step (installs the container runtime and prerequisites; needs administrator rights once).")
 			p.Newline()
-			c := prepareHostCmd(cmd.Context())
+			ctx := cmd.Context()
+			c := prepareHostCmd(ctx)
 			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 			if err := c.Run(); err != nil {
+				// User aborted (Ctrl-C) or the parent context was cancelled: exit
+				// quietly with 130 like the other cancellable paths, not a scary
+				// "prepare-host didn't complete — retry" (Bugbot #394).
+				if ctx.Err() != nil {
+					return &exitError{code: exitInterrupted}
+				}
 				return &exitError{code: exitFailure, err: fmt.Errorf("prepare-host didn't complete (%w). You can run the installer directly:\n    %s", err, prepareHostManualHint)}
 			}
 			return nil

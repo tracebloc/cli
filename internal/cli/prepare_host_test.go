@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,22 @@ func TestPrepareHostCmdFailsClosedOnDownloadError(t *testing.T) {
 func TestPrepareHostCmdDoesNotPipeIntoBash(t *testing.T) {
 	if strings.Contains(prepareHostInstallerCmd, "| bash") || strings.Contains(prepareHostInstallerCmd, "|bash") {
 		t.Errorf("prepareHostInstallerCmd must not pipe the script into bash (steals the installer's stdin); got: %q", prepareHostInstallerCmd)
+	}
+}
+
+// The installer must run in the CLI's foreground process group (NOT its own):
+// it's interactive and stdin is the TTY, so a backgrounded group would get
+// SIGTTIN and hang on any prompt. And WaitDelay must be positive so a child that
+// traps signals can't hang Wait forever after a programmatic cancel (Bugbot
+// #394). SysProcAttr==nil is portable (the field is *syscall.SysProcAttr on
+// every OS), so this stays a single cross-platform test.
+func TestPrepareHostCmdStaysInForegroundGroup(t *testing.T) {
+	c := prepareHostCmd(context.Background())
+	if c.SysProcAttr != nil {
+		t.Error("prepareHostCmd must not set SysProcAttr — a separate/background process group breaks interactive TTY prompts (SIGTTIN)")
+	}
+	if c.WaitDelay <= 0 {
+		t.Error("prepareHostCmd must set a positive WaitDelay so Wait can't hang forever after a cancel")
 	}
 }
 
