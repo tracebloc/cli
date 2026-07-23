@@ -398,7 +398,11 @@ if ! mkdir -p "$PREFIX" 2>/dev/null || [ ! -w "$PREFIX" ]; then
     home_bin="${HOME%/}/bin"
     home_bin_on_path=no
     case ":$PATH:" in *":$home_bin:"*) home_bin_on_path=yes ;; esac
-    if [ "$home_bin_on_path" = yes ] && [ -d "$home_bin" ] && [ -w "$home_bin" ]; then
+    # Guard HOME="" or "/": "${HOME%/}/bin" collapses to "/bin", so a root process
+    # (HOME=/) with /bin writable + on PATH would drop the CLI into /bin. Require a
+    # real, non-root $HOME before preferring ~/bin (Bugbot #392 r3).
+    if [ -n "${HOME:-}" ] && [ "$HOME" != "/" ] \
+       && [ "$home_bin_on_path" = yes ] && [ -d "$home_bin" ] && [ -w "$home_bin" ]; then
         echo "Note: $PREFIX isn't writable; installing to $home_bin (already on your PATH)."
         PREFIX="$home_bin"
     else
@@ -530,6 +534,9 @@ if [ "$persist" = "yes" ]; then
             fi
             ;;
         *)
+            # Usable in THIS shell already ($PREFIX on PATH) — say so even though
+            # we couldn't persist it for new terminals (Bugbot #392 r3).
+            [ "$on_path" = yes ] && echo "tracebloc is ready to use now ($PREFIX is on your PATH)."
             echo "Note: the installer couldn't update your shell config ($rc)."
             echo "Add this line to it (or your shell's startup file), then open a new terminal:"
             echo "  $path_line"
