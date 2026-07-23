@@ -358,6 +358,13 @@ func TestCopyCatalog(t *testing.T) {
 		[]run{{"tracebloc version --help", help("version")}},
 	)
 
+	upgradeFile := doc(
+		"tb upgrade — update to the latest release",
+		"What you see when you run `tb upgrade`. On Linux/macOS it re-runs the\nofficial installer (signature-verified) to update the CLI and your secure\nenvironment together, so they never drift apart. On Windows a running .exe is\nlocked and install.ps1 is CLI-only, so it prints the command to run in a fresh\nshell instead. The update-check nudge and the \"CLI too old\" (426) message both\npoint here. The installer's own live output streams during the run (not a stable\nscreen); its copy is in the client repo's installer catalog.",
+		nil,
+		[]run{{"tracebloc upgrade --help", help("upgrade")}},
+	)
+
 	files := map[string]string{
 		"00-home.golden":        homeFile,
 		"01-data-ingest.golden": dataIngestFile,
@@ -370,6 +377,7 @@ func TestCopyCatalog(t *testing.T) {
 		"08-client.golden":      clientFile,
 		"09-cluster.golden":     clusterFile,
 		"10-version.golden":     versionFile,
+		"11-upgrade.golden":     upgradeFile,
 		"zz-all-strings.golden": "every user-facing string in the source (AST-harvested — all arguments to the\n" +
 			"Printer methods + errors.New/fmt.Errorf/fmt.Sprintf, plus the text/remedy\n" +
 			"fields of healthLine{} and doctor.Result{} literals, both \"…\" and `…` raw\n" +
