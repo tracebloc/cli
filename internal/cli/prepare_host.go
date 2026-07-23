@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -116,6 +117,14 @@ func prepareHostInterrupted(ctx context.Context, runErr error) bool {
 	return false
 }
 
+// prepareHostUnsupportedOnOS reports whether prepare-host can't run on this OS.
+// The step readies a Linux server / HPC login node (container runtime, docker
+// group) — a Unix-only concept — and shells out to bash/curl/mktemp. On Windows
+// that would fail with a cryptic missing-bash error and a Unix-only retry hint,
+// so we stop early with a clear message instead (mirrors upgrade's Windows
+// handling; Bugbot #394).
+func prepareHostUnsupportedOnOS(goos string) bool { return goos == "windows" }
+
 // newPrepareHostCmd builds `tracebloc prepare-host` — the one-time administrator
 // step that readies a machine so a non-admin user can then install tracebloc
 // with no root at all.
@@ -146,6 +155,13 @@ host, so it's safe to run on a shared machine. Safe to re-run.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := printerFor(cmd)
 			p.Newline()
+			if prepareHostUnsupportedOnOS(runtime.GOOS) {
+				// Discoverable in --help everywhere, but a no-op-with-explanation
+				// here rather than a cryptic missing-bash failure (Bugbot #394).
+				p.Para("prepare-host readies a Linux server or HPC login node so a non-admin user can install tracebloc without root — it doesn't apply to Windows. Run it as an administrator on the Unix host the researcher will use.")
+				p.Newline()
+				return nil
+			}
 			ctx := cmd.Context()
 			c := prepareHostCmd(ctx)
 			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr

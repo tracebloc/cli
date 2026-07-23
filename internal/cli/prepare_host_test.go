@@ -155,3 +155,17 @@ func TestPrepareHostManualHint_CarriesUser(t *testing.T) {
 		t.Errorf("hint must invoke prepare-host: %q", h)
 	}
 }
+
+// prepare-host shells out to bash/curl and readies a Unix host, so it must be
+// guarded on Windows (a no-op-with-explanation, not a cryptic missing-bash
+// failure) — mirrors upgrade's Windows handling (Bugbot #394).
+func TestPrepareHostUnsupportedOnWindows(t *testing.T) {
+	if !prepareHostUnsupportedOnOS("windows") {
+		t.Error("prepare-host must be guarded on windows")
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if prepareHostUnsupportedOnOS(goos) {
+			t.Errorf("prepare-host must run on %s", goos)
+		}
+	}
+}

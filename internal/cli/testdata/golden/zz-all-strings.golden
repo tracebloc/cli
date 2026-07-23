@@ -483,6 +483,7 @@ screen. %s/%d are runtime placeholders.
 "port-forward allocated zero ports"
 "port-forward to %s/%s failed during startup: %w"
 "prepare-host didn't complete (%w). You can run the installer directly:\n    %s"
+"prepare-host readies a Linux server or HPC login node so a non-admin user can install tracebloc without root — it doesn't apply to Windows. Run it as an administrator on the Unix host the researcher will use."
 "pvc path"
 "querying datasets: %w%s"
 "reading %q: %w"
