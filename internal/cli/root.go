@@ -104,6 +104,7 @@ Helm, no YAML, no kubectl needed.`,
 	// `client` and NOT `client delete --uninstall`: one machine owns one client,
 	// so this removes tracebloc from the host and avoids colliding with `data delete`.
 	root.AddCommand(newDeleteCmd())
+	root.AddCommand(newPrepareHostCmd())
 	// F1: apply an update (re-runs the verified installer). The update-check
 	// nudge (update_check.go) and the 426 "too old" error both point here.
 	root.AddCommand(newUpgradeCmd())

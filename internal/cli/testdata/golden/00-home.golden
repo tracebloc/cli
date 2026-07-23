@@ -236,19 +236,20 @@ Usage:
   tracebloc [command]
 
 Available Commands:
-  auth        Inspect tracebloc authentication state
-  client      Provision this machine's tracebloc client
-  cluster     Inspect the cluster the CLI is currently targeting
-  completion  Generate the autocompletion script for the specified shell
-  data        Manage the datasets in your secure environment
-  delete      Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)
-  doctor      Check your secure environment is connected and ready to run training
-  help        Help about any command
-  login       Sign in to tracebloc in your browser (device flow)
-  logout      Sign out (revoke the token server-side and clear it locally)
-  resources   Show how much of this machine tracebloc may use
-  upgrade     Update tracebloc to the latest release
-  version     Print the tracebloc CLI version, git SHA, and build date
+  auth         Inspect tracebloc authentication state
+  client       Provision this machine's tracebloc client
+  cluster      Inspect the cluster the CLI is currently targeting
+  completion   Generate the autocompletion script for the specified shell
+  data         Manage the datasets in your secure environment
+  delete       Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)
+  doctor       Check your secure environment is connected and ready to run training
+  help         Help about any command
+  login        Sign in to tracebloc in your browser (device flow)
+  logout       Sign out (revoke the token server-side and clear it locally)
+  prepare-host Prepare this machine so a non-admin user can install tracebloc (run once, as an administrator)
+  resources    Show how much of this machine tracebloc may use
+  upgrade      Update tracebloc to the latest release
+  version      Print the tracebloc CLI version, git SHA, and build date
 
 Flags:
   -h, --help      help for tracebloc

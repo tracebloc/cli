@@ -1,0 +1,42 @@
+tb prepare-host — one-time admin step so a non-admin can install
+================================================================
+What you see when you run `tb prepare-host` — the one-time administrator step
+that readies a shared / HPC host so a non-admin user can then install tracebloc
+with no root. It re-runs the installer's verified prepare-host step; the
+privileged prep + its progress stream from the installer (not CLI copy). Only the
+--help is byte-exact below.
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc prepare-host --help
+Prepares a host that a non-admin user can't install on directly.
+
+Run this ONCE, as an administrator, on a machine where the person who will use
+tracebloc has no root or sudo — a shared server, an HPC login node. It installs
+the container runtime and its prerequisites.
+
+Pass that person's username to also grant them container-runtime (docker-group)
+access, so they can then install tracebloc at Tier 0 with no administrator
+rights at all:
+
+    sudo tracebloc prepare-host alice
+
+Without a username it installs only the runtime + prerequisites and tells you
+how to grant a user access afterwards. NOTE: the username is the RESEARCHER who
+will use tracebloc — not you, the admin running this.
+
+It re-runs the official installer's prepare-host step (verified with cosign). It
+does NOT create your secure environment or sign you in — it only prepares the
+host, so it's safe to run on a shared machine. Safe to re-run.
+
+Usage:
+  tracebloc prepare-host [researcher-username] [flags]
+
+Flags:
+  -h, --help   help for prepare-host
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)
