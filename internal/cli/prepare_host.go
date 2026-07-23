@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,10 +34,11 @@ curl -fsSL https://tracebloc.io/i.sh -o "$tmp"
 bash "$tmp" prepare-host`
 
 // prepareHostManualHint is the copy-pasteable command we show if the automated
-// run fails. It uses process substitution (bash <(curl …)) — the idiom the rest
-// of the repo recommends — so a human re-running it by hand keeps stdin on their
-// terminal for any interactive prompt.
-const prepareHostManualHint = "bash <(curl -fsSL https://tracebloc.io/i.sh) prepare-host"
+// run fails. Built from installCmd (doctor.go) — the single shared bootstrap
+// idiom — so a URL/idiom change updates every hint at once (Bugbot #394); we
+// only append the prepare-host subcommand. installCmd uses process substitution
+// (bash <(curl …)), which keeps stdin on the terminal for interactive prompts.
+const prepareHostManualHint = installCmd + " prepare-host"
 
 // prepareHostCmd builds the exec.Cmd that runs the installer.
 //
@@ -57,6 +59,23 @@ func prepareHostCmd(ctx context.Context) *exec.Cmd {
 	c := exec.CommandContext(ctx, "bash", "-c", prepareHostInstallerCmd)
 	c.WaitDelay = 5 * time.Second
 	return c
+}
+
+// prepareHostInterrupted reports whether the installer run ended because the user
+// aborted, so the caller can exit quietly (130) instead of framing it as a failed
+// install. ctx.Err() catches a cancel the signal handler already propagated — but
+// on a terminal Ctrl-C the child can die and c.Run() can return BEFORE
+// NotifyContext flips ctx.Err() (a race), so also treat bash's 130 (128+SIGINT)
+// exit as an interrupt (Bugbot #394).
+func prepareHostInterrupted(ctx context.Context, runErr error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	var ee *exec.ExitError
+	if errors.As(runErr, &ee) {
+		return ee.ExitCode() == exitInterrupted
+	}
+	return false
 }
 
 // newPrepareHostCmd builds `tracebloc prepare-host` — the one-time administrator
@@ -89,7 +108,7 @@ host, so it's safe to run on a shared machine. Safe to re-run.`,
 				// User aborted (Ctrl-C) or the parent context was cancelled: exit
 				// quietly with 130 like the other cancellable paths, not a scary
 				// "prepare-host didn't complete — retry" (Bugbot #394).
-				if ctx.Err() != nil {
+				if prepareHostInterrupted(ctx, err) {
 					return &exitError{code: exitInterrupted}
 				}
 				return &exitError{code: exitFailure, err: fmt.Errorf("prepare-host didn't complete (%w). You can run the installer directly:\n    %s", err, prepareHostManualHint)}
