@@ -172,9 +172,8 @@ func (e *UpgradeRequiredError) Error() string {
 		floor = ">= " + e.MinVersion
 	}
 	return fmt.Sprintf(
-		"this tracebloc CLI is too old for the server (requires %s). Upgrade to the "+
-			"latest release — re-run the tracebloc install script, or download it from "+
-			"https://github.com/tracebloc/cli/releases/latest — then retry.",
+		"this tracebloc CLI is too old for the server (requires %s). Update it — run "+
+			"`tracebloc upgrade` (or re-run the install script) — then retry.",
 		floor,
 	)
 }
