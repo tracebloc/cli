@@ -397,7 +397,11 @@ if ! mkdir -p "$PREFIX" 2>/dev/null || [ ! -w "$PREFIX" ]; then
     # PATH-advice block below wires into the shell rc.
     home_bin="${HOME%/}/bin"
     home_bin_on_path=no
-    case ":$PATH:" in *":$home_bin:"*) home_bin_on_path=yes ;; esac
+    # Match both "$home_bin" and a trailing-slash "$home_bin/" PATH entry — some
+    # users have "$HOME/bin/" (with the slash) on PATH, which a bare
+    # ":$home_bin:" pattern would miss and wrongly fall back to ~/.local/bin
+    # (Bugbot #392).
+    case ":$PATH:" in *":$home_bin:"*|*":$home_bin/:"*) home_bin_on_path=yes ;; esac
     # Guard HOME="" or "/": "${HOME%/}/bin" collapses to "/bin", so a root process
     # (HOME=/) with /bin writable + on PATH would drop the CLI into /bin. Require a
     # real, non-root $HOME before preferring ~/bin (Bugbot #392 r3).
@@ -459,7 +463,7 @@ home_dir="${HOME%/}"
 persist=no
 case "$PREFIX" in
     "$home_dir"/*) persist=yes ;;
-    *) case ":$PATH:" in *":$PREFIX:"*) ;; *) persist=yes ;; esac ;;
+    *) case ":$PATH:" in *":$PREFIX:"*|*":$PREFIX/:"*) ;; *) persist=yes ;; esac ;;
 esac
 
 # Is $PREFIX on the CURRENT shell's PATH? If so the binary is usable right now
@@ -468,7 +472,9 @@ esac
 # that new terminals won't have; Bugbot #392 r2), but the message must say
 # "ready now" instead of nagging "open a new terminal" for a dir that IS on PATH.
 on_path=no
-case ":$PATH:" in *":$PREFIX:"*) on_path=yes ;; esac
+# Trailing-slash tolerant, as above (Bugbot #392): a "$PREFIX/" PATH entry still
+# means the binary is usable now, so don't nag "open a new terminal".
+case ":$PATH:" in *":$PREFIX:"*|*":$PREFIX/:"*) on_path=yes ;; esac
 
 if [ "$persist" = "yes" ]; then
     shell_name="$(basename "${SHELL:-sh}")"
