@@ -114,3 +114,44 @@ func TestPrepareHostUserValidation(t *testing.T) {
 		}
 	}
 }
+
+// The no-username path promises it grants no access, so a pre-set ambient
+// TB_PREPARE_USER must be stripped from the child env; the username path sets
+// exactly that user (replacing any ambient value, not duplicating it) — Bugbot #394.
+func TestPrepareHostEnv_StripsAmbientAndSetsUser(t *testing.T) {
+	t.Setenv("TB_PREPARE_USER", "ambient-attacker")
+
+	for _, kv := range prepareHostEnv("") {
+		if strings.HasPrefix(kv, "TB_PREPARE_USER=") {
+			t.Errorf("no-username env must not carry TB_PREPARE_USER, got %q", kv)
+		}
+	}
+
+	n, got := 0, ""
+	for _, kv := range prepareHostEnv("alice") {
+		if strings.HasPrefix(kv, "TB_PREPARE_USER=") {
+			n++
+			got = strings.TrimPrefix(kv, "TB_PREPARE_USER=")
+		}
+	}
+	if n != 1 || got != "alice" {
+		t.Errorf("username env should carry exactly TB_PREPARE_USER=alice, got n=%d val=%q", n, got)
+	}
+}
+
+// On failure after `prepare-host <user>`, the manual retry must still grant
+// access (carry TB_PREPARE_USER=<user>) — otherwise a copy-pasted retry silently
+// does less than the original request. The no-username hint carries no such var
+// (Bugbot #394).
+func TestPrepareHostManualHint_CarriesUser(t *testing.T) {
+	if h := prepareHostManualHint(""); strings.Contains(h, "TB_PREPARE_USER") {
+		t.Errorf("no-username hint must not set TB_PREPARE_USER: %q", h)
+	}
+	h := prepareHostManualHint("alice")
+	if !strings.Contains(h, "TB_PREPARE_USER=alice") {
+		t.Errorf("username hint must carry TB_PREPARE_USER=alice so the retry still grants access: %q", h)
+	}
+	if !strings.Contains(h, "prepare-host") {
+		t.Errorf("hint must invoke prepare-host: %q", h)
+	}
+}

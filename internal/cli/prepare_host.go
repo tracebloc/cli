@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -33,11 +34,13 @@ var prepareHostUserRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$`)
 //     error) abort with a non-zero status instead of silently running nothing.
 //     (`curl | bash` swallowed this — bash read empty stdin and exited 0.)
 //
-// The temp file is removed on exit.
+// The temp file is removed on exit. The URL comes from installerURL (doctor.go)
+// so the automated download can't drift from the manual hint / other bootstrap
+// copy (Bugbot #394).
 const prepareHostInstallerCmd = `set -e
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
-curl -fsSL https://tracebloc.io/i.sh -o "$tmp"
+curl -fsSL ` + installerURL + ` -o "$tmp"
 bash "$tmp" prepare-host`
 
 // prepareHostManualHint is the copy-pasteable command we show if the automated
@@ -45,7 +48,35 @@ bash "$tmp" prepare-host`
 // idiom — so a URL/idiom change updates every hint at once (Bugbot #394); we
 // only append the prepare-host subcommand. installCmd uses process substitution
 // (bash <(curl …)), which keeps stdin on the terminal for interactive prompts.
-const prepareHostManualHint = installCmd + " prepare-host"
+// When a researcher username was given we prefix TB_PREPARE_USER=<user> so a
+// copy-pasted retry still grants access — otherwise the manual fallback would
+// silently do less than the original request (Bugbot #394).
+func prepareHostManualHint(user string) string {
+	if user != "" {
+		return "TB_PREPARE_USER=" + user + " " + installCmd + " prepare-host"
+	}
+	return installCmd + " prepare-host"
+}
+
+// prepareHostEnv is the child's environment: the parent's, but with any ambient
+// TB_PREPARE_USER stripped, then set to user only when a username was given.
+// Stripping matters — the no-username path promises it grants no access, so a
+// pre-set TB_PREPARE_USER in the admin's shell must not silently make the
+// installer grant it anyway (Bugbot #394).
+func prepareHostEnv(user string) []string {
+	parent := os.Environ()
+	env := make([]string, 0, len(parent)+1)
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "TB_PREPARE_USER=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	if user != "" {
+		env = append(env, "TB_PREPARE_USER="+user)
+	}
+	return env
+}
 
 // prepareHostCmd builds the exec.Cmd that runs the installer.
 //
@@ -118,15 +149,21 @@ host, so it's safe to run on a shared machine. Safe to re-run.`,
 			ctx := cmd.Context()
 			c := prepareHostCmd(ctx)
 			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+
+			user := ""
 			if len(args) == 1 {
-				user := args[0]
+				user = args[0]
 				if !prepareHostUserRe.MatchString(user) {
 					return &exitError{code: exitBadInput, err: fmt.Errorf("invalid username %q — expected a Linux username (letters, digits, '.', '_', '-')", user)}
 				}
-				// The installer reads TB_PREPARE_USER to pick who gets docker-group
-				// access. Pass it through the environment (not the command string), so
-				// it can't be shell-interpreted; the installer quotes it for usermod.
-				c.Env = append(os.Environ(), "TB_PREPARE_USER="+user)
+			}
+			// The installer reads TB_PREPARE_USER to pick who gets docker-group
+			// access. Pass it through the environment (not the command string) so
+			// it can't be shell-interpreted; the installer quotes it for usermod.
+			// prepareHostEnv also strips any ambient TB_PREPARE_USER so the
+			// no-username path never grants access it says it won't.
+			c.Env = prepareHostEnv(user)
+			if user != "" {
 				p.Para(fmt.Sprintf("Preparing this host and granting %s container-runtime access — re-running the installer's prepare-host step (needs administrator rights once).", user))
 			} else {
 				p.Para("Preparing this host — re-running the installer's prepare-host step (installs the container runtime and prerequisites; needs administrator rights once). Pass a researcher's username to also grant them access: tracebloc prepare-host <username>")
@@ -139,7 +176,7 @@ host, so it's safe to run on a shared machine. Safe to re-run.`,
 				if prepareHostInterrupted(ctx, err) {
 					return &exitError{code: exitInterrupted}
 				}
-				return &exitError{code: exitFailure, err: fmt.Errorf("prepare-host didn't complete (%w). You can run the installer directly:\n    %s", err, prepareHostManualHint)}
+				return &exitError{code: exitFailure, err: fmt.Errorf("prepare-host didn't complete (%w). You can run the installer directly:\n    %s", err, prepareHostManualHint(user))}
 			}
 			return nil
 		},

@@ -248,6 +248,7 @@ Available Commands:
   logout       Sign out (revoke the token server-side and clear it locally)
   prepare-host Prepare this machine so a non-admin user can install tracebloc (run once, as an administrator)
   resources    Show how much of this machine tracebloc may use
+  upgrade      Update tracebloc to the latest release
   version      Print the tracebloc CLI version, git SHA, and build date
 
 Flags:

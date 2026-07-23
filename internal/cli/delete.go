@@ -31,6 +31,7 @@ var (
 var (
 	osExecutable = os.Executable
 	osRemoveAll  = os.RemoveAll
+	osStat       = os.Stat
 )
 
 // deleteOpts bundles the `tracebloc delete` flags.
@@ -382,7 +383,19 @@ func removeHostDataDir() error {
 	if err != nil {
 		return err
 	}
-	return osRemoveAll(dir)
+	if err := osRemoveAll(dir); err != nil {
+		return err
+	}
+	// Verify the directory is actually gone before the caller prints "✔ Removed".
+	// A nil RemoveAll is not proof the tree is absent — a racing writer, a mount,
+	// or a masked partial failure can leave it present — and claiming a clean wipe
+	// we didn't achieve is exactly the offboard-hygiene gap RFC-0003 flags.
+	if _, statErr := osStat(dir); statErr == nil {
+		return fmt.Errorf("%s still present after removal", dir)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("verifying removal of %s: %w", dir, statErr)
+	}
+	return nil
 }
 
 // hostDataDirDisplay is the data dir for a user-facing hint; falls back to the

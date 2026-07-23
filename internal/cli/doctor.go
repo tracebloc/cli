@@ -19,10 +19,16 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
+// installerURL is the single source of truth for the installer script URL.
+// Everything that downloads or points at the installer (installCmd here,
+// prepareHostInstallerCmd in prepare_host.go) derives from this so a URL change
+// updates every path at once.
+const installerURL = "https://tracebloc.io/i.sh"
+
 // installCmd is the one-line installer we point people at when there's no
 // secure environment on this machine, or a component needs reinstalling. Kept in
 // one place so every remedy says the same thing.
-const installCmd = "bash <(curl -fsSL https://tracebloc.io/i.sh)"
+const installCmd = "bash <(curl -fsSL " + installerURL + ")"
 
 // doctorRunFn is a test seam over doctor.Run (the cluster-side probe). Tests
 // inject a fixed []doctor.Result so the roll-up + render can be exercised with a
