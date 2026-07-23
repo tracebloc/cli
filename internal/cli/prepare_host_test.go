@@ -6,17 +6,30 @@ import (
 	"testing"
 )
 
-// The prepare-host command shells out to `bash -c prepareHostInstallerCmd`. If
-// curl fails, a plain `curl | bash` pipeline still exits 0 (bash reads empty
-// stdin), so the command would report success while nothing ran. `set -o
-// pipefail` is what makes curl's failure propagate — guard it against removal
-// (Bugbot #394).
-func TestPrepareHostCmdUsesPipefail(t *testing.T) {
-	if !strings.HasPrefix(prepareHostInstallerCmd, "set -o pipefail;") {
-		t.Fatalf("prepareHostInstallerCmd must start with `set -o pipefail;` so a curl failure isn't swallowed; got: %q", prepareHostInstallerCmd)
+// A failed download must abort rather than run an empty script: with the old
+// `curl | bash`, a curl failure left bash reading empty stdin and exiting 0, so
+// the command reported success while prepare-host never ran. `set -e` + `curl
+// -o <file>` makes the failure propagate — guard both against removal (Bugbot
+// #394).
+func TestPrepareHostCmdFailsClosedOnDownloadError(t *testing.T) {
+	if !strings.Contains(prepareHostInstallerCmd, "set -e") {
+		t.Fatalf("prepareHostInstallerCmd must `set -e` so a failed download aborts; got: %q", prepareHostInstallerCmd)
+	}
+	if !strings.Contains(prepareHostInstallerCmd, "curl") || !strings.Contains(prepareHostInstallerCmd, "-o ") {
+		t.Fatalf("prepareHostInstallerCmd must download the installer to a file (curl -o) so curl's exit is checked; got: %q", prepareHostInstallerCmd)
 	}
 	if !strings.Contains(prepareHostInstallerCmd, "prepare-host") {
 		t.Fatalf("prepareHostInstallerCmd should invoke the installer's prepare-host step; got: %q", prepareHostInstallerCmd)
+	}
+}
+
+// The installer must NOT be fed to bash over a pipe: `curl | bash -s` makes the
+// inner bash read its program from the pipe, stealing the installer's stdin so
+// any interactive prompt in prepare-host gets EOF. We download and run a file
+// instead, leaving stdin on the TTY (Bugbot #394).
+func TestPrepareHostCmdDoesNotPipeIntoBash(t *testing.T) {
+	if strings.Contains(prepareHostInstallerCmd, "| bash") || strings.Contains(prepareHostInstallerCmd, "|bash") {
+		t.Errorf("prepareHostInstallerCmd must not pipe the script into bash (steals the installer's stdin); got: %q", prepareHostInstallerCmd)
 	}
 }
 
