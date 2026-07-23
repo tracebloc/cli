@@ -1,8 +1,18 @@
 # RFC 0003 — The secure environment: dataset storage, offboard hygiene & the boundary
 
-> **Status: DECIDED — v2.2, decisions D1–D15 locked 2026-07-22; execution
-> tickets filed and cross-linked in §10/§12.** Owner: @LukasWodka.
+> **Status: DECIDED — v2.3; decisions D1–D20 locked (D1–D15 2026-07-22;
+> D16–D20 2026-07-23). Execution tickets filed and cross-linked in §10/§12;
+> D16–D20 (per-dataset isolation) are decided but not yet ticketed, with
+> open items O5–O7 out for reviewer feedback.** Owner: @LukasWodka.
 > Co-design & validation: @saadqbal.
+>
+> **v2.2 → v2.3.** Adds the **per-dataset data-isolation model** (new §7bis,
+> D16–D20): one immutable `ds_<ingestor_id>` table per ingestion, correction
+> by delete (no version chain), and isolation enforced by a grant-scoped
+> definer-view instead of a `WHERE ingestor_id` filter — and **splits the
+> multi-org composition layer** (data spaces, federated dataset combination)
+> into its own RFC, "Data spaces & federated dataset composition" (drafting
+> in `backend`), which builds on these primitives.
 >
 > **v2.1 same-day errata:** the §3.1/§6.4 weight-lifecycle claims were
 > re-verified against the code — **weights do not rest durably in the
@@ -22,7 +32,9 @@
 >
 > Related: RFC-0001 (auth & client provisioning), RFC-0002 (data ingest flow
 > & terminology), terminology source-of-truth (v2 `TERMINOLOGY.md`, docs
-> `main`). Design ticket: backend#1151. Storage prototype: client#368
+> `main`). Forward: **Data spaces & federated dataset composition** RFC
+> (drafting in `backend`) builds on the §7bis isolation primitives. Design
+> ticket: backend#1151. Storage prototype: client#368
 > (flag-gated, draft). Offboard honesty fix: cli#389. Spans `cli`, `client`,
 > `client-runtime`, `backend`.
 
@@ -351,6 +363,91 @@ job must reach exactly its own dataset and its own artifacts, nothing else.
    spawned jobs; keep `readOnlyRootFilesystem` + read-only shared mounts as
    the floor.
 
+## 7bis. Per-dataset isolation — immutable tables & grant-scoped views (new in v2.3, DECIDED)
+
+§7 scopes *access* to a dataset (mounts, DB grants, pod hardening). This
+section sharpens *what a dataset physically is*, so the scoping rests on
+structure rather than on a filter a job could sidestep. Today
+tabular/time-series ingests land as rows in a **shared** table tagged by
+`ingestor_id`, and every read narrows with `WHERE ingestor_id IN (…)` (§3.1;
+tracebloc-client `core/utils/database.py:243-361`). A `WHERE` clause is a
+convention, not a wall — one dropped predicate or one `SELECT *` and a job
+reads its neighbours. The model below turns the convention into physics.
+
+1. **One immutable table per ingestion (D16).** Every ingest creates a
+   **brand-new physical table** named `ds_<ingestor_id>`; the ingestor id
+   *is* the physical identity. The dataset name the user chose is a
+   **user-facing label only** (metadata), never the table name. Ten ingests
+   of the same name and schema produce **ten tables**, not ten appends into
+   one. Isolation stops being a runtime filter and becomes a property of the
+   schema: a job that can only name `ds_<its-own-id>` cannot phrase a query
+   that reaches another dataset.
+
+2. **Immutable — no append, no in-place edit (D17; enforced by D19).** A
+   table, once written by an ingestion, is never appended to or edited.
+   Re-ingesting the same name+schema **creates a new table**; it does not
+   reuse the old one. This is enforced by **removing the ingestor's
+   reuse/append path**: `data-ingestors/tracebloc_ingestor/database.py:309-357`
+   today returns/reflects an existing table when the name and feature schema
+   match (the "return existing table if already created" / "check if table
+   exists in database" branch) — that branch is deleted, and ingestion
+   always creates a fresh `ds_<ingestor_id>`. The schema-drift guard that
+   lives in that branch (the "stale table from an earlier ingestion" error)
+   becomes moot once every ingestion owns a private table name.
+
+3. **Correction = delete, not versioning (D17).** There is **no version
+   chain**. A wrong ingestion is corrected by **dropping its table** and
+   re-ingesting — a new id, a new `ds_<ingestor_id>`, the bad one gone —
+   which keeps the model honest with the RFC's "delete means gone" stance
+   (§4/§5) instead of accreting history. **Referential cleanup is part of
+   the drop:** removing a table must invalidate every view and every
+   data-space reference pointing at it (O7). A definer-view left dangling
+   over a dropped base table is both a broken read path and a latent leak.
+
+4. **Isolation = a grant-scoped access handle, never raw-table access
+   (D18).** A training pod is never granted access to base tables at large.
+   For MySQL it is granted `SELECT` **only** on a **definer-rights view**
+   (degenerate case: on its single `ds_<ingestor_id>` table) — never on any
+   other dataset's base table. Because the grant does not name the
+   neighbours, a malicious or buggy `SELECT * FROM ds_<other-id>` **cannot
+   even reference** a table it holds no grant on; it fails at
+   permission-check time, not at a `WHERE` clause the job controls.
+
+   *View vs. table, for the reader:* a **table** stores rows on disk; a
+   **view** is a stored `SELECT` exposing only chosen rows/columns of one or
+   more tables, holding no data of its own; a **definer-rights view**
+   executes with the privileges of the user that *created* it, so you can
+   `GRANT SELECT` on the view to the training user **without** granting that
+   user any privilege on the underlying base tables. The view becomes the
+   only name the job holds; the base tables stay invisible.
+
+   For **file/image** datasets the analogue is the **per-dataset PVC /
+   `subPath` mount** already chosen as the D9 end state (client-runtime#203)
+   — same principle, different substrate: the handle is a mount, not a view.
+   And this **composes with the per-experiment DB grant (D10,
+   backend#1181)**: that grant now targets the experiment's **view/table
+   handle** rather than the shared table, and still excludes the platform
+   metadata DB. §7 and §7bis are the same wall from two sides — §7 scopes
+   the grant, §7bis scopes the object the grant points at.
+
+5. **Grandfather — new ingests only (D20).** The model applies to **new
+   ingestions**. Existing shared multi-ingestor tables **stay as they are**
+   — no migration, no backfill into per-ingestion tables — mirroring the
+   storage-migration stance (D4: no data-copier; installs move forward on
+   the natural boundary, here the next ingest). The client read path
+   therefore keeps tolerating both shapes through the transition (O6).
+
+**Scope boundary — what this section does *not* own.** The primitive here is
+deliberately **single-environment**: it makes one dataset an isolated,
+access-scoped object inside one secure environment. The **multi-org
+composition** layer — *data spaces*, federated combination of datasets
+across environments, the schema/compatibility engine that decides when two
+datasets may train together, and cross-org authorization — is carved into
+its **own RFC, "Data spaces & federated dataset composition"** (drafting in
+`backend`), which **builds on** these primitives (a data space is composed
+out of exactly these access-scoped units). Ownership split: **this RFC owns
+the isolation primitive; the data-spaces RFC owns the composition over it.**
+
 ## 8. Boundary enforcement & conformance (new in v2)
 
 ### 8.1 Egress lockdown — flip it (D6, separate ticket)
@@ -422,6 +519,11 @@ seal check.
 | D13 | Score/tamper integrity | **Separate RFC** — versioning+integrity root cause, not storage (§11) → backend#1185 |
 | D14 | Confidential compute | **Phase 2 — deferred for capacity**; Azure confidential-GPU pilot first; tiering as bridge (§6.5) |
 | D15 | Node-local default (was O1) | **Flip node-local to default for local installs** after one green training run on node-local (gate: backend#1180); checklist on client#367 |
+| D16 | Table-per-ingestion (§7bis) | **One immutable `ds_<ingestor_id>` table per ingest** — the ingestor id is the physical identity; the user's dataset name is a label only (same name+schema → N tables) |
+| D17 | Immutability + correction (§7bis) | **No append, no in-place edit; re-ingest = new table; correction = drop + re-ingest, no version chain** — the drop must cascade to dependent views / data-space refs (O7) |
+| D18 | Isolation enforcement (§7bis) | **Grant-scoped access handle, not raw-table access** — MySQL: `SELECT` on a definer-rights view (or the single `ds_` table) only; files: per-dataset PVC/`subPath` (D9); composes with the per-experiment grant (D10, backend#1181) |
+| D19 | Ingestor append-disable (§7bis) | **Remove the reuse/append path** — `data-ingestors/tracebloc_ingestor/database.py:309-357` (reuse-existing-table branch) deleted; ingestion always creates a fresh table |
+| D20 | Grandfather (§7bis) | **New ingests only; existing shared multi-ingestor tables stay as-is; no migration/backfill** (mirrors D4) |
 
 Open items:
 
@@ -429,6 +531,9 @@ Open items:
 |---|---|---|
 | O2 | Platform-side weight retention: when does crypto-shred fire on the averaging-share store (experiment completion? grace window? audit needs?) | Shred at completion + configurable grace window — decided inside backend#1182 |
 | O4 | Watermarking mechanics & owner (backend work) | Scope inside backend#1183 |
+| O5 | Storage abstraction beyond MySQL — should the RFC define "a dataset = an isolated, access-scoped unit" with a per-backend physical form (MySQL table + definer-view; file/folder PVC; future other DBs) rather than binding the concept to MySQL? | Open (reviewer feedback) — lean toward a backend-neutral definition; confirm the per-substrate forms |
+| O6 | View mechanics at scale — many tables + views (UNION / indexing / perf), and how the training read path moves from the client-built `WHERE ingestor_id IN (…)` (tracebloc-client `core/utils/database.py:243-361`) to reading a backend-provisioned view/table handle | Open (reviewer feedback) — needs a read-path / perf design pass |
+| O7 | Delete / referential-cleanup semantics — cascade a table drop to its views and any data-space references (D17) | Open (reviewer feedback) — resolve jointly with the data-spaces RFC (references cross the boundary) |
 
 Resolved since v2: **O1 → D15** (decided). **O3** dissolved by the
 verified architecture — there is no in-environment at-rest weight store
