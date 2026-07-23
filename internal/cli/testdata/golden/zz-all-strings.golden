@@ -291,6 +291,7 @@ screen. %s/%d are runtime placeholders.
 "This will remove"
 "Time column"
 "To train or benchmark models on it, create a use case at https://ai.tracebloc.io/my-use-cases"
+"To update tracebloc on Windows, run this in a new PowerShell window:"
 "Training results can't reach tracebloc — experiments will stall."
 "Try again shortly; if it persists, email support@tracebloc.io with `%s doctor --diagnose`."
 "Type %q to offboard this machine"

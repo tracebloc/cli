@@ -247,7 +247,7 @@ Available Commands:
   login       Sign in to tracebloc in your browser (device flow)
   logout      Sign out (revoke the token server-side and clear it locally)
   resources   Show how much of this machine tracebloc may use
-  upgrade     Update tracebloc (CLI + your secure environment) to the latest release
+  upgrade     Update tracebloc to the latest release
   version     Print the tracebloc CLI version, git SHA, and build date
 
 Flags:

@@ -360,7 +360,7 @@ func TestCopyCatalog(t *testing.T) {
 
 	upgradeFile := doc(
 		"tb upgrade — update to the latest release",
-		"What you see when you run `tb upgrade`. It re-runs the official installer\n(signature-verified) to update the CLI and your secure environment together, so\nthey never drift apart. The update-check nudge and the \"CLI too old\" (426)\nmessage both point here. The installer's own live output streams during the run\n(not a stable screen); its copy is in the client repo's installer catalog.",
+		"What you see when you run `tb upgrade`. On Linux/macOS it re-runs the\nofficial installer (signature-verified) to update the CLI and your secure\nenvironment together, so they never drift apart. On Windows a running .exe is\nlocked and install.ps1 is CLI-only, so it prints the command to run in a fresh\nshell instead. The update-check nudge and the \"CLI too old\" (426) message both\npoint here. The installer's own live output streams during the run (not a stable\nscreen); its copy is in the client repo's installer catalog.",
 		nil,
 		[]run{{"tracebloc upgrade --help", help("upgrade")}},
 	)

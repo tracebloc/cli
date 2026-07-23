@@ -47,32 +47,35 @@ func TestUpgradeCmd_HelpMentionsVerified(t *testing.T) {
 	}
 }
 
-// TestUpgradeCommandFor_PerOS: Windows is a shipped platform with no bash, so it
-// must run install.ps1 via PowerShell — never the Unix `bash i.sh` installer,
-// which fails there while the 426 "too old" error tells users to run upgrade.
-func TestUpgradeCommandFor_PerOS(t *testing.T) {
-	name, args, human := upgradeCommandFor("windows")
-	if name != "powershell" {
-		t.Errorf("windows upgrade name = %q, want powershell", name)
+// TestUpgradePlanFor_PerOS: Windows must NOT self-exec (a running .exe is locked
+// and install.ps1 is CLI-only) — it only prints the manual command. Unix runs
+// the installer with pipefail so a failed curl fails the whole pipeline.
+func TestUpgradePlanFor_PerOS(t *testing.T) {
+	win := upgradePlanFor("windows")
+	if win.exec {
+		t.Error("windows upgrade must not self-exec (running .exe is locked)")
 	}
-	joined := strings.Join(args, " ") + " " + human
-	if strings.Contains(joined, "bash") || strings.Contains(joined, "i.sh") {
-		t.Errorf("windows upgrade must not use the Unix installer: %q", joined)
+	if !strings.Contains(win.manual, "install.ps1") {
+		t.Errorf("windows manual command must run install.ps1: %q", win.manual)
 	}
-	if !strings.Contains(joined, "install.ps1") {
-		t.Errorf("windows upgrade must run install.ps1: %q", joined)
+	if strings.Contains(win.manual, "i.sh") || strings.Contains(win.manual, "bash") {
+		t.Errorf("windows must not point at the Unix installer: %q", win.manual)
 	}
 
 	for _, goos := range []string{"linux", "darwin"} {
-		name, args, human := upgradeCommandFor(goos)
-		if name != "bash" {
-			t.Errorf("%s upgrade name = %q, want bash", goos, name)
+		p := upgradePlanFor(goos)
+		if !p.exec || p.name != "bash" {
+			t.Errorf("%s upgrade should exec bash, got exec=%v name=%q", goos, p.exec, p.name)
 		}
-		if len(args) != 2 || args[0] != "-c" || !strings.Contains(args[1], "i.sh") {
-			t.Errorf("%s upgrade args = %v, want bash -c '…i.sh…'", goos, args)
+		joined := strings.Join(p.args, " ")
+		if !strings.Contains(joined, "-o pipefail") {
+			t.Errorf("%s upgrade must set pipefail so a failed curl fails the run: %q", goos, joined)
 		}
-		if human != upgradeInstallerCmdUnix {
-			t.Errorf("%s human hint = %q, want %q", goos, human, upgradeInstallerCmdUnix)
+		if !strings.Contains(joined, "i.sh") {
+			t.Errorf("%s upgrade must run i.sh: %q", goos, joined)
+		}
+		if p.manual != upgradeInstallerCmdUnix {
+			t.Errorf("%s manual hint = %q, want %q", goos, p.manual, upgradeInstallerCmdUnix)
 		}
 	}
 }
