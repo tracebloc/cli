@@ -136,7 +136,12 @@ func Stage(ctx context.Context, opts StageOptions) error {
 	}
 
 	// 5. Stream the tar. This is where actual bytes flow. The
-	//    progress bar (if TTY) renders during this call.
+	//    progress bar (if TTY) renders ONLY during this call — it's
+	//    built with RenderBlankState(false) (see progress.go) precisely
+	//    so the setup lines above print on their own clean lines instead
+	//    of colliding with a prematurely-drawn 0% bar. Keep any new
+	//    customer-facing status prints ahead of this call, not after the
+	//    bar starts.
 	_, _ = fmt.Fprintf(opts.Out, "Copying %d files (%s) into %q…\n",
 		opts.Layout.FileCount(), HumanBytes(opts.Layout.TotalBytes), opts.Table)
 
