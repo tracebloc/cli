@@ -92,13 +92,18 @@ func TestUpgradePlanFor_PerOS(t *testing.T) {
 
 // TestSkipUpdateNudge: the nudge must be suppressed right after `tracebloc
 // upgrade` (the running process is stale-by-design once it swaps its own binary)
+// AND after `tracebloc delete` (offboarding removed the CLI and wiped
+// ~/.tracebloc — the nudge's cache write would resurrect the dir; Bugbot #397),
 // but fire for any other command.
 func TestSkipUpdateNudge(t *testing.T) {
 	if !SkipUpdateNudge(newUpgradeCmd()) {
 		t.Error("upgrade command must skip the update nudge")
 	}
-	if SkipUpdateNudge(newDeleteCmd()) {
-		t.Error("non-upgrade command must not skip the nudge")
+	if !SkipUpdateNudge(newDeleteCmd()) {
+		t.Error("delete command must skip the update nudge (its cache write would resurrect the wiped ~/.tracebloc)")
+	}
+	if SkipUpdateNudge(newDoctorCmd(false)) {
+		t.Error("an ordinary command (doctor) must not skip the nudge")
 	}
 	if SkipUpdateNudge(nil) {
 		t.Error("nil command must not skip the nudge")

@@ -68,9 +68,18 @@ func isUpgradeCommand(cmd *cobra.Command) bool {
 	return cmd != nil && cmd.Name() == upgradeCmdName
 }
 
-// SkipUpdateNudge reports whether the update nudge should be suppressed for the
-// command that just ran. Exported for main, which owns the nudge call.
-func SkipUpdateNudge(cmd *cobra.Command) bool { return isUpgradeCommand(cmd) }
+// SkipUpdateNudge reports whether the post-command update nudge (and the cache
+// write it triggers) must be suppressed for the command that just ran. Exported
+// for main, which owns the nudge call. Suppressed after:
+//   - upgrade: the running process swapped its own binary and now carries the
+//     stale compile-time version — it would nudge about the release it just
+//     installed.
+//   - delete: offboarding removed the CLI and (on the default path) wiped
+//     ~/.tracebloc, so the nudge is nonsensical and its cache write would
+//     resurrect the just-offboarded host data dir (Bugbot #397).
+func SkipUpdateNudge(cmd *cobra.Command) bool {
+	return isUpgradeCommand(cmd) || isDeleteCommand(cmd)
+}
 
 // newUpgradeCmd implements `tracebloc upgrade` — the apply step the update
 // nudge (update_check.go) and the 426 "too old" error both point at.

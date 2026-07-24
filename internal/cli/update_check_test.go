@@ -54,6 +54,34 @@ func TestUpdateCacheRoundTrip(t *testing.T) {
 	}
 }
 
+// writeUpdateCache must never create the config dir: after `tracebloc delete`
+// wipes ~/.tracebloc, the post-command update check still runs, and recreating
+// the dir to write the throttle cache would resurrect the just-offboarded host
+// data dir. A missing dir is a silent no-op — no file, no dir (Bugbot #397).
+func TestWriteUpdateCache_DoesNotResurrectMissingDir(t *testing.T) {
+	base := t.TempDir()
+	gone := filepath.Join(base, "wiped") // deliberately never created
+	path := filepath.Join(gone, updateCacheFile)
+
+	if err := writeUpdateCache(path, updateCache{CheckedAt: time.Now(), Latest: "0.9.9"}); err != nil {
+		t.Fatalf("writeUpdateCache to a missing dir must be a silent no-op, got err: %v", err)
+	}
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Errorf("writeUpdateCache must not create the missing dir %s (err=%v)", gone, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("writeUpdateCache must not write a cache file into a missing dir: %v", err)
+	}
+
+	// Sanity: with the dir present it still writes (round-trips).
+	if err := writeUpdateCache(filepath.Join(base, updateCacheFile), updateCache{CheckedAt: time.Now(), Latest: "1.0.0"}); err != nil {
+		t.Fatalf("writeUpdateCache into an existing dir must succeed: %v", err)
+	}
+	if _, ok := readUpdateCache(filepath.Join(base, updateCacheFile)); !ok {
+		t.Error("cache should be present after writing into an existing dir")
+	}
+}
+
 func TestFetchLatestRelease(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"tag_name":"v0.9.7","name":"ignored"}`))
