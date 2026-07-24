@@ -1,0 +1,601 @@
+# RFC 0003 — The secure environment: dataset storage, offboard hygiene & the boundary
+
+> **Status: DECIDED — v2.3; decisions D1–D20 locked (D1–D15 2026-07-22;
+> D16–D20 2026-07-23). Execution tickets filed and cross-linked in §10/§12;
+> D16–D20 (per-dataset isolation) are decided but not yet ticketed, with
+> open items O5–O7 out for reviewer feedback.** Owner: @LukasWodka.
+> Co-design & validation: @saadqbal.
+>
+> **v2.2 → v2.3.** Adds the **per-dataset data-isolation model** (new §7bis,
+> D16–D20): one immutable `ds_<ingestor_id>` table per ingestion, correction
+> by delete (no version chain), and isolation enforced by a grant-scoped
+> definer-view instead of a `WHERE ingestor_id` filter — and **splits the
+> multi-org composition layer** (data spaces, federated dataset combination)
+> into its own RFC, "Data spaces & federated dataset composition" (drafting
+> in `backend`), which builds on these primitives.
+>
+> **v2.1 same-day errata:** the §3.1/§6.4 weight-lifecycle claims were
+> re-verified against the code — **weights do not rest durably in the
+> environment** (per-cycle scratch only; the durable store is
+> platform-side). D8 re-aimed accordingly; O1 decided → D15.
+>
+> **v1 → v2.** v1 (2026-07-21) framed two problems — offboard hygiene and
+> dataset storage — and left §7 as a decision menu. v2 records the decisions
+> taken (with prototype validation on a real install, client#368), folds in
+> the review feedback, and widens the lens to what those decisions were
+> always serving: a precise, honest definition of the **secure environment**
+> — its boundary (§1), threat model (§2), model-IP stance (§6), in-cluster
+> walls (§7), and per-substrate conformance (§8).
+>
+> Section map from v1: §2→§3, §3→§4, §4→§5, §5→§9, §6→§11, §7→§10
+> (now a decision log), §8→§12, §9→§13.
+>
+> Related: RFC-0001 (auth & client provisioning), RFC-0002 (data ingest flow
+> & terminology), terminology source-of-truth (v2 `TERMINOLOGY.md`, docs
+> `main`). Forward: **Data spaces & federated dataset composition** RFC
+> (drafting in `backend`) builds on the §7bis isolation primitives. Design
+> ticket: backend#1151. Storage prototype: client#368
+> (flag-gated, draft). Offboard honesty fix: cli#389. Spans `cli`, `client`,
+> `client-runtime`, `backend`.
+
+## 1. The secure environment — definition
+
+A **secure environment** is a sealed enclave on infrastructure the customer
+controls — a laptop (k3d), a cloud cluster (EKS/AKS/OpenShift), or bare
+metal; the promise is the same in every form. It has **exactly three
+ingress channels, one egress channel, and nothing sideways**:
+
+| Direction | Channel | Carries | Transport |
+|---|---|---|---|
+| In | **Data ingester** | raw datasets, from sources the customer configures | ingest jobs (local files / network share) |
+| In | **tracebloc control plane** | models, weights, experiment instructions | backend API + Service Bus (TLS) |
+| In | **tracebloc software** | container images, chart, CLI | registries — all images digest-pinned |
+| Out | **tracebloc control plane** | trained weights, metrics, status/logs | Service Bus + allowlisted FQDNs (TLS) |
+
+Everything else is sealed: the environment does not reach into host
+directories (§5), nothing on the host casually reads the environment's data
+(§5), and workloads inside cannot reach arbitrary networks (§8). The
+environment only dials out — no inbound ports are required.
+
+**Wording discipline.** Externally we say: *defined, auditable ingress and
+egress — and raw data is never an egress channel.* We do **not** say
+"air-gapped": the environment *requires* outbound connectivity (it
+authenticates to the backend to obtain its Service Bus credentials; no
+backend egress ⇒ experiments sit Pending), so a literal air-gap claim fails
+the first serious security review. "Almost air-gapped" is internal
+shorthand only.
+
+## 2. Threat model — protect what, from whom
+
+The environment protects **two assets for two parties**: the data owner's
+datasets, and the model provider's model IP. Adversary by adversary:
+
+| Adversary | Datasets protected by | Model IP protected by | Status |
+|---|---|---|---|
+| External network attacker | TLS everywhere; outbound-only; NetworkPolicy | same | enforced |
+| Other services/users on the host | node-local storage — no host files, no 777, no bind-mount (§5) | same | decided (D1/D2) |
+| Vendor training code in-cluster | egress lockdown (§8.1) + dataset-scoped mounts + scoped DB grants (§7) | n/a — it *is* the model | built-inert / decided |
+| tracebloc itself | raw data never leaves; only weights + defined metrics egress | n/a | by design |
+| Cloud provider (cloud form) | customer-run infra; encrypted PVs; TEE later | TEE later (§6.5) | partial |
+| **Environment owner (root)** | out of scope — the data is theirs | hygiene + watermark/audit now (§6.3–6.4); TEE phase 2 (§6.5) | decided (D7/D8) |
+
+**Honest ceilings — never claim past these:**
+
+1. **The machine owner has root, Docker, and the disk.** On classical
+   hardware, nothing that executes there can be made absolutely
+   inaccessible to them. For datasets that is fine (the data is theirs);
+   for model IP, see §6.
+2. **The sanctioned exit carries data-derived information.** Weights and
+   metrics are functions of the training data — that is the product. The
+   defensible claim is "**raw data never leaves**", not "nothing derived
+   from your data leaves". Residual leakage (memorization, membership
+   inference) is a known property of federated learning; differential
+   privacy / secure aggregation are future options, out of scope here.
+3. **Tampering can be made detectable, not impossible** (owner-root
+   again). Dataset integrity & score reproducibility is deliberately a
+   separate RFC (§11).
+
+## 3. How it works today (verified 2026-07-21; evidence refreshed 2026-07-22)
+
+### 3.1 Where data and weights physically live
+- MySQL runs **in-cluster**; ingested datasets are tables in the
+  `training_test_datasets` database.
+- **Model weights do not rest durably in the environment** (verified
+  against the code 2026-07-22). Each training pod downloads its current
+  weights from the backend at cycle start (ZIP transport envelope → a
+  framework file, e.g. `.pkl`/`.safetensors`), writes them **only into its
+  own per-experiment scratch** (`EXPERIMENT_SCRATCH_PATH`, an emptyDir that
+  dies with the pod; legacy images fall back to the image filesystem), and
+  uploads the result back to the backend after the cycle. The durable,
+  cross-cycle weight store is **platform-side** (tracebloc's averaging
+  share: `{edge}_{exp}_{cycle}_weights.pkl` under `SHARE_PATH`) — outside
+  the environment. N concurrent trainings = N pods, each holding only its
+  own current file; nothing accumulates in the environment.
+- The MySQL PersistentVolume uses a **hostPath** under
+  `/tracebloc/<release>/mysql`; the local k3d cluster **bind-mounts
+  `~/.tracebloc → /tracebloc`** (`HOST_DATA_DIR`, default
+  `$HOME/.tracebloc`). Net effect: dataset tables are host files.
+- Dataset *files* can additionally come from `HOST_DATASET_DIR` (a network
+  mount by design, backend#743), bind-mounted **cluster-wide** (`@all`) at
+  `/tracebloc-data` — a wider window than a single ingest needs (§7).
+
+### 3.2 Permissions (corrected from v1)
+- `_ensure_tracebloc_dirs` chmods **the `logs`/`mysql`/`data` subdirs** to
+  `777` — not all of `~/.tracebloc`, and `values.yaml` is spared. v1
+  overstated the blast radius.
+- On the hostPath model that 777 is **load-bearing** (the host user writes
+  into the shared dirs, and kubelet does not apply fsGroup to hostPath
+  volumes) — so v1 §4.6's "can ship independently" was wrong. The 777
+  disappears **with Option C**, not before it (D2).
+
+### 3.3 Install & upgrade behavior
+- Install does `mkdir -p` with **no existing-data guard** — leftover data
+  is silently adopted. Flat and per-release layouts coexist across
+  versions; a machine that has seen both accumulates both (Problem A).
+- On re-run, the installer **reuses** an existing cluster ("already exists"
+  → use it; `cluster start`) — it does not recreate. In-place upgrades
+  therefore keep data; only an explicit `cluster delete` destroys it. This
+  fact is load-bearing for D1 and D4.
+
+### 3.4 Offboard (`tracebloc delete`)
+- Teardown order: revoke credential → clear active-client pointer → Helm
+  uninstall → k3d cluster delete → prune images → remove host data dir →
+  remove self. Flags: `--yes`, `--keep-data`, `--force`.
+- The host-data wipe is now **verified before printing ✔** (cli#389) —
+  a nil `RemoveAll` is no longer treated as proof.
+- `HOST_DATASET_DIR` is never touched (by design — shared network mount).
+
+### 3.5 Egress today (added in v2)
+- The training NetworkPolicy ships **enabled**, allowing DNS, in-cluster
+  MySQL, the requests-proxy, and the egress gateway — **plus a
+  `0.0.0.0/0:443` rule** (`networkPolicy.training.allowExternalHttps`
+  defaults to `true`). The squid egress gateway (FQDN allowlist: backend +
+  App Insights) ships **inert** (`egressProxy.routeWorkloads: false`).
+- Translation: the lockdown is **built but not flipped** — today a training
+  pod can still reach any external host on :443 (§8.1).
+- Enforcement tooling exists: a `helm test` probe verifies the CNI actually
+  blocks egress, and a reachability check verifies required backend egress
+  works.
+
+### 3.6 Spawned-job hardening today
+- New-architecture images run with `readOnlyRootFilesystem`, write weights
+  and scratch to a pod-scoped `emptyDir` (`EXPERIMENT_SCRATCH_PATH` — dies
+  with the pod), and get read-only shared mounts. **Legacy images are
+  carved out** of parts of this (they write inside the image filesystem).
+
+### 3.7 The 2026-07-21 reproduction (unchanged from v1)
+- "Delete isn't deleting" was **wrong**: `tracebloc delete --force --yes`
+  fully wiped `~/.tracebloc` (0 survivors). The earlier "survival" was a
+  flat/per-release **transition artifact** across a version bump, plus a
+  second CLI binary in `/usr/local/bin`. The real gaps: alternate/legacy
+  locations, and the installer silently re-adopting whatever it finds.
+
+## 4. Problem A — offboard leaves a clean slate → DECIDED
+
+**What we want:** "delete" means the environment's data is gone — current
+version and leftovers — so a reinstall starts empty. UX expectation and
+privacy expectation at once.
+
+**Scope constraint (unchanged):** never a machine-wide wipe. A machine can
+host multiple environments, and `HOST_DATASET_DIR` may be a shared network
+mount other tools use. Clean-slate is scoped to the environment being
+offboarded.
+
+**Decision (D3):**
+1. **Installer leftover-guard** — if data is present at install time, stop
+   and make the user choose (reuse / wipe / new dir) instead of silently
+   adopting. This is the guard that prevents the bug that was actually hit,
+   and it doubles as the migration prompt (D4).
+2. **Drop the heavy multi-path wipe** proposed in v1 — under node-local
+   storage (§5) there are no host data paths left to chase. `delete` keeps
+   config/token cleanup and **verifies the wipe before printing ✔**
+   (shipped as cli#389).
+3. `--keep-data` stays as the explicit opt-out. A `--purge-all` (enumerate,
+   confirm, never default) is deferred until someone actually needs it.
+
+## 5. Problem B — where datasets live → DECIDED: Option C (node-local)
+
+**The principle (unchanged from v1): separate restart-persistence from
+delete-persistence.** Laptops reboot and data must survive; offboard/delete
+means destroyed. The hostPath bind-mount conflated the two by making data
+survive everything — which is exactly what made offboard fragile (Problem
+A) *and* put data outside the environment boundary (Problem B).
+
+The v1 menu, with the decision marked:
+
+| Option | Restart-persists | Delete wipes it | Host exposure |
+|---|---|---|---|
+| A. Status quo — bind-mount `~/.tracebloc`, 777 subdirs | ✅ | ⚠️ only if delete chases every path | ❌ world-readable files in `$HOME` |
+| B. Docker managed named volume (env-scoped) | ✅ | ✅ if removed on offboard | ✅ |
+| **C. Node-local storage (k3s `local-path`, inside the k3d node) — CHOSEN (D1)** | ✅ (node container persists across stop/start) | ✅ (dies with `cluster delete`) | ✅ not visible as host files |
+| D. C + encryption at rest | ✅ | ✅ | ✅✅ — **phase 2** (D5) |
+
+**Why C:** datasets and MySQL move onto k3s's built-in `local-path`
+provisioner *inside the k3d node*. Delete destroys the data by
+construction; there is no browsable host folder; the 777 goes away by
+construction (D2); restarts keep working (the node container and its
+Docker volume survive stop/start); and upgrades keep data because the
+installer **reuses** the cluster (§3.3). The v1 objection to C —
+"loses survive-delete+recreate" — dissolves: delete+recreate is precisely
+the case where data *should* die.
+
+**Validated on a real credentialed dev install (client#368, 2026-07-22):**
+single-node cluster, all PVCs Bound on `local-path`, zero hostPath PVs;
+real jobs-manager-spawned ingest jobs mounted the shared PVC and registered
+datasets against the backend; stop/start preserved data; `cluster delete`
+destroyed the node, its Docker volume, and all data; nothing under
+`~/.tracebloc`. The prototype run also caught and fixed a real leak (a
+second `_ensure_tracebloc_dirs` call site still creating empty 777 dirs).
+
+**Constraint C1 — single-node.** `local-path` is RWO/WaitForFirstConsumer,
+and spawned Jobs must land on the node that holds the volume, so node-local
+pins the cluster to a **single node** — it forces both `AGENTS=0` **and**
+`SERVERS=1`. Dropping the agents is not enough on its own: k3s server nodes
+are schedulable, so `SERVERS>1` would still yield multiple nodes a Job could
+land on away from the volume; the prototype (client#368) had to pin both.
+Since the defaults are `SERVERS=1`/`AGENTS=1` today, **flipping the storage
+default also changes the default local topology from two nodes to one** —
+call this out in release notes. (k3s agents on one Docker host provide no
+real isolation, so nothing of value is lost.)
+
+**Out of scope for now:** `HOST_DATASET_DIR` (network-mount ingest sources)
+stays on the hostpath path; combining it with node-local is a follow-up.
+
+**Migration (D4): no data-copier.** `--reuse-values` upgrades keep existing
+installs on their current `~/.tracebloc`; they move to C on a clean
+delete + reinstall — consistent with "delete means gone". The leftover-guard
+(D3) ensures data is never silently stranded or adopted.
+
+**Encryption at rest (D5): phase 2.** For local installs, recommend host
+full-disk encryption (FileVault/LUKS); in cloud, encrypted PVs. App-level
+crypto for the volume is not warranted for a local dev tool unless the
+threat model changes — and the real answer to "protected from a local
+admin" is §6.5, not filesystem crypto.
+
+**Decided (D15, 2026-07-22):** node-local flips from flag-gated
+(`TB_STORAGE_MODE`) to **default** for local installs — the step that
+actually delivers this RFC to users — after one green end-to-end
+**training run** on node-local (the only client#368-checklist item not yet
+exercised; it was blocked by an orthogonal dev auth issue, not by
+storage). The single-node topology change (C1) goes in the release notes.
+
+## 6. Model IP protection — two-sided trust (new in v2)
+
+### 6.1 Goal
+The environment owner must not be able to access the vendor models that
+run inside their environment. This completes the marketplace trust story in
+both directions — the data owner's data is protected from the vendor,
+**and** the vendor's model is protected from the data owner. Almost nobody
+in the FL space offers the second half; it is worth building toward
+deliberately.
+
+### 6.2 The ceiling — state it before designing around it
+To execute, weights must exist in plaintext in RAM/VRAM, and any decryption
+key must be present in the environment. Root can dump process memory, GPU
+memory, or the disk at any moment *during* execution — so at-rest
+encryption alone, obfuscation, and delete-after-run all raise the bar
+without changing the outcome. **On classical hardware, prevention against
+owner-root is impossible; only trusted execution environments (§6.5)
+change that.** Everything in 6.3–6.4 is deterrence, detection, and
+minimization — valuable, and never to be sold as prevention.
+
+### 6.3 Now — watermarking + audit (D7)
+Fingerprint delivered weights **per environment** (traitor tracing): a
+leaked model is attributable to the environment it leaked from, which makes
+the contractual protection enforceable. Log model-delivery events. This is
+detection and legal recourse, not prevention — and it is what makes 6.4
+credible commercially.
+
+### 6.4 Now — runtime hygiene, maximum practical (D8)
+1. **Weights enter at runtime over TLS, never baked into images** (already
+   true — images stay generic per task type; `docker save` yields no IP).
+2. **The active working copy** lives in pod-scoped scratch
+   (`EXPERIMENT_SCRATCH_PATH`, an `emptyDir`) and dies with the pod —
+   already true on new-architecture images; close the legacy-image
+   carve-out (D11).
+3. **At rest in the environment — corrected in v2.1 after code
+   verification.** The edge has **no durable weight store to encrypt**:
+   weights arrive per cycle, exist only in the pod's own scratch and
+   process memory, and the durable store is platform-side (§3.1). v2's
+   proposal to envelope-encrypt an in-environment weight DB targeted a
+   store that does not exist — the architecture is already stronger than
+   that proposal assumed. What remains on the edge is **lifecycle
+   hygiene**: `ttlSecondsAfterFinished` on finished Jobs (an emptyDir
+   survives until its pod object is deleted), closing the legacy
+   image-filesystem fallback (D11), offboard's existing image prune
+   (§3.4), and — optional, marginal against the §6.2 ceiling — encrypting
+   the scratch file with a per-pod in-memory key.
+4. **The platform-side store is where envelope encryption +
+   crypto-shredding apply.** The durable `{edge}_{exp}_{cycle}_weights.pkl`
+   files under the averaging share are opaque bytes: encrypt on receipt,
+   decrypt in memory for averaging, per-experiment key in the backend's
+   KMS, discard the key on experiment deletion → every copy (including
+   backups/snapshots) becomes unrecoverable, instantly and verifiably.
+   Feasible as a contained change at the existing weight-file I/O choke
+   points (deserialization is already confined via `safe_unpickle` on both
+   edge and averaging). This protects vendor IP **on tracebloc
+   infrastructure** and makes experiment deletion verifiable — but it is a
+   **platform ticket (backend/averaging), not part of the environment
+   boundary** this RFC defines.
+
+Stated ceiling: root can still capture plaintext *during* execution — 6.4
+stops casual and after-the-fact access, not a determined owner. That gap
+belongs to 6.5.
+
+### 6.5 Phase 2 — confidential computing (TEE) (D14)
+AMD SEV-SNP / Intel TDX confidential VMs plus NVIDIA H100/H200
+confidential-computing mode encrypt memory with keys held in silicon; the
+host, hypervisor, and root **cannot** read enclave memory. Remote
+attestation lets tracebloc act as key broker: weights decrypt **only**
+inside a measured, attested enclave. This is the one mechanism that
+actually delivers "the owner cannot access the model" — and it also
+strengthens the *data* story in cloud deployments (data protected from the
+cloud provider). Azure sells confidential GPU VMs today, so a pilot on
+cloud-form environments is the natural first step **when build capacity
+allows — explicitly deferred for now** (decided 2026-07-22). On-prem
+follows where customer hardware supports it; local k3d never gets it.
+Bridge until then: **sensitivity tiering** — vendors can flag crown-jewel
+models to run only on TEE-attested environments; commodity/open-backbone
+models run anywhere.
+
+### 6.6 Rejected
+Homomorphic encryption / MPC for training: orders of magnitude too slow for
+deep learning at this scale. Named here so it doesn't resurface.
+
+## 7. In-cluster walls — dataset & experiment scoping (new in v2, DECIDED)
+
+Being inside the box must not mean seeing everything in the box. The
+precise promise is "no service **outside the sanctioned training flow**
+touches the data" — and the sanctioned flow is *per experiment*. A training
+job must reach exactly its own dataset and its own artifacts, nothing else.
+
+1. **Dataset-scoped mounts (D9).** Jobs-manager currently mounts the whole
+   shared data PVC into spawned jobs. Near term: mount only the job's
+   dataset directory (`subPath`), read-only for training. End state under
+   Option C: **one PVC per dataset** — `local-path` dynamic provisioning
+   makes per-dataset PVCs cheap — so a job physically cannot see other
+   datasets. This also narrows the cluster-wide `HOST_DATASET_DIR` window
+   where that path is used.
+2. **The database layer (D10).** Tabular and time-series datasets are
+   MySQL tables, and the training NetworkPolicy allows training→MySQL —
+   PVC scoping alone does not cover them. Adopt **per-experiment DB
+   credentials whose grants cover only that experiment's dataset tables**
+   (and its own weight rows, which composes with §6.4): short-lived,
+   injected at job start, revoked after.
+3. **Finish spawned-pod hardening (D11).** Close the legacy-image
+   read-only carve-out; set `automountServiceAccountToken: false` on
+   spawned jobs; keep `readOnlyRootFilesystem` + read-only shared mounts as
+   the floor.
+
+## 7bis. Per-dataset isolation — immutable tables & grant-scoped views (new in v2.3, DECIDED)
+
+§7 scopes *access* to a dataset (mounts, DB grants, pod hardening). This
+section sharpens *what a dataset physically is*, so the scoping rests on
+structure rather than on a filter a job could sidestep. Today
+tabular/time-series ingests land as rows in a **shared** table tagged by
+`ingestor_id`, and every read narrows with `WHERE ingestor_id IN (…)` (§3.1;
+tracebloc-engine `core/utils/database.py:243-361`). A `WHERE` clause is a
+convention, not a wall — one dropped predicate or one `SELECT *` and a job
+reads its neighbours. The model below turns the convention into physics.
+
+1. **One immutable table per ingestion (D16).** Every ingest creates a
+   **brand-new physical table** named `ds_<ingestor_id>`; the ingestor id
+   *is* the physical identity. The dataset name the user chose is a
+   **user-facing label only** (metadata), never the table name. Ten ingests
+   of the same name and schema produce **ten tables**, not ten appends into
+   one. Isolation stops being a runtime filter and becomes a property of the
+   schema: a job that can only name `ds_<its-own-id>` cannot phrase a query
+   that reaches another dataset.
+
+2. **Immutable — no append, no in-place edit (D17; enforced by D19).** A
+   table, once written by an ingestion, is never appended to or edited.
+   Re-ingesting the same name+schema **creates a new table**; it does not
+   reuse the old one. This is enforced by **removing the ingestor's
+   reuse/append path**: `data-ingestors/tracebloc_ingestor/database.py:275-357`
+   today returns/reflects an existing table when the name and feature schema
+   match (the "return existing table if already created" / "check if table
+   exists in database" branch) — that branch is deleted, and ingestion
+   always creates a fresh `ds_<ingestor_id>`. The schema-drift guard that
+   lives in that branch (the "stale table from an earlier ingestion" error)
+   becomes moot once every ingestion owns a private table name.
+
+3. **Correction = delete, not versioning (D17).** There is **no version
+   chain**. A wrong ingestion is corrected by **dropping its table** and
+   re-ingesting — a new id, a new `ds_<ingestor_id>`, the bad one gone —
+   which keeps the model honest with the RFC's "delete means gone" stance
+   (§4/§5) instead of accreting history. **Referential cleanup is part of
+   the drop:** removing a table must invalidate every view and every
+   data-space reference pointing at it (O7). A definer-view left dangling
+   over a dropped base table is both a broken read path and a latent leak.
+
+4. **Isolation = a grant-scoped access handle, never raw-table access
+   (D18).** A training pod is never granted access to base tables at large.
+   For MySQL it is granted `SELECT` **only** on a **definer-rights view**
+   (degenerate case: on its single `ds_<ingestor_id>` table) — never on any
+   other dataset's base table. Because the grant does not name the
+   neighbours, a malicious or buggy `SELECT * FROM ds_<other-id>` **cannot
+   even reference** a table it holds no grant on; it fails at
+   permission-check time, not at a `WHERE` clause the job controls.
+
+   *View vs. table, for the reader:* a **table** stores rows on disk; a
+   **view** is a stored `SELECT` exposing only chosen rows/columns of one or
+   more tables, holding no data of its own; a **definer-rights view**
+   executes with the privileges of the user that *created* it, so you can
+   `GRANT SELECT` on the view to the training user **without** granting that
+   user any privilege on the underlying base tables. The view becomes the
+   only name the job holds; the base tables stay invisible.
+
+   For **file/image** datasets the analogue is the **per-dataset PVC /
+   `subPath` mount** already chosen as the D9 end state (client-runtime#203)
+   — same principle, different substrate: the handle is a mount, not a view.
+   And this **composes with the per-experiment DB grant (D10,
+   backend#1181)**: that grant now targets the experiment's **view/table
+   handle** rather than the shared table, and still excludes the platform
+   metadata DB. §7 and §7bis are the same wall from two sides — §7 scopes
+   the grant, §7bis scopes the object the grant points at.
+
+5. **Grandfather — new ingests only (D20).** The model applies to **new
+   ingestions**. Existing shared multi-ingestor tables **stay as they are**
+   — no migration, no backfill into per-ingestion tables — mirroring the
+   storage-migration stance (D4: no data-copier; installs move forward on
+   the natural boundary, here the next ingest). The client read path
+   therefore keeps tolerating both shapes through the transition (O6).
+
+**Scope boundary — what this section does *not* own.** The primitive here is
+deliberately **single-environment**: it makes one dataset an isolated,
+access-scoped object inside one secure environment. The **multi-org
+composition** layer — *data spaces*, federated combination of datasets
+across environments, the schema/compatibility engine that decides when two
+datasets may train together, and cross-org authorization — is carved into
+its **own RFC, "Data spaces & federated dataset composition"** (drafting in
+`backend`), which **builds on** these primitives (a data space is composed
+out of exactly these access-scoped units). Ownership split: **this RFC owns
+the isolation primitive; the data-spaces RFC owns the composition over it.**
+
+## 8. Boundary enforcement & conformance (new in v2)
+
+### 8.1 Egress lockdown — flip it (D6, separate ticket)
+The outbound wall exists (training NetworkPolicy, squid FQDN-allowlist
+gateway, enforcement probe, backend-reachability check) but **ships
+permissive**: `allowExternalHttps: true` keeps a `0.0.0.0/0:443` rule and
+`routeWorkloads: false` leaves the gateway inert. Until the per-fleet flip
+(verify gateway → route workloads → drop the 443 rule), "nothing gets out"
+is not an enforced property for training pods on :443. Tracked as its own
+ticket; this RFC records the dependency: **the golden-box claim is gated on
+that flip** more than on anything else in this document.
+
+### 8.2 The seal check (D12)
+Productize the existing probes into **one conformance suite** — the
+egress-enforcement probe, the required-backend-reachability check, and
+storage checks (post-C: no hostPath PVs, PVCs on the expected class,
+nothing under `~/.tracebloc`) — runnable at install, at upgrade, and on
+demand, surfaced pass/fail in the CLI. Design stance the chart already
+takes: **silent non-protection is worse than explicit disabling.** An
+environment that cannot enforce a guarantee is explicitly marked *unsealed*
+— never silently claimed sealed.
+
+### 8.3 The guarantee matrix (D12)
+Enforcement differs per substrate; the matrix is the honest artifact a
+customer security review can quote. To be filled precisely as part of D12
+(cells: enforced / conditional / recommended / not available):
+
+| Guarantee | k3d local | EKS | AKS | OpenShift | bare metal |
+|---|---|---|---|---|---|
+| Storage inside cluster boundary (§5) | decided (C) | native PV | native PV | native PV | native PV |
+| NetworkPolicy egress enforcement | verify (k3s embedded) | conditional (CNI mode) | conditional (CNI) | native (OVN) | conditional (CNI) |
+| Encryption at rest | host FDE (recommended) | encrypted EBS | encrypted disks | platform | site policy |
+| Confidential compute (§6.5) | not available | phase 2 | phase 2 (pilot) | phase 2 | hardware-dependent |
+
+### 8.4 Verify local enforcement (D12)
+Do not assume k3d enforces NetworkPolicy — verify the k3s-embedded
+controller blocks egress on a local install and fold that probe into the
+seal check.
+
+## 9. Messaging reconciliation
+
+- The **channel list in §1 is the quotable definition** of the secure
+  environment — align docs, website, and sales material with it and with
+  the terminology source-of-truth.
+- Keep the strong "within the secure environment" wording — Option C makes
+  it literally true for local storage. Internal precision: node-local means
+  *not-host-visible + dies-with-cluster*, not *cryptographically secure*.
+- Never "air-gapped" in external copy (§1).
+- Model-IP claims: "technically protected" only where TEE-attested (§6.5,
+  phase 2). Until then the accurate sentence is: *runtime-hygienic,
+  watermarked, and contractually protected.*
+
+## 10. Decision log (2026-07-22, Lukas + Asad)
+
+| # | Decision (v1 ref) | Outcome |
+|---|---|---|
+| D1 | Local storage target (§7.2) | **Option C — node-local**, validated in client#368 → client#367 |
+| D2 | Drop `chmod 777` (§7.3) | **Yes — by construction with C** (load-bearing on hostpath, cannot ship separately) |
+| D3 | Offboard clean-slate (§7.1) | **Leftover-guard yes; heavy multi-path wipe no; verify-before-✔** (guard: client#376; verify: cli#389) |
+| D4 | Migration (§7.5) | **No data-copier**; guard prevents stranding; installs move to C on delete+reinstall |
+| D5 | At-rest encryption (§7.4) | **Phase 2**; recommend host FDE; keep wording honest |
+| D6 | Egress lockdown flip | **client-runtime#199**; golden-box claim gated on it (§8.1) |
+| D7 | Model IP — now | **Watermarking + audit** (§6.3) → backend#1183 |
+| D8 | Weights at rest | **Edge: nothing rests by architecture (verified) — lifecycle hygiene (client-runtime#200); platform-side envelope encryption + crypto-shredding (backend#1182)** (§6.4) |
+| D9 | Dataset scoping | **Scoped mounts → per-dataset PVCs under C** (§7.1) → client-runtime#203 |
+| D10 | DB scoping | **Per-experiment DB credentials, table-scoped grants** (§7.2) → backend#1181 |
+| D11 | Pod hardening | **Close legacy carve-out; no SA token; read-only floor** (§7.3) → client-runtime#201 + #202 |
+| D12 | Conformance | **Guarantee matrix + seal check + verify k3d enforcement** (§8.2–8.4) → backend#1184 + cli#393 |
+| D13 | Score/tamper integrity | **Separate RFC** — versioning+integrity root cause, not storage (§11) → backend#1185 |
+| D14 | Confidential compute | **Phase 2 — deferred for capacity**; Azure confidential-GPU pilot first; tiering as bridge (§6.5) |
+| D15 | Node-local default (was O1) | **Flip node-local to default for local installs** after one green training run on node-local (gate: backend#1180); checklist on client#367 |
+| D16 | Table-per-ingestion (§7bis) | **One immutable `ds_<ingestor_id>` table per ingest** — the ingestor id is the physical identity; the user's dataset name is a label only (same name+schema → N tables) |
+| D17 | Immutability + correction (§7bis) | **No append, no in-place edit; re-ingest = new table; correction = drop + re-ingest, no version chain** — the drop must cascade to dependent views / data-space refs (O7) |
+| D18 | Isolation enforcement (§7bis) | **Grant-scoped access handle, not raw-table access** — MySQL: `SELECT` on a definer-rights view (or the single `ds_` table) only; files: per-dataset PVC/`subPath` (D9); composes with the per-experiment grant (D10, backend#1181) |
+| D19 | Ingestor append-disable (§7bis) | **Remove the reuse/append path** — `data-ingestors/tracebloc_ingestor/database.py:275-357` (reuse-existing-table branch) deleted; ingestion always creates a fresh table |
+| D20 | Grandfather (§7bis) | **New ingests only; existing shared multi-ingestor tables stay as-is; no migration/backfill** (mirrors D4) |
+
+Open items:
+
+| # | Question | Recommendation |
+|---|---|---|
+| O2 | Platform-side weight retention: when does crypto-shred fire on the averaging-share store (experiment completion? grace window? audit needs?) | Shred at completion + configurable grace window — decided inside backend#1182 |
+| O4 | Watermarking mechanics & owner (backend work) | Scope inside backend#1183 |
+| O5 | Storage abstraction beyond MySQL — should the RFC define "a dataset = an isolated, access-scoped unit" with a per-backend physical form (MySQL table + definer-view; file/folder PVC; future other DBs) rather than binding the concept to MySQL? | Open (reviewer feedback) — lean toward a backend-neutral definition; confirm the per-substrate forms |
+| O6 | View mechanics at scale — many tables + views (UNION / indexing / perf), and how the training read path moves from the client-built `WHERE ingestor_id IN (…)` (tracebloc-engine `core/utils/database.py:243-361`) to reading a backend-provisioned view/table handle | Open (reviewer feedback) — needs a read-path / perf design pass |
+| O7 | Delete / referential-cleanup semantics — cascade a table drop to its views and any data-space references (D17) | Open (reviewer feedback) — resolve jointly with the data-spaces RFC (references cross the boundary) |
+
+Resolved since v2: **O1 → D15** (decided). **O3** dissolved by the
+verified architecture — there is no in-environment at-rest weight store
+needing key custody; platform-side keys live in the backend's KMS.
+
+## 11. Non-goals
+
+- Remote/cloud PV storage model — unchanged (already on proper PVs on
+  customer infrastructure).
+- Restart-persistence — unchanged (laptops reboot; data survives).
+- **Dataset integrity & score reproducibility** — fingerprint at ingest,
+  verify at scoring, bind every score to the dataset fingerprint. Genuinely
+  important for the benchmark product, but its root cause is verifiable
+  *versioning*, not storage location; it gets its **own RFC** (D13) rather
+  than blurring this one.
+- Cryptographic training (HE/MPC) — rejected (§6.6). Differential privacy /
+  secure aggregation — future, separate.
+
+## 12. Rollout sequence
+
+1. Land this RFC with the §10 decision log. Execution epic: backend#1151.
+2. cli#389 (verify-before-✔) and client#368 (flag-gated C) merge on their
+   own review tracks.
+3. Build the **installer leftover-guard** (D3 — client#376).
+4. **Egress-lockdown flip** (D6 — client-runtime#199), per fleet.
+5. One green **training run on node-local** (gate: backend#1180) → flip the
+   default (D15 — checklist on client#367), single-node topology change in
+   release notes.
+6. **Scoping & hygiene** (D8–D11) as backend#1151 children: job-TTL +
+   scratch hygiene (client-runtime#200); platform-side weight-store
+   encryption + crypto-shred (backend#1182); scoped mounts
+   (client-runtime#203); per-experiment DB grants (backend#1181);
+   pod-hardening completion (client-runtime#201, #202); watermarking
+   (D7 — backend#1183).
+7. **Seal check + guarantee matrix** (D12 — backend#1184, CLI surfacing
+   cli#393).
+8. Phase 2 when capacity allows: TEE pilot on Azure confidential GPU (D14);
+   at-rest encryption revisit (D5). Docs/messaging: backend#1185 (integrity
+   RFC), backend#1186 (§9 alignment).
+
+## 13. Appendix — evidence (refreshed 2026-07-22; line numbers as of that date)
+
+- `client/scripts/lib/common.sh:386` — `HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"` (v1 cited :329 — drifted)
+- `client/scripts/lib/common.sh:392` — `HOST_DATASET_DIR="${HOST_DATASET_DIR:-}"` (v1 cited :335)
+- `client/scripts/lib/common.sh` (post-#368) — `SERVERS="${SERVERS:-1}"`/`AGENTS="${AGENTS:-1}"` (default two-node local topology), and `TB_STORAGE_MODE=node-local` forces **both** `AGENTS=0` **and** `SERVERS=1` for the single-node pin (§5 C1)
+- `client/scripts/lib/cluster.sh:28-56` — `_ensure_tracebloc_dirs`: `mkdir -p` with no existing-data guard; `chmod -R 777` scoped to `logs`/`mysql`/`data` subdirs only, `values.yaml` spared
+- `client/scripts/lib/cluster.sh:197`, `:355-356` — cluster **reuse** on re-run (`cluster start`; "already exists → Using existing cluster")
+- `client/scripts/lib/cluster.sh:312` — `-v "${HOST_DATASET_DIR}:/tracebloc-data@all"` (cluster-wide dataset-source mount)
+- `client/client/values.yaml` — `networkPolicy.training.{enabled,allowExternalHttps,enforcementProbeHost,clusterCidrs}`, `egressProxy.{enabled,routeWorkloads}`, `egressReachabilityCheck` (lockdown built, ships permissive; §3.5/§8.1)
+- `client-runtime/jobs_manager.py` (~:825-885) — `EXPERIMENT_SCRATCH_PATH` emptyDir scratch, `readOnlyRootFilesystem`, read-only shared mounts; legacy-image carve-out (~:77, :829)
+- `tracebloc-engine/core/weights/base.py:117-146, :340` — per-cycle weight
+  download (backend → ZIP envelope → `{scratch}/{exp}_{model}_weights.<ext>`)
+  and upload back to the backend; stale-sibling cleanup between formats
+- `tracebloc-engine/core/utils/general.py:21-33` — `get_experiment_path()`:
+  `EXPERIMENT_SCRATCH_PATH` (emptyDir) or legacy image-filesystem fallback
+- `averaging-service/service/safe_unpickle.py` — the durable, platform-side
+  weight store: `{edge}_{exp}_{cycle}_weights.pkl` under `SHARE_PATH`;
+  deserialization confined on both sides (edge: backend#946)
+- `cli/internal/cli/delete.go` — teardown order; wipe verified before ✔ as of cli#389
+- Validation evidence — client#368 comments (2026-07-22): single-node node-local install on dev; PVCs on `local-path`; real ingest-jobs sharing the data PVC; stop/start survives; delete destroys volume + data; prototype fix `5e4ea45` (second `_ensure_tracebloc_dirs` call site)
+- Repro (2026-07-21): `tracebloc delete --force --yes` → `~/.tracebloc` gone, 0 `.ibd` survivors; earlier "survival" = flat/per-release transition artifact + second CLI binary
