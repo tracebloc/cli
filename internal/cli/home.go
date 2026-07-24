@@ -489,7 +489,11 @@ func realProbeEnv(ctx context.Context) envProbe {
 	// the remembered-name fallback) — and skip the cluster I/O entirely, which
 	// also keeps the common unprovisioned re-entry instant.
 	if !binding.applied {
-		return envProbe{local: localNoRelease}
+		// #401: an empty pointer isn't proof of "no environment" — the Windows
+		// installer never writes it. localEnvFallback adopts a release only on
+		// a LOCAL (loopback/k3d) cluster, so the shared-cluster guarantee above
+		// is preserved; everything else still reads as no-release.
+		return localEnvFallback(ctx)
 	}
 	resolved, err := loadClusterFn(opts)
 	if err != nil {
@@ -645,22 +649,8 @@ func sanitizeInvoked(argv0 string) string {
 	return binTracebloc
 }
 
-// tbAliasAvailable reports whether a real tracebloc-owned `tb` alias sits next to
-// this binary (the installer symlinks it there, cli#142). Reuses delete.go's
-// aliasStatus so "is it ours" is judged exactly as offboarding judges it — we
-// only advertise `tb` when it genuinely points at this CLI.
-func tbAliasAvailable() bool {
-	exe, err := osExecutable()
-	if err != nil {
-		return false
-	}
-	tb := filepath.Join(filepath.Dir(exe), binTB)
-	if tb == exe {
-		return false
-	}
-	_, ours := aliasStatus(tb, exe)
-	return ours
-}
+// tbAliasAvailable moved to home_local_fallback.go (#401): it now also accepts
+// the Windows tb.cmd shim, which the symlink-only test could never match.
 
 // ── Rendering (pure) ──
 
