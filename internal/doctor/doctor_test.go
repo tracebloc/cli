@@ -657,6 +657,36 @@ func TestCheckNodeFit(t *testing.T) {
 			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
 		}
 	})
+	// Drift nudge (#400 / backend#1236): a budget using ≤ half of what the
+	// largest node could give one run gets a resources-set-max pointer; a snug
+	// fit stays quiet.
+	t.Run("big machine + small budget -> ok with the resize nudge", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "32", "64Gi"))
+		r := checkNodeFit(bg(), cs, cpuOnly) // 2/8Gi vs max 31/61
+		if r.Status != StatusOK || !strings.Contains(r.Detail, "resources set max") {
+			t.Fatalf("=> %v (%q), want ok with nudge", r.Status, r.Detail)
+		}
+	})
+	t.Run("snug fit -> ok without the nudge", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "4", "12Gi"))
+		r := checkNodeFit(bg(), cs, cpuOnly) // 2/8Gi vs max 3/9: memory over half
+		if r.Status != StatusOK || strings.Contains(r.Detail, "resources set max") {
+			t.Fatalf("=> %v (%q), want ok without nudge", r.Status, r.Detail)
+		}
+	})
+	t.Run("heterogeneous nodes: nudge quotes the CPU-major node, matching set max (Bugbot)", func(t *testing.T) {
+		// resources.LargestReadyNode (what `set max` applies) is CPU-major:
+		// it picks cpuBig (32/64Gi -> max 31/61Gi), not memBig (8/128Gi ->
+		// 7/125Gi). The advertised ceiling must be the SAME node's.
+		cs := fake.NewClientset(
+			node("cpuBig", "32", "64Gi"),
+			node("memBig", "8", "128Gi"),
+		)
+		r := checkNodeFit(bg(), cs, cpuOnly)
+		if r.Status != StatusOK || !strings.Contains(r.Detail, "cpu=31,memory=61Gi") {
+			t.Fatalf("=> %v (%q), want the CPU-major node's ceiling cpu=31,memory=61Gi", r.Status, r.Detail)
+		}
+	})
 }
 
 func dockerSecret(name string, data []byte) *corev1.Secret {
