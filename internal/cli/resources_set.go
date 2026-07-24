@@ -364,11 +364,27 @@ func desiredFromFlags(req setReq, current resources.Training, gpuName corev1.Res
 func runResourcesWizard(p *ui.Printer, pr prompter, node resources.Machine, current resources.Training, gpuName corev1.ResourceName, gpuCount int64, machineHasGPU bool) (resources.Training, error) {
 	maxCores := resources.MaxRunCores(node)
 	maxGiB := resources.MaxRunGiB(node)
+	// The configured budget floored to the wizard's whole-unit domain — used to
+	// clamp prompt defaults and annotate the header (#398). `current` is the
+	// cluster-wide ceiling (chart default 8Gi), which a machine can shrink UNDER
+	// (the WSL2 field case: node ~6.7 GiB under a lingering 8Gi ceiling).
+	curCores := int(current.CPU.MilliValue() / 1000)
+	curGiB := int(current.Mem.Value() >> 30)
 
-	// (1) Current per-run budget vs the machine.
+	// (1) Current per-run budget vs the machine. When the configured budget
+	// exceeds what this machine can still give one run, say so instead of
+	// printing a bare ">100%" line like "8 of 6.7 GiB" (#398).
 	p.Section("How much of this machine a training run may use")
-	p.Field("CPU", fmt.Sprintf("%s of %s cores", coresNum(current.CPU), coresNum(node.CPU)))
-	p.Field("Memory", fmt.Sprintf("%s of %s GiB", gibNum(current.Mem), gibNum(node.Mem)))
+	cpuLine := fmt.Sprintf("%s of %s cores", coresNum(current.CPU), coresNum(node.CPU))
+	if curCores > maxCores {
+		cpuLine += " — more than this machine can give one run now"
+	}
+	p.Field("CPU", cpuLine)
+	memLine := fmt.Sprintf("%s of %s GiB", gibNum(current.Mem), gibNum(node.Mem))
+	if curGiB > maxGiB {
+		memLine += " — more than this machine can give one run now"
+	}
+	p.Field("Memory", memLine)
 	if machineHasGPU {
 		p.Field("GPU", fmt.Sprintf("%d of %d", currentGPUCount(current), gpuCount))
 	}
@@ -411,17 +427,21 @@ func runResourcesWizard(p *ui.Printer, pr prompter, node resources.Machine, curr
 				"overhead it can offer a training run at most %d core(s) and %d GiB. Free up "+
 				"resources or use a larger machine.", maxCores, maxGiB)}
 	}
+	// The offered defaults are the current budget CLAMPED into each prompt's own
+	// valid range (#398): unclamped, a machine that shrank under the configured
+	// ceiling offered a default its own validator then rejected — pressing Enter
+	// on "(8)" answered "must be between 2 and 3".
 	coresAns, err := pr.Input(
 		fmt.Sprintf("CPU cores for one run (1–%d)", maxCores),
 		"how many CPU cores a single training run may use",
-		coresNum(current.CPU), boundedInt(1, maxCores))
+		strconv.Itoa(clampInt(curCores, 1, maxCores)), boundedInt(1, maxCores))
 	if err != nil {
 		return resources.Training{}, err
 	}
 	memAns, err := pr.Input(
 		fmt.Sprintf("Memory for one run in GiB (2–%d)", maxGiB),
 		"how much memory a single training run may use, in GiB",
-		gibNum(current.Mem), boundedInt(2, maxGiB))
+		strconv.Itoa(clampInt(curGiB, 2, maxGiB)), boundedInt(2, maxGiB))
 	if err != nil {
 		return resources.Training{}, err
 	}
@@ -601,6 +621,18 @@ func sameCeiling(a, b resources.Training) bool {
 // SHOW formatters append, for the wizard's "x of N" lines.
 func coresNum(q resource.Quantity) string { return strings.TrimSuffix(resources.FormatCPU(q), " CPU") }
 func gibNum(q resource.Quantity) string   { return strings.TrimSuffix(resources.FormatMem(q), " GiB") }
+
+// clampInt limits v to [lo, hi]. Prompt defaults must sit inside their own valid
+// range, or accepting the offer is rejected by its own validator (#398).
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
 
 func currentGPUCount(t resources.Training) int64 {
 	if t.HasGPU {
