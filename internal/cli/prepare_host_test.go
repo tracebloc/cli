@@ -25,6 +25,22 @@ func TestPrepareHostCmdFailsClosedOnDownloadError(t *testing.T) {
 	}
 }
 
+// Every curl in the shared installer script must pin the TLS 1.2 floor
+// (--tlsv1.2), matching scripts/install.sh, so this privileged download can never
+// negotiate a weaker protocol. Guards both the upgrade (no subcommand) and
+// prepare-host paths since they share installerRunScript (Bugbot #397).
+func TestInstallerRunScriptPinsTLSFloor(t *testing.T) {
+	for _, sub := range []string{"", "prepare-host"} {
+		script := installerRunScript(sub)
+		if !strings.Contains(script, "curl") {
+			t.Fatalf("installerRunScript(%q) must curl the installer; got: %q", sub, script)
+		}
+		if !strings.Contains(script, "--tlsv1.2") {
+			t.Errorf("installerRunScript(%q) must pin --tlsv1.2 on the download (matches install.sh); got: %q", sub, script)
+		}
+	}
+}
+
 // The installer must NOT be fed to bash over a pipe: `curl | bash -s` makes the
 // inner bash read its program from the pipe, stealing the installer's stdin so
 // any interactive prompt in prepare-host gets EOF. We download and run a file

@@ -92,13 +92,24 @@ func TestUpgradePlanFor_PerOS(t *testing.T) {
 
 // TestSkipUpdateNudge: the nudge must be suppressed right after `tracebloc
 // upgrade` (the running process is stale-by-design once it swaps its own binary)
+// AND after `tracebloc delete` (offboarding removed the CLI and wiped
+// ~/.tracebloc — the nudge's cache write would resurrect the dir; Bugbot #397),
 // but fire for any other command.
 func TestSkipUpdateNudge(t *testing.T) {
 	if !SkipUpdateNudge(newUpgradeCmd()) {
 		t.Error("upgrade command must skip the update nudge")
 	}
-	if SkipUpdateNudge(newDeleteCmd()) {
-		t.Error("non-upgrade command must not skip the nudge")
+	if !SkipUpdateNudge(newDeleteCmd()) {
+		t.Error("delete command must skip the update nudge (its cache write would resurrect the wiped ~/.tracebloc)")
+	}
+	// `data delete` shares the leaf name "delete" but does NOT offboard/wipe — it
+	// must still get the nudge. Guards the name-collision fix (Bugbot #404): the
+	// skip is driven by an annotation, not by cmd.Name().
+	if SkipUpdateNudge(newDataDeleteCmd()) {
+		t.Error("`data delete` must NOT skip the nudge — it doesn't wipe ~/.tracebloc or remove the CLI")
+	}
+	if SkipUpdateNudge(newDoctorCmd(false)) {
+		t.Error("an ordinary command (doctor) must not skip the nudge")
 	}
 	if SkipUpdateNudge(nil) {
 		t.Error("nil command must not skip the nudge")

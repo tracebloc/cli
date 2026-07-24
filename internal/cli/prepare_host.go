@@ -35,8 +35,11 @@ var prepareHostUserRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$`)
 //     error) abort with a non-zero status instead of silently running nothing.
 //     (`curl | bash` swallowed this — bash read empty stdin and exited 0.)
 //
-// The temp file is removed on exit. The URL comes from installerURL (doctor.go)
-// so every installer path shares one source and can't drift (Bugbot #394/#397).
+// The download uses `--tlsv1.2` — the TLS 1.2 floor scripts/install.sh enforces
+// on every security-sensitive fetch — so this privileged installer download can
+// never negotiate a weaker protocol (Bugbot #397). The temp file is removed on
+// exit. The URL comes from installerURL (doctor.go) so every installer path
+// shares one source and can't drift (Bugbot #394/#397).
 func installerRunScript(subcommand string) string {
 	run := `bash "$tmp"`
 	if subcommand != "" {
@@ -45,7 +48,7 @@ func installerRunScript(subcommand string) string {
 	return `set -e
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
-curl -fsSL ` + installerURL + ` -o "$tmp"
+curl -fsSL --tlsv1.2 ` + installerURL + ` -o "$tmp"
 ` + run
 }
 

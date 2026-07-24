@@ -149,12 +149,20 @@ func readUpdateCache(path string) (updateCache, bool) {
 	return c, true
 }
 
+// writeUpdateCache persists the throttle state next to the config. Best-effort
+// (every caller ignores the error) and, critically, it must NOT create the
+// tracebloc data directory: after `tracebloc delete` wipes ~/.tracebloc, the
+// post-command update check still runs, and an MkdirAll here would resurrect the
+// just-offboarded host data dir (Bugbot #397; RFC-0003 offboard hygiene). So we
+// only write when the dir already exists — its lifecycle is owned by
+// login/client-create and delete, never by a throttle cache. A missing dir is a
+// silent no-op (the throttle simply isn't persisted until the dir exists again).
 func writeUpdateCache(path string, c updateCache) error {
 	if path == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		return nil // dir gone (fresh machine, or just-offboarded) — don't recreate it
 	}
 	raw, err := json.Marshal(c)
 	if err != nil {
