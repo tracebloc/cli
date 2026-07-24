@@ -311,8 +311,33 @@ func TestSummarizeDoctor(t *testing.T) {
 
 	t.Run("no compute → ready Fail", func(t *testing.T) {
 		_, r := summarizeDoctor(with(allOK, "Node capacity", doctor.StatusFail), tokenOK)
-		if r.status != doctor.StatusFail || !strings.Contains(r.remedy, "Docker Desktop") {
-			t.Errorf("want ready Fail with a raise-allocation remedy, got %v remedy=%q", r.status, r.remedy)
+		// GOOS-independent invariant: every variant carries the resize fix
+		// (#400 — the old string pinned "Docker Desktop", wrong on WSL2/linux).
+		if r.status != doctor.StatusFail || !strings.Contains(r.remedy, "resources set max") {
+			t.Errorf("want ready Fail with a resize remedy, got %v remedy=%q", r.status, r.remedy)
+		}
+	})
+
+	// computeRemedy (#400): the compute remedy must match the host's actual
+	// memory lever — Docker Desktop's Resources slider does not exist on the
+	// WSL2 backend, and bare Linux has no Docker Desktop at all.
+	t.Run("computeRemedy per GOOS", func(t *testing.T) {
+		win := computeRemedy("windows")
+		if !strings.Contains(win, ".wslconfig") || !strings.Contains(win, "Hyper-V") {
+			t.Fatalf("windows remedy must name both levers: %q", win)
+		}
+		mac := computeRemedy("darwin")
+		if !strings.Contains(mac, "Docker Desktop → Resources") {
+			t.Fatalf("darwin remedy keeps the slider: %q", mac)
+		}
+		lin := computeRemedy("linux")
+		if strings.Contains(lin, "Docker Desktop") || strings.Contains(lin, "wslconfig") {
+			t.Fatalf("linux remedy must not name Docker Desktop/WSL: %q", lin)
+		}
+		for _, r := range []string{win, mac, lin} {
+			if !strings.Contains(r, "resources set max") {
+				t.Fatalf("every remedy carries the resize fix: %q", r)
+			}
 		}
 	})
 

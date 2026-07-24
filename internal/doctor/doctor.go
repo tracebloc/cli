@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/tracebloc/cli/internal/cluster"
+	"github.com/tracebloc/cli/internal/resources"
 )
 
 // Status is a single check's severity. Ordered so the numerically-greatest
@@ -596,12 +597,18 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	// node as a whole — never OR cpu/mem and GPU across different nodes, which
 	// would pass even when no single node can run the job (Bugbot on PR #91).
 	var cpuMemFits, fullFits bool
+	var bestCPU, bestMem resource.Quantity // largest Ready node (memory-first), for the drift nudge
 	for i := range nodes.Items {
 		n := nodes.Items[i]
 		if !nodeReady(n) {
 			continue
 		}
 		alloc := n.Status.Allocatable
+		if alloc.Memory().Cmp(bestMem) > 0 ||
+			(alloc.Memory().Cmp(bestMem) == 0 && alloc.Cpu().Cmp(bestCPU) > 0) {
+			bestMem = *alloc.Memory()
+			bestCPU = *alloc.Cpu()
+		}
 		nodeCPUMem := alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0
 		nodeGPU := !gpuRequested
 		if gpuRequested {
@@ -633,7 +640,19 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			Remedy: "If GPU training is expected, ensure one node has both the compute and the GPU capacity, with its device plugin.",
 		}
 	default:
-		return Result{Name: name, Status: StatusOK, Detail: fmt.Sprintf("a Ready node can schedule a training job (%s)", req)}
+		detail := fmt.Sprintf("a Ready node can schedule a training job (%s)", req)
+		// Drift nudge (#400 / backend#1236): the install-time auto-size goes
+		// stale when a machine GROWS. When the configured budget uses no more
+		// than half of what this machine could give one run (largest node −
+		// platform overhead), say so.
+		m := resources.Machine{CPU: bestCPU, Mem: bestMem}
+		maxCores, maxGiB := resources.MaxRunCores(m), resources.MaxRunGiB(m)
+		if maxCores >= 1 && maxGiB >= 2 &&
+			cpuReq.MilliValue()*2 <= int64(maxCores)*1000 &&
+			memReq.Value()*2 <= int64(maxGiB)<<30 {
+			detail += fmt.Sprintf(" — this machine could give a run up to cpu=%d,memory=%dGi ('tracebloc resources set max')", maxCores, maxGiB)
+		}
+		return Result{Name: name, Status: StatusOK, Detail: detail}
 	}
 }
 

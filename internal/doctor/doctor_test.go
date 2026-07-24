@@ -657,6 +657,23 @@ func TestCheckNodeFit(t *testing.T) {
 			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
 		}
 	})
+	// Drift nudge (#400 / backend#1236): a budget using ≤ half of what the
+	// largest node could give one run gets a resources-set-max pointer; a snug
+	// fit stays quiet.
+	t.Run("big machine + small budget -> ok with the resize nudge", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "32", "64Gi"))
+		r := checkNodeFit(bg(), cs, cpuOnly) // 2/8Gi vs max 31/61
+		if r.Status != StatusOK || !strings.Contains(r.Detail, "resources set max") {
+			t.Fatalf("=> %v (%q), want ok with nudge", r.Status, r.Detail)
+		}
+	})
+	t.Run("snug fit -> ok without the nudge", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "4", "12Gi"))
+		r := checkNodeFit(bg(), cs, cpuOnly) // 2/8Gi vs max 3/9: memory over half
+		if r.Status != StatusOK || strings.Contains(r.Detail, "resources set max") {
+			t.Fatalf("=> %v (%q), want ok without nudge", r.Status, r.Detail)
+		}
+	})
 }
 
 func dockerSecret(name string, data []byte) *corev1.Secret {
