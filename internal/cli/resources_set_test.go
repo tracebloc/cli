@@ -333,6 +333,39 @@ func TestWizard_ChooseAnAmount(t *testing.T) {
 	}
 }
 
+// TestWizard_DefaultsClampedToShrunkMachine (#398): on a machine that shrank
+// under the configured ceiling (the WSL2 field case: node smaller than the
+// chart-default 8Gi RESOURCE_LIMITS), pressing Enter on every prompt must
+// succeed — the offered defaults are clamped into their own valid ranges.
+// Before the clamp, accepting the memory default "(8)" was rejected by its own
+// validator ("must be between 2 and N").
+func TestWizard_DefaultsClampedToShrunkMachine(t *testing.T) {
+	pr := &fakePrompter{
+		answers: map[string]string{
+			"How much may one training run use?": "Choose an amount",
+			// CPU + memory prompts deliberately NOT scripted: the fake returns
+			// each prompt's DEFAULT — exactly "the user pressed Enter".
+		},
+		confirm: boolPtr(true),
+	}
+	// 12-CPU / 7-GiB node → maxCores 11, maxGiB 4; current cpu=2 fits, memory
+	// 8Gi exceeds → default must clamp 8 → 4.
+	cs := csWith("12", "7Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
+	var buf bytes.Buffer
+	err := applyResourcesSet(context.Background(), ui.New(&buf, ui.WithColor(false)), pr,
+		setTarget(cs), cluster.KubeconfigOptions{}, setReq{dryRun: true})
+	if err != nil {
+		t.Fatalf("Enter-on-defaults must succeed on a shrunk machine: %v", err)
+	}
+	if !strings.Contains(buf.String(), "cpu=2,memory=4Gi") {
+		t.Errorf("clamped defaults should apply cpu=2,memory=4Gi:\n%s", buf.String())
+	}
+	// The header must not present the stale ceiling as a bare ">100%" fact.
+	if !strings.Contains(buf.String(), "more than this machine can give one run now") {
+		t.Errorf("header should annotate the over-ceiling budget:\n%s", buf.String())
+	}
+}
+
 // TestWizard_ChooseAnAmountTooSmallMachine: on a machine too small to give a run
 // even the 1-core / 2-GiB minimum after tracebloc's overhead, the "Choose an
 // amount" path must NOT prompt an impossible range (e.g. "1–0") that rejects
