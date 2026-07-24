@@ -103,13 +103,16 @@ func tbAliasAvailable() bool {
 	return tbCmdAliasOurs(dir, exe)
 }
 
-// tbCmdAliasOurs reports whether a tb.cmd shim in dir invokes exe (matched on
-// the binary's basename, case-insensitively — .cmd is a Windows artifact).
+// tbCmdAliasOurs reports whether a tb.cmd shim in dir invokes THIS binary by
+// its full path (install.ps1 writes an absolute target — the same ownership
+// bar aliasStatus applies to symlinks). Matching just the basename would claim
+// any third-party shim that merely mentions "tracebloc", or one invoking a
+// different tracebloc at another path (Bugbot). Case-insensitive: .cmd is a
+// Windows artifact and NTFS paths are case-insensitive.
 func tbCmdAliasOurs(dir, exe string) bool {
 	b, err := os.ReadFile(filepath.Join(dir, binTB+".cmd"))
 	if err != nil {
 		return false
 	}
-	base := strings.TrimSuffix(filepath.Base(exe), ".exe")
-	return strings.Contains(strings.ToLower(string(b)), strings.ToLower(base))
+	return strings.Contains(strings.ToLower(string(b)), strings.ToLower(filepath.Clean(exe)))
 }

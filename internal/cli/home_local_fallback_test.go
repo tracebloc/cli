@@ -138,4 +138,21 @@ func TestTbCmdAliasOurs(t *testing.T) {
 	if tbCmdAliasOurs(dir, exe) {
 		t.Fatal("a shim invoking a different tool is not ours")
 	}
+	// Bugbot: mentioning the name is not ownership — neither a comment that
+	// says "tracebloc" nor an invocation of a DIFFERENT tracebloc install.
+	if err := os.WriteFile(filepath.Join(dir, "tb.cmd"),
+		[]byte("@echo off\r\nrem tracebloc helper\r\nsome-other-tool %*\r\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if tbCmdAliasOurs(dir, exe) {
+		t.Fatal("a shim merely mentioning tracebloc is not ours")
+	}
+	other := filepath.Join(dir, "elsewhere", "tracebloc.exe")
+	if err := os.WriteFile(filepath.Join(dir, "tb.cmd"),
+		[]byte("@echo off\r\n\""+other+"\" %*\r\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if tbCmdAliasOurs(dir, exe) {
+		t.Fatal("a shim invoking a different tracebloc install is not ours")
+	}
 }
