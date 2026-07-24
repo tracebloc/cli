@@ -54,11 +54,11 @@ func TestPrepareHostCmdStaysInForegroundGroup(t *testing.T) {
 // A user abort must be detected as an interrupt even when NotifyContext hasn't
 // flipped ctx.Err() yet — bash exits 130 on SIGINT and c.Run() can return first
 // (Bugbot #394). A genuine failure (exit 1) must NOT be treated as an interrupt.
-func TestPrepareHostInterrupted(t *testing.T) {
+func TestInstallerRunInterrupted(t *testing.T) {
 	// Cancelled context → interrupt regardless of the run error.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if !prepareHostInterrupted(ctx, errors.New("boom")) {
+	if !installerRunInterrupted(ctx, errors.New("boom")) {
 		t.Error("a cancelled context must be treated as an interrupt")
 	}
 
@@ -68,13 +68,13 @@ func TestPrepareHostInterrupted(t *testing.T) {
 	// Live context + bash exit 130 (128+SIGINT) → interrupt (the Ctrl-C race).
 	if err := exec.Command("bash", "-c", "exit 130").Run(); err == nil {
 		t.Fatal("expected a non-nil error from exit 130")
-	} else if !prepareHostInterrupted(context.Background(), err) {
+	} else if !installerRunInterrupted(context.Background(), err) {
 		t.Error("exit 130 with a live context must be treated as an interrupt")
 	}
 	// Live context + a normal failure (exit 1) → NOT an interrupt.
 	if err := exec.Command("bash", "-c", "exit 1").Run(); err == nil {
 		t.Fatal("expected a non-nil error from exit 1")
-	} else if prepareHostInterrupted(context.Background(), err) {
+	} else if installerRunInterrupted(context.Background(), err) {
 		t.Error("exit 1 must NOT be treated as an interrupt")
 	}
 }

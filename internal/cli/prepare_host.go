@@ -20,29 +20,41 @@ import (
 // early with a clear error rather than a confusing failure deep in the installer).
 var prepareHostUserRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$`)
 
-// prepareHostInstallerCmd runs the official installer's admin-only prepare-host
-// step. Like `tracebloc upgrade`, this deliberately delegates to the verified
-// installer (cosign-checked) instead of re-implementing any privileged host prep
-// in the CLI — the privileged surface stays in one audited place.
+// installerRunScript builds the bash program that downloads the cosign-verified
+// installer to a temp file and runs THAT — optionally with a subcommand (e.g.
+// "prepare-host"). Shared by `tracebloc upgrade` (no subcommand, full install)
+// and `tracebloc prepare-host`, so both stay on one download-then-execute idiom.
 //
-// We download the installer to a temp file and run THAT, rather than
-// `curl | bash -s`. Two reasons, both Bugbot #394:
-//   - stdin: with `curl | bash -s`, the inner bash reads its *program* from the
+// We run a downloaded FILE rather than `curl … | bash`. Two reasons, both Bugbot
+// (#394, #397):
+//   - stdin: with `curl | bash`, the inner bash reads its *program* from the
 //     pipe, so the installer's stdin is no longer the terminal. Any interactive
-//     prompt in prepare-host (e.g. which non-admin user gets runtime access)
-//     would get EOF. Running a downloaded file leaves stdin on the TTY.
+//     prompt (sign-in, or which non-admin user gets runtime access) would get
+//     EOF. Running a downloaded file leaves stdin on the TTY.
 //   - fail-closed: `set -e` + `curl -o` makes a failed download (network/DNS/HTTP
 //     error) abort with a non-zero status instead of silently running nothing.
 //     (`curl | bash` swallowed this — bash read empty stdin and exited 0.)
 //
 // The temp file is removed on exit. The URL comes from installerURL (doctor.go)
-// so the automated download can't drift from the manual hint / other bootstrap
-// copy (Bugbot #394).
-const prepareHostInstallerCmd = `set -e
+// so every installer path shares one source and can't drift (Bugbot #394/#397).
+func installerRunScript(subcommand string) string {
+	run := `bash "$tmp"`
+	if subcommand != "" {
+		run += " " + subcommand
+	}
+	return `set -e
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 curl -fsSL ` + installerURL + ` -o "$tmp"
-bash "$tmp" prepare-host`
+` + run
+}
+
+// prepareHostInstallerCmd runs the official installer's admin-only prepare-host
+// step. Like `tracebloc upgrade`, this deliberately delegates to the verified
+// installer (cosign-checked) instead of re-implementing any privileged host prep
+// in the CLI — the privileged surface stays in one audited place. See
+// installerRunScript for why we download-then-execute rather than pipe.
+var prepareHostInstallerCmd = installerRunScript("prepare-host")
 
 // prepareHostManualHint is the copy-pasteable command we show if the automated
 // run fails. Built from installCmd (doctor.go) — the single shared bootstrap
@@ -100,13 +112,13 @@ func prepareHostCmd(ctx context.Context) *exec.Cmd {
 	return c
 }
 
-// prepareHostInterrupted reports whether the installer run ended because the user
-// aborted, so the caller can exit quietly (130) instead of framing it as a failed
-// install. ctx.Err() catches a cancel the signal handler already propagated — but
-// on a terminal Ctrl-C the child can die and c.Run() can return BEFORE
-// NotifyContext flips ctx.Err() (a race), so also treat bash's 130 (128+SIGINT)
-// exit as an interrupt (Bugbot #394).
-func prepareHostInterrupted(ctx context.Context, runErr error) bool {
+// installerRunInterrupted reports whether an installer run (upgrade or
+// prepare-host) ended because the user aborted, so the caller can exit quietly
+// (130) instead of framing it as a failed install. ctx.Err() catches a cancel
+// the signal handler already propagated — but on a terminal Ctrl-C the child can
+// die and c.Run() can return BEFORE NotifyContext flips ctx.Err() (a race), so
+// also treat bash's 130 (128+SIGINT) exit as an interrupt (Bugbot #394/#397).
+func installerRunInterrupted(ctx context.Context, runErr error) bool {
 	if ctx.Err() != nil {
 		return true
 	}
@@ -189,7 +201,7 @@ host, so it's safe to run on a shared machine. Safe to re-run.`,
 				// User aborted (Ctrl-C) or the parent context was cancelled: exit
 				// quietly with 130 like the other cancellable paths, not a scary
 				// "prepare-host didn't complete — retry" (Bugbot #394).
-				if prepareHostInterrupted(ctx, err) {
+				if installerRunInterrupted(ctx, err) {
 					return &exitError{code: exitInterrupted}
 				}
 				return &exitError{code: exitFailure, err: fmt.Errorf("prepare-host didn't complete (%w). You can run the installer directly:\n    %s", err, prepareHostManualHint(user))}

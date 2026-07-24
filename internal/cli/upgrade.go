@@ -18,17 +18,18 @@ const upgradeCmdName = "upgrade"
 // installer ourselves: it re-downloads + cosign-verifies the release, replaces
 // the CLI, and upgrades the secure environment's services to match — so we never
 // re-implement (and risk diverging from) the installer's signature verification.
-// The short `curl … | bash` form (not `bash <(curl …)`) works from any shell
-// (see the shell-safety fix in the docs).
+// We download-then-execute the installer (installerRunScript, shared with
+// prepare-host) rather than `curl … | bash`: piping makes the inner bash read
+// its program from the pipe, stealing the installer's stdin so its interactive
+// prompts (sign-in, etc.) can't read the TTY. The URL is derived from
+// installerURL (doctor.go) so it can't drift from the other installer paths
+// (Bugbot #397).
 //
 // Windows is different: we do NOT self-exec there. A running .exe is locked, so
 // install.ps1's Move-Item can't overwrite the very binary we're running, and
 // install.ps1 is CLI-only (no environment). So on Windows we print the command
 // for the user to run in a fresh shell instead of pretending to self-update.
-const (
-	upgradeInstallerCmdUnix    = "curl -fsSL https://tracebloc.io/i.sh | bash"
-	upgradeInstallerCmdWindows = "irm https://github.com/tracebloc/cli/releases/latest/download/install.ps1 | iex"
-)
+const upgradeInstallerCmdWindows = "irm https://github.com/tracebloc/cli/releases/latest/download/install.ps1 | iex"
 
 // upgradePlan is how `upgrade` proceeds on a given OS: either exec the installer
 // (Unix) or just show the user a command to run (Windows). manual is the
@@ -46,14 +47,16 @@ func upgradePlanFor(goos string) upgradePlan {
 	if goos == "windows" {
 		return upgradePlan{exec: false, manual: upgradeInstallerCmdWindows}
 	}
-	// `-o pipefail` so a failed `curl` fails the whole pipeline: without it the
-	// trailing `bash` exits 0 on empty stdin and we'd report a successful upgrade
-	// having installed nothing.
+	// Download-then-execute the verified installer (installerRunScript, shared
+	// with prepare-host): its `set -e`+`curl -o` fails closed on a bad download,
+	// and running a file (not a pipe) keeps the installer's stdin on the TTY. The
+	// manual hint reuses installCmd (doctor.go), the shared bootstrap idiom, so
+	// the URL has a single source.
 	return upgradePlan{
 		exec:   true,
 		name:   "bash",
-		args:   []string{"-o", "pipefail", "-c", upgradeInstallerCmdUnix},
-		manual: upgradeInstallerCmdUnix,
+		args:   []string{"-c", installerRunScript("")},
+		manual: installCmd,
 	}
 }
 
@@ -102,9 +105,16 @@ Safe to run anytime; safe to re-run.`,
 
 			// Stream the installer straight to the user's terminal, and keep
 			// stdin wired so its interactive prompts (sign-in, etc.) still work.
-			c := exec.CommandContext(cmd.Context(), plan.name, plan.args...)
+			ctx := cmd.Context()
+			c := exec.CommandContext(ctx, plan.name, plan.args...)
 			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 			if err := c.Run(); err != nil {
+				// User aborted (Ctrl-C) or the parent context was cancelled: exit
+				// quietly with 130 like prepare-host, not a scary "upgrade didn't
+				// complete — retry" (Bugbot #397).
+				if installerRunInterrupted(ctx, err) {
+					return &exitError{code: exitInterrupted}
+				}
 				return &exitError{code: exitFailure, err: fmt.Errorf(
 					"upgrade didn't complete (%w). You can run the installer directly:\n    %s",
 					err, plan.manual)}
