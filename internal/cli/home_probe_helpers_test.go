@@ -68,14 +68,22 @@ func TestJobsManagerReady(t *testing.T) {
 	})
 }
 
-// TestMachineCapacity pins home.go:565 (0%): sum Ready nodes' allocatable, and
-// return ok=false when the node list can't be read.
+// TestMachineCapacity pins home.go's capacity view: the LARGEST Ready node's
+// allocatable (never a sum — k3d's server+agent are one machine, #399), and
+// ok=false when the node list can't be read.
 func TestMachineCapacity(t *testing.T) {
 	ctx := context.Background()
 	t.Run("ready node -> compute + ok", func(t *testing.T) {
 		n := capNode("n1", "8", "32Gi", false)
 		if _, ok := machineCapacity(ctx, fake.NewSimpleClientset(&n)); !ok {
 			t.Error("a Ready node must yield compute")
+		}
+	})
+	t.Run("two identical k3d nodes -> 1x the machine, not 2x (#399)", func(t *testing.T) {
+		a, b := capNode("server-0", "12", "7Gi", false), capNode("agent-0", "12", "7Gi", false)
+		ci, ok := machineCapacity(ctx, fake.NewSimpleClientset(&a, &b))
+		if !ok || ci.CPU != 12 || ci.MemGiB != 7 {
+			t.Errorf("=> %+v ok=%v, want cpu=12 mem=7 (largest node, not 24/14)", ci, ok)
 		}
 	})
 	t.Run("node list error -> ok=false", func(t *testing.T) {

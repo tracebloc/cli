@@ -592,25 +592,25 @@ func machineCapacity(ctx context.Context, cs kubernetes.Interface) (computeInfo,
 	return sumCapacity(nodes.Items)
 }
 
-// sumCapacity is the pure summation behind machineCapacity — split out so the
-// rounding + GPU logic is unit-testable without a clientset.
+// sumCapacity picks the LARGEST Ready node (CPU-major, like
+// resources.LargestReadyNode) — never a sum: k3d's server+agent are the same
+// physical machine, and summing double-counted it (#399).
 func sumCapacity(nodes []corev1.Node) (computeInfo, bool) {
 	var cpuMilli, memBytes, gpu int64
-	ready := 0
+	found := false
 	for i := range nodes {
-		n := nodes[i]
-		if !nodeReady(n) {
+		if !nodeReady(nodes[i]) {
 			continue
 		}
-		ready++
-		alloc := n.Status.Allocatable
-		cpuMilli += alloc.Cpu().MilliValue()
-		memBytes += alloc.Memory().Value()
-		if q, ok := alloc[gpuResource]; ok {
-			gpu += q.Value()
+		alloc := nodes[i].Status.Allocatable
+		cm, mb := alloc.Cpu().MilliValue(), alloc.Memory().Value()
+		if found && (cm < cpuMilli || (cm == cpuMilli && mb <= memBytes)) {
+			continue
 		}
+		q := alloc[gpuResource] // zero Quantity when absent -> gpu 0
+		found, cpuMilli, memBytes, gpu = true, cm, mb, q.Value()
 	}
-	if ready == 0 {
+	if !found {
 		return computeInfo{}, false
 	}
 	return computeInfo{

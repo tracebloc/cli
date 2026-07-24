@@ -28,7 +28,10 @@ func readyNode(name, cpu, mem string, extra ...string) *corev1.Node {
 	}
 }
 
-func TestMachineCapacity_SumsReadyNodesAndGPU(t *testing.T) {
+// The k3d regression (#399): server-0 + agent-0 are the SAME physical machine,
+// so two identical Ready nodes must report 1× that machine, never 2×. The
+// not-Ready node is bigger than both — it must not win either.
+func TestMachineCapacity_LargestReadyNodeNotSum(t *testing.T) {
 	notReady := readyNode("down", "16", "64Gi")
 	notReady.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}
 
@@ -38,18 +41,11 @@ func TestMachineCapacity_SumsReadyNodesAndGPU(t *testing.T) {
 		*notReady, // must be excluded entirely
 	}
 	m := MachineCapacity(nodes)
-	if got := FormatCPU(m.CPU); got != "8 CPU" {
-		t.Errorf("cpu sum = %q, want 8 CPU", got)
+	if got := FormatCPU(m.CPU); got != "4 CPU" {
+		t.Errorf("cpu = %q, want 4 CPU (largest node, not the 8-CPU sum)", got)
 	}
-	if got := FormatMem(m.Mem); got != "32 GiB" {
-		t.Errorf("mem sum = %q, want 32 GiB", got)
-	}
-	gpu, ok := m.GPU["nvidia.com/gpu"]
-	if !ok || gpu.Value() != 1 {
-		t.Errorf("gpu = %v (ok=%v), want 1", gpu, ok)
-	}
-	if len(m.GPU) != 1 {
-		t.Errorf("unexpected extra GPU entries: %v", m.GPU)
+	if got := FormatMem(m.Mem); got != "16 GiB" {
+		t.Errorf("mem = %q, want 16 GiB (largest node, not the 32-GiB sum)", got)
 	}
 }
 

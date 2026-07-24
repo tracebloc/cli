@@ -612,18 +612,19 @@ func capNode(name, cpu, mem string, notReady bool, gpu ...string) corev1.Node {
 // TestSumCapacity: Ready-node summation, GiB/CPU rounding, GPU aggregation, and
 // the all-NotReady → omit contract.
 func TestSumCapacity(t *testing.T) {
-	t.Run("sums ready nodes, rounds, counts GPUs", func(t *testing.T) {
+	t.Run("largest ready node wins, rounds, carries its GPUs (#399)", func(t *testing.T) {
 		got, ok := sumCapacity([]corev1.Node{
-			capNode("a", "7900m", "16Gi", false, "1"), // 7.9 CPU → 8
-			capNode("b", "4", "16Gi", false, "1"),     // +4 CPU, +1 GPU
-			capNode("gone", "8", "32Gi", true),        // NotReady → ignored
+			capNode("a", "7900m", "16Gi", false, "1"), // 7.9 CPU → largest (CPU-major) → 8
+			capNode("b", "4", "16Gi", false, "1"),     // smaller — must not be added
+			capNode("gone", "8", "32Gi", true),        // NotReady → ignored even though biggest
 		})
 		if !ok {
 			t.Fatal("expected ok")
 		}
-		// 7900m + 4000m = 11900m → 11.9 → 12; 32 GiB total; 2 GPU.
-		if got != (computeInfo{CPU: 12, MemGiB: 32, GPU: 2}) {
-			t.Fatalf("got %+v, want {12 32 2}", got)
+		// Largest Ready node only: 7900m → 7.9 → 8; 16 GiB; its 1 GPU — never
+		// the 12/32/2 cross-node sum (k3d's nodes are one physical machine).
+		if got != (computeInfo{CPU: 8, MemGiB: 16, GPU: 1}) {
+			t.Fatalf("got %+v, want {8 16 1}", got)
 		}
 	})
 	t.Run("no GPU dimension when none present", func(t *testing.T) {
