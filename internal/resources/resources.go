@@ -58,35 +58,18 @@ type Training struct {
 	HasGPU  bool
 }
 
-// MachineCapacity sums the allocatable CPU/memory (and GPU) across every Ready
-// node. A pod is scheduled onto ONE node, but the machine-capacity headline is a
-// whole-machine figure the user recognizes ("this machine has 8 CPU"); the
-// single-node fit question is `cluster doctor`'s job (checkNodeFit), which
-// deliberately never ORs capacity across nodes. On the installer's single-node
-// path the sum is just that node.
+// MachineCapacity reports the machine headline ("equipped with …") as the
+// LARGEST Ready node's allocatable — never a sum. The previous whole-machine
+// sum assumed the installer path is single-node, but the default k3d topology
+// is server-0 + agent-0: two kubernetes nodes on the SAME physical machine,
+// so the sum double-counted it ("24 CPU · 13.4 GiB" on a 12-CPU / 6.7-GiB
+// box, #399). A pod schedules onto ONE node anyway, so the largest node is
+// both truthful and scheduling-relevant — and now every surface (this
+// headline, the wizard, doctor's checkNodeFit) quotes the same machine.
 func MachineCapacity(nodes []corev1.Node) Machine {
-	m := Machine{GPU: map[corev1.ResourceName]resource.Quantity{}}
-	for i := range nodes {
-		n := nodes[i]
-		if !nodeReady(n) {
-			continue
-		}
-		for name, qty := range n.Status.Allocatable {
-			switch name {
-			case corev1.ResourceCPU:
-				addInto(&m.CPU, qty)
-			case corev1.ResourceMemory:
-				addInto(&m.Mem, qty)
-			default:
-				// Surface GPUs (and any other extended device) so the machine
-				// line can note "· 1 GPU" — but only non-zero quantities.
-				if isGPUResource(name) && !qty.IsZero() {
-					cur := m.GPU[name]
-					cur.Add(qty)
-					m.GPU[name] = cur
-				}
-			}
-		}
+	m, ok := LargestReadyNode(nodes)
+	if !ok {
+		return Machine{GPU: map[corev1.ResourceName]resource.Quantity{}}
 	}
 	return m
 }
@@ -142,10 +125,6 @@ func FormatGPU(name corev1.ResourceName, q resource.Quantity) string {
 }
 
 // --- internal helpers -------------------------------------------------------
-
-// addInto adds src into dst in place. resource.Quantity.Add is a pointer
-// method; dst starts as a zero quantity (value 0), so the first add seeds it.
-func addInto(dst *resource.Quantity, src resource.Quantity) { dst.Add(src) }
 
 // nodeReady reports whether a node's Ready condition is True. Mirrors
 // doctor.nodeReady — kept local so this package stays leaf/pure and doesn't
