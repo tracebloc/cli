@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -381,6 +382,51 @@ func TestSeal_CancelledMidSuite_NoVerdict(t *testing.T) {
 	for _, verdict := range []string{"Sealed", "Unsealed", "Seal unknown"} {
 		if strings.Contains(out.String(), verdict) {
 			t.Errorf("no verdict may render on a cancelled run; got %q in:\n%s", verdict, out.String())
+		}
+	}
+}
+
+// The Ctrl-C race the ctx.Err()-only check missed: on a terminal Ctrl-C the helm
+// child can exit 130 (128+SIGINT) BEFORE NotifyContext flips ctx.Err(). The
+// cancel site must still treat that as a quiet interrupt (exit 130, no verdict)
+// and never let the failed check render a false Unsealed. It reuses the same
+// installerRunInterrupted helper as upgrade/prepare-host (Bugbot #397).
+func TestSeal_CtrlCExit130BeforeCtxFlips_NoFalseUnsealed(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available to synthesize an exit-130 ExitError")
+	}
+	// A real *exec.ExitError with code 130 — exactly what helm.Runner surfaces
+	// (CombinedOutput returns the exec error unwrapped) when the child dies on SIGINT.
+	exit130 := exec.Command("bash", "-c", "exit 130").Run()
+
+	stubSealTarget(t)
+	origList, origRun := listTestHooksFn, runHelmTestFn
+	listTestHooksFn = func(_ context.Context, _ helm.TestTarget) ([]helm.TestHook, error) {
+		return sealHooks(), nil
+	}
+	ran := 0
+	runHelmTestFn = func(_ context.Context, _ helm.TestTarget, _ []string, _ time.Duration) (string, error) {
+		ran++
+		// ctx is deliberately NOT cancelled — this is the race window where the
+		// child already exited 130 but NotifyContext hasn't flipped ctx.Err() yet.
+		return "", exit130
+	}
+	t.Cleanup(func() { listTestHooksFn, runHelmTestFn = origList, origRun })
+
+	var out bytes.Buffer
+	err := runSealCheck(context.Background(), ui.New(&out), cluster.KubeconfigOptions{}, 0)
+	if got := ExitCodeFromError(err); got != exitInterrupted {
+		t.Fatalf("exit code = %d, want %d — a Ctrl-C (helm exit 130) must be a quiet interrupt, not a verdict: %v", got, exitInterrupted, err)
+	}
+	if !IsSilentError(err) {
+		t.Fatalf("Ctrl-C must exit quietly, got: %v", err)
+	}
+	if ran != 1 {
+		t.Errorf("no further checks may run after the interrupt, ran %d", ran)
+	}
+	for _, verdict := range []string{"Sealed", "Unsealed", "Seal unknown"} {
+		if strings.Contains(out.String(), verdict) {
+			t.Errorf("no verdict (esp. a false Unsealed) may render on a Ctrl-C run; got %q in:\n%s", verdict, out.String())
 		}
 	}
 }

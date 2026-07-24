@@ -93,8 +93,10 @@ func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOpt
 	hooks, herr := listTestHooksFn(ctx, tt)
 	if herr != nil {
 		// Ctrl-C while enumerating is a cancelled run, not an enumeration
-		// failure — exit quietly, matching the per-check loop below (Bugbot).
-		if ctx.Err() != nil {
+		// failure — exit quietly, matching the per-check loop below. Reuse
+		// installerRunInterrupted so a terminal Ctrl-C where helm exits 130 before
+		// NotifyContext flips ctx.Err() is caught here too (Bugbot #397).
+		if installerRunInterrupted(ctx, herr) {
 			return &exitError{code: exitInterrupted}
 		}
 		// Can't even enumerate the checks — that's an error, not a verdict:
@@ -123,7 +125,12 @@ func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOpt
 		// Ctrl-C (or a parent deadline) mid-suite is a cancelled run, not a
 		// verdict: every remaining check would "fail" on the dead context and
 		// render a fake Unsealed. Exit quietly, the way `status --wait` does.
-		if ctx.Err() != nil {
+		// Reuse installerRunInterrupted (shared with upgrade/prepare-host): it
+		// also catches the race where a terminal Ctrl-C makes the helm child exit
+		// 130 BEFORE NotifyContext flips ctx.Err() — otherwise this check reads as
+		// a real failure and prints a false Unsealed (exit 2), breaking the "never
+		// claim a verdict you didn't verify" rule (Bugbot #397).
+		if installerRunInterrupted(ctx, terr) {
 			return &exitError{code: exitInterrupted}
 		}
 		check := sealCheck{name: name, passed: terr == nil}
