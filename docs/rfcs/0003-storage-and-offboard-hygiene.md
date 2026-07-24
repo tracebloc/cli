@@ -229,7 +229,11 @@ second `_ensure_tracebloc_dirs` call site still creating empty 777 dirs).
 
 **Constraint C1 — single-node.** `local-path` is RWO/WaitForFirstConsumer,
 and spawned Jobs must land on the node that holds the volume, so node-local
-forces `AGENTS=0`. Since `AGENTS` defaults to `1` today, **flipping the
+pins the cluster to a **single node** — it forces both `AGENTS=0` **and**
+`SERVERS=1`. Dropping the agents is not enough on its own: k3s server nodes
+are schedulable, so `SERVERS>1` would still yield multiple nodes a Job could
+land on away from the volume; the prototype (client#368) had to pin both.
+Since the defaults are `SERVERS=1`/`AGENTS=1` today, **flipping the storage
 default also changes the default local topology from two nodes to one** —
 call this out in release notes. (k3s agents on one Docker host provide no
 real isolation, so nothing of value is lost.)
@@ -578,7 +582,7 @@ needing key custody; platform-side keys live in the backend's KMS.
 
 - `client/scripts/lib/common.sh:386` — `HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"` (v1 cited :329 — drifted)
 - `client/scripts/lib/common.sh:392` — `HOST_DATASET_DIR="${HOST_DATASET_DIR:-}"` (v1 cited :335)
-- `client/scripts/lib/common.sh:383` — `AGENTS="${AGENTS:-1}"` (default two-node local topology; §5 C1)
+- `client/scripts/lib/common.sh` (post-#368) — `SERVERS="${SERVERS:-1}"`/`AGENTS="${AGENTS:-1}"` (default two-node local topology), and `TB_STORAGE_MODE=node-local` forces **both** `AGENTS=0` **and** `SERVERS=1` for the single-node pin (§5 C1)
 - `client/scripts/lib/cluster.sh:28-56` — `_ensure_tracebloc_dirs`: `mkdir -p` with no existing-data guard; `chmod -R 777` scoped to `logs`/`mysql`/`data` subdirs only, `values.yaml` spared
 - `client/scripts/lib/cluster.sh:197`, `:355-356` — cluster **reuse** on re-run (`cluster start`; "already exists → Using existing cluster")
 - `client/scripts/lib/cluster.sh:312` — `-v "${HOST_DATASET_DIR}:/tracebloc-data@all"` (cluster-wide dataset-source mount)
