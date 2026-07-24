@@ -102,6 +102,12 @@ func TestSkipUpdateNudge(t *testing.T) {
 	if !SkipUpdateNudge(newDeleteCmd()) {
 		t.Error("delete command must skip the update nudge (its cache write would resurrect the wiped ~/.tracebloc)")
 	}
+	// `data delete` shares the leaf name "delete" but does NOT offboard/wipe — it
+	// must still get the nudge. Guards the name-collision fix (Bugbot #404): the
+	// skip is driven by an annotation, not by cmd.Name().
+	if SkipUpdateNudge(newDataDeleteCmd()) {
+		t.Error("`data delete` must NOT skip the nudge — it doesn't wipe ~/.tracebloc or remove the CLI")
+	}
 	if SkipUpdateNudge(newDoctorCmd(false)) {
 		t.Error("an ordinary command (doctor) must not skip the nudge")
 	}
