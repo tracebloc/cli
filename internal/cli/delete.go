@@ -44,6 +44,9 @@ type deleteOpts struct {
 	namespace       string
 }
 
+// deleteCmdName is the top-level offboard command's name.
+const deleteCmdName = "delete"
+
 // newDeleteCmd wires the TOP-LEVEL `tracebloc delete` — offboarding this machine
 // (RFC-0001 §7.10). It is deliberately NOT under `client` and NOT
 // `client delete --uninstall`: on the single-machine CLI the host owns exactly
@@ -64,8 +67,15 @@ type deleteOpts struct {
 func newDeleteCmd() *cobra.Command {
 	var o deleteOpts
 	cmd := &cobra.Command{
-		Use:   "delete",
-		Short: "Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)",
+		Use: deleteCmdName,
+		// Suppress the post-command update nudge/cache-write: offboarding removes
+		// the CLI and (on the default path) wipes ~/.tracebloc, so nudging to
+		// upgrade a just-removed binary is nonsensical and the cache write would
+		// resurrect the just-wiped data dir. The annotation (not a name match) means
+		// `data delete` is unaffected — only this top-level command opts in
+		// (Bugbot #397, #404). See SkipUpdateNudge.
+		Annotations: map[string]string{skipUpdateNudgeAnnotation: "true"},
+		Short:       "Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)",
 		Long: `Removes tracebloc from this machine: revokes the machine credential,
 uninstalls the Helm release, deletes the local cluster, reclaims the tracebloc
 container images, and clears local state — then removes the CLI itself.

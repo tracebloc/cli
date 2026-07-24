@@ -60,24 +60,38 @@ func upgradePlanFor(goos string) upgradePlan {
 	}
 }
 
-// isUpgradeCommand reports whether the executed command is `tracebloc upgrade`,
-// so main can skip the post-command update nudge (the still-running process
-// carries its old compile-time version after swapping its own binary, and would
-// otherwise nudge about the very release it just installed).
-func isUpgradeCommand(cmd *cobra.Command) bool {
-	return cmd != nil && cmd.Name() == upgradeCmdName
-}
+// skipUpdateNudgeAnnotation marks a command after which main must NOT run the
+// post-command update nudge (nor the cache write it triggers). Commands
+// self-declare it in their cobra Annotations (see newUpgradeCmd, newDeleteCmd),
+// so SkipUpdateNudge needs no central name list and — critically — can't be
+// fooled by a same-named subcommand: the top-level offboard `delete` carries the
+// annotation while `data delete` does not, even though both leaves are named
+// "delete" (Bugbot #404).
+const skipUpdateNudgeAnnotation = "tracebloc.io/skip-update-nudge"
 
-// SkipUpdateNudge reports whether the update nudge should be suppressed for the
-// command that just ran. Exported for main, which owns the nudge call.
-func SkipUpdateNudge(cmd *cobra.Command) bool { return isUpgradeCommand(cmd) }
+// SkipUpdateNudge reports whether the post-command update nudge (and the cache
+// write it triggers) must be suppressed for the command that just ran. Exported
+// for main, which owns the nudge call. A command opts in via
+// skipUpdateNudgeAnnotation; today that's:
+//   - upgrade: the running process swapped its own binary and now carries the
+//     stale compile-time version — it would nudge about the release it just
+//     installed.
+//   - delete: offboarding removed the CLI and (on the default path) wiped
+//     ~/.tracebloc, so the nudge is nonsensical and its cache write would
+//     resurrect the just-offboarded host data dir (Bugbot #397).
+func SkipUpdateNudge(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.Annotations[skipUpdateNudgeAnnotation] == "true"
+}
 
 // newUpgradeCmd implements `tracebloc upgrade` — the apply step the update
 // nudge (update_check.go) and the 426 "too old" error both point at.
 func newUpgradeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   upgradeCmdName,
-		Short: "Update tracebloc to the latest release",
+		Use: upgradeCmdName,
+		// Suppress the post-command update nudge/cache-write: this process just
+		// swapped its own binary and is stale by design (see SkipUpdateNudge).
+		Annotations: map[string]string{skipUpdateNudgeAnnotation: "true"},
+		Short:       "Update tracebloc to the latest release",
 		Long: `Updates tracebloc to the latest release by re-running the official
 installer. It verifies signatures (cosign) and replaces the CLI; on Linux/macOS
 it also upgrades your secure environment's services to match, so the CLI and the
