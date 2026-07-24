@@ -1,9 +1,12 @@
 tb client — register / list / inspect environments
 ==================================================
 What you see under `tb client`. `tb client create` shows a review (below) before
-it registers a new secure environment. `tb client list` / `tb client status` read
-live backend state, so they aren't stable screens — their strings are in
-zz-all-strings.golden.
+it registers a new secure environment. `tb client status --seal` verifies the
+environment's protections by running the chart's conformance checks (the seal
+check) — all three verdicts are shown: sealed, unsealed (with the per-check
+failure + fix hint), and unknown (a chart with no checks is honestly NOT called
+sealed). `tb client list` / plain `tb client status` read live backend state, so
+they aren't stable screens — their strings are in zz-all-strings.golden.
 
 $ tb client create   # review, before you confirm
 
@@ -12,6 +15,33 @@ $ tb client create   # review, before you confirm
     namespace:     lukas-macbook
     location:      DE
     cluster:       a1b2c3d4  (anchors this client — re-runs adopt it)
+
+$ tb client status --seal   # sealed — every conformance check passed
+
+  Seal check — secure environment "lukas-macbook"
+
+  ✓ egress-enforcement
+  ✓ backend-reachability
+
+  ✔ Sealed — all 2 conformance checks passed. This environment's protections are enforced.
+
+$ tb client status --seal   # unsealed — a protection is not enforced
+
+  Seal check — secure environment "lukas-macbook"
+
+  ✗ egress-enforcement — job failed: BackoffLimitExceeded
+      see why: kubectl logs -n lukas-macbook job/lukas-macbook-egress-enforcement-check
+  ✓ backend-reachability
+
+  ✖ Unsealed — 1 of 2 conformance checks failed. This environment's protections are not all enforced.
+  Fix the failing checks above, then re-run `tracebloc client status --seal` to confirm the seal.
+
+$ tb client status --seal   # unknown — this chart ships no conformance checks
+
+  Seal check — secure environment "lukas-macbook"
+
+  ⚠  Seal unknown — this chart ships no conformance checks, so this environment's protections can't be verified. Not claiming sealed.
+  Upgrade your secure environment to a chart with the seal-check suite, then re-run `tracebloc client status --seal`.
 
 
 ------------------------------------------------------------
@@ -78,13 +108,34 @@ Report tracebloc's view of this machine's active client — online, offline,
 or pending. With --wait, poll until tracebloc reports it online (exit 0) or the
 timeout elapses (non-zero), to confirm the client connected after setup.
 
+With --seal, verify the environment's protections instead: run the chart's
+conformance checks (its helm tests — the seal check, RFC-0003) against this
+machine's secure environment and report the verdict with per-check detail:
+
+  sealed     every conformance check passed
+  unsealed   a check failed or couldn't run — a protection is not enforced
+  unknown    the chart ships no conformance checks, so nothing was verified
+
+Only a fully-passed suite exits 0; an environment that can't be verified is
+never claimed sealed.
+
+Exit codes with --seal:
+  0   sealed — every conformance check passed
+  2   unsealed (a check failed), or unknown (the chart has no checks)
+  3   kubeconfig could not be loaded / cluster unreachable
+  4   cluster reachable but no tracebloc client found there
+
 Usage:
   tracebloc client status [flags]
 
 Flags:
-  -h, --help               help for status
-      --timeout duration   with --wait, give up after this long (default 2m0s)
-      --wait               poll until tracebloc reports this client online
+      --context string      with --seal: name of the kubeconfig context to use (default: kubeconfig's current-context)
+  -h, --help                help for status
+      --kubeconfig string   with --seal: path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
+  -n, --namespace string    with --seal: namespace where your tracebloc client is installed
+      --seal                verify this environment's protections: run the chart's conformance checks and report sealed / unsealed
+      --timeout duration    with --wait, give up after this long; with --seal, the time budget per check (default 2m0s)
+      --wait                poll until tracebloc reports this client online
 
 Global Flags:
       --plain     disable color and decorative output (also honors $NO_COLOR)
