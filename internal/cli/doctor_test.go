@@ -327,7 +327,7 @@ func TestSummarizeDoctor(t *testing.T) {
 			t.Fatalf("windows remedy must name both levers: %q", win)
 		}
 		mac := computeRemedy("darwin")
-		if !strings.Contains(mac, "Docker Desktop → Resources") {
+		if !strings.Contains(mac, "Docker Desktop → Settings → Resources → Advanced") {
 			t.Fatalf("darwin remedy keeps the slider: %q", mac)
 		}
 		lin := computeRemedy("linux")

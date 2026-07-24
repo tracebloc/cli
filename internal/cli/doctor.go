@@ -308,9 +308,9 @@ func computeRemedy(goos string) string {
 	resize := fmt.Sprintf("size runs to this machine with `%s resources set max`", launcher())
 	switch goos {
 	case "windows":
-		return fmt.Sprintf("Free some up, give Docker more memory (WSL2 backend: `[wsl2] memory=…` in %%UserProfile%%\\.wslconfig then `wsl --shutdown`; Hyper-V backend: Docker Desktop → Settings → Resources), or %s.", resize)
+		return fmt.Sprintf("Free some up, give Docker more memory (WSL2 backend: `[wsl2] memory=…` in %%UserProfile%%\\.wslconfig then `wsl --shutdown`; Hyper-V backend: Docker Desktop → Settings → Resources → Advanced), or %s.", resize)
 	case "darwin":
-		return fmt.Sprintf("Free some up, raise the machine's allocation in Docker Desktop → Resources, or %s.", resize)
+		return fmt.Sprintf("Free some up, raise the machine's allocation in Docker Desktop → Settings → Resources → Advanced, or %s.", resize)
 	default:
 		return fmt.Sprintf("Free some up on this machine, or %s.", resize)
 	}
