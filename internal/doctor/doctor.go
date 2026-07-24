@@ -597,17 +597,20 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	// node as a whole — never OR cpu/mem and GPU across different nodes, which
 	// would pass even when no single node can run the job (Bugbot on PR #91).
 	var cpuMemFits, fullFits bool
-	var bestCPU, bestMem resource.Quantity // largest Ready node (memory-first), for the drift nudge
+	// Largest Ready node for the drift nudge — CPU-major with memory as the
+	// tie-break, EXACTLY like resources.nodeLarger, so the advertised ceiling
+	// always matches what `resources set max` will actually apply (Bugbot).
+	var bestCPU, bestMem resource.Quantity
 	for i := range nodes.Items {
 		n := nodes.Items[i]
 		if !nodeReady(n) {
 			continue
 		}
 		alloc := n.Status.Allocatable
-		if alloc.Memory().Cmp(bestMem) > 0 ||
-			(alloc.Memory().Cmp(bestMem) == 0 && alloc.Cpu().Cmp(bestCPU) > 0) {
-			bestMem = *alloc.Memory()
+		if alloc.Cpu().Cmp(bestCPU) > 0 ||
+			(alloc.Cpu().Cmp(bestCPU) == 0 && alloc.Memory().Cmp(bestMem) > 0) {
 			bestCPU = *alloc.Cpu()
+			bestMem = *alloc.Memory()
 		}
 		nodeCPUMem := alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0
 		nodeGPU := !gpuRequested
