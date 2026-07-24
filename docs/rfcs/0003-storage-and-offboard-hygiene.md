@@ -374,7 +374,7 @@ section sharpens *what a dataset physically is*, so the scoping rests on
 structure rather than on a filter a job could sidestep. Today
 tabular/time-series ingests land as rows in a **shared** table tagged by
 `ingestor_id`, and every read narrows with `WHERE ingestor_id IN (…)` (§3.1;
-tracebloc-client `core/utils/database.py:243-361`). A `WHERE` clause is a
+tracebloc-engine `core/utils/database.py:243-361`). A `WHERE` clause is a
 convention, not a wall — one dropped predicate or one `SELECT *` and a job
 reads its neighbours. The model below turns the convention into physics.
 
@@ -391,7 +391,7 @@ reads its neighbours. The model below turns the convention into physics.
    table, once written by an ingestion, is never appended to or edited.
    Re-ingesting the same name+schema **creates a new table**; it does not
    reuse the old one. This is enforced by **removing the ingestor's
-   reuse/append path**: `data-ingestors/tracebloc_ingestor/database.py:309-357`
+   reuse/append path**: `data-ingestors/tracebloc_ingestor/database.py:275-357`
    today returns/reflects an existing table when the name and feature schema
    match (the "return existing table if already created" / "check if table
    exists in database" branch) — that branch is deleted, and ingestion
@@ -526,7 +526,7 @@ seal check.
 | D16 | Table-per-ingestion (§7bis) | **One immutable `ds_<ingestor_id>` table per ingest** — the ingestor id is the physical identity; the user's dataset name is a label only (same name+schema → N tables) |
 | D17 | Immutability + correction (§7bis) | **No append, no in-place edit; re-ingest = new table; correction = drop + re-ingest, no version chain** — the drop must cascade to dependent views / data-space refs (O7) |
 | D18 | Isolation enforcement (§7bis) | **Grant-scoped access handle, not raw-table access** — MySQL: `SELECT` on a definer-rights view (or the single `ds_` table) only; files: per-dataset PVC/`subPath` (D9); composes with the per-experiment grant (D10, backend#1181) |
-| D19 | Ingestor append-disable (§7bis) | **Remove the reuse/append path** — `data-ingestors/tracebloc_ingestor/database.py:309-357` (reuse-existing-table branch) deleted; ingestion always creates a fresh table |
+| D19 | Ingestor append-disable (§7bis) | **Remove the reuse/append path** — `data-ingestors/tracebloc_ingestor/database.py:275-357` (reuse-existing-table branch) deleted; ingestion always creates a fresh table |
 | D20 | Grandfather (§7bis) | **New ingests only; existing shared multi-ingestor tables stay as-is; no migration/backfill** (mirrors D4) |
 
 Open items:
@@ -536,7 +536,7 @@ Open items:
 | O2 | Platform-side weight retention: when does crypto-shred fire on the averaging-share store (experiment completion? grace window? audit needs?) | Shred at completion + configurable grace window — decided inside backend#1182 |
 | O4 | Watermarking mechanics & owner (backend work) | Scope inside backend#1183 |
 | O5 | Storage abstraction beyond MySQL — should the RFC define "a dataset = an isolated, access-scoped unit" with a per-backend physical form (MySQL table + definer-view; file/folder PVC; future other DBs) rather than binding the concept to MySQL? | Open (reviewer feedback) — lean toward a backend-neutral definition; confirm the per-substrate forms |
-| O6 | View mechanics at scale — many tables + views (UNION / indexing / perf), and how the training read path moves from the client-built `WHERE ingestor_id IN (…)` (tracebloc-client `core/utils/database.py:243-361`) to reading a backend-provisioned view/table handle | Open (reviewer feedback) — needs a read-path / perf design pass |
+| O6 | View mechanics at scale — many tables + views (UNION / indexing / perf), and how the training read path moves from the client-built `WHERE ingestor_id IN (…)` (tracebloc-engine `core/utils/database.py:243-361`) to reading a backend-provisioned view/table handle | Open (reviewer feedback) — needs a read-path / perf design pass |
 | O7 | Delete / referential-cleanup semantics — cascade a table drop to its views and any data-space references (D17) | Open (reviewer feedback) — resolve jointly with the data-spaces RFC (references cross the boundary) |
 
 Resolved since v2: **O1 → D15** (decided). **O3** dissolved by the
@@ -588,10 +588,10 @@ needing key custody; platform-side keys live in the backend's KMS.
 - `client/scripts/lib/cluster.sh:312` — `-v "${HOST_DATASET_DIR}:/tracebloc-data@all"` (cluster-wide dataset-source mount)
 - `client/client/values.yaml` — `networkPolicy.training.{enabled,allowExternalHttps,enforcementProbeHost,clusterCidrs}`, `egressProxy.{enabled,routeWorkloads}`, `egressReachabilityCheck` (lockdown built, ships permissive; §3.5/§8.1)
 - `client-runtime/jobs_manager.py` (~:825-885) — `EXPERIMENT_SCRATCH_PATH` emptyDir scratch, `readOnlyRootFilesystem`, read-only shared mounts; legacy-image carve-out (~:77, :829)
-- `tracebloc-client/core/weights/base.py:117-146, :340` — per-cycle weight
+- `tracebloc-engine/core/weights/base.py:117-146, :340` — per-cycle weight
   download (backend → ZIP envelope → `{scratch}/{exp}_{model}_weights.<ext>`)
   and upload back to the backend; stale-sibling cleanup between formats
-- `tracebloc-client/core/utils/general.py:21-33` — `get_experiment_path()`:
+- `tracebloc-engine/core/utils/general.py:21-33` — `get_experiment_path()`:
   `EXPERIMENT_SCRATCH_PATH` (emptyDir) or legacy image-filesystem fallback
 - `averaging-service/service/safe_unpickle.py` — the durable, platform-side
   weight store: `{edge}_{exp}_{cycle}_weights.pkl` under `SHARE_PATH`;
