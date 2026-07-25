@@ -21,8 +21,9 @@ import (
 // testable without a pseudo-terminal — the same trick kubernetes.Interface
 // uses to let cluster code run against a fake clientset.
 // errInteractiveCancelled is returned when the user declines the
-// confirm prompt or hits Ctrl-C. It's control flow, not a failure:
-// runDataIngest maps it to a clean exit (0) with a "Cancelled" note.
+// confirm prompt or hits Ctrl-C. It's control flow, not a failure —
+// every site reports it through cleanCancel / mapPromptErr below: a
+// visible "Cancelled — …" note and a clean exit (0).
 var errInteractiveCancelled = errors.New("cancelled by user")
 
 type prompter interface {
@@ -101,6 +102,48 @@ func mapErr(err error) error {
 		return errInteractiveCancelled
 	}
 	return err
+}
+
+// cleanCancel is the ONE place a cancelled prompt is reported to the user. It
+// prints the CLI's cancellation line — "Cancelled — <nothing>." — and returns
+// nil, which ExitCodeFromError maps to exitOK.
+//
+// Exit 0 is the convention every prompting command follows (data ingest, data
+// delete, resources set, client create, delete): backing out at a question is a
+// user choice, and nothing was started, so there is no failure to report.
+// exitInterrupted (130) is for the OTHER Ctrl-C — the one that interrupts work
+// already in flight (the sign-in wait, `client status --wait`, the seal suite, an
+// installer re-run), where an operation really was cut short. See exitcodes.go.
+//
+// nothing says what did NOT happen ("nothing was changed."), and takes format
+// args for the sites that name the thing they left alone. The prefix lives here
+// so no site invents its own wording, and the argument is required so no site can
+// report a cancellation without saying what it left untouched.
+func cleanCancel(p *ui.Printer, nothing string, a ...any) error {
+	p.Infof("Cancelled — %s", fmt.Sprintf(nothing, a...))
+	return nil
+}
+
+// mapPromptErr maps a prompter error to the CLI's exit contract, so a prompt can
+// neither fail nor be cancelled silently. Ctrl-C (errInteractiveCancelled, from
+// mapErr above) goes through cleanCancel — the same visible note and the same
+// exit 0 the site's declined-answer branch produces. Anything else is a real
+// prompt failure: exit 1.
+//
+// The Printer and the note are in the signature deliberately. The bug this
+// replaced mapped the cancellation straight to nil, so Ctrl-C exited 0 with no
+// output at all — a script could not tell it apart from a completed run
+// (backend#1253). Handling the sentinel now costs you a note; printing nothing
+// is no longer reachable.
+//
+// Sites whose non-cancel error needs a code other than exitFailure keep their own
+// errors.Is check and call cleanCancel directly — the printing still funnels
+// through one place.
+func mapPromptErr(p *ui.Printer, err error, nothing string, a ...any) error {
+	if errors.Is(err, errInteractiveCancelled) {
+		return cleanCancel(p, nothing, a...)
+	}
+	return &exitError{code: exitFailure, err: err}
 }
 
 // isInteractiveTTY reports whether we can run a guided prompt flow:

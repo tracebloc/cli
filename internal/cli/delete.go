@@ -195,11 +195,14 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		p.PromptHint("This is irreversible. Type the client name to confirm, or leave blank to cancel.")
 		typed, perr := pr.Input(fmt.Sprintf("Type %q to offboard this machine", name), "", "", nil)
 		if perr != nil {
-			return mapClientErr(perr)
+			// Ctrl-C mid-typing is the same "no" the mismatch branch below
+			// handles — same visible note, same clean exit. It used to return
+			// nil unprinted, so an aborted offboard looked exactly like a
+			// completed one to anything reading the stream (backend#1253).
+			return mapPromptErr(p, perr, "nothing was removed.")
 		}
 		if strings.TrimSpace(typed) != name {
-			p.Infof("Cancelled — the name didn't match. Nothing was removed.")
-			return nil
+			return cleanCancel(p, "the name didn't match. Nothing was removed.")
 		}
 	}
 

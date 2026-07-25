@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/AlecAivazis/survey/v2/terminal"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/tracebloc/cli/internal/doctor"
 	"github.com/tracebloc/cli/internal/resources"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // TestMapErr pins the interactive-cancel seam contract (interactive.go:82,
@@ -29,16 +32,27 @@ func TestMapErr(t *testing.T) {
 	}
 }
 
-// TestMapClientErr pins client.go:1015 (0%): a cancelled prompt is a clean exit
-// (nil); anything else becomes an exit-1 *exitError.
-func TestMapClientErr(t *testing.T) {
-	if err := mapClientErr(errInteractiveCancelled); err != nil {
+// TestMapPromptErr pins the seam's exit contract: a cancelled prompt is a clean
+// exit (nil ⇒ exit 0) AND prints the shared note — the two are inseparable here,
+// which is the whole point of the helper (backend#1253). Anything else becomes an
+// exit-1 *exitError, with nothing printed (main() reports it).
+func TestMapPromptErr(t *testing.T) {
+	var out bytes.Buffer
+	if err := mapPromptErr(ui.New(&out, ui.WithColor(false)), errInteractiveCancelled, "nothing was changed."); err != nil {
 		t.Errorf("cancel must map to a clean nil, got %v", err)
 	}
-	err := mapClientErr(errors.New("nope"))
+	if got := out.String(); !strings.Contains(got, "Cancelled — nothing was changed.") {
+		t.Errorf("cancel must print the shared note, got %q", got)
+	}
+
+	out.Reset()
+	err := mapPromptErr(ui.New(&out, ui.WithColor(false)), errors.New("nope"), "nothing was changed.")
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.Code() != 1 {
 		t.Errorf("a real error must become exit 1, got %v", err)
+	}
+	if out.String() != "" {
+		t.Errorf("a real prompt failure must not print a cancellation note, got %q", out.String())
 	}
 }
 
