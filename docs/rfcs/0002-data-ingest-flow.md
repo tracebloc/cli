@@ -1,5 +1,9 @@
 # RFC 0002 — `tracebloc data ingest`: flow, terminology & task taxonomy
 
+> **Qualified ID: `RFC-CLI-0002`.** Cite this document by its qualified ID, never as
+> a bare "RFC 0002" — `backend` also has a 0002 (platform cost & autoscaling).
+> Org-wide index: `docs/rfcs/README.md` in `tracebloc/backend` (private).
+>
 > **Status: DRAFT — for discussion.** Owner: @LukasWodka. Last updated: 2026-07-07.
 >
 > This RFC captures the redesign of the `tracebloc data ingest` user
