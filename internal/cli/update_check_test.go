@@ -118,6 +118,50 @@ func TestLatestReleaseVersion_FreshCacheSkipsNetwork(t *testing.T) {
 	}
 }
 
+// An ABSENT config dir (fresh install / offboarded) must SKIP the network check
+// entirely — not hit GitHub on every command. writeUpdateCache can't persist the
+// throttle without the dir (Bugbot #404), so an unconditional fetch would repeat
+// forever and burn updateCheckTimeout each time (Bugbot #397). Distinct from the
+// dir-present-but-stale case, which still fetches (throttled) below.
+func TestLatestReleaseVersion_MissingConfigDirSkipsNetwork(t *testing.T) {
+	absent := filepath.Join(t.TempDir(), "nope") // deliberately never created
+	t.Setenv("TRACEBLOC_CONFIG_DIR", absent)
+	// A server that fails the test if it's ever hit — proves no fetch is attempted.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("network hit despite an absent config dir — the update check must be skipped")
+	}))
+	defer srv.Close()
+	swapURL(t, srv.URL)
+
+	if got := latestReleaseVersion(); got != "" {
+		t.Errorf("latestReleaseVersion = %q, want \"\" (skipped: no config dir)", got)
+	}
+	// The skipped check must not have resurrected the dir either (reconciles #404).
+	if _, err := os.Stat(absent); !os.IsNotExist(err) {
+		t.Errorf("update check must not create the missing config dir %s (err=%v)", absent, err)
+	}
+}
+
+// The dir-present-but-no-cache case (e.g. right after login created ~/.tracebloc)
+// must still fetch and then persist the throttle — the missing-dir skip must NOT
+// bleed into the normal path, or the once-a-day throttle would never arm.
+func TestLatestReleaseVersion_DirPresentNoCacheFetchesAndPersists(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // dir exists; no cache file yet
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"tag_name":"v2.0.0"}`))
+	}))
+	defer srv.Close()
+	swapURL(t, srv.URL)
+
+	if got := latestReleaseVersion(); got != "2.0.0" {
+		t.Errorf("latestReleaseVersion = %q, want 2.0.0 (dir present, no cache → fetch)", got)
+	}
+	// The fetch must have persisted the throttle so the next call is served from cache.
+	if c, ok := readUpdateCache(updateCachePath()); !ok || c.Latest != "2.0.0" {
+		t.Errorf("throttle not persisted after a dir-present fetch: %+v ok=%v", c, ok)
+	}
+}
+
 func TestLatestReleaseVersion_StaleCacheFetchesAndRewrites(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

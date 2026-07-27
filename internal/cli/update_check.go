@@ -80,6 +80,16 @@ func latestReleaseVersion() string {
 	if c, ok := readUpdateCache(path); ok && time.Since(c.CheckedAt) < updateCheckInterval {
 		return c.Latest
 	}
+	// No fresh cache. If the config dir is absent, the throttle can't be persisted
+	// (writeUpdateCache won't recreate it — Bugbot #404), so fetching here would
+	// repeat on EVERY command and burn updateCheckTimeout each time. A missing dir
+	// also means the CLI isn't set up (fresh install) or was offboarded — nothing
+	// to nudge about. Skip the network check entirely. The dir-present but
+	// stale/unreadable case still falls through to the throttled fetch below, so
+	// this doesn't defeat the normal path (Bugbot #397).
+	if !configDirExists(path) {
+		return ""
+	}
 	latest, err := fetchLatestRelease(latestReleaseURL, updateCheckTimeout)
 	if err != nil {
 		if c, ok := readUpdateCache(path); ok {
@@ -134,6 +144,22 @@ func updateCachePath() string {
 	return filepath.Join(dir, updateCacheFile)
 }
 
+// configDirExists reports whether the tracebloc config dir (the parent of the
+// update cache) is present — the single gate for "can the update-check throttle
+// be persisted?". When it's absent (a fresh install, or a wiped/offboarded
+// ~/.tracebloc) the cache can neither be read nor written, so the caller must
+// no-op: latestReleaseVersion skips the network check (so a fetch isn't repeated
+// unthrottled on every command — Bugbot #397) and writeUpdateCache skips the
+// write (so a throttle cache never resurrects a just-wiped dir — Bugbot #404).
+// An empty path (config.Dir() failed) counts as absent.
+func configDirExists(cachePath string) bool {
+	if cachePath == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Dir(cachePath))
+	return err == nil
+}
+
 func readUpdateCache(path string) (updateCache, bool) {
 	if path == "" {
 		return updateCache{}, false
@@ -158,10 +184,7 @@ func readUpdateCache(path string) (updateCache, bool) {
 // login/client-create and delete, never by a throttle cache. A missing dir is a
 // silent no-op (the throttle simply isn't persisted until the dir exists again).
 func writeUpdateCache(path string, c updateCache) error {
-	if path == "" {
-		return nil
-	}
-	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+	if !configDirExists(path) {
 		return nil // dir gone (fresh machine, or just-offboarded) — don't recreate it
 	}
 	raw, err := json.Marshal(c)
