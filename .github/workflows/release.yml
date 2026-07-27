@@ -19,7 +19,7 @@
 #
 #   cosign verify-blob \
 #     --certificate-identity-regexp \
-#       'https://github.com/tracebloc/cli/.github/workflows/release.yml@.*' \
+#       'https://github.com/tracebloc/cli/.github/workflows/release.yml@refs/tags/v.*' \
 #     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
 #     --certificate <binary>.cert \
 #     --signature <binary>.sig \

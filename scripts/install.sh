@@ -361,7 +361,7 @@ verify_cosign_signature() {
 
     if "$COSIGN_BIN" verify-blob \
             --certificate-identity-regexp \
-              "https://github.com/${GITHUB_REPO}/.github/workflows/release.yml@.*" \
+              "https://github.com/${GITHUB_REPO}/.github/workflows/release.yml@refs/tags/v.*" \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             --certificate "$TMP/$BINARY_FILE.cert" \
             --signature "$TMP/$BINARY_FILE.sig" \
