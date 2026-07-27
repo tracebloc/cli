@@ -1,5 +1,11 @@
 # RFC 0003 — The secure environment: dataset storage, offboard hygiene & the boundary
 
+> **Qualified ID: `RFC-CLI-0003`.** Cite this document by its qualified ID, never as
+> a bare "RFC 0003" — `backend` also has a 0003 (configurable preprocessing &
+> imputation). Note that the existing bare `RFC-0003` references in the `client`
+> chart templates and `docs/SEAL-CHECK.md` mean **this** document. Org-wide index:
+> `docs/rfcs/README.md` in `tracebloc/backend` (private).
+>
 > **Status: DECIDED — v2.3; decisions D1–D20 locked (D1–D15 2026-07-22;
 > D16–D20 2026-07-23). Execution tickets filed and cross-linked in §10/§12;
 > D16–D20 (per-dataset isolation) are decided but not yet ticketed, with
