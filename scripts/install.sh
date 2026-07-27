@@ -387,13 +387,34 @@ verify_cosign_signature
 PREFIX="$INSTALL_PREFIX"
 if ! mkdir -p "$PREFIX" 2>/dev/null || [ ! -w "$PREFIX" ]; then
     # The customer's chosen prefix isn't usable (no write perms on
-    # parent, /usr/local/bin without sudo, etc.). Fall back to a
-    # per-user dir; the PATH-advice block below tells them how to
-    # pick it up.
-    FALLBACK="$HOME/.local/bin"
-    echo "Note: $PREFIX isn't writable (couldn't mkdir or no -w); falling back to $FALLBACK"
-    mkdir -p "$FALLBACK"
-    PREFIX="$FALLBACK"
+    # parent, /usr/local/bin without sudo, etc.). Prefer ~/bin when it
+    # already exists on $PATH and is writable: the binary is then usable
+    # in THIS shell (and every new one) with NO rc edit and no new
+    # terminal — the least-privilege install's B2 goal (RFC 0001). We
+    # only consider the conventional general-purpose ~/bin, never a
+    # language-specific dir that merely happens to be on PATH (~/.cargo/bin,
+    # ~/go/bin, …). Otherwise fall back to ~/.local/bin, which the
+    # PATH-advice block below wires into the shell rc.
+    home_bin="${HOME%/}/bin"
+    home_bin_on_path=no
+    # Match both "$home_bin" and a trailing-slash "$home_bin/" PATH entry — some
+    # users have "$HOME/bin/" (with the slash) on PATH, which a bare
+    # ":$home_bin:" pattern would miss and wrongly fall back to ~/.local/bin
+    # (Bugbot #392).
+    case ":$PATH:" in *":$home_bin:"*|*":$home_bin/:"*) home_bin_on_path=yes ;; esac
+    # Guard HOME="" or "/": "${HOME%/}/bin" collapses to "/bin", so a root process
+    # (HOME=/) with /bin writable + on PATH would drop the CLI into /bin. Require a
+    # real, non-root $HOME before preferring ~/bin (Bugbot #392 r3).
+    if [ -n "${HOME:-}" ] && [ "$HOME" != "/" ] \
+       && [ "$home_bin_on_path" = yes ] && [ -d "$home_bin" ] && [ -w "$home_bin" ]; then
+        echo "Note: $PREFIX isn't writable; installing to $home_bin (already on your PATH)."
+        PREFIX="$home_bin"
+    else
+        FALLBACK="$HOME/.local/bin"
+        echo "Note: $PREFIX isn't writable (couldn't mkdir or no -w); falling back to $FALLBACK"
+        mkdir -p "$FALLBACK"
+        PREFIX="$FALLBACK"
+    fi
 fi
 
 chmod +x "$TMP/$BINARY_FILE"
@@ -442,8 +463,18 @@ home_dir="${HOME%/}"
 persist=no
 case "$PREFIX" in
     "$home_dir"/*) persist=yes ;;
-    *) case ":$PATH:" in *":$PREFIX:"*) ;; *) persist=yes ;; esac ;;
+    *) case ":$PATH:" in *":$PREFIX:"*|*":$PREFIX/:"*) ;; *) persist=yes ;; esac ;;
 esac
+
+# Is $PREFIX on the CURRENT shell's PATH? If so the binary is usable right now
+# (this covers the ~/bin-already-on-PATH case). We still persist a $HOME prefix
+# to the rc (a current-$PATH hit may be session-only — a one-off export, direnv —
+# that new terminals won't have; Bugbot #392 r2), but the message must say
+# "ready now" instead of nagging "open a new terminal" for a dir that IS on PATH.
+on_path=no
+# Trailing-slash tolerant, as above (Bugbot #392): a "$PREFIX/" PATH entry still
+# means the binary is usable now, so don't nag "open a new terminal".
+case ":$PATH:" in *":$PREFIX:"*|*":$PREFIX/:"*) on_path=yes ;; esac
 
 if [ "$persist" = "yes" ]; then
     shell_name="$(basename "${SHELL:-sh}")"
@@ -490,14 +521,28 @@ if [ "$persist" = "yes" ]; then
     echo ""
     case "$state" in
         added)
-            echo "Added $PREFIX to your PATH in $rc."
-            echo "Open a new terminal — or load it now:  . \"$rc\""
+            if [ "$on_path" = yes ]; then
+                # Usable in THIS shell already; the rc line is just so new
+                # terminals find it too (covers a session-only $PATH hit).
+                echo "tracebloc is ready to use now."
+                echo "Also added $PREFIX to $rc so new terminals find it too."
+            else
+                echo "Added $PREFIX to your PATH in $rc."
+                echo "Open a new terminal — or load it now:  . \"$rc\""
+            fi
             ;;
         present)
-            echo "$PREFIX is already in your PATH config ($rc) — nothing to add."
-            echo "If a new terminal can't find it yet, open one — or load it now:  . \"$rc\""
+            if [ "$on_path" = yes ]; then
+                echo "tracebloc is ready to use now ($PREFIX is on your PATH)."
+            else
+                echo "$PREFIX is already in your PATH config ($rc) — nothing to add."
+                echo "If a new terminal can't find it yet, open one — or load it now:  . \"$rc\""
+            fi
             ;;
         *)
+            # Usable in THIS shell already ($PREFIX on PATH) — say so even though
+            # we couldn't persist it for new terminals (Bugbot #392 r3).
+            [ "$on_path" = yes ] && echo "tracebloc is ready to use now ($PREFIX is on your PATH)."
             echo "Note: the installer couldn't update your shell config ($rc)."
             echo "Add this line to it (or your shell's startup file), then open a new terminal:"
             echo "  $path_line"

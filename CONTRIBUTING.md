@@ -55,7 +55,7 @@ This repo follows the same conventions as the rest of the tracebloc org:
   fix(#150): handle empty kubeconfig gracefully
   ```
 
-- **PR body** should include a `Closes #N` line (on its own line) for any ticket the PR fully resolves. GitHub auto-closes the issue on merge. The `feat(#N):` convention in the title is for kanban tracking; `Closes #N` in the body is what triggers auto-close.
+- **PR body** should include a `Closes #N` line (on its own line) for any ticket the PR fully resolves. The `feat(#N):` convention in the title is for kanban tracking; the body line is what links the issue. Owner-qualify anything in another repo — `Fixes tracebloc/backend#123` — because a bare `backend#123` only cross-references and closes nothing. And since GitHub fires closing keywords only on merges into the default branch (`main`), a PR merged to `develop` won't auto-close on its own: confirm the ticket, and close it by hand if needed.
 
 - **One PR per ticket** when practical. Roll-up sync PRs (`Sync develop → main for vX.Y.Z release`) are an exception.
 

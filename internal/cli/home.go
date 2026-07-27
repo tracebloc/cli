@@ -489,7 +489,11 @@ func realProbeEnv(ctx context.Context) envProbe {
 	// the remembered-name fallback) — and skip the cluster I/O entirely, which
 	// also keeps the common unprovisioned re-entry instant.
 	if !binding.applied {
-		return envProbe{local: localNoRelease}
+		// #401: an empty pointer isn't proof of "no environment" — the Windows
+		// installer never writes it. localEnvFallback adopts a release only on
+		// a LOCAL (loopback/k3d) cluster, so the shared-cluster guarantee above
+		// is preserved; everything else still reads as no-release.
+		return localEnvFallback(ctx)
 	}
 	resolved, err := loadClusterFn(opts)
 	if err != nil {
@@ -592,25 +596,25 @@ func machineCapacity(ctx context.Context, cs kubernetes.Interface) (computeInfo,
 	return sumCapacity(nodes.Items)
 }
 
-// sumCapacity is the pure summation behind machineCapacity — split out so the
-// rounding + GPU logic is unit-testable without a clientset.
+// sumCapacity picks the LARGEST Ready node (CPU-major, like
+// resources.LargestReadyNode) — never a sum: k3d's server+agent are the same
+// physical machine, and summing double-counted it (#399).
 func sumCapacity(nodes []corev1.Node) (computeInfo, bool) {
 	var cpuMilli, memBytes, gpu int64
-	ready := 0
+	found := false
 	for i := range nodes {
-		n := nodes[i]
-		if !nodeReady(n) {
+		if !nodeReady(nodes[i]) {
 			continue
 		}
-		ready++
-		alloc := n.Status.Allocatable
-		cpuMilli += alloc.Cpu().MilliValue()
-		memBytes += alloc.Memory().Value()
-		if q, ok := alloc[gpuResource]; ok {
-			gpu += q.Value()
+		alloc := nodes[i].Status.Allocatable
+		cm, mb := alloc.Cpu().MilliValue(), alloc.Memory().Value()
+		if found && (cm < cpuMilli || (cm == cpuMilli && mb <= memBytes)) {
+			continue
 		}
+		q := alloc[gpuResource] // zero Quantity when absent -> gpu 0
+		found, cpuMilli, memBytes, gpu = true, cm, mb, q.Value()
 	}
-	if ready == 0 {
+	if !found {
 		return computeInfo{}, false
 	}
 	return computeInfo{
@@ -645,22 +649,8 @@ func sanitizeInvoked(argv0 string) string {
 	return binTracebloc
 }
 
-// tbAliasAvailable reports whether a real tracebloc-owned `tb` alias sits next to
-// this binary (the installer symlinks it there, cli#142). Reuses delete.go's
-// aliasStatus so "is it ours" is judged exactly as offboarding judges it — we
-// only advertise `tb` when it genuinely points at this CLI.
-func tbAliasAvailable() bool {
-	exe, err := osExecutable()
-	if err != nil {
-		return false
-	}
-	tb := filepath.Join(filepath.Dir(exe), binTB)
-	if tb == exe {
-		return false
-	}
-	_, ours := aliasStatus(tb, exe)
-	return ours
-}
+// tbAliasAvailable moved to home_local_fallback.go (#401): it now also accepts
+// the Windows tb.cmd shim, which the symlink-only test could never match.
 
 // ── Rendering (pure) ──
 

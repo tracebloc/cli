@@ -17,8 +17,10 @@ package cli
 // constant per MEANING sharing the value, so each construction site stays
 // honest and the docs table maps number → per-command meaning.
 const (
-	// exitOK: success. Includes --dry-run completing, a guided run the
-	// user cancelled cleanly, and doctor passing with warnings only.
+	// exitOK: success. Includes --dry-run completing, any prompt the user
+	// declined or cancelled with Ctrl-C (always with a visible "Cancelled —
+	// …" note — see cleanCancel in interactive.go), and doctor passing with
+	// warnings only.
 	exitOK = 0
 
 	// exitFailure: generic failure with no more specific bucket (cobra
@@ -83,8 +85,16 @@ const (
 	// couldn't be determined / followed within the watch window.
 	exitIngestFailed = 9
 
-	// exitInterrupted: the user hit Ctrl-C at an interactive prompt
-	// (128+SIGINT, the shell convention). Emitted silent (err == nil) so
-	// main() prints no "Error:" line on the way out.
+	// exitInterrupted: the user hit Ctrl-C while an operation was already in
+	// flight — the sign-in wait, `client status --wait`, the seal suite, or an
+	// installer re-run (upgrade / prepare-host) — 128+SIGINT, the shell
+	// convention. Emitted silent (err == nil) so main() prints no "Error:"
+	// line on the way out.
+	//
+	// NOT for a cancelled PROMPT. Backing out at a question starts nothing, so
+	// every prompt site reports that through cleanCancel instead: a visible
+	// "Cancelled — …" note and exitOK (interactive.go, backend#1253). This
+	// comment used to claim the prompt case, contradicting exitOK above and
+	// every call site.
 	exitInterrupted = 130
 )

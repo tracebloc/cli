@@ -1,0 +1,31 @@
+tb upgrade — update to the latest release
+=========================================
+What you see when you run `tb upgrade`. On Linux/macOS it re-runs the
+official installer (signature-verified) to update the CLI and your secure
+environment together, so they never drift apart. On Windows a running .exe is
+locked and install.ps1 is CLI-only, so it prints the command to run in a fresh
+shell instead. The update-check nudge and the "CLI too old" (426) message both
+point here. The installer's own live output streams during the run (not a stable
+screen); its copy is in the client repo's installer catalog.
+
+
+------------------------------------------------------------
+--help
+------------------------------------------------------------
+$ tracebloc upgrade --help
+Updates tracebloc to the latest release by re-running the official
+installer. It verifies signatures (cosign) and replaces the CLI; on Linux/macOS
+it also upgrades your secure environment's services to match, so the CLI and the
+environment never drift apart. On Windows it prints the command to update the
+CLI (a running executable can't replace itself, so you run it in a fresh shell).
+Safe to run anytime; safe to re-run.
+
+Usage:
+  tracebloc upgrade [flags]
+
+Flags:
+  -h, --help   help for upgrade
+
+Global Flags:
+      --plain     disable color and decorative output (also honors $NO_COLOR)
+      --verbose   stream detailed step-by-step progress (also via $TRACEBLOC_LOG_LEVEL=debug)

@@ -115,12 +115,12 @@ produces that code.
 
 | Code | Meaning | Produced by | Constant |
 |------|---------|-------------|----------|
-| `0` | Success — includes `--dry-run` completing, a guided run you cancelled cleanly, and `doctor` passing with warnings only | all commands | `exitOK` |
+| `0` | Success — includes `--dry-run` completing, any prompt you declined or cancelled with Ctrl-C (nothing was started, and the CLI prints a `Cancelled — …` line saying so), and `doctor` passing with warnings only | all commands | `exitOK` |
 | `1` | Generic failure with no more specific bucket (also any error without an explicit code) | `login`, `client …`, `delete`, mistyped commands | `exitFailure` |
 | `2` | Your input didn't validate: schema validation failed (spec synthesized from flags, or your YAML), an unsupported/unknown `--task`, a task-scoped flag applied to the wrong task, an invalid dataset name, or a resource size that doesn't fit the machine | `data ingest`, `data validate`, `data delete`, `resources set` | `exitBadInput` |
-| `2` | One or more checks failed | `doctor` | `exitChecksFailed` |
-| `3` | Local environment problem: kubeconfig couldn't be loaded, the dataset path is missing or unreadable, the local layout is wrong, a YAML file didn't parse, or a prompt was needed but the run is non-interactive (`--no-input` / `--output-json` / no TTY) | `data ingest`, `data validate`, `data list`, `data delete`, `doctor`, `resources`, `resources set` | `exitLocalEnv` |
-| `4` | Cluster reachable but no tracebloc client found in the namespace — or its shared storage / dataset list is missing, so the target can't be confirmed | `data ingest`, `data list`, `data delete`, `cluster info`, `resources`, `resources set` | `exitNoWorkspace` |
+| `2` | One or more checks failed — for `client status --seal`: the environment is unsealed (a conformance check failed), or unknown (the chart ships no conformance checks, so the seal couldn't be verified) | `doctor`, `client status --seal` | `exitChecksFailed` |
+| `3` | Local environment problem: kubeconfig couldn't be loaded, the dataset path is missing or unreadable, the local layout is wrong, a YAML file didn't parse, or a prompt was needed but the run is non-interactive (`--no-input` / `--output-json` / no TTY) | `data ingest`, `data validate`, `data list`, `data delete`, `doctor`, `resources`, `resources set`, `client status --seal` | `exitLocalEnv` |
+| `4` | Cluster reachable but no tracebloc client found in the namespace — or its shared storage / dataset list is missing, so the target can't be confirmed | `data ingest`, `data list`, `data delete`, `cluster info`, `resources`, `resources set`, `client status --seal` | `exitNoWorkspace` |
 | `5` | Auth: the ingestor SA token couldn't be obtained, or jobs-manager rejected it (401/403) | `data ingest`, `cluster info` | `exitAuth` |
 | `5` | No dataset by that name on this client (nothing to delete) | `data delete` | `exitNoSuchDataset` |
 | `6` | Destination table already exists — re-run with `--overwrite` to replace it, or pick a different `--name` | `data ingest` | `exitTableExists` |
@@ -129,7 +129,7 @@ produces that code.
 | `7` | The cluster couldn't be queried for its datasets | `data list` | `exitQueryFailed` |
 | `8` | jobs-manager rejected the submitted run (a non-auth 4xx/5xx), or the port-forward to it couldn't be set up | `data ingest` | `exitSubmitFailed` |
 | `9` | The ingestion Job exited non-zero, completed with row-level failures the summary panel reports, or its outcome couldn't be determined / followed | `data ingest` | `exitIngestFailed` |
-| `130` | You hit Ctrl-C at an interactive prompt (128+SIGINT) | interactive prompts | `exitInterrupted` |
+| `130` | You hit Ctrl-C while something was already running — the sign-in wait, `client status --wait`, the seal check, or an installer re-run (128+SIGINT). Ctrl-C at a *question* is `0` instead: nothing had started | `login`, `client status --wait`, `client status --seal`, `upgrade`, `prepare-host` | `exitInterrupted` |
 
 ## Still stuck?
 

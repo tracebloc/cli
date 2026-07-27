@@ -39,6 +39,7 @@ type fakeNodeboot struct {
 	pruneErr      error
 	removedPaths  []string
 	removeErr     map[string]error // path → error to return from osRemoveAll
+	statPresent   bool             // when true, osStat reports the data dir still exists after rm
 	executable    string
 	executableErr error
 	// Kubeconfig/context the uninstall seam was handed — so a test can prove the
@@ -50,7 +51,7 @@ type fakeNodeboot struct {
 func (f *fakeNodeboot) install(t *testing.T) {
 	t.Helper()
 	origU, origT, origP := uninstallChart, teardownCluster, pruneImages
-	origExe, origRm := osExecutable, osRemoveAll
+	origExe, origRm, origStat := osExecutable, osRemoveAll, osStat
 	uninstallChart = func(_ context.Context, ns, kubeconfig, kubeContext string) error {
 		f.calls = append(f.calls, "uninstall:"+ns)
 		f.uninstallKubeconfig, f.uninstallContext = kubeconfig, kubeContext
@@ -78,9 +79,19 @@ func (f *fakeNodeboot) install(t *testing.T) {
 		}
 		return nil
 	}
+	// osStat backs removeHostDataDir's verify-before-success. Default: the data dir
+	// is gone (ErrNotExist) so a clean wipe reports success. statPresent flips it to
+	// "still there" so a test can prove the CLI does NOT claim ✔ on an unverified wipe.
+	osStat = func(path string) (os.FileInfo, error) {
+		f.calls = append(f.calls, "stat:"+path)
+		if f.statPresent {
+			return nil, nil
+		}
+		return nil, os.ErrNotExist
+	}
 	t.Cleanup(func() {
 		uninstallChart, teardownCluster, pruneImages = origU, origT, origP
-		osExecutable, osRemoveAll = origExe, origRm
+		osExecutable, osRemoveAll, osStat = origExe, origRm, origStat
 	})
 }
 
@@ -399,6 +410,36 @@ func TestDelete_WipeFails_StillClearsPointer(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Couldn't remove local data") {
 		t.Errorf("expected a wipe-failure warning, got:\n%s", out.String())
+	}
+}
+
+// A nil RemoveAll is not proof the wipe happened: if the data dir is still present
+// afterwards, delete must NOT print "✔ Removed" — it must warn and flag degraded,
+// so offboard never claims a clean slate it didn't achieve (RFC-0003).
+func TestDelete_WipeUnverified_DoesNotClaimSuccess(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/edge-device/":
+			_, _ = w.Write([]byte(`[{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/revoke"):
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+	exe := filepath.Join(t.TempDir(), "tracebloc")
+	// osRemoveAll returns nil (no removeErr), but osStat reports the dir still present.
+	fn := &fakeNodeboot{executable: exe, statPresent: true}
+	fn.install(t)
+
+	var out bytes.Buffer
+	if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true}); err != nil {
+		t.Fatalf("offboard: %v", err)
+	}
+	if strings.Contains(out.String(), "Removed local tracebloc data and config") {
+		t.Errorf("must NOT claim a clean wipe when the dir is still present:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Couldn't remove local data") {
+		t.Errorf("expected the unverified-wipe warning, got:\n%s", out.String())
 	}
 }
 

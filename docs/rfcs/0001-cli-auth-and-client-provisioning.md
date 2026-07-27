@@ -1,5 +1,11 @@
 # RFC 0001 — Browser-based auth & one-command client provisioning
 
+> **Qualified ID: `RFC-CLI-0001`.** Cite this document by its qualified ID, never as
+> a bare "RFC 0001" — `backend` and `client` each have their own 0001. Note that
+> most existing bare `RFC-0001` references in the `backend`, `cli` and `client`
+> codebases mean **this** document. Org-wide index: `docs/rfcs/README.md` in
+> `tracebloc/backend` (private).
+>
 > **Status: ACCEPTED — implemented.** The design in this RFC shipped in
 > **CLI v0.4.0** ([cli#107](https://github.com/tracebloc/cli/pull/107)); the
 > tracking epic ([cli#54](https://github.com/tracebloc/cli/issues/54)) is closed.

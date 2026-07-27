@@ -31,6 +31,7 @@ var (
 var (
 	osExecutable = os.Executable
 	osRemoveAll  = os.RemoveAll
+	osStat       = os.Stat
 )
 
 // deleteOpts bundles the `tracebloc delete` flags.
@@ -42,6 +43,9 @@ type deleteOpts struct {
 	contextOverride string
 	namespace       string
 }
+
+// deleteCmdName is the top-level offboard command's name.
+const deleteCmdName = "delete"
 
 // newDeleteCmd wires the TOP-LEVEL `tracebloc delete` — offboarding this machine
 // (RFC-0001 §7.10). It is deliberately NOT under `client` and NOT
@@ -63,8 +67,15 @@ type deleteOpts struct {
 func newDeleteCmd() *cobra.Command {
 	var o deleteOpts
 	cmd := &cobra.Command{
-		Use:   "delete",
-		Short: "Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)",
+		Use: deleteCmdName,
+		// Suppress the post-command update nudge/cache-write: offboarding removes
+		// the CLI and (on the default path) wipes ~/.tracebloc, so nudging to
+		// upgrade a just-removed binary is nonsensical and the cache write would
+		// resurrect the just-wiped data dir. The annotation (not a name match) means
+		// `data delete` is unaffected — only this top-level command opts in
+		// (Bugbot #397, #404). See SkipUpdateNudge.
+		Annotations: map[string]string{skipUpdateNudgeAnnotation: "true"},
+		Short:       "Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)",
 		Long: `Removes tracebloc from this machine: revokes the machine credential,
 uninstalls the Helm release, deletes the local cluster, reclaims the tracebloc
 container images, and clears local state — then removes the CLI itself.
@@ -184,11 +195,14 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		p.PromptHint("This is irreversible. Type the client name to confirm, or leave blank to cancel.")
 		typed, perr := pr.Input(fmt.Sprintf("Type %q to offboard this machine", name), "", "", nil)
 		if perr != nil {
-			return mapClientErr(perr)
+			// Ctrl-C mid-typing is the same "no" the mismatch branch below
+			// handles — same visible note, same clean exit. It used to return
+			// nil unprinted, so an aborted offboard looked exactly like a
+			// completed one to anything reading the stream (backend#1253).
+			return mapPromptErr(p, perr, "nothing was removed.")
 		}
 		if strings.TrimSpace(typed) != name {
-			p.Infof("Cancelled — the name didn't match. Nothing was removed.")
-			return nil
+			return cleanCancel(p, "the name didn't match. Nothing was removed.")
 		}
 	}
 
@@ -382,7 +396,19 @@ func removeHostDataDir() error {
 	if err != nil {
 		return err
 	}
-	return osRemoveAll(dir)
+	if err := osRemoveAll(dir); err != nil {
+		return err
+	}
+	// Verify the directory is actually gone before the caller prints "✔ Removed".
+	// A nil RemoveAll is not proof the tree is absent — a racing writer, a mount,
+	// or a masked partial failure can leave it present — and claiming a clean wipe
+	// we didn't achieve is exactly the offboard-hygiene gap RFC-0003 flags.
+	if _, statErr := osStat(dir); statErr == nil {
+		return fmt.Errorf("%s still present after removal", dir)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("verifying removal of %s: %w", dir, statErr)
+	}
+	return nil
 }
 
 // hostDataDirDisplay is the data dir for a user-facing hint; falls back to the

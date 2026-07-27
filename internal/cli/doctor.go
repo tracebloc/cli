@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -19,10 +20,16 @@ import (
 	"github.com/tracebloc/cli/internal/ui"
 )
 
+// installerURL is the single source of truth for the installer script URL.
+// Everything that downloads or points at the installer (installCmd here,
+// prepareHostInstallerCmd in prepare_host.go) derives from this so a URL change
+// updates every path at once.
+const installerURL = "https://tracebloc.io/i.sh"
+
 // installCmd is the one-line installer we point people at when there's no
 // secure environment on this machine, or a component needs reinstalling. Kept in
 // one place so every remedy says the same thing.
-const installCmd = "bash <(curl -fsSL https://tracebloc.io/i.sh)"
+const installCmd = "bash <(curl -fsSL " + installerURL + ")"
 
 // doctorRunFn is a test seam over doctor.Run (the cluster-side probe). Tests
 // inject a fixed []doctor.Result so the roll-up + render can be exercised with a
@@ -291,6 +298,24 @@ func tokenLabel(tok tokenState) string {
 // stays in --verbose. When the owner isn't connected — for ANY reason — a
 // healthy local cluster still can't run training, so readiness degrades honestly
 // to "can't check" rather than showing a reassuring ✔ next to a Connected ✖.
+// computeRemedy is the "not enough compute" remedy for the host OS (#400). On
+// Windows the default Docker backend is WSL2, where Docker Desktop has NO
+// Resources→Memory slider — the VM's memory comes from %UserProfile%\.wslconfig.
+// macOS keeps the slider; bare Linux has no Docker Desktop at all. Every
+// variant ends with the drift fix: size runs to the machine (backend#1236's
+// install-time auto-size can go stale when a machine shrinks).
+func computeRemedy(goos string) string {
+	resize := fmt.Sprintf("size runs to this machine with `%s resources set max`", launcher())
+	switch goos {
+	case "windows":
+		return fmt.Sprintf("Free some up, give Docker more memory (WSL2 backend: `[wsl2] memory=…` in %%UserProfile%%\\.wslconfig then `wsl --shutdown`; Hyper-V backend: Docker Desktop → Settings → Resources → Advanced), or %s.", resize)
+	case "darwin":
+		return fmt.Sprintf("Free some up, raise the machine's allocation in Docker Desktop → Settings → Resources → Advanced, or %s.", resize)
+	default:
+		return fmt.Sprintf("Free some up on this machine, or %s.", resize)
+	}
+}
+
 func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready healthLine) {
 	by := make(map[string]doctor.Result, len(results))
 	for _, r := range results {
@@ -364,7 +389,7 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		// the "Everything looks good" verdict (Bugbot).
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — part of your secure environment can't start yet.",
-			fmt.Sprintf("Some pods are stuck starting — usually not enough free compute, or a training image that can't be pulled. Free some up in Docker Desktop → Resources, then re-run `%s doctor`; if it persists, email support@tracebloc.io with `%s doctor --diagnose`.", launcher(), launcher())}
+			fmt.Sprintf("Some pods are stuck starting — usually not enough free compute, or a training image that can't be pulled. %s Then re-run `%s doctor`; if it persists, email support@tracebloc.io with `%s doctor --diagnose`.", computeRemedy(runtime.GOOS), launcher(), launcher())}
 	case by["Image pull secret"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — the training images can't be pulled.",
@@ -388,7 +413,7 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 	case by["Node capacity"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — not enough free compute to start a training.",
-			"Free some up, or raise the machine's allocation in Docker Desktop → Resources."}
+			computeRemedy(runtime.GOOS)}
 	default:
 		ready = healthLine{doctor.StatusOK, "Ready to run training", ""}
 	}
