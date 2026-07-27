@@ -88,8 +88,11 @@ func connectIngestTarget(ctx context.Context, a *runDataIngestArgs) (target *clu
 			return nil, "", false, aerr
 		}
 		if !proceed {
-			a.Printer.Infof("Cancelled — %q was left as-is; nothing was ingested.", existingTable)
-			return nil, "", true, nil
+			// Reached by both a declined replace and a Ctrl-C at that prompt
+			// (existingTableAction folds them into proceed=false), so one note
+			// covers both — via the shared cleanCancel.
+			return nil, "", true, cleanCancel(a.Printer,
+				"%q was left as-is; nothing was ingested.", existingTable)
 		}
 		a.Overwrite = true
 	}

@@ -333,12 +333,17 @@ func runClientCreate(ctx context.Context, p *ui.Printer, pr prompter, opts clien
 			renderClientReview(p, name, namespace, location, clusterID)
 			ok, cerr := pr.Confirm("Provision this client?", true)
 			if cerr != nil {
-				return mapClientErr(cerr)
+				// Ctrl-C here is the same choice as answering "No" below, so it
+				// gets the same note and the same clean exit — never a silent
+				// exit 0 that a script reads as "provisioned" (backend#1253).
+				// Logged unconditionally: for a cancel the reason IS "cancelled
+				// by user", and a real terminal failure should say so too.
+				ilog.Logf("stopped at the confirm prompt: %v", cerr)
+				return mapPromptErr(p, cerr, "nothing was provisioned.")
 			}
 			if !ok {
 				ilog.Logf("cancelled by user at the confirm prompt")
-				p.Hintf("Cancelled.")
-				return nil
+				return cleanCancel(p, "nothing was provisioned.")
 			}
 		} else if pr == nil && !opts.yes && opts.credentialFile == "" && !willAdopt {
 			// Non-interactive with no way to confirm AND no --credential-file: a fresh
@@ -853,14 +858,6 @@ func emailLocalPart(email string) string {
 		return email[:i]
 	}
 	return email
-}
-
-// mapClientErr turns a cancelled interactive prompt into a clean exit.
-func mapClientErr(err error) error {
-	if errors.Is(err, errInteractiveCancelled) {
-		return nil
-	}
-	return &exitError{code: exitFailure, err: err}
 }
 
 // randHex returns nbytes of crypto-random data hex-encoded.

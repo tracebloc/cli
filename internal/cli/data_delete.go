@@ -229,25 +229,27 @@ undone — re-ingesting the data is the only way back.`)
 				"refusing to delete without confirmation: pass --yes or run on a terminal")}
 		}
 		p.PromptHint("This drops the table and removes the files listed above — there's no undo. Pass --yes next time to skip this prompt.")
-		ok, err := a.Prompter.Confirm(fmt.Sprintf("Delete %q and its files?", matched), false)
-		if err != nil {
-			if errors.Is(err, errInteractiveCancelled) {
-				p.Infof("Cancelled — nothing was deleted.")
-				if a.OutputJSON {
-					writeDataDeleteJSON(a.JSONOut, "declined", resolved.Namespace, release.ReleaseName, plan, nil)
-					jsonEmitted = true
-				}
-				return nil
-			}
-			return &exitError{code: exitLocalEnv, err: err}
-		}
-		if !ok {
-			p.Infof("Cancelled — nothing was deleted.")
+		// Both ways out of this prompt — Ctrl-C and an explicit "no" — report the
+		// same outcome: the shared cancellation note, one "declined" JSON object,
+		// exit 0. One closure so the pair can't drift apart.
+		declined := func() error {
 			if a.OutputJSON {
 				writeDataDeleteJSON(a.JSONOut, "declined", resolved.Namespace, release.ReleaseName, plan, nil)
 				jsonEmitted = true
 			}
-			return nil
+			return cleanCancel(p, "nothing was deleted.")
+		}
+		ok, err := a.Prompter.Confirm(fmt.Sprintf("Delete %q and its files?", matched), false)
+		if err != nil {
+			// Not mapPromptErr: a prompt that genuinely fails here is a
+			// local-environment problem (exit 3), not the generic exit 1.
+			if errors.Is(err, errInteractiveCancelled) {
+				return declined()
+			}
+			return &exitError{code: exitLocalEnv, err: err}
+		}
+		if !ok {
+			return declined()
 		}
 	}
 

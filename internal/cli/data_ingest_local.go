@@ -102,8 +102,8 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 	if a.Interactive && a.Prompter != nil {
 		if err := runInteractive(a.Printer, a.Prompter, a, a.TaskSet); err != nil {
 			if errors.Is(err, errInteractiveCancelled) {
-				a.Printer.Infof("Cancelled — nothing was ingested.")
-				return nil, nil, nil, true, nil
+				// cleanCancel prints the shared note and returns the clean exit.
+				return nil, nil, nil, true, cleanCancel(a.Printer, "nothing was ingested.")
 			}
 			// A typed exitError from a guided step (e.g. the path-existence
 			// guard, which runInteractive runs before the family sniff)
