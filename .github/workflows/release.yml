@@ -115,8 +115,8 @@ jobs:
           else
             echo "::warning::no VERSION file at this ref (pre-train tag) - skipping the consistency check."
           fi
-          echo "tag=$REF" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building $REF (version=$VERSION)"
 
       - name: Build binary
@@ -222,11 +222,11 @@ jobs:
           # prerelease, so it can never become 'latest' -- which is what the
           # installer bootstrap (releases/latest/download/...) resolves.
           if printf '%s' "$REF" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
-            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "tag=$REF" >> $GITHUB_OUTPUT
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
