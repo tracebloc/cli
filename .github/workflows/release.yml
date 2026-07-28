@@ -100,8 +100,23 @@ jobs:
           REF="${{ inputs.ref || github.ref_name }}"
           # Strip the leading v for use in -X main.version
           VERSION="${REF#v}"
-          echo "tag=$REF" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # The VERSION file declares the next release (read by the release
+          # train to cut rc/final tags). Any tag -- train-cut OR manual --
+          # must agree with it, so the file can never go silently stale
+          # after an out-of-train release. Refs from before the file existed
+          # (rebuilds of old tags) are grandfathered with a warning.
+          BASE=$(printf '%s' "$VERSION" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+          if [ -f VERSION ]; then
+            FILE_VERSION=$(tr -d '[:space:]' < VERSION)
+            if [ "$BASE" != "$FILE_VERSION" ]; then
+              echo "::error::tag $REF (base $BASE) does not match VERSION ($FILE_VERSION) - bump VERSION on develop first."
+              exit 1
+            fi
+          else
+            echo "::warning::no VERSION file at this ref (pre-train tag) - skipping the consistency check."
+          fi
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building $REF (version=$VERSION)"
 
       - name: Build binary
@@ -202,7 +217,16 @@ jobs:
         id: tag
         run: |
           REF="${{ inputs.ref || github.ref_name }}"
-          echo "tag=$REF" >> $GITHUB_OUTPUT
+          # STRICT stability rule: only a plain vX.Y.Z tag is a stable release.
+          # Anything else (v1.2.3-rc.1, and typos like v1.2.3rc1) is marked
+          # prerelease, so it can never become 'latest' -- which is what the
+          # installer bootstrap (releases/latest/download/...) resolves.
+          if printf '%s' "$REF" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
@@ -210,9 +234,9 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
-          # Mark as prerelease for v*.*.* tags containing - (e.g.
-          # v0.1.0-rc1). Plain semver releases are stable.
-          prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
+          # Strict: only plain vX.Y.Z is stable (computed above); rc tags and
+          # malformed variants are prereleases and never become 'latest'.
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
           files: |
             dist/tracebloc-*
             dist/SHA256SUMS
