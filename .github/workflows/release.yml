@@ -47,9 +47,27 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Pre-flight: reject a branch-misdispatch ONCE, in seconds, before the 8-way
+  # matrix spins up (review nit on #429). Ref passed via env, never inline.
+  guard:
+    name: Ref guard
+    runs-on: ubuntu-latest
+    env:
+      REF_FULL: ${{ github.ref }}
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      - name: Dispatch rebuilds must run at a v* tag ref
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && ! printf '%s' "$REF_FULL" | grep -qE '^refs/tags/v'; then
+            echo "::error::rebuilds must be dispatched from the v* tag itself (Actions -> Run workflow -> select the tag), not a branch -- signatures would embed $REF_FULL and fail every customer verification."
+            exit 1
+          fi
+          echo "ref ok: $REF_FULL"
+
   release:
     timeout-minutes: 20
     name: Build + sign + publish
+    needs: guard
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -94,15 +112,14 @@ jobs:
 
       - name: Determine release version
         id: version
+        env:
+          # Passed via env, never interpolated into the script: git permits $/
+          # backticks in tag names and a crafted v* tag would otherwise execute
+          # on the runner (R8; same rule as the client installer workflows).
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          # Dispatch rebuilds must run AT a v* tag ref -- the keyless identity
-          # embeds this run's ref, and installers only trust refs/tags/v.*.
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && ! printf '%s' "${{ github.ref }}" | grep -qE '^refs/tags/v'; then
-            echo "::error::rebuilds must be dispatched from the v* tag itself (Actions -> Run workflow -> select the tag), not a branch -- signatures would embed ${{ github.ref }} and fail every customer verification."
-            exit 1
-          fi
           # github.ref_name = "v0.1.0" (tag push, or dispatch AT the tag ref)
-          REF="${{ github.ref_name }}"
+          REF="$REF_NAME"
           # Strip the leading v for use in -X main.version
           VERSION="${REF#v}"
           # The VERSION file declares the next release (read by the release
