@@ -24,8 +24,11 @@ GOIMPORTS_VERSION   ?= v0.48.0
 
 # ---- top-level targets -------------------------------------------
 
+# ci mirrors the PR gates exactly — including golangci-lint (lint-full),
+# which fails on findings since #430. A green `make ci` must imply a green
+# PR; lint-full's own guard tells you how to install the tool if missing.
 .PHONY: ci
-ci: vet test lint fmt-check schema-check vulncheck file-budget deadcode check-style
+ci: vet test lint lint-full fmt-check schema-check vulncheck file-budget deadcode check-style
 	@echo "==> ci: all green"
 
 .PHONY: build
