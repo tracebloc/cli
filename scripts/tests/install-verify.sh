@@ -13,7 +13,10 @@
 #  served from a temp dir. No network, no real download. This harness is bash
 #  (for arrays/locals); the script under test stays POSIX sh.
 # =============================================================================
-set -u
+# pipefail so a failing pipeline producer (sha256sum | awk in _sha) can't be
+# masked by its last stage exiting 0. Deliberately NO -e: this harness counts
+# pass/fail itself and must keep running after a failed assertion.
+set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALLER="$SELF_DIR/../install.sh"
