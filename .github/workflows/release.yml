@@ -31,12 +31,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: 'Tag to build (e.g. v0.1.0). Must already exist on origin.'
-        required: true
-        type: string
+  # Rebuilds: dispatch the workflow AT the tag ref (Actions -> Run workflow ->
+  # pick the v* tag), or gh run rerun a previous tag run. Cosign embeds the
+  # RUN's ref in the keyless identity; the installers only trust
+  # @refs/tags/v.*, so a branch-dispatched "rebuild of a tag" would publish
+  # signatures every customer install rejects (Bugbot on promotion #428).
+  workflow_dispatch: {}
 
 permissions:
   contents: write  # create / update the GitHub Release
@@ -78,7 +78,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
 
       - name: Set up Go
@@ -95,9 +95,14 @@ jobs:
       - name: Determine release version
         id: version
         run: |
-          # On a tag push: github.ref_name = "v0.1.0"
-          # On workflow_dispatch: inputs.ref = "v0.1.0"
-          REF="${{ inputs.ref || github.ref_name }}"
+          # Dispatch rebuilds must run AT a v* tag ref -- the keyless identity
+          # embeds this run's ref, and installers only trust refs/tags/v.*.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && ! printf '%s' "${{ github.ref }}" | grep -qE '^refs/tags/v'; then
+            echo "::error::rebuilds must be dispatched from the v* tag itself (Actions -> Run workflow -> select the tag), not a branch -- signatures would embed ${{ github.ref }} and fail every customer verification."
+            exit 1
+          fi
+          # github.ref_name = "v0.1.0" (tag push, or dispatch AT the tag ref)
+          REF="${{ github.ref_name }}"
           # Strip the leading v for use in -X main.version
           VERSION="${REF#v}"
           # The VERSION file declares the next release (read by the release
@@ -186,7 +191,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.ref }}
 
       - name: Download all matrix artifacts
         uses: actions/download-artifact@v7
@@ -216,7 +221,7 @@ jobs:
       - name: Determine release tag
         id: tag
         run: |
-          REF="${{ inputs.ref || github.ref_name }}"
+          REF="${{ github.ref_name }}"
           # STRICT stability rule: only a plain vX.Y.Z tag is a stable release.
           # Anything else (v1.2.3-rc.1, and typos like v1.2.3rc1) is marked
           # prerelease, so it can never become 'latest' -- which is what the
