@@ -212,7 +212,7 @@ undone — re-ingesting the data is the only way back.`)
 		p.Newline()
 		p.Successf("Dry-run — nothing was deleted.")
 		if a.OutputJSON {
-			writeDataDeleteJSON(a.JSONOut, "dry-run", resolved.Namespace, release.ReleaseName, plan, nil, true)
+			writeDataDeleteJSON(a.JSONOut, "dry-run", resolved.Namespace, release.ReleaseName, plan, nil, false)
 			jsonEmitted = true
 		}
 		return nil
@@ -234,7 +234,7 @@ undone — re-ingesting the data is the only way back.`)
 		// exit 0. One closure so the pair can't drift apart.
 		declined := func() error {
 			if a.OutputJSON {
-				writeDataDeleteJSON(a.JSONOut, "declined", resolved.Namespace, release.ReleaseName, plan, nil, true)
+				writeDataDeleteJSON(a.JSONOut, "declined", resolved.Namespace, release.ReleaseName, plan, nil, false)
 				jsonEmitted = true
 			}
 			return cleanCancel(p, "nothing was deleted.")
@@ -309,8 +309,9 @@ type dataDeleteJSON struct {
 	PVCPaths     []string `json:"pvc_paths"`
 	RemovedPaths []string `json:"removed_paths"`
 	// BookkeepingCleaned mirrors push.TeardownResult: whether the
-	// run-journal/salt rows were removed with the table. Always true for
-	// dry-run/declined (nothing was attempted).
+	// run-journal/salt rows were removed with the table. Always false for
+	// dry-run/declined — nothing was attempted, and a strict consumer must
+	// never read "cleanup happened" out of a run that deleted nothing.
 	BookkeepingCleaned bool `json:"bookkeeping_cleaned"`
 }
 

@@ -97,6 +97,7 @@ screen. %s/%d are runtime placeholders.
 "Already signed out."
 "Applies to your next training run; a run already going keeps its size."
 "Ask one of these admins (or ask them to grant you access)"
+"Bookkeeping cleanup incomplete — the old table is gone, but its run-journal/salt rows may remain: %s"
 "Bookkeeping cleanup incomplete — the table is gone, but its run-journal/salt rows may remain: %s"
 "CPU cores for one run (1–%d)"
 "CSV %s has no columns"
