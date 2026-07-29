@@ -388,7 +388,7 @@ type SchemaInference struct {
 // redeclares them. The risky cases (empty-in-sample, id-like) are returned
 // alongside the schema so the caller can surface them as warnings.
 func InferSchema(csvPath string) (*SchemaInference, error) {
-	f, err := os.Open(csvPath)
+	f, err := os.Open(csvPath) // #nosec G304 -- csvPath is the dataset CSV DiscoverTabular's symlink-rejecting walk found under the operator-chosen root; local read as the invoking user.
 	if err != nil {
 		return nil, err
 	}

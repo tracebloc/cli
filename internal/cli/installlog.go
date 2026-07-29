@@ -34,7 +34,7 @@ func newInstallLog() (*installLog, string) {
 		return nil, ""
 	}
 	path := filepath.Join(dir, "install-"+time.Now().UTC().Format("20060102-150405")+".log")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 -- creates (never reads) the install log at a timestamp-generated name under the CLI's own 0700 config dir, mode 0600.
 	if err != nil {
 		// No file was created — return an empty path so the caller never
 		// advertises a "Full log:" location that doesn't exist (Bugbot).

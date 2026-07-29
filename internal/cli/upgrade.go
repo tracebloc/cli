@@ -120,7 +120,7 @@ Safe to run anytime; safe to re-run.`,
 			// Stream the installer straight to the user's terminal, and keep
 			// stdin wired so its interactive prompts (sign-in, etc.) still work.
 			ctx := cmd.Context()
-			c := exec.CommandContext(ctx, plan.name, plan.args...)
+			c := exec.CommandContext(ctx, plan.name, plan.args...) // #nosec G204 -- upgradePlanFor(runtime.GOOS) yields compile-time constants: "bash" -c installerRunScript(""); only the GOOS branch varies, no user input.
 			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 			if err := c.Run(); err != nil {
 				// User aborted (Ctrl-C) or the parent context was cancelled: exit

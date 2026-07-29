@@ -110,7 +110,7 @@ func tbAliasAvailable() bool {
 // different tracebloc at another path (Bugbot). Case-insensitive: .cmd is a
 // Windows artifact and NTFS paths are case-insensitive.
 func tbCmdAliasOurs(dir, exe string) bool {
-	b, err := os.ReadFile(filepath.Join(dir, binTB+".cmd"))
+	b, err := os.ReadFile(filepath.Join(dir, binTB+".cmd")) // #nosec G304 -- fixed name next to os.Executable(): inspects the install dir's own tb.cmd shim; whoever controls that dir already controls the binary.
 	if err != nil {
 		return false
 	}

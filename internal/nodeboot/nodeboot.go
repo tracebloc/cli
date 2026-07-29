@@ -32,7 +32,7 @@ const imageReference = "ghcr.io/tracebloc/*"
 // Runner executes an external command and returns its combined output. A package
 // var so tests can substitute a fake without spawning real k3d/helm/docker.
 var Runner = func(ctx context.Context, name string, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput() // #nosec G204 -- test seam: callers pass literal tool names (k3d/helm/docker) with argv from package consts and the operator's own cluster/release names; no shell.
 	return string(out), err
 }
 

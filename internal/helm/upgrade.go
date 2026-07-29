@@ -53,7 +53,7 @@ const (
 // var so tests substitute a fake without spawning real helm. Mirrors
 // nodeboot.Runner exactly.
 var Runner = func(ctx context.Context, name string, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput() // #nosec G204 -- test seam: every caller passes the literal "helm"; args are the operator's own release/kubeconfig flags, exec'd as an argv array, no shell.
 	return string(out), err
 }
 
