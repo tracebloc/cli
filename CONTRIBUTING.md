@@ -105,3 +105,7 @@ Coverage says a line *ran*; mutation testing says a test would *fail* if the lin
 4. File one issue per real gap, titled `test(<pkg>): pin <behavior> (mutation survivor)`, quoting the gremlins line (mutant type + file:line) and what behavior the missing test must pin. That issue then flows through the kanban like any other test ticket — #262, #263, #264 are the pattern.
 
 Survivors are *findings to triage*, not build failures — the workflow stays green even when mutants live, on purpose.
+
+## Bugbot findings
+
+See `.cursor/BUGBOT.md` — every thread gets a reply (fixed / false-positive-with-evidence), then resolved.
