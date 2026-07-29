@@ -173,11 +173,12 @@ ensure_cosign() {
     csums="$TMP/cosign_checksums.txt"
 
     echo "  cosign not found — bootstrapping pinned ${COSIGN_VERSION} to verify the signature..."
-    # --tlsv1.2 floor for the cosign bootstrap fetch, matching the client
-    # installer's curls — never negotiate below TLS 1.2 to pull the verifier we
-    # then trust to authenticate the release.
-    if ! curl -fsSL --tlsv1.2 "$cbase/$casset" -o "$cbin" 2>/dev/null; then return 1; fi
-    if ! curl -fsSL --tlsv1.2 "$cbase/cosign_checksums.txt" -o "$csums" 2>/dev/null; then return 1; fi
+    # --tlsv1.2 floor + time bounds for the cosign bootstrap fetch, matching the
+    # client installer's identical curls (--connect-timeout 30 --max-time 300) —
+    # never negotiate below TLS 1.2 to pull the verifier we then trust to
+    # authenticate the release, and never let a hung endpoint wedge the install.
+    if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$cbase/$casset" -o "$cbin" 2>/dev/null; then return 1; fi
+    if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$cbase/cosign_checksums.txt" -o "$csums" 2>/dev/null; then return 1; fi
 
     cwant="$(grep " ${casset}\$" "$csums" | awk '{print $1}' | head -1)"
     [ -n "$cwant" ] || return 1
@@ -202,7 +203,7 @@ resolve_tag() {
     # Use the redirect-trail of /releases/latest to learn the tag —
     # avoids hitting the rate-limited /api/repos endpoint for the
     # zero-auth one-liner case.
-    redirect_url="$(curl -fsSI --tlsv1.2 \
+    redirect_url="$(curl -fsSI --tlsv1.2 --connect-timeout 30 --max-time 30 \
         "https://github.com/${GITHUB_REPO}/releases/latest" \
         | awk '/^[Ll]ocation:/ { print $2 }' \
         | tr -d '\r')"
@@ -265,13 +266,13 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 echo "Downloading binary..."
-if ! curl -fsSL --tlsv1.2 "$BASE_URL/$BINARY_FILE" -o "$TMP/$BINARY_FILE"; then
+if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$BASE_URL/$BINARY_FILE" -o "$TMP/$BINARY_FILE"; then
     echo "Error: failed to download $BASE_URL/$BINARY_FILE" >&2
     exit 1
 fi
 
 echo "Downloading SHA256SUMS..."
-if ! curl -fsSL --tlsv1.2 "$BASE_URL/SHA256SUMS" -o "$TMP/SHA256SUMS"; then
+if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$BASE_URL/SHA256SUMS" -o "$TMP/SHA256SUMS"; then
     echo "Error: failed to download SHA256SUMS — release may be malformed" >&2
     exit 1
 fi
@@ -345,8 +346,8 @@ verify_cosign_signature() {
     fi
 
     echo "Verifying cosign signature..."
-    if ! curl -fsSL --tlsv1.2 "$BASE_URL/$BINARY_FILE.sig" -o "$TMP/$BINARY_FILE.sig" 2>/dev/null \
-       || ! curl -fsSL --tlsv1.2 "$BASE_URL/$BINARY_FILE.cert" -o "$TMP/$BINARY_FILE.cert" 2>/dev/null; then
+    if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$BASE_URL/$BINARY_FILE.sig" -o "$TMP/$BINARY_FILE.sig" 2>/dev/null \
+       || ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$BASE_URL/$BINARY_FILE.cert" -o "$TMP/$BINARY_FILE.cert" 2>/dev/null; then
         if [ "$ALLOW_UNVERIFIED" = "1" ]; then
             echo "  WARNING: .sig/.cert not published for $TAG — signature NOT verified" >&2
             echo "  (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
