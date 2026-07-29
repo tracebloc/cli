@@ -212,7 +212,7 @@ undone — re-ingesting the data is the only way back.`)
 		p.Newline()
 		p.Successf("Dry-run — nothing was deleted.")
 		if a.OutputJSON {
-			writeDataDeleteJSON(a.JSONOut, "dry-run", resolved.Namespace, release.ReleaseName, plan, nil)
+			writeDataDeleteJSON(a.JSONOut, "dry-run", resolved.Namespace, release.ReleaseName, plan, nil, true)
 			jsonEmitted = true
 		}
 		return nil
@@ -234,7 +234,7 @@ undone — re-ingesting the data is the only way back.`)
 		// exit 0. One closure so the pair can't drift apart.
 		declined := func() error {
 			if a.OutputJSON {
-				writeDataDeleteJSON(a.JSONOut, "declined", resolved.Namespace, release.ReleaseName, plan, nil)
+				writeDataDeleteJSON(a.JSONOut, "declined", resolved.Namespace, release.ReleaseName, plan, nil, true)
 				jsonEmitted = true
 			}
 			return cleanCancel(p, "nothing was deleted.")
@@ -283,9 +283,15 @@ undone — re-ingesting the data is the only way back.`)
 
 	p.Newline()
 	p.Successf("Deleted %s.%s and %d PVC path(s).", plan.Database, plan.Table, len(res.RemovedPaths))
+	if !res.BookkeepingCleaned {
+		// Best-effort cleanup failed — say so, or a schema-drift regression
+		// (a renamed keying column) is indistinguishable from a legacy
+		// cluster without the bookkeeping tables (review, Saqlain).
+		p.Warnf("Bookkeeping cleanup incomplete — the table is gone, but its run-journal/salt rows may remain: %s", strings.Join(res.BookkeepingErrs, "; "))
+	}
 	p.Infof("The dataset's catalog metadata is kept as a record on tracebloc, marked unavailable — never removed.")
 	if a.OutputJSON {
-		writeDataDeleteJSON(a.JSONOut, "deleted", resolved.Namespace, release.ReleaseName, plan, res.RemovedPaths)
+		writeDataDeleteJSON(a.JSONOut, "deleted", resolved.Namespace, release.ReleaseName, plan, res.RemovedPaths, res.BookkeepingCleaned)
 		jsonEmitted = true
 	}
 	return nil
@@ -302,12 +308,16 @@ type dataDeleteJSON struct {
 	Table        string   `json:"table"` // the REAL (case-resolved) spelling, not the raw argument
 	PVCPaths     []string `json:"pvc_paths"`
 	RemovedPaths []string `json:"removed_paths"`
+	// BookkeepingCleaned mirrors push.TeardownResult: whether the
+	// run-journal/salt rows were removed with the table. Always true for
+	// dry-run/declined (nothing was attempted).
+	BookkeepingCleaned bool `json:"bookkeeping_cleaned"`
 }
 
 // writeDataDeleteJSON serializes the delete result to w (stdout in
 // --output-json mode). Marshal errors are dropped: marshaling our own
 // struct can't fail in practice, and the exit code remains the contract.
-func writeDataDeleteJSON(w io.Writer, status, namespace, release string, plan push.TeardownPlan, removed []string) {
+func writeDataDeleteJSON(w io.Writer, status, namespace, release string, plan push.TeardownPlan, removed []string, bookkeepingCleaned bool) {
 	pvcPaths := plan.PVCPaths
 	if pvcPaths == nil {
 		pvcPaths = []string{} // emit [] not null
@@ -316,13 +326,14 @@ func writeDataDeleteJSON(w io.Writer, status, namespace, release string, plan pu
 		removed = []string{} // emit [] not null
 	}
 	res := dataDeleteJSON{
-		Status:       status,
-		Namespace:    namespace,
-		Release:      release,
-		Database:     plan.Database,
-		Table:        plan.Table,
-		PVCPaths:     pvcPaths,
-		RemovedPaths: removed,
+		Status:             status,
+		Namespace:          namespace,
+		Release:            release,
+		Database:           plan.Database,
+		Table:              plan.Table,
+		PVCPaths:           pvcPaths,
+		RemovedPaths:       removed,
+		BookkeepingCleaned: bookkeepingCleaned,
 	}
 	b, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {

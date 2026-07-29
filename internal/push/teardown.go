@@ -71,6 +71,13 @@ type TeardownResult struct {
 	// alongside it. Best-effort: false on clusters whose ingestor never
 	// created those tables — the teardown itself still succeeds.
 	BookkeepingCleaned bool
+	// BookkeepingErrs carries the per-table failure detail (which
+	// bookkeeping table, mysql's stderr folded into the error) so callers
+	// can SURFACE it: a silent false is indistinguishable from the
+	// schema-drift regression this cleanup exists to prevent — e.g. a
+	// renamed keying column would otherwise no-op invisibly, reopening
+	// the husk-row leak (review, Saqlain).
+	BookkeepingErrs []string
 }
 
 // Teardown performs the in-cluster teardown described by plan:
@@ -123,20 +130,25 @@ func Teardown(ctx context.Context, cs kubernetes.Interface, exec Executor, names
 	//     best-effort: either bookkeeping table may be absent on clusters
 	//     that never ran a journal-aware ingestor, and these are metadata
 	//     rows, not data — never fail a teardown whose DROP succeeded.
-	// The SQL is fed on STDIN (the runMySQLQuery pattern), never through a
-	// shell -e argument: the string literal's single quotes would terminate
-	// a single-quoted shell string and mysql would see an unquoted
-	// identifier — the DELETEs would silently fail forever (Bugbot on the
-	// PR). Stdin sidesteps shell quoting entirely.
+	// The SQL rides runMySQLQuery — stdin, never a shell -e argument: the
+	// string literal's single quotes would terminate a single-quoted shell
+	// string and mysql would see an unquoted identifier, silently no-oping
+	// the DELETEs forever (Bugbot on the PR). Column contract, pinned
+	// against data-ingestors tracebloc_ingestor/database.py: BOTH
+	// bookkeeping tables key these rows by `table_name` —
+	//   RUNS_TABLE  tracebloc_ingest_runs  (ingestor_id PK, table_name
+	//               indexed via ix_tracebloc_ingest_runs_table)
+	//   SALT_TABLE  tracebloc_ingest_meta  (table_name PK, salt)
+	// Each DELETE stays a separate best-effort call: batched on one stdin,
+	// a missing first table would abort the second (mysql stops on error).
 	res.BookkeepingCleaned = true
 	for _, bookkeeping := range []string{ingestRunsTable, ingestMetaTable} {
 		cleanupSQL := fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE table_name='%s'",
 			plan.Database, bookkeeping, plan.Table)
-		var cleanupStderr bytes.Buffer
-		if err := exec.Exec(ctx, namespace, mysqlPod, mysqlContainer,
-			[]string{"sh", "-c", `mysql -uroot -p"$MYSQL_ROOT_PASSWORD"`},
-			strings.NewReader(cleanupSQL), nil, &cleanupStderr); err != nil {
+		if _, err := runMySQLQuery(ctx, exec, namespace, mysqlPod, mysqlContainer, cleanupSQL); err != nil {
 			res.BookkeepingCleaned = false
+			res.BookkeepingErrs = append(res.BookkeepingErrs,
+				fmt.Sprintf("%s: %v", bookkeeping, err))
 		}
 	}
 

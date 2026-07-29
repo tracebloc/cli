@@ -288,7 +288,7 @@ func runMySQLQuery(ctx context.Context, exec Executor, namespace, pod, container
 	script := `mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N`
 	if err := exec.Exec(ctx, namespace, pod, container,
 		[]string{"sh", "-c", script}, strings.NewReader(query), &stdout, &stderr); err != nil {
-		return "", fmt.Errorf("querying datasets: %w%s", err, stderrSuffix(&stderr))
+		return "", fmt.Errorf("running mysql query: %w%s", err, stderrSuffix(&stderr))
 	}
 	return stdout.String(), nil
 }
