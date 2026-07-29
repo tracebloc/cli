@@ -42,7 +42,7 @@ var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 // non-EOF Read error is only ever a genuine I/O failure, so callers can treat
 // it as fail-closed. The caller closes the returned Closer.
 func openCSVReader(path string) (*csv.Reader, io.Closer, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- opens the operator's own dataset CSV to mirror the ingestor's checks locally before upload; no privilege boundary crossed.
 	if err != nil {
 		return nil, nil, err
 	}
@@ -78,7 +78,7 @@ func matchColumnIndex(header []string, want string) int {
 
 // HasBOM reports whether the file starts with a UTF-8 BOM.
 func HasBOM(path string) (bool, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- 3-byte BOM sniff of the same operator-supplied dataset CSV openCSVReader reads; local preflight as the invoking user.
 	if err != nil {
 		return false, err
 	}
@@ -802,7 +802,7 @@ func hasKnownExtension(name string) bool {
 // the FIRST gate validate_data runs in-cluster: the CSV must be valid UTF-8
 // and free of NUL bytes, or the whole run aborts (after the upload).
 func CheckCSVEncoding(path string) error {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- encoding-check of the operator's own dataset CSV, size-capped by LimitReader; same local-preflight threat model as openCSVReader.
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", filepath.Base(path), err)
 	}
