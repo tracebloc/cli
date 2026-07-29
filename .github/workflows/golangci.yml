@@ -10,7 +10,7 @@ name: golangci-lint
 # Why the action is safe now: the golangci-lint-action timeout story
 # (#6) was the SSA linters (staticcheck, unused) choking on the
 # k8s.io/* dep tree. The current .golangci.yml enables no SSA linters;
-# a full run measures ~11s wall locally, well inside the runner budget.
+# a full run measures ~11s wall locally / ~62s on the runner (#423).
 #
 # Part of backend#1305 (epic #930, Layer 1).
 
@@ -33,19 +33,26 @@ jobs:
     name: golangci-lint (advisory)
     runs-on: ubuntu-latest
     # ============================ ADVISORY ============================
-    # DELIBERATELY not a required check, and continue-on-error keeps the
-    # PR checkmark green while the pre-existing gosec backlog (8 findings
-    # at introduction: 4x G204, 3x G304, 1x G115 — sized on the PR that
-    # added this job) is worked off. golangci-lint exits non-zero on any
-    # finding, so without this the job would red-X every PR for issues it
-    # didn't introduce. Read the job log / annotations for the findings.
+    # DELIBERATELY not a required check, and `--issues-exit-code=0` on
+    # the run step keeps findings from red-Xing the job: golangci-lint
+    # exits non-zero on any finding by default, and the pre-existing
+    # gosec backlog (8 findings at introduction: 4x G204, 3x G304,
+    # 1x G115 — sized on #423, the PR that added this job) would
+    # otherwise fail every PR for issues it didn't introduce. Findings
+    # still surface as inline annotations and in the job log.
+    # Infrastructure breakage (bad config, typecheck failure) is a
+    # different exit code and still fails the job — deliberately: an
+    # advisory job that can't even flag its own rot is dead weight.
     #
-    # REMOVE `continue-on-error` when the backlog hits zero and this
-    # check flips to required (the advisory -> required pattern from
-    # backend#1303; tracked under backend#1305 / epic #930). A required
-    # check that can't fail is worse than no check.
+    # (Job-level `continue-on-error: true` is NOT the tool for this —
+    # it greens the workflow run but still shows the job itself as
+    # failed in the PR checks list.)
+    #
+    # REMOVE the `--issues-exit-code=0` arg when the backlog hits zero
+    # and this check flips to required (the advisory -> required
+    # pattern from backend#1303; tracked under backend#1305 / epic
+    # #930). A required check that can't fail is worse than no check.
     # ==================================================================
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
@@ -65,3 +72,6 @@ jobs:
         uses: golangci/golangci-lint-action@v9.3.0
         with:
           version: v2.12.2
+          # ADVISORY MODE — see the block comment above. Remove at the
+          # required-flip.
+          args: --issues-exit-code=0
