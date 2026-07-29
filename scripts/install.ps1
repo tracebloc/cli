@@ -163,7 +163,7 @@ try {
             # exception. & invokes cosign as an external process,
             # which doesn't interact with $ErrorActionPreference.
             & cosign verify-blob `
-                --certificate-identity-regexp "https://github.com/$GitHubRepo/.github/workflows/release.yml@.*" `
+                --certificate-identity-regexp "https://github.com/$GitHubRepo/.github/workflows/release.yml@refs/tags/v.*" `
                 --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
                 --certificate (Join-Path $tmpDir "$binaryFile.cert") `
                 --signature   (Join-Path $tmpDir "$binaryFile.sig") `
