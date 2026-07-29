@@ -122,7 +122,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- the CLI's own config: Dir()/config.json under ~/.tracebloc or the operator's explicit $TRACEBLOC_CONFIG_DIR override, read as the invoking user.
 	if errors.Is(err, fs.ErrNotExist) {
 		return &Config{Version: schemaVersion, Profiles: map[string]*Profile{}}, nil
 	}

@@ -112,8 +112,9 @@ sync_one() {
   # whole body — so a failed curl (e.g. a 404) would otherwise fall through and
   # be misdiagnosed as "not valid JSON" on the empty temp file. Check curl's
   # exit explicitly and report the real fetch failure. --tlsv1.2 matches every
-  # other curl in the repo (scripts/install.sh).
-  curl -fsSL --tlsv1.2 "$url" -o "$tmp"
+  # other curl in the repo (scripts/install.sh); the time bounds keep a hung
+  # endpoint from wedging CI.
+  curl -fsSL --tlsv1.2 --connect-timeout 10 --max-time 60 "$url" -o "$tmp"
   local curl_rc=$?
   if [[ $curl_rc -ne 0 ]]; then
     echo "error: failed to fetch $url (curl exited $curl_rc)" >&2

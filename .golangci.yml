@@ -4,9 +4,24 @@
 # bugs without flooding PRs with style noise. Tune up over time
 # rather than turning everything on day one and quarantining half of
 # them.
+#
+# Format: golangci-lint v2 (`version: "2"`). The v1-format file died
+# with golangci-lint v1: v1 binaries are EOL and predate Go 1.26, so
+# they can't typecheck this module at all, and v2 binaries (what
+# `brew install golangci-lint` ships) refuse v1 configs. Migrated via
+# `golangci-lint migrate` (backend#1305, epic #930 Layer 1); needs
+# golangci-lint >= v2.
+#
+# CI: run by the advisory `golangci-lint` job in
+# .github/workflows/golangci.yml (pinned version there; keep it in
+# lockstep when the format needs a newer binary). The old
+# action-times-out story (#6) was about the SSA linters (staticcheck,
+# unused) on the k8s.io dep tree — this set has none, so the action
+# is safe with it.
+
+version: "2"
 
 run:
-  timeout: 5m
   # Track go.mod's `go` directive. Go's release cadence + `go mod
   # tidy`'s aggressive bumping (especially when k8s.io/* deps want
   # newer Go) keep dragging go.mod's minimum up; pinning a stale
@@ -17,42 +32,73 @@ run:
   go: "1.26"
 
 linters:
-  disable-all: true
+  default: none
   enable:
     # The set is trimmed to the linters that DON'T do full whole-program
     # SSA analysis. `staticcheck` and `unused` were in the original set
     # and reproducibly caused the GitHub-hosted runner to time-budget
     # the job (~2 min then shutdown signal) on this module — k8s.io/*
     # transitive deps inflate the analysis graph enough to OOM-or-stall
-    # the standard 4-CPU/16GB runner. Re-enabling them is a v0.2
-    # follow-up that needs either a larger runner, a much narrower
-    # scope (e.g. only `./internal/...`), or a faster successor like
-    # govulncheck for the security-only subset.
+    # the standard 4-CPU/16GB runner (#6). staticcheck now runs
+    # standalone in build.yml's Lint job instead.
 
     # Cheap, per-file checks — catch real bugs without SSA.
     - errcheck       # unchecked error returns
     - govet          # `go vet`
     - ineffassign    # assignments that go nowhere
 
+    # Security: insecure code patterns (G1xx-G6xx) — command injection,
+    # path traversal, weak crypto, world-writable files. Complements
+    # govulncheck (known CVEs in deps) with our-own-code checks; this is
+    # a customer-installed binary that shells out and writes to disk, so
+    # both halves matter (backend#1305, epic #930 Layer 1).
+    - gosec
+
     # Style / hygiene that pays for itself in code review time.
-    - gofmt
-    - goimports
     - misspell
     - unconvert      # unnecessary type conversions
 
-linters-settings:
-  goimports:
-    # Group imports: stdlib, third-party, our own. Keeps diffs
-    # readable when adding new imports.
-    local-prefixes: github.com/tracebloc/cli
+  exclusions:
+    # v1 had `exclude-use-default: false` — the default exclusions hide
+    # a lot of real findings, so keep opting back in (no presets).
+    generated: lax
+    rules:
+      # Test files often deliberately ignore err returns from
+      # bytes.Buffer / strings.Builder / fmt.Fprintf, which never fail.
+      # gosec is likewise test-exempt per convention: tests use fixed
+      # temp paths, os.Setenv, and relaxed perms that G-rules flag but
+      # that never ship in the binary.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+# v2 moved the formatters out of `linters`. Same tools as before —
+# build.yml's Lint job runs the standalone equivalents (`gofmt -s`,
+# `goimports -local`).
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      # Group imports: stdlib, third-party, our own. Keeps diffs
+      # readable when adding new imports.
+      local-prefixes:
+        - github.com/tracebloc/cli
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 
 issues:
-  # Default exclusions hide a lot of real findings — opt back in.
-  exclude-use-default: false
-
-  exclude-rules:
-    # Test files often deliberately ignore err returns from
-    # bytes.Buffer / strings.Builder / fmt.Fprintf, which never fail.
-    - path: _test\.go
-      linters:
-        - errcheck
+  # Never cap repeated findings: the default (3) hid 10 of the 13 G304s
+  # behind a cache-flappy sample — "8 findings" were really 18 (#427).
+  # A gate must see the whole backlog, every run.
+  max-same-issues: 0

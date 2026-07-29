@@ -469,7 +469,7 @@ func writeTarFile(tw *tar.Writer, src, dst string) (int64, error) {
 	if err := tw.WriteHeader(hdr); err != nil {
 		return 0, err
 	}
-	f, err := os.Open(src)
+	f, err := os.Open(src) // #nosec G304 -- src came from the symlink-rejecting walk and the Lstat guard above re-rejects symlinks at stream time; reads the operator's own dataset file.
 	if err != nil {
 		return 0, err
 	}

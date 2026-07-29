@@ -27,7 +27,7 @@ import (
 // default, advising --target-size. (Since Discover only yields the
 // ingestor's accept-set — .jpg/.jpeg/.png — that path is defensive.)
 func DetectImageSize(path string) (width, height int, err error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- decodes the header of an image the symlink-rejecting dataset walk found under the operator-chosen root; operator's own file.
 	if err != nil {
 		return 0, 0, err
 	}

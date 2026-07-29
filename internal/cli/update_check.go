@@ -164,7 +164,7 @@ func readUpdateCache(path string) (updateCache, bool) {
 	if path == "" {
 		return updateCache{}, false
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- the CLI's own throttle cache: config.Dir() + the constant updateCacheFile name; contents JSON-validated before use.
 	if err != nil {
 		return updateCache{}, false
 	}
