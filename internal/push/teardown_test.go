@@ -217,30 +217,34 @@ func TestTeardown_CleansBookkeepingRows(t *testing.T) {
 		if !res.BookkeepingCleaned {
 			t.Error("BookkeepingCleaned = false, want true")
 		}
+		// The SQL must arrive on STDIN with its quoted literal intact —
+		// never through a shell -e argument, where the literal's single
+		// quotes would be eaten by the shell (Bugbot: the DELETEs would
+		// silently no-op forever).
 		var journal, salt bool
 		for _, call := range rec.calls {
-			joined := strings.Join(call.cmd, " ")
-			if strings.Contains(joined, "DELETE FROM") &&
-				strings.Contains(joined, ingestRunsTable) &&
-				strings.Contains(joined, plan.Table) {
+			if strings.Contains(strings.Join(call.cmd, " "), "DELETE FROM") {
+				t.Errorf("DELETE passed as a shell argument (%q) — must be fed on stdin", call.cmd)
+			}
+			stdin := string(call.stdin)
+			want := "WHERE table_name='" + plan.Table + "'"
+			if strings.Contains(stdin, "DELETE FROM") && strings.Contains(stdin, ingestRunsTable) && strings.Contains(stdin, want) {
 				journal = true
 			}
-			if strings.Contains(joined, "DELETE FROM") &&
-				strings.Contains(joined, ingestMetaTable) &&
-				strings.Contains(joined, plan.Table) {
+			if strings.Contains(stdin, "DELETE FROM") && strings.Contains(stdin, ingestMetaTable) && strings.Contains(stdin, want) {
 				salt = true
 			}
 		}
 		if !journal {
-			t.Errorf("no DELETE against %s for %s observed", ingestRunsTable, plan.Table)
+			t.Errorf("no stdin DELETE against %s with a quoted literal for %s observed", ingestRunsTable, plan.Table)
 		}
 		if !salt {
-			t.Errorf("no DELETE against %s for %s observed", ingestMetaTable, plan.Table)
+			t.Errorf("no stdin DELETE against %s with a quoted literal for %s observed", ingestMetaTable, plan.Table)
 		}
 	})
 
 	t.Run("bookkeeping failure never fails the teardown", func(t *testing.T) {
-		rec := &recordingExecutor{failWhenCmdContains: "DELETE FROM"}
+		rec := &recordingExecutor{failWhenStdinContains: "DELETE FROM"}
 		res, err := Teardown(context.Background(), newCS(), rec, "tracebloc", plan, opts)
 		if err != nil {
 			t.Fatalf("Teardown should tolerate bookkeeping failures, got: %v", err)
@@ -257,20 +261,26 @@ func TestTeardown_CleansBookkeepingRows(t *testing.T) {
 	})
 }
 
-// recordingExecutor records every Exec call and can fail selected ones.
+// recordingExecutor records every Exec call (command AND stdin) and can
+// fail calls whose stdin matches a marker.
 type recordingExecutor struct {
-	calls               []execCall
-	failWhenCmdContains string
+	calls                 []execCall
+	failWhenStdinContains string
 }
 
 type execCall struct {
 	pod, container string
 	cmd            []string
+	stdin          []byte
 }
 
 func (r *recordingExecutor) Exec(ctx context.Context, namespace, pod, container string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	r.calls = append(r.calls, execCall{pod: pod, container: container, cmd: cmd})
-	if r.failWhenCmdContains != "" && strings.Contains(strings.Join(cmd, " "), r.failWhenCmdContains) {
+	var in []byte
+	if stdin != nil {
+		in, _ = io.ReadAll(stdin)
+	}
+	r.calls = append(r.calls, execCall{pod: pod, container: container, cmd: cmd, stdin: in})
+	if r.failWhenStdinContains != "" && strings.Contains(string(in), r.failWhenStdinContains) {
 		return fmt.Errorf("simulated bookkeeping failure")
 	}
 	return nil

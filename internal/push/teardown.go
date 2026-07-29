@@ -123,14 +123,19 @@ func Teardown(ctx context.Context, cs kubernetes.Interface, exec Executor, names
 	//     best-effort: either bookkeeping table may be absent on clusters
 	//     that never ran a journal-aware ingestor, and these are metadata
 	//     rows, not data — never fail a teardown whose DROP succeeded.
+	// The SQL is fed on STDIN (the runMySQLQuery pattern), never through a
+	// shell -e argument: the string literal's single quotes would terminate
+	// a single-quoted shell string and mysql would see an unquoted
+	// identifier — the DELETEs would silently fail forever (Bugbot on the
+	// PR). Stdin sidesteps shell quoting entirely.
 	res.BookkeepingCleaned = true
 	for _, bookkeeping := range []string{ingestRunsTable, ingestMetaTable} {
 		cleanupSQL := fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE table_name='%s'",
 			plan.Database, bookkeeping, plan.Table)
-		cleanupScript := fmt.Sprintf(`mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e '%s'`, cleanupSQL)
 		var cleanupStderr bytes.Buffer
 		if err := exec.Exec(ctx, namespace, mysqlPod, mysqlContainer,
-			[]string{"sh", "-c", cleanupScript}, nil, nil, &cleanupStderr); err != nil {
+			[]string{"sh", "-c", `mysql -uroot -p"$MYSQL_ROOT_PASSWORD"`},
+			strings.NewReader(cleanupSQL), nil, &cleanupStderr); err != nil {
 			res.BookkeepingCleaned = false
 		}
 	}
