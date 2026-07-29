@@ -216,9 +216,11 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 	//     failures pass through unchanged.
 	desired, err := decideDesired(p, pr, req, node, current, machineGPUName, machineGPUCount, machineHasGPU)
 	if err != nil {
+		// Not mapPromptErr: a validation error from the wizard carries its own
+		// code (exit 2) and must pass through unchanged, so only the cancel is
+		// funnelled through the shared note.
 		if errors.Is(err, errInteractiveCancelled) {
-			p.Infof("Cancelled — nothing was changed.")
-			return nil
+			return cleanCancel(p, "nothing was changed.")
 		}
 		return err
 	}
@@ -273,18 +275,13 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 		p.PromptHint("tracebloc keeps about 1 core and 3 GiB for itself on top of this — it fits on this machine.")
 		proceed, cerr := pr.Confirm(fmt.Sprintf("Let each training run use up to %s?", perRunSize(desired)), true)
 		if cerr != nil {
-			// Ctrl-C here is the same user choice as answering "No": print the
-			// same note the decline below (and a wizard interrupt above) prints,
-			// and exit 0 — never a silent success that hides the abort.
-			if errors.Is(cerr, errInteractiveCancelled) {
-				p.Infof("Cancelled — nothing was changed.")
-				return nil
-			}
-			return mapClientErr(cerr)
+			// Ctrl-C here is the same user choice as answering "No": the same
+			// note the decline below (and a wizard interrupt above) prints, and
+			// exit 0 — never a silent success that hides the abort.
+			return mapPromptErr(p, cerr, "nothing was changed.")
 		}
 		if !proceed {
-			p.Infof("Cancelled — nothing was changed.")
-			return nil
+			return cleanCancel(p, "nothing was changed.")
 		}
 	}
 

@@ -538,6 +538,14 @@ func (c *catalogPrompter) Confirm(label string, def bool) (bool, error) {
 // Both "…" and `…` raw strings; deduped + sorted.
 func harvestMessages(t *testing.T) []string {
 	t.Helper()
+	// Package-local helpers that print through the Printer on the caller's
+	// behalf. Their note argument is user-facing copy no Printer-argument scan
+	// would see, and the helper supplies the sentence's opening — so harvest the
+	// ASSEMBLED line the user reads, not the bare clause (backend#1253).
+	copyHelperPrefix := map[string]string{
+		"cleanCancel":  "Cancelled — ",
+		"mapPromptErr": "Cancelled — ",
+	}
 	methods := map[string]bool{
 		"Successf": true, "Warnf": true, "Errorf": true, "Infof": true, "Hintf": true,
 		"Detailf": true, "Para": true, "Section": true, "PromptHint": true, "PromptHeader": true,
@@ -580,7 +588,7 @@ func harvestMessages(t *testing.T) []string {
 	}
 
 	seen := map[string]struct{}{}
-	collect := func(exprs []ast.Expr) {
+	collect := func(prefix string, exprs []ast.Expr) {
 		for _, arg := range exprs {
 			lit, ok := arg.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
@@ -595,7 +603,7 @@ func harvestMessages(t *testing.T) []string {
 			if len([]rune(s)) < 4 || !strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyz") {
 				continue
 			}
-			seen[s] = struct{}{}
+			seen[prefix+s] = struct{}{}
 		}
 	}
 	fset := token.NewFileSet()
@@ -611,16 +619,21 @@ func harvestMessages(t *testing.T) []string {
 			ast.Inspect(f, func(n ast.Node) bool {
 				switch node := n.(type) {
 				case *ast.CallExpr:
+					if id, ok := node.Fun.(*ast.Ident); ok {
+						if prefix, isHelper := copyHelperPrefix[id.Name]; isHelper {
+							collect(prefix, node.Args)
+						}
+					}
 					if isCopyCall(node) {
-						collect(node.Args)
+						collect("", node.Args)
 					}
 				case *ast.CompositeLit:
 					if isCopyStruct(node.Type) {
 						for _, el := range node.Elts {
 							if kv, ok := el.(*ast.KeyValueExpr); ok {
-								collect([]ast.Expr{kv.Value})
+								collect("", []ast.Expr{kv.Value})
 							} else {
-								collect([]ast.Expr{el})
+								collect("", []ast.Expr{el})
 							}
 						}
 					}
