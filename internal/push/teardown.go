@@ -66,6 +66,18 @@ func PlanTeardown(table string) TeardownPlan {
 type TeardownResult struct {
 	DroppedTable bool
 	RemovedPaths []string
+	// BookkeepingCleaned reports whether the ingestor's bookkeeping rows
+	// for the table (run-journal + pseudonymization salt) were deleted
+	// alongside it. Best-effort: false on clusters whose ingestor never
+	// created those tables — the teardown itself still succeeds.
+	BookkeepingCleaned bool
+	// BookkeepingErrs carries the per-table failure detail (which
+	// bookkeeping table, mysql's stderr folded into the error) so callers
+	// can SURFACE it: a silent false is indistinguishable from the
+	// schema-drift regression this cleanup exists to prevent — e.g. a
+	// renamed keying column would otherwise no-op invisibly, reopening
+	// the husk-row leak (review, Saqlain).
+	BookkeepingErrs []string
 }
 
 // Teardown performs the in-cluster teardown described by plan:
@@ -106,6 +118,39 @@ func Teardown(ctx context.Context, cs kubernetes.Interface, exec Executor, names
 		return res, fmt.Errorf("dropping %s.%s: %w%s", plan.Database, plan.Table, err, stderrSuffix(&stderr))
 	}
 	res.DroppedTable = true
+
+	// 1b. Best-effort bookkeeping cleanup (RFC-0003 I6 — tracebloc/backend#1209):
+	//     the ingestor keeps one run-journal row per ingest and one
+	//     pseudonymization-salt row per table; dropping the table alone
+	//     strands them. Under per-ingestion tables (data-ingestors#408)
+	//     every dataset is its own table, so every delete would leave one
+	//     husk row of each kind — an unbounded slow leak. plan.Table passed
+	//     ValidateTableName ([A-Za-z_][A-Za-z0-9_]*), so it cannot escape
+	//     the single-quoted literal. Each DELETE runs separately and
+	//     best-effort: either bookkeeping table may be absent on clusters
+	//     that never ran a journal-aware ingestor, and these are metadata
+	//     rows, not data — never fail a teardown whose DROP succeeded.
+	// The SQL rides runMySQLQuery — stdin, never a shell -e argument: the
+	// string literal's single quotes would terminate a single-quoted shell
+	// string and mysql would see an unquoted identifier, silently no-oping
+	// the DELETEs forever (Bugbot on the PR). Column contract, pinned
+	// against data-ingestors tracebloc_ingestor/database.py: BOTH
+	// bookkeeping tables key these rows by `table_name` —
+	//   RUNS_TABLE  tracebloc_ingest_runs  (ingestor_id PK, table_name
+	//               indexed via ix_tracebloc_ingest_runs_table)
+	//   SALT_TABLE  tracebloc_ingest_meta  (table_name PK, salt)
+	// Each DELETE stays a separate best-effort call: batched on one stdin,
+	// a missing first table would abort the second (mysql stops on error).
+	res.BookkeepingCleaned = true
+	for _, bookkeeping := range []string{ingestRunsTable, ingestMetaTable} {
+		cleanupSQL := fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE table_name='%s'",
+			plan.Database, bookkeeping, plan.Table)
+		if _, err := runMySQLQuery(ctx, exec, namespace, mysqlPod, mysqlContainer, cleanupSQL); err != nil {
+			res.BookkeepingCleaned = false
+			res.BookkeepingErrs = append(res.BookkeepingErrs,
+				fmt.Sprintf("%s: %v", bookkeeping, err))
+		}
+	}
 
 	// 2. rm the PVC dirs from an ephemeral stage-identity pod (see the
 	//    doc note above + #259). The pod owns the staging files it
