@@ -140,6 +140,7 @@ screen. %s/%d are runtime placeholders.
 "Ctrl-C to cancel"
 "Ctrl-C to stop watching — the run keeps going on the cluster"
 "DB failures"
+"DELETE FROM `%s`.`%s` WHERE table_name='%s'"
 "DROP TABLE IF EXISTS `%s`.`%s`"
 "Datasets in %s (0)"
 "Datasets in %s — %d"

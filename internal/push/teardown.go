@@ -66,6 +66,11 @@ func PlanTeardown(table string) TeardownPlan {
 type TeardownResult struct {
 	DroppedTable bool
 	RemovedPaths []string
+	// BookkeepingCleaned reports whether the ingestor's bookkeeping rows
+	// for the table (run-journal + pseudonymization salt) were deleted
+	// alongside it. Best-effort: false on clusters whose ingestor never
+	// created those tables — the teardown itself still succeeds.
+	BookkeepingCleaned bool
 }
 
 // Teardown performs the in-cluster teardown described by plan:
@@ -106,6 +111,29 @@ func Teardown(ctx context.Context, cs kubernetes.Interface, exec Executor, names
 		return res, fmt.Errorf("dropping %s.%s: %w%s", plan.Database, plan.Table, err, stderrSuffix(&stderr))
 	}
 	res.DroppedTable = true
+
+	// 1b. Best-effort bookkeeping cleanup (RFC-0003 I6 — tracebloc/backend#1209):
+	//     the ingestor keeps one run-journal row per ingest and one
+	//     pseudonymization-salt row per table; dropping the table alone
+	//     strands them. Under per-ingestion tables (data-ingestors#408)
+	//     every dataset is its own table, so every delete would leave one
+	//     husk row of each kind — an unbounded slow leak. plan.Table passed
+	//     ValidateTableName ([A-Za-z_][A-Za-z0-9_]*), so it cannot escape
+	//     the single-quoted literal. Each DELETE runs separately and
+	//     best-effort: either bookkeeping table may be absent on clusters
+	//     that never ran a journal-aware ingestor, and these are metadata
+	//     rows, not data — never fail a teardown whose DROP succeeded.
+	res.BookkeepingCleaned = true
+	for _, bookkeeping := range []string{ingestRunsTable, ingestMetaTable} {
+		cleanupSQL := fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE table_name='%s'",
+			plan.Database, bookkeeping, plan.Table)
+		cleanupScript := fmt.Sprintf(`mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e '%s'`, cleanupSQL)
+		var cleanupStderr bytes.Buffer
+		if err := exec.Exec(ctx, namespace, mysqlPod, mysqlContainer,
+			[]string{"sh", "-c", cleanupScript}, nil, nil, &cleanupStderr); err != nil {
+			res.BookkeepingCleaned = false
+		}
+	}
 
 	// 2. rm the PVC dirs from an ephemeral stage-identity pod (see the
 	//    doc note above + #259). The pod owns the staging files it
