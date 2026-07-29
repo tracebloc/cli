@@ -40,13 +40,19 @@ jobs:
     # 1x G115 — sized on #423, the PR that added this job) would
     # otherwise fail every PR for issues it didn't introduce. Findings
     # still surface as inline annotations and in the job log.
-    # Infrastructure breakage (bad config, typecheck failure) is a
-    # different exit code and still fails the job — deliberately: an
-    # advisory job that can't even flag its own rot is dead weight.
+    #
+    # Known blind spot while advisory: typecheck (compile) errors ride
+    # the same issues exit path as lint findings, so under this flag
+    # they exit 0 too (verified empirically on #423 — this is NOT a
+    # separate exit code). No real signal is lost: a non-compiling PR
+    # reds the required Test / Lint / Build jobs anyway, and a broken
+    # .golangci.yml still fails THIS job via the action's
+    # `golangci-lint config verify` pre-step, which --issues-exit-code
+    # does not touch.
     #
     # (Job-level `continue-on-error: true` is NOT the tool for this —
     # it greens the workflow run but still shows the job itself as
-    # failed in the PR checks list.)
+    # failed in the PR checks list; see the first run on #423.)
     #
     # REMOVE the `--issues-exit-code=0` arg when the backlog hits zero
     # and this check flips to required (the advisory -> required
@@ -72,6 +78,6 @@ jobs:
         uses: golangci/golangci-lint-action@v9.3.0
         with:
           version: v2.12.2
-          # ADVISORY MODE — see the block comment above. Remove at the
-          # required-flip.
+          # ADVISORY MODE — see the block comment above (incl. the
+          # typecheck caveat). Remove at the required-flip.
           args: --issues-exit-code=0
