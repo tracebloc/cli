@@ -96,3 +96,9 @@ formatters:
       - third_party$
       - builtin$
       - examples$
+
+issues:
+  # Never cap repeated findings: the default (3) hid 10 of the 13 G304s
+  # behind a cache-flappy sample — "8 findings" were really 18 (#427).
+  # A gate must see the whole backlog, every run.
+  max-same-issues: 0
