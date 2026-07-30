@@ -237,8 +237,15 @@ jobs:
 
       - name: Determine release tag
         id: tag
+        env:
+          # Pass the ref through the environment, never interpolate it into the
+          # script. A tag name is attacker-controllable, so a crafted v* tag
+          # carrying backticks or $() would otherwise execute on the publish
+          # runner before the release is even created (R8). Same treatment the
+          # guard and version steps above already got.
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          REF="${{ github.ref_name }}"
+          REF="$REF_NAME"
           # STRICT stability rule: only a plain vX.Y.Z tag is a stable release.
           # Anything else (v1.2.3-rc.1, and typos like v1.2.3rc1) is marked
           # prerelease, so it can never become 'latest' -- which is what the
