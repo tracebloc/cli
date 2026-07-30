@@ -32,8 +32,13 @@ _sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{pr
 # Build a sandbox release + mock bin. Args: COSIGN_PRESENT(yes/no)
 make_sandbox() {
   SBX="$(mktemp -d)"
-  BIN="$SBX/bin"; REL="$SBX/release"; DEST="$SBX/dest"
-  mkdir -p "$BIN" "$REL" "$DEST"
+  BIN="$SBX/bin"; REL="$SBX/release"; DEST="$SBX/dest"; HOMEDIR="$SBX/home"
+  # Every run gets its OWN $HOME. The installer persists a PATH line to the
+  # shell rc, so without this the harness appends to the *developer's* real
+  # ~/.bash_profile — once per successful case, with a fresh mktemp --prefix
+  # each time. That is how the v0.10.1 validation box ended up with ten
+  # tracebloc PATH blocks, all naming temp dirs that no longer existed (#433).
+  mkdir -p "$BIN" "$REL" "$DEST" "$HOMEDIR"
 
   # The "binary" and its SHA256SUMS, named exactly as resolve_tag/detect_* expect.
   os="$(uname -s | tr '[:upper:]' '[:lower:]')"; [ "$os" = darwin ] || os=linux
@@ -77,8 +82,29 @@ EOF
 
 drop_sandbox() { rm -rf "$SBX"; }
 
-# Run installer with PATH=$BIN only (host cosign can't shadow), into $DEST.
-run_installer() { PATH="$BIN" "$BIN/bash" "$INSTALLER" --prefix "$DEST" "$@" >"$SBX/out" 2>&1; echo $?; }
+# Run installer with PATH=$BIN only (host cosign can't shadow), into $DEST, with
+# $HOME pointed at the sandbox so the rc write can never touch real dotfiles.
+# FAKE_SHELL selects which rc the installer targets; /bin/sh → $HOME/.profile,
+# which is the same answer on Linux and macOS (bash differs between them), so the
+# assertions below don't have to branch per platform.
+run_installer() {
+  PATH="$BIN" HOME="$HOMEDIR" SHELL="${FAKE_SHELL:-/bin/sh}" \
+    "$BIN/bash" "$INSTALLER" --prefix "$DEST" "$@" >"$SBX/out" 2>&1
+  echo $?
+}
+
+# Same, but installs into an explicit prefix (and optionally with that prefix
+# pre-seeded onto PATH) so the profile-write behaviour can be exercised across
+# several installs that share one $HOME.
+run_installer_at() {
+  local prefix="$1" extra_path="${2:-}"
+  PATH="$BIN${extra_path:+:$extra_path}" HOME="$HOMEDIR" SHELL="${FAKE_SHELL:-/bin/sh}" \
+    "$BIN/bash" "$INSTALLER" --prefix "$prefix" >"$SBX/out" 2>&1
+  echo $?
+}
+
+# How many PATH blocks the installer owns in the sandbox rc.
+tb_blocks() { grep -c '^# Added by the tracebloc CLI installer$' "$1" 2>/dev/null || true; }
 
 # ── 1. cosign present + valid signature → installs ──────────────────────────
 make_sandbox yes
@@ -208,6 +234,100 @@ else
   bad "malformed COSIGN_VERSION rejected (rc=$rc)"; sed 's/^/      /' "$SBX/out"
 fi
 drop_sandbox
+
+# ── 11. the rc PATH block is idempotent and never accumulates (#433) ─────────
+# Pre-#433 the append was guarded only by "does the rc mention $PREFIX", so an
+# install with a DIFFERENT prefix appended another block every time and the
+# profile grew without bound. Assert exactly ONE block whatever the history:
+# same prefix repeated, then a run of distinct prefixes.
+make_sandbox yes
+RC="$HOMEDIR/.profile"
+COSIGN_RESULT=0 run_installer >/dev/null
+COSIGN_RESULT=0 run_installer >/dev/null
+COSIGN_RESULT=0 run_installer >/dev/null
+if [ "$(tb_blocks "$RC")" = 1 ]; then
+  ok "same prefix installed 3x leaves one PATH block"
+else
+  bad "same prefix installed 3x leaves one PATH block (got $(tb_blocks "$RC"))"; sed 's/^/      /' "$RC"
+fi
+
+# Distinct prefixes — the exact shape that produced ten blocks on the v0.10.1 box.
+p1="$SBX/p1"; p2="$SBX/p2"; p3="$SBX/p3"
+for p in "$p1" "$p2" "$p3"; do COSIGN_RESULT=0 run_installer_at "$p" >/dev/null; done
+if [ "$(tb_blocks "$RC")" = 1 ] && grep -qF "$p3" "$RC" && ! grep -qF "$p1" "$RC"; then
+  ok "three different prefixes leave one block, naming the newest"
+else
+  bad "three different prefixes leave one block, naming the newest (got $(tb_blocks "$RC"))"; sed 's/^/      /' "$RC"
+fi
+drop_sandbox
+
+# ── 12. a prefix already on PATH is not persisted at all ────────────────────
+# Nothing to fix, so the rc must not be created or touched — the common
+# /usr/local/bin case used to get a line that changed nothing (#433).
+make_sandbox yes
+COSIGN_RESULT=0 run_installer_at "$DEST" "$DEST" >/dev/null
+if [ ! -e "$HOMEDIR/.profile" ]; then
+  ok "prefix already on PATH writes no rc at all"
+else
+  bad "prefix already on PATH writes no rc at all"; sed 's/^/      /' "$HOMEDIR/.profile"
+fi
+drop_sandbox
+
+# ── 13. the user's own rc content survives byte-for-byte ────────────────────
+# We are editing a file we don't own: replacing our block must not reorder,
+# rewrite or drop a single unrelated line.
+make_sandbox yes
+RC="$HOMEDIR/.profile"
+cat > "$RC" <<'PROF'
+# my profile
+export EDITOR=vim
+export PATH="$HOME/mytools:$PATH"
+
+alias ll='ls -la'
+PROF
+cp "$RC" "$SBX/rc.orig"
+COSIGN_RESULT=0 run_installer_at "$SBX/q1" >/dev/null
+COSIGN_RESULT=0 run_installer_at "$SBX/q2" >/dev/null
+# Strip our block back out; what remains must equal the original exactly.
+grep -vF '# Added by the tracebloc CLI installer' "$RC" | grep -vF "$SBX/q2" | sed '${/^$/d;}' > "$SBX/rc.stripped"
+if [ "$(tb_blocks "$RC")" = 1 ] && diff -q "$SBX/rc.stripped" "$SBX/rc.orig" >/dev/null; then
+  ok "unrelated rc lines preserved across a block replacement"
+else
+  bad "unrelated rc lines preserved across a block replacement"; diff "$SBX/rc.orig" "$SBX/rc.stripped" | sed 's/^/      /'
+fi
+drop_sandbox
+
+# ── 14. a marker left dangling above unrelated content can't eat it ─────────
+# Removal keys off our marker, so it only takes the next line when that line is
+# shaped like a PATH op we wrote — never arbitrary user content.
+make_sandbox yes
+RC="$HOMEDIR/.profile"
+printf '# Added by the tracebloc CLI installer\nalias precious="keep me"\n' > "$RC"
+COSIGN_RESULT=0 run_installer_at "$SBX/r1" >/dev/null
+if grep -q 'precious' "$RC"; then
+  ok "dangling marker doesn't consume the line below it"
+else
+  bad "dangling marker doesn't consume the line below it"; sed 's/^/      /' "$RC"
+fi
+drop_sandbox
+
+# ── 15. each shell's rc is the one a fresh interactive shell reads ──────────
+# zsh → ~/.zshrc, fish → ~/.config/fish/config.fish (and fish gets
+# fish_add_path, not a bash `export`), anything else → ~/.profile. Dedupe has to
+# hold on whichever file we picked, so re-run and re-assert per shell.
+for spec in "zsh:.zshrc:export PATH=" "fish:.config/fish/config.fish:fish_add_path"; do
+  sh_name="${spec%%:*}"; rest="${spec#*:}"; rc_rel="${rest%%:*}"; want_op="${rest#*:}"
+  make_sandbox yes
+  RC="$HOMEDIR/$rc_rel"
+  FAKE_SHELL="/bin/$sh_name" COSIGN_RESULT=0 run_installer_at "$SBX/s1" >/dev/null
+  FAKE_SHELL="/bin/$sh_name" COSIGN_RESULT=0 run_installer_at "$SBX/s2" >/dev/null
+  if [ "$(tb_blocks "$RC")" = 1 ] && grep -qF "$want_op" "$RC" && grep -qF "$SBX/s2" "$RC"; then
+    ok "$sh_name: one block in $rc_rel using $want_op"
+  else
+    bad "$sh_name: one block in $rc_rel using $want_op (got $(tb_blocks "$RC"))"; sed 's/^/      /' "$RC" 2>/dev/null
+  fi
+  drop_sandbox
+done
 
 echo
 echo "install-verify: $PASS passed, $FAIL failed"
