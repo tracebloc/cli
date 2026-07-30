@@ -469,6 +469,66 @@ for spec in "zsh:.zshrc:export PATH=" "fish:.config/fish/config.fish:fish_add_pa
   drop_sandbox
 done
 
+# -- 16. a fish prefix containing spaces is recognised as already listed ------
+# We WRITE `fish_add_path "$PREFIX"`, so rc_lists_dir must parse the quotes
+# rather than field-split: it used to see two whitespace fields, match neither,
+# append a second block, and report adding an entry that was already present.
+for quote_style in double single; do
+  make_sandbox yes
+  RC="$HOMEDIR/.config/fish/config.fish"
+  mkdir -p "$(dirname "$RC")"
+  SPACED="$SBX/my tools/bin"
+  mkdir -p "$SPACED"
+  if [ "$quote_style" = double ]; then
+    printf 'fish_add_path "%s"\n' "$SPACED" > "$RC"
+  else
+    printf "fish_add_path '%s'\n" "$SPACED" > "$RC"
+  fi
+  before=$(cat "$RC")
+  FAKE_SHELL=/bin/fish COSIGN_RESULT=0 run_installer_at "$SPACED" >/dev/null 2>&1
+  if [ "$(cat "$RC")" = "$before" ]; then
+    ok "fish: $quote_style-quoted prefix with spaces seen as already listed"
+  else
+    bad "fish: $quote_style-quoted prefix with spaces not matched (rc rewritten)"; sed 's/^/      /' "$RC"
+  fi
+  drop_sandbox
+done
+
+# -- 17. an inline comment that mentions fish_add_path must not defeat the match
+# A greedy strip through the LAST `fish_add_path` on the line would leave the
+# comment text as the "path" and miss the real argument (Bugbot, cli#439).
+make_sandbox yes
+RC="$HOMEDIR/.config/fish/config.fish"
+mkdir -p "$(dirname "$RC")"
+printf 'fish_add_path "%s"  # set by fish_add_path\n' "$SBX/s1" > "$RC"
+mkdir -p "$SBX/s1"
+before=$(cat "$RC")
+FAKE_SHELL=/bin/fish COSIGN_RESULT=0 run_installer_at "$SBX/s1" >/dev/null 2>&1
+if [ "$(cat "$RC")" = "$before" ]; then
+  ok "fish: inline comment naming fish_add_path does not break the match"
+else
+  bad "fish: inline comment naming fish_add_path broke the match (rc rewritten)"; sed 's/^/      /' "$RC"
+fi
+drop_sandbox
+
+# -- 18. the prefix is the SECOND quoted arg on a multi-path fish line --------
+# fish_add_path accepts several directories. Parsing that stopped at the first
+# closing quote missed a later one, appended a redundant block, and reported a
+# PATH add that was already there (Bugbot, cli#439).
+make_sandbox yes
+RC="$HOMEDIR/.config/fish/config.fish"
+mkdir -p "$(dirname "$RC")"
+mkdir -p "$SBX/other" "$SBX/s1"
+printf 'fish_add_path "%s" "%s"\n' "$SBX/other" "$SBX/s1" > "$RC"
+before=$(cat "$RC")
+FAKE_SHELL=/bin/fish COSIGN_RESULT=0 run_installer_at "$SBX/s1" >/dev/null 2>&1
+if [ "$(cat "$RC")" = "$before" ]; then
+  ok "fish: prefix as the second quoted arg is seen as already listed"
+else
+  bad "fish: second quoted arg was not matched (rc rewritten)"; sed 's/^/      /' "$RC"
+fi
+drop_sandbox
+
 echo
 echo "install-verify: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

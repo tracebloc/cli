@@ -648,7 +648,46 @@ rc_lists_dir() {
         {
             n = 0
             if ($0 ~ /(^|[^A-Za-z_])fish_add_path([^A-Za-z_]|$)/) {
-                for (i = 1; i <= NF; i++) if ($i !~ /^-/ && $i !~ /fish_add_path/) cand[++n] = $i
+                # Parse quotes instead of field-splitting. We WRITE
+                # fish_add_path "$PREFIX", so a prefix containing spaces became
+                # two whitespace fields here and never matched -- the installer
+                # then appended a second block and claimed it had added a PATH
+                # entry that was already present. The sibling reader further up
+                # already keeps the remainder intact; this now agrees with it.
+                # Tokenise the argument list, honouring quotes. Three things
+                # this has to get right, each of which broke a previous
+                # attempt (cli#439):
+                #   * FIRST occurrence of the command, via index() -- a greedy
+                #     /^.*fish_add_path/ strips through an inline comment that
+                #     mentions it and loses the real argument;
+                #   * quoted arguments are ONE path, spaces included, because we
+                #     write fish_add_path "$PREFIX";
+                #   * fish_add_path takes MULTIPLE directories, so parsing must
+                #     continue past the first closing quote.
+                at = index($0, "fish_add_path")
+                rest = substr($0, at + 13)
+                while (length(rest) > 0) {
+                    sub(/^[[:space:]]+/, "", rest)
+                    if (length(rest) == 0) break
+                    ch = substr(rest, 1, 1)
+                    if (ch == "#") break            # trailing comment
+                    if (ch == "\"" || ch == "\047") {
+                        body = substr(rest, 2)
+                        close_at = index(body, ch)
+                        if (close_at > 0) {
+                            cand[++n] = substr(body, 1, close_at - 1)
+                            rest = substr(body, close_at + 1)
+                        } else {                    # unterminated quote
+                            cand[++n] = body
+                            rest = ""
+                        }
+                    } else {
+                        sp = match(rest, /[[:space:]]/)
+                        tok = (sp > 0) ? substr(rest, 1, sp - 1) : rest
+                        rest = (sp > 0) ? substr(rest, sp) : ""
+                        if (tok !~ /^-/) cand[++n] = tok   # skip flags
+                    }
+                }
             } else if ($0 ~ /(^|[^A-Za-z_])[Pp][Aa][Tt][Hh][+]?=/) {
                 value = $0
                 sub(/^[^=]*=/, "", value)
