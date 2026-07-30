@@ -503,28 +503,90 @@ case ":$PATH:" in *":$PREFIX:"*|*":$PREFIX/:"*) on_path=yes ;; esac
 # --------------------------------------------------------------------
 PATH_MARKER="# Added by the tracebloc CLI installer"
 
+# _tb_owns_dir <dir>: 0 if <dir> is one this installer would have put in the rc.
+#
+# The marker alone is not proof of ownership. A marker left dangling by a
+# hand-edit can end up directly above the USER's own PATH line, and taking that
+# line with it would silently delete a PATH entry we never added (Bugbot on #434).
+# So we demand positive evidence:
+#   * a '$' anywhere in the dir  -> never ours; we always write a literal,
+#     already-expanded path, whereas "$HOME/mytools" is the user's own style
+#   * the prefix we are installing to right now
+#   * a dir that no longer exists -> a stale block of ours, exactly the #433 case
+#   * a dir that still holds a tracebloc binary -> a previous install of ours
+# Anything else is treated as the user's line and left alone.
+_tb_owns_dir() {
+    case "$1" in
+        ''|*'$'*) return 1 ;;
+    esac
+    if [ "$1" = "$PREFIX" ]; then return 0; fi
+    if [ ! -d "$1" ]; then return 0; fi
+    if [ -e "$1/$BINARY_NAME" ]; then return 0; fi
+    return 1
+}
+
 # strip_tb_path_block <file>: echo <file> minus every block we own — the marker
-# line, the PATH op on the line after it, and the blank separator on the line
-# before. Every other line is passed through unchanged and in order: this is a
-# file we do NOT own, so nothing else may be rewritten, reordered or dropped.
-# awk (POSIX, already used above) buffers the file so the look-behind for the
-# blank separator is possible.
+# line, the PATH op on the line after it when _tb_owns_dir vouches for the
+# directory it names, and the blank separator on the line before. A marker whose
+# following line we cannot claim loses only the orphaned marker comment; the
+# user's PATH op survives. Every other line is passed through unchanged and in
+# order: this is a file we do NOT own, so nothing else may be rewritten,
+# reordered or dropped.
 strip_tb_path_block() {
+    _stb_file="$1"
+    _stb_owned=""
+    _stb_orphan=""
+    _stb_tab="$(printf '\t')"
+
+    # Pair each marker with the directory named on the line below it, or with "-"
+    # when that line isn't a PATH op shaped like one we write. Via a temp file
+    # rather than a pipe so the ownership verdicts land in THIS shell, and rather
+    # than a heredoc so the awk program needs no nested-expansion escaping.
+    _stb_pairs="$TMP/tb.pairs"
     awk -v marker="$PATH_MARKER" '
+        NR > 1 && prev == marker {
+            dir = "-"
+            if ($0 ~ /^[[:space:]]*export[[:space:]]+PATH="[^"]+:\$PATH"[[:space:]]*$/) {
+                dir = $0
+                sub(/^[^"]*"/, "", dir)
+                sub(/:\$PATH".*$/, "", dir)
+            } else if ($0 ~ /^[[:space:]]*fish_add_path[[:space:]]/) {
+                dir = $0
+                sub(/^[[:space:]]*fish_add_path[[:space:]]+/, "", dir)
+                sub(/[[:space:]]+$/, "", dir)
+                gsub(/^["\047]|["\047]$/, "", dir)
+            }
+            printf "%d\t%s\n", NR - 1, dir
+        }
+        { prev = $0 }
+        END { if (NR >= 1 && prev == marker) printf "%d\t-\n", NR }
+    ' "$_stb_file" > "$_stb_pairs"
+
+    while IFS="$_stb_tab" read -r _stb_no _stb_dir; do
+        [ -n "$_stb_no" ] || continue
+        if [ "$_stb_dir" != "-" ] && _tb_owns_dir "$_stb_dir"; then
+            _stb_owned="$_stb_owned,$_stb_no"
+        else
+            _stb_orphan="$_stb_orphan,$_stb_no"
+        fi
+    done < "$_stb_pairs"
+
+    awk -v owned="$_stb_owned" -v orphan="$_stb_orphan" '
+        BEGIN {
+            n = split(owned, a, ",");  for (i = 1; i <= n; i++) if (a[i] != "") own[a[i] + 0] = 1
+            n = split(orphan, b, ","); for (i = 1; i <= n; i++) if (b[i] != "") orp[b[i] + 0] = 1
+        }
         { line[NR] = $0 }
         END {
             for (i = 1; i <= NR; i++) {
-                if (line[i] != marker) continue
+                if (!(i in own) && !(i in orp)) continue
                 drop[i] = 1
-                # Only a PATH op shaped like one WE wrote leaves with the
-                # marker, so a marker a user has left dangling above their own
-                # content can never take that content with it.
-                if (i < NR && line[i + 1] ~ /^[[:space:]]*(export[[:space:]]+PATH=|fish_add_path[[:space:]])/) drop[i + 1] = 1
+                if (i in own) drop[i + 1] = 1
                 if (i > 1 && line[i - 1] == "") drop[i - 1] = 1
             }
             for (i = 1; i <= NR; i++) if (!(i in drop)) print line[i]
         }
-    ' "$1"
+    ' "$_stb_file"
 }
 
 # rc_lists_dir <dir> <file>: 0 if a non-comment PATH op in <file> already puts

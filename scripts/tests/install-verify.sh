@@ -322,6 +322,43 @@ else
 fi
 drop_sandbox
 
+# The nastier variant: a dangling marker directly above the user's OWN PATH
+# export. The marker is not proof of ownership, so the line only goes if we can
+# vouch for the directory it names — otherwise we'd silently delete a PATH entry
+# we never added (Bugbot on #434).
+make_sandbox yes
+RC="$HOMEDIR/.profile"
+mkdir -p "$SBX/mytools"
+printf '# Added by the tracebloc CLI installer\nexport PATH="%s:$PATH"\n' "$SBX/mytools" > "$RC"
+COSIGN_RESULT=0 run_installer_at "$SBX/t1" >/dev/null
+if grep -qF "$SBX/mytools" "$RC"; then
+  ok "dangling marker above the user's own PATH export keeps that export"
+else
+  bad "dangling marker above the user's own PATH export keeps that export"; sed 's/^/      /' "$RC"
+fi
+# Same, with an unexpanded $HOME — a '$' can never appear in a path we wrote.
+printf '# Added by the tracebloc CLI installer\nexport PATH="$HOME/mytools:$PATH"\n' > "$RC"
+COSIGN_RESULT=0 run_installer_at "$SBX/t2" >/dev/null
+if grep -qF '$HOME/mytools' "$RC"; then
+  ok "dangling marker above an unexpanded \$HOME PATH line keeps that line"
+else
+  bad "dangling marker above an unexpanded \$HOME PATH line keeps that line"; sed 's/^/      /' "$RC"
+fi
+drop_sandbox
+
+# …but a block naming a directory that no longer exists IS ours — that is the
+# exact cruft #433 reported, and it must still be cleaned up.
+make_sandbox yes
+RC="$HOMEDIR/.profile"
+printf '\n# Added by the tracebloc CLI installer\nexport PATH="%s/deleted-prefix:$PATH"\n' "$SBX" > "$RC"
+COSIGN_RESULT=0 run_installer_at "$SBX/t3" >/dev/null
+if [ "$(tb_blocks "$RC")" = 1 ] && ! grep -qF 'deleted-prefix' "$RC"; then
+  ok "a block naming a vanished directory is cleaned up"
+else
+  bad "a block naming a vanished directory is cleaned up"; sed 's/^/      /' "$RC"
+fi
+drop_sandbox
+
 # ── 15. each shell's rc is the one a fresh interactive shell reads ──────────
 # zsh → ~/.zshrc, fish → ~/.config/fish/config.fish (and fish gets
 # fish_add_path, not a bash `export`), anything else → ~/.profile. Dedupe has to
