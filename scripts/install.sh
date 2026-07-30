@@ -654,8 +654,15 @@ rc_lists_dir() {
                 # then appended a second block and claimed it had added a PATH
                 # entry that was already present. The sibling reader further up
                 # already keeps the remainder intact; this now agrees with it.
-                rest = $0
-                sub(/^.*fish_add_path[[:space:]]*/, "", rest)
+                # index() finds the FIRST occurrence. A greedy /^.*fish_add_path/
+                # would strip through the LAST one, so an inline comment that
+                # mentions fish_add_path would leave the comment text as the
+                # "path" and miss the real argument -- reintroducing this very
+                # bug (Bugbot, cli#439). The old field-split avoided it by
+                # filtering the command token out instead.
+                at = index($0, "fish_add_path")
+                rest = substr($0, at + 13)
+                sub(/^[[:space:]]+/, "", rest)
                 while (rest ~ /^-/) { sub(/^-[^[:space:]]*[[:space:]]*/, "", rest) }
                 sub(/[[:space:]]+$/, "", rest)
                 q = substr(rest, 1, 1)
