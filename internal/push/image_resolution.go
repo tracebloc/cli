@@ -27,7 +27,7 @@ import (
 func scanImageResolutions(paths []string, expectedW, expectedH, minW, minH int) (broken, tooSmall, mismatched []string) {
 	for _, path := range paths {
 		name := filepath.Base(path)
-		f, err := os.Open(path)
+		f, err := os.Open(path) // #nosec G304 -- paths come from the symlink-rejecting dataset walk of the operator-chosen root; mirrors the in-cluster validator on the operator's own files.
 		if err != nil {
 			broken = append(broken, fmt.Sprintf("%s (unreadable: %v)", name, err))
 			continue

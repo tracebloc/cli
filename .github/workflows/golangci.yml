@@ -1,0 +1,66 @@
+name: golangci-lint
+
+# Runs golangci-lint (with the gosec security linter) against the
+# repo's .golangci.yml on every PR + push to develop/main. This is the
+# "one tool, one config" successor being sized up for the standalone
+# lint steps in build.yml, and the first thing in this repo that scans
+# our own code for insecure patterns — govulncheck (build.yml +
+# vulncheck.yml) only covers known CVEs in dependencies.
+#
+# Why the action is safe now: the golangci-lint-action timeout story
+# (#6) was the SSA linters (staticcheck, unused) choking on the
+# k8s.io/* dep tree. The current .golangci.yml enables no SSA linters;
+# a full run measures ~11s wall locally / ~62s on the runner (#423).
+#
+# Part of backend#1305 (epic #930, Layer 1).
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: golangci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  golangci:
+    timeout-minutes: 10
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    # ============================= GATE ==============================
+    # Blocking by exit code since the backlog hit zero: the gosec
+    # findings sized on #423 were all resolved with per-site reviewed
+    # #nosec waivers (#427), so any finding this job reports from now
+    # on is NEW and fails the job — including typecheck errors, which
+    # ride the same exit path. History of the advisory era (the
+    # --issues-exit-code=0 flag, why job-level continue-on-error was
+    # not the tool) is in the #423/#426 discussions if you need it.
+    # Final step of the flip = marking this check required in branch
+    # protection (backend#1305 / epic #930).
+    # ==================================================================
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Both versions pinned for reproducibility, same policy as the
+      # standalone tools in build.yml (#127). golangci-lint v2.12.2 is
+      # built with Go 1.26 (required: go.mod says `go 1.26.0`; v1-era
+      # binaries can't typecheck this module). Bump deliberately, and
+      # keep the version in step with the format expectations noted in
+      # .golangci.yml AND with GOLANGCI_LINT_VERSION in the Makefile
+      # (make lint-full runs the same pinned version -- the local/CI
+      # mirror depends on the two never drifting).
+      - name: golangci-lint run (.golangci.yml)
+        uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          version: v2.12.2

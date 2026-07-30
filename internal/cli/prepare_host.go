@@ -110,7 +110,7 @@ func prepareHostEnv(user string) []string {
 // that traps signals. We rely on the default SIGKILL rather than a custom
 // SIGINT-only Cancel (which a privileged child could ignore, hanging Wait).
 func prepareHostCmd(ctx context.Context) *exec.Cmd {
-	c := exec.CommandContext(ctx, "bash", "-c", prepareHostInstallerCmd)
+	c := exec.CommandContext(ctx, "bash", "-c", prepareHostInstallerCmd) // #nosec G204 -- argv is compile-time constant: literal "bash" -c installerRunScript("prepare-host"), built only from the installerURL const; no runtime input.
 	c.WaitDelay = 5 * time.Second
 	return c
 }

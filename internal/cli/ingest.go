@@ -75,7 +75,7 @@ Exit codes:
 func runIngestValidate(cmd *cobra.Command, args []string) error {
 	path := args[0]
 
-	body, err := os.ReadFile(path)
+	body, err := os.ReadFile(path) // #nosec G304 -- reading the ingest.yaml the operator named as the positional arg is this command's documented job; local CLI, invoking user's privileges.
 	if err != nil {
 		// fileError is exit-code 3 territory. We use a sentinel
 		// exit-coded error so cobra propagates the right code via

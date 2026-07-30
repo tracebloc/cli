@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -165,7 +166,7 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 		// DROP/rm and then "succeed".
 		plan := push.PlanTeardown(existingTable)
 		rmSpin := a.Printer.Spinner(fmt.Sprintf("Removing the existing %q first", existingTable), "")
-		_, terr := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
+		tres, terr := push.Teardown(ctx, cs, &push.SPDYExecutor{Config: resolved.RestConfig, Client: cs}, resolved.Namespace, plan, push.PodSpecOptions{
 			Namespace:          resolved.Namespace,
 			PVCClaimName:       pvc.ClaimName,
 			PVCMountPath:       pvc.MountPath,
@@ -184,6 +185,13 @@ func runDataIngest(ctx context.Context, out, errOut io.Writer, a runDataIngestAr
 					"would hit the leftovers after uploading everything. Run `tracebloc data delete %s` "+
 					"first, then re-run this ingest. Nothing new was staged. (%w)",
 				existingTable, existingTable, terr)}
+		}
+		if !tres.BookkeepingCleaned {
+			// Same surfacing `data delete` does (Bugbot on the PR): the
+			// overwrite pre-clean runs the identical teardown, and a silent
+			// bookkeeping failure here would hide the same schema-drift
+			// regression on this path.
+			a.Printer.Warnf("Bookkeeping cleanup incomplete — the old table is gone, but its run-journal/salt rows may remain: %s", strings.Join(tres.BookkeepingErrs, "; "))
 		}
 		a.Printer.Successf("Removed the old %q — ingesting the new data.", existingTable)
 	}

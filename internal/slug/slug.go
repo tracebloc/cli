@@ -87,7 +87,7 @@ func toASCII(s string) string {
 	var b strings.Builder
 	for _, r := range norm.NFKD.String(s) {
 		if r < 128 {
-			b.WriteByte(byte(r))
+			b.WriteByte(byte(r)) // #nosec G115 -- false positive: range-over-string runes are non-negative and the r < 128 guard bounds them, so byte(r) is a lossless ASCII conversion.
 		}
 	}
 	return b.String()
