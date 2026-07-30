@@ -494,6 +494,23 @@ for quote_style in double single; do
   drop_sandbox
 done
 
+# -- 17. an inline comment that mentions fish_add_path must not defeat the match
+# A greedy strip through the LAST `fish_add_path` on the line would leave the
+# comment text as the "path" and miss the real argument (Bugbot, cli#439).
+make_sandbox yes
+RC="$HOMEDIR/.config/fish/config.fish"
+mkdir -p "$(dirname "$RC")"
+printf 'fish_add_path "%s"  # set by fish_add_path\n' "$SBX/s1" > "$RC"
+mkdir -p "$SBX/s1"
+before=$(cat "$RC")
+FAKE_SHELL=/bin/fish COSIGN_RESULT=0 run_installer_at "$SBX/s1" >/dev/null 2>&1
+if [ "$(cat "$RC")" = "$before" ]; then
+  ok "fish: inline comment naming fish_add_path does not break the match"
+else
+  bad "fish: inline comment naming fish_add_path broke the match (rc rewritten)"; sed 's/^/      /' "$RC"
+fi
+drop_sandbox
+
 echo
 echo "install-verify: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
