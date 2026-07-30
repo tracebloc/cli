@@ -173,11 +173,13 @@ ensure_cosign() {
     csums="$TMP/cosign_checksums.txt"
 
     echo "  cosign not found — bootstrapping pinned ${COSIGN_VERSION} to verify the signature..."
-    # --tlsv1.2 floor for the cosign bootstrap fetch, matching the client
-    # installer's curls — never negotiate below TLS 1.2 to pull the verifier we
-    # then trust to authenticate the release.
-    if ! curl -fsSL --tlsv1.2 "$cbase/$casset" -o "$cbin" 2>/dev/null; then return 1; fi
-    if ! curl -fsSL --tlsv1.2 "$cbase/cosign_checksums.txt" -o "$csums" 2>/dev/null; then return 1; fi
+    # dl() carries the TLS 1.2 floor + stall-based bounding (see the helper) —
+    # never negotiate below TLS 1.2 to pull the verifier we then trust to
+    # authenticate the release, and never let a dead endpoint wedge the
+    # install. No wall-clock cap: the ~90MB cosign binary must be allowed to
+    # finish on slow links (review #426).
+    if ! dl "$cbase/$casset" "$cbin" 2>/dev/null; then return 1; fi
+    if ! dl "$cbase/cosign_checksums.txt" "$csums" 2>/dev/null; then return 1; fi
 
     cwant="$(grep " ${casset}\$" "$csums" | awk '{print $1}' | head -1)"
     [ -n "$cwant" ] || return 1
@@ -202,7 +204,7 @@ resolve_tag() {
     # Use the redirect-trail of /releases/latest to learn the tag —
     # avoids hitting the rate-limited /api/repos endpoint for the
     # zero-auth one-liner case.
-    redirect_url="$(curl -fsSI --tlsv1.2 \
+    redirect_url="$(curl -fsSI --tlsv1.2 --connect-timeout 30 --max-time 30 \
         "https://github.com/${GITHUB_REPO}/releases/latest" \
         | awk '/^[Ll]ocation:/ { print $2 }' \
         | tr -d '\r')"
@@ -261,17 +263,28 @@ echo "Installing tracebloc CLI $TAG ($OS/$ARCH)..."
 BINARY_FILE="${BINARY_NAME}-${TAG}-${OS}-${ARCH}"
 BASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${TAG}"
 
+# Shared download profile for every body fetch in this script (review: #426).
+# Stall-based bounding instead of a wall-clock cap: --max-time 300 made the
+# ~50MB binary fail under ~1.4 Mbps and the ~90MB cosign bootstrap under
+# ~2.6 Mbps — links that are slow but alive must be allowed to finish, while
+# a dead connection (under 1 KiB/s for 60s straight) still aborts instead of
+# wedging the install. TLS floor stays 1.2. Retune here, once.
+# usage: dl <url> <dest>
+dl() {
+    curl -fsSL --tlsv1.2 --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$1" -o "$2"
+}
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 echo "Downloading binary..."
-if ! curl -fsSL --tlsv1.2 "$BASE_URL/$BINARY_FILE" -o "$TMP/$BINARY_FILE"; then
+if ! dl "$BASE_URL/$BINARY_FILE" "$TMP/$BINARY_FILE"; then
     echo "Error: failed to download $BASE_URL/$BINARY_FILE" >&2
     exit 1
 fi
 
 echo "Downloading SHA256SUMS..."
-if ! curl -fsSL --tlsv1.2 "$BASE_URL/SHA256SUMS" -o "$TMP/SHA256SUMS"; then
+if ! dl "$BASE_URL/SHA256SUMS" "$TMP/SHA256SUMS"; then
     echo "Error: failed to download SHA256SUMS — release may be malformed" >&2
     exit 1
 fi
@@ -345,8 +358,8 @@ verify_cosign_signature() {
     fi
 
     echo "Verifying cosign signature..."
-    if ! curl -fsSL --tlsv1.2 "$BASE_URL/$BINARY_FILE.sig" -o "$TMP/$BINARY_FILE.sig" 2>/dev/null \
-       || ! curl -fsSL --tlsv1.2 "$BASE_URL/$BINARY_FILE.cert" -o "$TMP/$BINARY_FILE.cert" 2>/dev/null; then
+    if ! dl "$BASE_URL/$BINARY_FILE.sig" "$TMP/$BINARY_FILE.sig" 2>/dev/null \
+       || ! dl "$BASE_URL/$BINARY_FILE.cert" "$TMP/$BINARY_FILE.cert" 2>/dev/null; then
         if [ "$ALLOW_UNVERIFIED" = "1" ]; then
             echo "  WARNING: .sig/.cert not published for $TAG — signature NOT verified" >&2
             echo "  (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2

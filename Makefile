@@ -9,11 +9,12 @@
 # ---- toggles -----------------------------------------------------
 
 GO            ?= go
-GOLANGCI_LINT ?= golangci-lint
 PKGS          := ./...
 
 # Pinned lint/analysis tool versions (reproducibility — no more @latest drift).
-# Keep these in lockstep with .github/workflows/build.yml. Bump deliberately.
+# Keep these in lockstep with .github/workflows/build.yml — and
+# GOLANGCI_LINT_VERSION with .github/workflows/golangci.yml. Bump deliberately.
+GOLANGCI_LINT_VERSION ?= v2.12.2
 ERRCHECK_VERSION    ?= v1.20.0
 INEFFASSIGN_VERSION ?= v0.2.0
 MISSPELL_VERSION    ?= v0.3.4
@@ -24,8 +25,11 @@ GOIMPORTS_VERSION   ?= v0.48.0
 
 # ---- top-level targets -------------------------------------------
 
+# ci mirrors the PR gates exactly — including golangci-lint (lint-full),
+# which fails on findings since #430. A green `make ci` must imply a green
+# PR; lint-full's own guard tells you how to install the tool if missing.
 .PHONY: ci
-ci: vet test lint fmt-check schema-check vulncheck file-budget deadcode check-style
+ci: vet test lint lint-full fmt-check schema-check vulncheck file-budget deadcode check-style
 	@echo "==> ci: all green"
 
 .PHONY: build
@@ -126,15 +130,14 @@ deadcode:
 vulncheck:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
+# Pinned to the exact version the golangci CI job runs (see
+# .github/workflows/golangci.yml), via the same `go run tool@version`
+# pattern as the tools above — no PATH dependency, so a green
+# `make ci` and the PR gate can never disagree on golangci version.
+# First run builds from source (~1-2 min); cached afterwards.
 .PHONY: lint-full
 lint-full:
-	@command -v $(GOLANGCI_LINT) >/dev/null 2>&1 || { \
-	  echo "==> $(GOLANGCI_LINT) not on PATH"; \
-	  echo "    install via:  brew install golangci-lint"; \
-	  echo "    or see:       https://golangci-lint.run/usage/install/"; \
-	  exit 1; \
-	}
-	$(GOLANGCI_LINT) run
+	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run
 
 .PHONY: fmt
 fmt:

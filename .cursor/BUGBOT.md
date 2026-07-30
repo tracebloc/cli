@@ -125,3 +125,11 @@ consequence — what they see, and which exit code they get — not just the cod
 
 This repo is **public**: never put a customer name, internal hostname, or internal-only ticket
 detail in a finding. A bare `tracebloc/backend#NNNN` reference is fine.
+
+## Working with Bugbot findings (team norm)
+
+Every Bugbot review thread gets a reply, then gets resolved:
+- **Fixed**: say what changed and in which commit.
+- **False positive**: say why, with evidence (file/line, measured behavior).
+Unresolved cursor threads HOLD release-train promotions (soft gate) — an
+unaddressed finding blocks the fleet, not just this PR.

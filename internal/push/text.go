@@ -162,7 +162,7 @@ func validateTextRecords(csvPath, dirName string, files []string, rf RecordForma
 		if path == "" {
 			continue // manifest names a file not on disk — a missing-file check's job, not ours
 		}
-		content, err := os.ReadFile(path)
+		content, err := os.ReadFile(path) // #nosec G304 -- path comes from byBase/byStem, keyed only by files the symlink-vetted walk found in the dataset dir; a manifest entry selects among them, it cannot point elsewhere.
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", filepath.Join(dirName, filepath.Base(path)), err)
 		}

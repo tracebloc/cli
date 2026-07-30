@@ -133,8 +133,10 @@ sync_one() {
   # sync_one is called as `if ! sync_one ...`, which suspends `set -e` for the
   # whole body — so check curl's exit explicitly and report the real fetch
   # failure instead of misdiagnosing an empty temp file as "not valid JSON".
-  # --tlsv1.2 matches every other curl in the repo (scripts/install.sh).
-  curl -fsSL --tlsv1.2 \
+  # --tlsv1.2 matches every other curl in the repo (scripts/install.sh); the
+  # time bounds keep a hung GitHub API from wedging CI (18 fixtures per run,
+  # so a generous per-file ceiling would compound).
+  curl -fsSL --tlsv1.2 --connect-timeout 10 --max-time 60 \
     -H "Authorization: Bearer ${TOKEN}" \
     -H "Accept: application/vnd.github.raw+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
