@@ -511,6 +511,24 @@ else
 fi
 drop_sandbox
 
+# -- 18. the prefix is the SECOND quoted arg on a multi-path fish line --------
+# fish_add_path accepts several directories. Parsing that stopped at the first
+# closing quote missed a later one, appended a redundant block, and reported a
+# PATH add that was already there (Bugbot, cli#439).
+make_sandbox yes
+RC="$HOMEDIR/.config/fish/config.fish"
+mkdir -p "$(dirname "$RC")"
+mkdir -p "$SBX/other" "$SBX/s1"
+printf 'fish_add_path "%s" "%s"\n' "$SBX/other" "$SBX/s1" > "$RC"
+before=$(cat "$RC")
+FAKE_SHELL=/bin/fish COSIGN_RESULT=0 run_installer_at "$SBX/s1" >/dev/null 2>&1
+if [ "$(cat "$RC")" = "$before" ]; then
+  ok "fish: prefix as the second quoted arg is seen as already listed"
+else
+  bad "fish: second quoted arg was not matched (rc rewritten)"; sed 's/^/      /' "$RC"
+fi
+drop_sandbox
+
 echo
 echo "install-verify: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
