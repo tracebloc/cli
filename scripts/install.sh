@@ -602,7 +602,11 @@ strip_tb_path_block() {
 # either side.
 rc_lists_dir() {
     awk -v want="$1" '
-        BEGIN { sub(/\/+$/, "", want); if (want == "") exit }
+        # exit 1, not a bare exit. A bare exit in BEGIN still runs END, so
+        # the status would be the END rule below -- 1 when nothing was found --
+        # but saying it outright means "no component to look for" can never be
+        # read as "already listed" by a later reader or a stricter awk.
+        BEGIN { sub(/\/+$/, "", want); if (want == "") exit 1 }
         /^[[:space:]]*#/ { next }
         {
             n = 0
