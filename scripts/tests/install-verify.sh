@@ -251,6 +251,17 @@ else
   bad "same prefix installed 3x leaves one PATH block (got $(tb_blocks "$RC"))"; sed 's/^/      /' "$RC"
 fi
 
+# …and the repeat runs must not even rewrite the file. `tracebloc upgrade`
+# re-execs this installer, so the same prefix comes back on every upgrade; the rc
+# is the user's file and an install that changes nothing must touch nothing.
+cp "$RC" "$SBX/rc.before"
+COSIGN_RESULT=0 run_installer >/dev/null
+if diff -q "$RC" "$SBX/rc.before" >/dev/null && grep -q 'already in your PATH config' "$SBX/out"; then
+  ok "re-install with the same prefix leaves the rc byte-identical"
+else
+  bad "re-install with the same prefix leaves the rc byte-identical"; diff "$SBX/rc.before" "$RC" | sed 's/^/      /'
+fi
+
 # Distinct prefixes — the exact shape that produced ten blocks on the v0.10.1 box.
 p1="$SBX/p1"; p2="$SBX/p2"; p3="$SBX/p3"
 for p in "$p1" "$p2" "$p3"; do COSIGN_RESULT=0 run_installer_at "$p" >/dev/null; done

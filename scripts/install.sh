@@ -564,6 +564,19 @@ rc_lists_dir() {
     ' "$2"
 }
 
+# rc_has_our_block <path_line> <file>: 0 if <file> already carries our marker
+# immediately followed by exactly <path_line> — i.e. the rc already says
+# precisely what this run would write. `tracebloc upgrade` re-execs this
+# installer, so the same prefix comes back around on every upgrade; without this
+# we'd rewrite a file we don't own to no effect and report it as a change.
+rc_has_our_block() {
+    awk -v marker="$PATH_MARKER" -v want="$1" '
+        prev == marker && $0 == want { found = 1; exit }
+        { prev = $0 }
+        END { exit(found ? 0 : 1) }
+    ' "$2"
+}
+
 # replace_rc <file>: make $rc's contents exactly <file>'s. Truncates the
 # existing path rather than mv'ing a temp over it, so the inode, mode and owner
 # survive — and so an rc that is a SYMLINK into a dotfiles repo is written
@@ -610,18 +623,25 @@ if [ "$persist" = "yes" ]; then
     if [ -f "$rc" ]; then cat "$rc" > "$rc_now" 2>/dev/null || : > "$rc_now"; fi
     strip_tb_path_block "$rc_now" > "$rc_next"
 
-    had_block=no
-    if grep -qxF "$PATH_MARKER" "$rc_now" 2>/dev/null; then had_block=yes; fi
+    # How many blocks of ours the rc carries. More than one means an older
+    # installer piled them up and this run consolidates them.
+    tb_blocks="$(grep -cxF "$PATH_MARKER" "$rc_now" 2>/dev/null || true)"
+    [ -n "$tb_blocks" ] || tb_blocks=0
 
     if rc_lists_dir "$PREFIX" "$rc_next"; then
         # A line we don't own already puts $PREFIX on PATH, so there is nothing
         # to add. If we'd also left a block behind, drop it — it is redundant.
-        if [ "$had_block" = no ]; then
+        if [ "$tb_blocks" = 0 ]; then
             state=present   # rc already persists it — leave the file untouched
         elif replace_rc "$rc_next"; then
             state=present
         fi
-    elif [ "$had_block" = no ]; then
+    elif [ "$tb_blocks" = 1 ] && rc_has_our_block "$path_line" "$rc_now"; then
+        # Our one block already says exactly this. The re-install and `tracebloc
+        # upgrade` case: leave the file completely alone rather than rewriting it
+        # byte-for-byte and reporting a change we didn't make.
+        state=present
+    elif [ "$tb_blocks" = 0 ]; then
         # Nothing of ours to clean up, so append instead of rewriting: a file we
         # don't own is never rewritten when adding a line is enough.
         #
