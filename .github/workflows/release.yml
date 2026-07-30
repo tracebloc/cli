@@ -31,12 +31,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: 'Tag to build (e.g. v0.1.0). Must already exist on origin.'
-        required: true
-        type: string
+  # Rebuilds: dispatch the workflow AT the tag ref (Actions -> Run workflow ->
+  # pick the v* tag), or gh run rerun a previous tag run. Cosign embeds the
+  # RUN's ref in the keyless identity; the installers only trust
+  # @refs/tags/v.*, so a branch-dispatched "rebuild of a tag" would publish
+  # signatures every customer install rejects (Bugbot on promotion #428).
+  workflow_dispatch: {}
 
 permissions:
   contents: write  # create / update the GitHub Release
@@ -47,9 +47,27 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Pre-flight: reject a branch-misdispatch ONCE, in seconds, before the 8-way
+  # matrix spins up (review nit on #429). Ref passed via env, never inline.
+  guard:
+    name: Ref guard
+    runs-on: ubuntu-latest
+    env:
+      REF_FULL: ${{ github.ref }}
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      - name: Dispatch rebuilds must run at a v* tag ref
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && ! printf '%s' "$REF_FULL" | grep -qE '^refs/tags/v'; then
+            echo "::error::rebuilds must be dispatched from the v* tag itself (Actions -> Run workflow -> select the tag), not a branch -- signatures would embed $REF_FULL and fail every customer verification."
+            exit 1
+          fi
+          echo "ref ok: $REF_FULL"
+
   release:
     timeout-minutes: 20
     name: Build + sign + publish
+    needs: guard
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -78,7 +96,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
 
       - name: Set up Go
@@ -94,10 +112,14 @@ jobs:
 
       - name: Determine release version
         id: version
+        env:
+          # Passed via env, never interpolated into the script: git permits $/
+          # backticks in tag names and a crafted v* tag would otherwise execute
+          # on the runner (R8; same rule as the client installer workflows).
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          # On a tag push: github.ref_name = "v0.1.0"
-          # On workflow_dispatch: inputs.ref = "v0.1.0"
-          REF="${{ inputs.ref || github.ref_name }}"
+          # github.ref_name = "v0.1.0" (tag push, or dispatch AT the tag ref)
+          REF="$REF_NAME"
           # Strip the leading v for use in -X main.version
           VERSION="${REF#v}"
           # The VERSION file declares the next release (read by the release
@@ -186,7 +208,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.ref }}
 
       - name: Download all matrix artifacts
         uses: actions/download-artifact@v7
@@ -215,8 +237,15 @@ jobs:
 
       - name: Determine release tag
         id: tag
+        env:
+          # Pass the ref through the environment, never interpolate it into the
+          # script. A tag name is attacker-controllable, so a crafted v* tag
+          # carrying backticks or $() would otherwise execute on the publish
+          # runner before the release is even created (R8). Same treatment the
+          # guard and version steps above already got.
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          REF="${{ inputs.ref || github.ref_name }}"
+          REF="$REF_NAME"
           # STRICT stability rule: only a plain vX.Y.Z tag is a stable release.
           # Anything else (v1.2.3-rc.1, and typos like v1.2.3rc1) is marked
           # prerelease, so it can never become 'latest' -- which is what the
