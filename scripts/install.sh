@@ -582,7 +582,16 @@ rc_has_our_block() {
 # survive — and so an rc that is a SYMLINK into a dotfiles repo is written
 # THROUGH instead of being silently replaced by a regular file.
 replace_rc() {
-    { cat "$1" > "$rc"; } 2>/dev/null
+    if { cat "$1" > "$rc"; } 2>/dev/null; then
+        return 0
+    fi
+    # The redirection truncates before cat writes, so a write that dies partway
+    # (no space left, a vanishing mount) would leave the user's rc in pieces.
+    # Put the original contents back — best effort, but far better than leaving a
+    # file we don't own half-written. The caller then reports `failed` and prints
+    # the line to add by hand.
+    { cat "$rc_now" > "$rc"; } 2>/dev/null || true
+    return 1
 }
 
 if [ "$persist" = "yes" ]; then
