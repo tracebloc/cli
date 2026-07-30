@@ -648,7 +648,27 @@ rc_lists_dir() {
         {
             n = 0
             if ($0 ~ /(^|[^A-Za-z_])fish_add_path([^A-Za-z_]|$)/) {
-                for (i = 1; i <= NF; i++) if ($i !~ /^-/ && $i !~ /fish_add_path/) cand[++n] = $i
+                # Parse quotes instead of field-splitting. We WRITE
+                # fish_add_path "$PREFIX", so a prefix containing spaces became
+                # two whitespace fields here and never matched -- the installer
+                # then appended a second block and claimed it had added a PATH
+                # entry that was already present. The sibling reader further up
+                # already keeps the remainder intact; this now agrees with it.
+                rest = $0
+                sub(/^.*fish_add_path[[:space:]]*/, "", rest)
+                while (rest ~ /^-/) { sub(/^-[^[:space:]]*[[:space:]]*/, "", rest) }
+                sub(/[[:space:]]+$/, "", rest)
+                q = substr(rest, 1, 1)
+                if (q == "\"" || q == "\047") {
+                    # Quoted: everything up to the closing quote is ONE path,
+                    # spaces included.
+                    body = substr(rest, 2)
+                    close_at = index(body, q)
+                    cand[++n] = (close_at > 0) ? substr(body, 1, close_at - 1) : body
+                } else {
+                    # Unquoted: several bare paths may share the line.
+                    n = split(rest, cand, /[[:space:]]+/)
+                }
             } else if ($0 ~ /(^|[^A-Za-z_])[Pp][Aa][Tt][Hh][+]?=/) {
                 value = $0
                 sub(/^[^=]*=/, "", value)

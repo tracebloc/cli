@@ -469,6 +469,31 @@ for spec in "zsh:.zshrc:export PATH=" "fish:.config/fish/config.fish:fish_add_pa
   drop_sandbox
 done
 
+# -- 16. a fish prefix containing spaces is recognised as already listed ------
+# We WRITE `fish_add_path "$PREFIX"`, so rc_lists_dir must parse the quotes
+# rather than field-split: it used to see two whitespace fields, match neither,
+# append a second block, and report adding an entry that was already present.
+for quote_style in double single; do
+  make_sandbox yes
+  RC="$HOMEDIR/.config/fish/config.fish"
+  mkdir -p "$(dirname "$RC")"
+  SPACED="$SBX/my tools/bin"
+  mkdir -p "$SPACED"
+  if [ "$quote_style" = double ]; then
+    printf 'fish_add_path "%s"\n' "$SPACED" > "$RC"
+  else
+    printf "fish_add_path '%s'\n" "$SPACED" > "$RC"
+  fi
+  before=$(cat "$RC")
+  FAKE_SHELL=/bin/fish COSIGN_RESULT=0 run_installer_at "$SPACED" >/dev/null 2>&1
+  if [ "$(cat "$RC")" = "$before" ]; then
+    ok "fish: $quote_style-quoted prefix with spaces seen as already listed"
+  else
+    bad "fish: $quote_style-quoted prefix with spaces not matched (rc rewritten)"; sed 's/^/      /' "$RC"
+  fi
+  drop_sandbox
+done
+
 echo
 echo "install-verify: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
