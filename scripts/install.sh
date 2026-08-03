@@ -489,6 +489,255 @@ on_path=no
 # means the binary is usable now, so don't nag "open a new terminal".
 case ":$PATH:" in *":$PREFIX:"*|*":$PREFIX/:"*) on_path=yes ;; esac
 
+# --------------------------------------------------------------------
+# The ONE PATH block this installer owns.
+#
+# Before #433 the append was guarded only by "does the rc mention $PREFIX", so
+# every install with a DIFFERENT prefix appended another block and the profile
+# grew without bound: the v0.10.1 validation box collected TEN, each pointing at
+# a temp dir that no longer existed. We now tag our block with $PATH_MARKER and
+# a re-run REPLACES it instead of stacking a second one.
+#
+# Keep $PATH_MARKER byte-stable — matching it is exactly what lets a re-run find
+# and clean up the blocks older installers left behind.
+# --------------------------------------------------------------------
+PATH_MARKER="# Added by the tracebloc CLI installer"
+
+# The marker line we WRITE also records the directory, so a later run can prove
+# it wrote both halves of the block:
+#
+#   # Added by the tracebloc CLI installer (prefix: /opt/tracebloc)
+#   export PATH="/opt/tracebloc:$PATH"
+#
+# When the recorded prefix and the directory on the PATH line agree, the block is
+# unambiguously ours and can be reclaimed even if that directory has since been
+# deleted — which is what keeps the #433 cleanup working. $PATH_MARKER stays the
+# stable *beginning* of the line (matched literally, never as a whole line) so
+# blocks written by older installers are still recognised.
+PATH_MARKER_LINE="$PATH_MARKER (prefix: $PREFIX)"
+
+# _tb_owns_dir <recorded> <dir>: 0 if the block naming <dir>, under a marker that
+# recorded <recorded> ("-" when it recorded nothing), is one we wrote.
+#
+# The marker alone is NOT proof. A marker left dangling by a hand-edit can end up
+# directly above the USER's own PATH line, and taking that line with it would
+# silently delete a PATH entry we never added — unrecoverable, and the one outcome
+# this whole change exists to avoid (Bugbot on #434). So we require positive
+# evidence, in order:
+#   * a '$' anywhere in the dir -> never ours. We always write a literal,
+#     already-expanded path; "$HOME/mytools" is the user's own idiom.
+#   * the dir we are installing to right now -> safe to replace whoever wrote it,
+#     since we are about to write that very line.
+#   * the marker recorded this same dir -> we wrote the comment AND the line.
+#     Existence is irrelevant here: a recorded prefix that has been deleted is
+#     exactly the stale cruft #433 reported.
+#   * a legacy marker (recorded nothing) -> the only proof left is a tracebloc
+#     binary still sitting in the dir. A legacy marker over a VANISHED dir is
+#     deliberately NOT claimed: it is indistinguishable from the user's own entry
+#     for a directory they haven't created yet, so we keep their line and accept
+#     that one pre-#433 dead entry may survive.
+_tb_owns_dir() {
+    _tow_rec="$1"
+    _tow_dir="$2"
+    case "$_tow_dir" in
+        ''|-|*'$'*) return 1 ;;
+    esac
+    if [ "$_tow_dir" = "$PREFIX" ]; then return 0; fi
+    if [ "$_tow_rec" != "-" ] && [ "$_tow_rec" = "$_tow_dir" ]; then return 0; fi
+    if [ "$_tow_rec" = "-" ] && [ -d "$_tow_dir" ] && [ -e "$_tow_dir/$BINARY_NAME" ]; then return 0; fi
+    return 1
+}
+
+# strip_tb_path_block <file>: echo <file> minus every block we can PROVE we wrote
+# — the marker line, the PATH op on the line after it, and the blank separator on
+# the line before, but only when _tb_owns_dir vouches for the directory named.
+#
+# A block we cannot claim is left completely intact, comment and all. Two reasons:
+# we must never delete a PATH line we didn't write, and a pre-#433 block we can't
+# claim is far more useful to the user still labelled "Added by the tracebloc CLI
+# installer" (so they can see what it is and delete it) than reduced to a bare,
+# unexplained PATH line. Every other line is passed through unchanged and in
+# order: this is a file we do NOT own.
+strip_tb_path_block() {
+    _stb_file="$1"
+    _stb_owned=""
+    _stb_tab="$(printf '\t')"
+
+    # Emit one record per marker: its line number, the prefix that marker recorded
+    # ("-" for a legacy marker that recorded none), and the directory named on the
+    # line below it ("-" when that line isn't a PATH op shaped like one we write).
+    # Via a temp file rather than a pipe so the ownership verdicts land in THIS
+    # shell, and rather than a heredoc so the awk program needs no
+    # nested-expansion escaping.
+    #
+    # A marker is any line STARTING with $PATH_MARKER (index(...) == 1 is a
+    # literal test, so a path full of regex metacharacters can't misfire).
+    _stb_pairs="$TMP/tb.pairs"
+    awk -v marker="$PATH_MARKER" '
+        function recorded_prefix(line,   rest) {
+            rest = substr(line, length(marker) + 1)
+            # " (prefix: <dir>)" -> <dir>; anything else (including the bare
+            # legacy marker) records nothing.
+            if (rest ~ /^ \(prefix: .*\)$/) return substr(rest, 11, length(rest) - 11)
+            return "-"
+        }
+        NR > 1 && prev_is_marker {
+            dir = "-"
+            if ($0 ~ /^[[:space:]]*export[[:space:]]+PATH="[^"]+:\$PATH"[[:space:]]*$/) {
+                dir = $0
+                sub(/^[^"]*"/, "", dir)
+                sub(/:\$PATH".*$/, "", dir)
+            } else if ($0 ~ /^[[:space:]]*fish_add_path[[:space:]]/) {
+                dir = $0
+                sub(/^[[:space:]]*fish_add_path[[:space:]]+/, "", dir)
+                sub(/[[:space:]]+$/, "", dir)
+                gsub(/^["\047]|["\047]$/, "", dir)
+            }
+            printf "%d\t%s\t%s\n", NR - 1, prev_rec, dir
+        }
+        {
+            prev_is_marker = (index($0, marker) == 1)
+            prev_rec = prev_is_marker ? recorded_prefix($0) : "-"
+        }
+        END { if (NR >= 1 && prev_is_marker) printf "%d\t%s\t-\n", NR, prev_rec }
+    ' "$_stb_file" > "$_stb_pairs"
+
+    while IFS="$_stb_tab" read -r _stb_no _stb_rec _stb_dir; do
+        [ -n "$_stb_no" ] || continue
+        if _tb_owns_dir "$_stb_rec" "$_stb_dir"; then
+            _stb_owned="$_stb_owned,$_stb_no"
+        fi
+    done < "$_stb_pairs"
+
+    awk -v owned="$_stb_owned" '
+        BEGIN {
+            n = split(owned, a, ","); for (i = 1; i <= n; i++) if (a[i] != "") own[a[i] + 0] = 1
+        }
+        { line[NR] = $0 }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (!(i in own)) continue
+                drop[i] = 1          # the marker
+                drop[i + 1] = 1      # the PATH op under it (vouched for)
+                if (i > 1 && line[i - 1] == "") drop[i - 1] = 1   # our blank separator
+            }
+            for (i = 1; i <= NR; i++) if (!(i in drop)) print line[i]
+        }
+    ' "$_stb_file"
+}
+
+# rc_lists_dir <dir> <file>: 0 if a non-comment PATH op in <file> already puts
+# <dir> on PATH. Only an actual PATH op counts — a bare comment or an unrelated
+# line that merely mentions the dir must NOT pass, or we'd claim success while a
+# new shell still can't find the binary (#61). Handles PATH= / PATH+= / zsh's
+# path+=() / fish_add_path.
+#
+# It compares whole path COMPONENTS. The old test was `grep -F "$PREFIX"`, a
+# substring match: installing --prefix /opt/tb after /opt/tb2 matched the
+# /opt/tb2 line and reported "already in your PATH config" for a directory that
+# was on nobody's PATH (#433). Quotes and trailing slashes are tolerated on
+# either side.
+rc_lists_dir() {
+    awk -v want="$1" '
+        # exit 1, not a bare exit. A bare exit in BEGIN still runs END, so
+        # the status would be the END rule below -- 1 when nothing was found --
+        # but saying it outright means "no component to look for" can never be
+        # read as "already listed" by a later reader or a stricter awk.
+        BEGIN { sub(/\/+$/, "", want); if (want == "") exit 1 }
+        /^[[:space:]]*#/ { next }
+        {
+            n = 0
+            if ($0 ~ /(^|[^A-Za-z_])fish_add_path([^A-Za-z_]|$)/) {
+                # Parse quotes instead of field-splitting. We WRITE
+                # fish_add_path "$PREFIX", so a prefix containing spaces became
+                # two whitespace fields here and never matched -- the installer
+                # then appended a second block and claimed it had added a PATH
+                # entry that was already present. The sibling reader further up
+                # already keeps the remainder intact; this now agrees with it.
+                # Tokenise the argument list, honouring quotes. Three things
+                # this has to get right, each of which broke a previous
+                # attempt (cli#439):
+                #   * FIRST occurrence of the command, via index() -- a greedy
+                #     /^.*fish_add_path/ strips through an inline comment that
+                #     mentions it and loses the real argument;
+                #   * quoted arguments are ONE path, spaces included, because we
+                #     write fish_add_path "$PREFIX";
+                #   * fish_add_path takes MULTIPLE directories, so parsing must
+                #     continue past the first closing quote.
+                at = index($0, "fish_add_path")
+                rest = substr($0, at + 13)
+                while (length(rest) > 0) {
+                    sub(/^[[:space:]]+/, "", rest)
+                    if (length(rest) == 0) break
+                    ch = substr(rest, 1, 1)
+                    if (ch == "#") break            # trailing comment
+                    if (ch == "\"" || ch == "\047") {
+                        body = substr(rest, 2)
+                        close_at = index(body, ch)
+                        if (close_at > 0) {
+                            cand[++n] = substr(body, 1, close_at - 1)
+                            rest = substr(body, close_at + 1)
+                        } else {                    # unterminated quote
+                            cand[++n] = body
+                            rest = ""
+                        }
+                    } else {
+                        sp = match(rest, /[[:space:]]/)
+                        tok = (sp > 0) ? substr(rest, 1, sp - 1) : rest
+                        rest = (sp > 0) ? substr(rest, sp) : ""
+                        if (tok !~ /^-/) cand[++n] = tok   # skip flags
+                    }
+                }
+            } else if ($0 ~ /(^|[^A-Za-z_])[Pp][Aa][Tt][Hh][+]?=/) {
+                value = $0
+                sub(/^[^=]*=/, "", value)
+                n = split(value, cand, ":")
+            } else {
+                next
+            }
+            for (i = 1; i <= n; i++) {
+                dir = cand[i]
+                gsub(/[\047"()]/, "", dir)
+                sub(/\/+$/, "", dir)
+                if (dir == want) { found = 1; exit }
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$2"
+}
+
+# rc_same <fileA> <fileB>: 0 if the two files hold the same text. Used to skip
+# the write entirely when the rc already says what we were going to say —
+# `tracebloc upgrade` re-execs this installer, so the same prefix comes back
+# around on every upgrade and a file we don't own must not be rewritten to no
+# effect.
+#
+# Deliberately not cmp(1): cmp ships in diffutils, which a minimal container
+# image can lack, and a missing tool would silently turn "leave the file alone"
+# into "rewrite it every run". $(...) strips trailing newlines on both sides
+# equally, which is harmless here — a missing block is a far bigger difference
+# than a final newline.
+rc_same() {
+    [ "$(cat "$1")" = "$(cat "$2")" ]
+}
+
+# replace_rc <file>: make $rc's contents exactly <file>'s. Truncates the
+# existing path rather than mv'ing a temp over it, so the inode, mode and owner
+# survive — and so an rc that is a SYMLINK into a dotfiles repo is written
+# THROUGH instead of being silently replaced by a regular file.
+replace_rc() {
+    if { cat "$1" > "$rc"; } 2>/dev/null; then
+        return 0
+    fi
+    # The redirection truncates before cat writes, so a write that dies partway
+    # (no space left, a vanishing mount) would leave the user's rc in pieces.
+    # Put the original contents back — best effort, but far better than leaving a
+    # file we don't own half-written. The caller then reports `failed` and prints
+    # the line to add by hand.
+    { cat "$rc_now" > "$rc"; } 2>/dev/null || true
+    return 1
+}
+
 if [ "$persist" = "yes" ]; then
     shell_name="$(basename "${SHELL:-sh}")"
     case "$shell_name" in
@@ -503,32 +752,74 @@ if [ "$persist" = "yes" ]; then
     esac
 
     if [ "$shell_name" = "fish" ]; then
-        path_line="fish_add_path $PREFIX"
+        # Quoted, like the client installer's fish hint: a --prefix containing a
+        # space must survive into the rc as one argument.
+        path_line="fish_add_path \"$PREFIX\""
     else
         path_line="export PATH=\"$PREFIX:\$PATH\""
     fi
 
-    # Track three outcomes precisely so the message can neither over- nor
-    # under-claim: already configured / freshly added / couldn't write.
-    state=failed
+    # fish's rc lives in ~/.config/fish/, which may not exist yet; the others sit
+    # directly in $HOME. Create the parent or the write below has nowhere to go.
     mkdir -p "$(dirname "$rc")" 2>/dev/null || true
-    # Idempotency: only an actual, non-comment PATH op that references $PREFIX
-    # counts as "already configured" — a bare comment or an unrelated line that
-    # merely mentions the dir must NOT pass, or we'd claim success while a new
-    # shell still can't find the binary (#61). Match PATH= / PATH+= /
-    # fish_add_path / zsh's path+=() (case-insensitive); the [^A-Za-z_] guard
-    # keeps PYTHONPATH=/MYPATH= out.
-    if grep -v '^[[:space:]]*#' "$rc" 2>/dev/null \
-         | grep -iE '(^|[^A-Za-z_])path[+]?=|fish_add_path' \
-         | grep -qF "$PREFIX"; then
-        state=present   # rc already persists it — leave it alone
-    # Group the append so the redirection-open error (e.g. a read-only rc, or
-    # an unwritable parent dir) is suppressed too: `cmd >> "$rc" 2>/dev/null`
-    # leaks the shell's "Permission denied" because the >> open is attempted
-    # before 2>/dev/null applies. Wrapping in { ... } 2>/dev/null puts the
-    # stderr redirect in scope first.
-    elif { printf '\n# Added by the tracebloc CLI installer\n%s\n' "$path_line" >> "$rc"; } 2>/dev/null; then
-        state=added
+
+    # Read the rc as it stands (it may not exist yet) and compute what it looks
+    # like with our block removed. Deciding from the STRIPPED copy is what makes
+    # this idempotent: whatever we wrote on an earlier run is out of the way, so
+    # "is $PREFIX already handled?" is answered by the user's own lines only, and
+    # our block gets rewritten rather than duplicated.
+    rc_now="$TMP/rc.current"
+    rc_next="$TMP/rc.next"
+    rc_want="$TMP/rc.want"
+    : > "$rc_now"
+    if [ -f "$rc" ]; then cat "$rc" > "$rc_now" 2>/dev/null || : > "$rc_now"; fi
+    strip_tb_path_block "$rc_now" > "$rc_next"
+
+    # Build the contents the rc SHOULD have. If a line we don't own already puts
+    # $PREFIX on PATH we add nothing — the stripped copy is already the answer,
+    # and any block of ours it removed was redundant.
+    cat "$rc_next" > "$rc_want"
+    if rc_lists_dir "$PREFIX" "$rc_next"; then
+        persisted=yes
+    else
+        persisted=no
+        printf '\n%s\n%s\n' "$PATH_MARKER_LINE" "$path_line" >> "$rc_want"
+    fi
+
+    # Six outcomes, tracked precisely so the closing message can neither over- nor
+    # under-claim. The two failure states are distinct on purpose: only one of them
+    # means the user's PATH is actually wrong (Bugbot on #434).
+    #   present     — the rc already says this; nothing written
+    #   added       — our block appended to an rc that had none of ours
+    #   replaced    — our stale block rewritten to name $PREFIX
+    #   tidied      — $PREFIX was already persisted by the user; we removed a
+    #                 redundant block of ours
+    #   tidy_failed — as `tidied`, but the rewrite failed. PATH is still correct,
+    #                 so this is cosmetic and must NOT ask for a manual edit.
+    #   failed      — $PREFIX is not persisted and we could not write. The only
+    #                 case that warrants manual instructions.
+    state=failed
+    if rc_same "$rc_want" "$rc_now"; then
+        # Never touch a file we don't own to no effect — the re-install and
+        # `tracebloc upgrade` path lands here.
+        state=present
+    elif rc_same "$rc_next" "$rc_now"; then
+        # Nothing of ours was stripped, so the only difference is our new block:
+        # append rather than rewriting the whole file. (Reachable only when
+        # $persisted is no — otherwise rc_want would equal rc_now above.)
+        #
+        # Group the append so the redirection-open error (e.g. a read-only rc, or
+        # an unwritable parent dir) is suppressed too: `cmd >> "$rc" 2>/dev/null`
+        # leaks the shell's "Permission denied" because the >> open is attempted
+        # before 2>/dev/null applies. Wrapping in { ... } 2>/dev/null puts the
+        # stderr redirect in scope first.
+        if { printf '\n%s\n%s\n' "$PATH_MARKER_LINE" "$path_line" >> "$rc"; } 2>/dev/null; then
+            state=added
+        fi
+    elif replace_rc "$rc_want"; then
+        if [ "$persisted" = yes ]; then state=tidied; else state=replaced; fi
+    elif [ "$persisted" = yes ]; then
+        state=tidy_failed
     fi
 
     echo ""
@@ -544,13 +835,40 @@ if [ "$persist" = "yes" ]; then
                 echo "Open a new terminal — or load it now:  . \"$rc\""
             fi
             ;;
-        present)
+        replaced)
+            # An earlier install left a PATH line for a different prefix. We
+            # updated that one line in place instead of stacking another (#433).
+            echo "Updated the tracebloc PATH entry in $rc to $PREFIX."
+            if [ "$on_path" = yes ]; then
+                echo "tracebloc is ready to use now."
+            else
+                echo "Open a new terminal — or load it now:  . \"$rc\""
+            fi
+            ;;
+        present|tidied)
+            # `tidied` differs only in that we also dropped a redundant block of
+            # ours; either way the rc already persists $PREFIX, so the user has
+            # nothing to do.
             if [ "$on_path" = yes ]; then
                 echo "tracebloc is ready to use now ($PREFIX is on your PATH)."
             else
                 echo "$PREFIX is already in your PATH config ($rc) — nothing to add."
                 echo "If a new terminal can't find it yet, open one — or load it now:  . \"$rc\""
             fi
+            ;;
+        tidy_failed)
+            # $PREFIX IS persisted — by a line we don't own — and all we failed to
+            # do is remove a now-redundant block of ours. Telling the user to add a
+            # PATH line by hand here would be plain wrong: their PATH is correct.
+            # Say what actually happened and leave it at that (Bugbot on #434).
+            if [ "$on_path" = yes ]; then
+                echo "tracebloc is ready to use now ($PREFIX is on your PATH)."
+            else
+                echo "$PREFIX is already in your PATH config ($rc) — nothing to add."
+                echo "If a new terminal can't find it yet, open one — or load it now:  . \"$rc\""
+            fi
+            echo "Note: couldn't remove a leftover tracebloc PATH line from $rc"
+            echo "      (not writable). Harmless — your PATH is already correct."
             ;;
         *)
             # Usable in THIS shell already ($PREFIX on PATH) — say so even though
