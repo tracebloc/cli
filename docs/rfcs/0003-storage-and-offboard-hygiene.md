@@ -482,20 +482,38 @@ environment that cannot enforce a guarantee is explicitly marked *unsealed*
 
 ### 8.3 The guarantee matrix (D12)
 Enforcement differs per substrate; the matrix is the honest artifact a
-customer security review can quote. To be filled precisely as part of D12
-(cells: enforced / conditional / recommended / not available):
+customer security review can quote. Cell vocabulary: **enforced** — holds by
+construction on this substrate; **conditional** — holds when the substrate is
+configured for it (e.g. a NetworkPolicy-enforcing CNI); **recommended** —
+operator responsibility, not platform-enforced; **not available**. The seal
+check (`tracebloc client status --seal`, D12) is the live verifier — "verified"
+means it confirmed the guarantee on that cluster when the check ran. The
+chart-side input table and the recorded substrate runs live in
+[`client/docs/SEAL-CHECK.md`](../../../client/docs/SEAL-CHECK.md).
 
-| Guarantee | k3d local | EKS | AKS | OpenShift | bare metal |
+| Guarantee | k3d local (k3s) | EKS | AKS | OpenShift | bare metal |
 |---|---|---|---|---|---|
-| Storage inside cluster boundary (§5) | decided (C) | native PV | native PV | native PV | native PV |
-| NetworkPolicy egress enforcement | verify (k3s embedded) | conditional (CNI mode) | conditional (CNI) | native (OVN) | conditional (CNI) |
-| Encryption at rest | host FDE (recommended) | encrypted EBS | encrypted disks | platform | site policy |
-| Confidential compute (§6.5) | not available | phase 2 | phase 2 (pilot) | phase 2 | hardware-dependent |
+| Storage inside cluster boundary (§5) | enforced (Option C node-local; verified by `storage-assertions`) | enforced (native PV) | enforced (native PV) | enforced (native PV; PV scan degraded when `clusterScope=false`) | enforced (native PV) |
+| NetworkPolicy egress enforcement | conditional → **substrate-verified**: k3s's embedded controller blocks egress (k3d v5.8.3 / k3s v1.33.6+k3s1, 2026-07-30, §8.4); full-chart probe run pending | conditional (VPC CNI netpol agent / Calico / Cilium) — verified per-fleet by `egress-enforcement` | conditional (Azure NPM / Calico) — verified per-fleet | **enforced** (OVN-Kubernetes, native) — verified per-fleet | conditional (Flannel alone does **not** enforce) — verified per-fleet |
+| Encryption at rest | recommended (host FDE) | enforced (encrypted EBS) | enforced (encrypted disks) | platform-dependent | recommended (site policy) |
+| Confidential compute (§6.5) | not available | phase 2 (pilot) | phase 2 (pilot) | phase 2 | hardware-dependent |
+
+Reading a cell: only cells naming a live check (“verified by …”) are proven on
+that cluster by the seal check today. The cloud and bare-metal netpol cells
+read **conditional** because enforcement depends on the CNI the operator runs;
+the seal check's `egress-enforcement` probe confirms it per-fleet once the
+lockdown is flipped (D6 / #199). k3d's netpol *substrate* is run-verified
+(§8.4); recording the full-chart probe run is the one remaining item.
 
 ### 8.4 Verify local enforcement (D12)
-Do not assume k3d enforces NetworkPolicy — verify the k3s-embedded
-controller blocks egress on a local install and fold that probe into the
-seal check.
+Do not assume k3d enforces NetworkPolicy — verify the k3s-embedded controller
+blocks egress on a local install and fold that probe into the seal check.
+**Substrate status (2026-07-30):** run-verified — a deny-egress NetworkPolicy on
+k3d v5.8.3 / k3s v1.33.6+k3s1 took a probe pod reachable → blocked → reachable,
+so k3s *does* enforce egress on k3d. The remaining item is recording the
+full-chart `egress-enforcement` probe run against a deployed release; details
+and the reproducible method are in
+[`client/docs/SEAL-CHECK.md`](../../../client/docs/SEAL-CHECK.md) §8.4.
 
 ## 9. Messaging reconciliation
 
