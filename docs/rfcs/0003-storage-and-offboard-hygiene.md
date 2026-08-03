@@ -489,7 +489,7 @@ operator responsibility, not platform-enforced; **not available**. The seal
 check (`tracebloc client status --seal`, D12) is the live verifier — "verified"
 means it confirmed the guarantee on that cluster when the check ran. The
 chart-side input table and the recorded substrate runs live in
-[`client/docs/SEAL-CHECK.md`](../../../client/docs/SEAL-CHECK.md).
+[`client/docs/SEAL-CHECK.md`](https://github.com/tracebloc/client/blob/develop/docs/SEAL-CHECK.md).
 
 | Guarantee | k3d local (k3s) | EKS | AKS | OpenShift | bare metal |
 |---|---|---|---|---|---|
@@ -510,10 +510,11 @@ Do not assume k3d enforces NetworkPolicy — verify the k3s-embedded controller
 blocks egress on a local install and fold that probe into the seal check.
 **Substrate status (2026-07-30):** run-verified — a deny-egress NetworkPolicy on
 k3d v5.8.3 / k3s v1.33.6+k3s1 took a probe pod reachable → blocked → reachable,
-so k3s *does* enforce egress on k3d. The remaining item is recording the
-full-chart `egress-enforcement` probe run against a deployed release; details
-and the reproducible method are in
-[`client/docs/SEAL-CHECK.md`](../../../client/docs/SEAL-CHECK.md) §8.4.
+so k3s *does* enforce egress on k3d. That substrate run's evidence and its
+reproducible method are recorded in
+[`client/docs/SEAL-CHECK.md`](https://github.com/tracebloc/client/blob/develop/docs/SEAL-CHECK.md) §8.4.
+The one remaining item is recording the full-chart `egress-enforcement` probe
+run against a deployed release.
 
 ## 9. Messaging reconciliation
 
