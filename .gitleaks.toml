@@ -6,7 +6,7 @@ useDefault = true
 [[allowlists]]
 description = "synthetic idempotency key in submit tests (1 baseline entry)"
 targetRules = ["generic-api-key"]
-condition = "and"
+condition = "AND"
 paths = ['''_test\.go$''']
 regexTarget = "line"
 regexes = ['''IdempotencyKey:\s*"nightly-claims-[0-9.]+"''']
