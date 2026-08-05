@@ -63,7 +63,7 @@ jobs:
     outputs:
       e2e: ${{ steps.filter.outputs.e2e }}
     steps:
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         with:
           # Union of both suites' dependency surface. Kind suite: the
@@ -118,7 +118,7 @@ jobs:
       # kubeconfig resolution. kind ships a default StorageClass
       # (local-path), so the test's PVC binds.
       - name: Create kind cluster
-        uses: helm/kind-action@v1.14.0
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
 
       # Run the unit suite + the integration suite each under coverage, then merge
       # them (go tool covdata). The merge credits the real-cluster I/O seams —
@@ -167,11 +167,36 @@ jobs:
       # k3d (the cluster the CLI tears down) + helm (the release it uninstalls).
       # docker is preinstalled on ubuntu-latest. The test creates the throwaway
       # cluster itself, so only the binaries are needed here.
-      - name: Install k3d
-        run: curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/v5.7.4/install.sh | TAG=v5.7.4 bash
+      - name: Install k3d (version + digest pinned)
+        # Was `curl .../v5.7.4/install.sh | TAG=v5.7.4 bash` — version-pinned by
+        # tag, but a tag is mutable and the pipe executes the script before
+        # anything can inspect it (backend#1493 / D10). The script only detects
+        # OS/arch and copies the release binary anyway, so on a known runner it
+        # buys nothing: fetch the binary itself, verify against the pinned
+        # digest, and only then install. To bump, change version and digest
+        # together, taking the digest from the upstream release's checksums.txt.
+        env:
+          K3D_VERSION: "5.7.4"
+          K3D_SHA256: "1ac1da365236736a8df8c32107b54aca208384ab1d9a06771443c85ad698a5eb"
+        run: |
+          set -euo pipefail
+          # Assert the digest is a full SHA-256 before trusting it: sha256sum -c
+          # treats a malformed expectation line as "nothing to check" on some
+          # builds, which would let an empty env var wave the install through.
+          if [[ ! "${K3D_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::K3D_SHA256 is not a 64-character hex SHA-256 digest."
+            exit 1
+          fi
+          URL="https://github.com/k3d-io/k3d/releases/download/v${K3D_VERSION}/k3d-linux-amd64"
+          # -f so an HTTP error page is a curl failure, not a file handed to
+          # sha256sum.
+          curl -fsSL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/k3d" "$URL"
+          echo "${K3D_SHA256}  $RUNNER_TEMP/k3d" | sha256sum -c -
+          sudo install -m 0755 "$RUNNER_TEMP/k3d" /usr/local/bin/k3d
+          k3d version
 
       - name: Install helm
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.15.4
 
