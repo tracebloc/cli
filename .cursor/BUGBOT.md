@@ -117,6 +117,11 @@ Two things make this repo unusual and should shape every finding:
 - No `vendor/` directory — the module cache is used on purpose.
 - `// style-guard: allow` is a defined escape hatch but is currently used nowhere; if one
   appears, it is a novel exception worth scrutiny rather than an accepted pattern.
+- A `code-quality-caller.yml` that passes **no `secrets:` line** is correct, not an omission.
+  The shared `code-quality.yml` reusable references no secrets by contract
+  (RFC-BACKEND-1405 Q5, backend#1526): secretless callees get no secrets line, and if the
+  reusable ever gains one, callers switch to explicit per-secret passing — never
+  `secrets: inherit`. Flag the *addition* of `secrets: inherit` on this caller instead.
 
 ## Tone
 
