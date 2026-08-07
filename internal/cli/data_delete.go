@@ -170,7 +170,10 @@ undone — re-ingesting the data is the only way back.`)
 	//    running teardown against a cluster with no tracebloc install.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTargetFn(ctx, a.Printer, opts, binding, true)
+	// leadRedirect=false: the warning paragraph above is already this command's
+	// opening output, so the multi-client redirect note stays inline — no
+	// mid-output blank between the warning and the note (§380).
+	target, err := resolveClusterTargetFn(ctx, a.Printer, opts, binding, true, false)
 	if err != nil {
 		return binding.explain(err)
 	}

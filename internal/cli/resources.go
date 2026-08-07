@@ -83,10 +83,14 @@ Exit codes:
 // the jobs-manager env — the same source `cluster doctor` parses, so the two
 // never disagree.
 func runResourcesShow(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions) error {
-	p.Newline()
-
+	// The leading blank now lives in renderResources (before the first Stat), not
+	// here before resolve (§380): the resolve-time redirect in discoverRelease
+	// self-leads its own blank, so a pre-resolve Newline() here would stack a
+	// second one onto it in the multi-client case.
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false)
+	// leadRedirect=true: this resolve is the command's first output, so the
+	// multi-client redirect note self-leads its one leading blank (§380).
+	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true)
 	if err != nil {
 		return binding.explain(err)
 	}
@@ -125,6 +129,11 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 		train.HasGPU = false
 	}
 
+	// One leading blank before the view. It lives here (not in runResourcesShow
+	// before resolve) so it doesn't stack on the now-self-leading resolve-time
+	// redirect in the multi-client case (§380). Stat does not self-lead, so this
+	// is the view's only opening blank.
+	p.Newline()
 	if nodeErr != nil {
 		p.Stat("Your secure environment is equipped with:", "unavailable")
 		p.Hintf("     couldn't read capacity: %v", nodeErr)
