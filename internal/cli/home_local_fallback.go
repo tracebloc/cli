@@ -44,7 +44,7 @@ func localEnvFallback(ctx context.Context) envProbe {
 	}
 	// Namespace-only discovery — never the cluster-wide scan, mirroring the
 	// gate's no-silent-retarget rule even on a local cluster.
-	release, nsUsed, err := discoverRelease(ctx, nil, cs, resolved.Namespace, false)
+	release, nsUsed, err := discoverRelease(ctx, nil, cs, resolved.Namespace, false, false)
 	if err != nil {
 		return envProbe{local: localNoRelease}
 	}

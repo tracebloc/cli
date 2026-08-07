@@ -138,7 +138,12 @@ func runResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, opts clust
 	}
 
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTarget(ctx, p, opts, binding, false)
+	// leadRedirect=true: resolve is the command's first output. On the
+	// multi-client path the redirect note self-leads its one blank; on the
+	// single-client path there's no note and the confirm/dry-run self-lead
+	// supplies the only leading blank — so `set` keeps NO pre-resolve Newline()
+	// and never regresses the #375 double-blank (§380).
+	target, err := resolveClusterTarget(ctx, p, opts, binding, false, true)
 	if err != nil {
 		return binding.explain(err)
 	}

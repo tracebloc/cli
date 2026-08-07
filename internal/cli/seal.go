@@ -74,7 +74,9 @@ func (m sealModel) failedCount() int {
 // the chart's test hooks, run each one, render, and exit by the verdict.
 func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, timeout time.Duration) error {
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false)
+	// leadRedirect=true: seal prints nothing before resolving, so the
+	// multi-client redirect note is the opening line and self-leads its blank.
+	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true)
 	if err != nil {
 		return binding.explain(err)
 	}

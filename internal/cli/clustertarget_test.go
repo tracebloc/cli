@@ -41,7 +41,7 @@ func withClusterSeams(t *testing.T, cs kubernetes.Interface) {
 func TestResolveClusterTarget_NoClient_InstallerMessageExit4(t *testing.T) {
 	withClusterSeams(t, fake.NewSimpleClientset()) // empty cluster
 	_, err := resolveClusterTarget(context.Background(), nil,
-		cluster.KubeconfigOptions{}, activeClientBinding{}, true)
+		cluster.KubeconfigOptions{}, activeClientBinding{}, true, true)
 	if err == nil {
 		t.Fatal("expected an error when the cluster hosts no client")
 	}
@@ -67,7 +67,7 @@ func TestResolveClusterTarget_NoClient_InstallerMessageExit4(t *testing.T) {
 func TestResolveClusterTarget_MultipleClients_PickOneExit4(t *testing.T) {
 	withClusterSeams(t, fake.NewSimpleClientset(jmDep("alpha"), jmDep("beta")))
 	_, err := resolveClusterTarget(context.Background(), nil,
-		cluster.KubeconfigOptions{}, activeClientBinding{}, true)
+		cluster.KubeconfigOptions{}, activeClientBinding{}, true, true)
 	if err == nil {
 		t.Fatal("expected an error when multiple clients are present")
 	}
@@ -214,7 +214,7 @@ func TestDiscoverRelease_ScanFindsSingleClientElsewhere(t *testing.T) {
 	cs := fake.NewSimpleClientset(jmDep("lukas-01"))
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	release, nsUsed, err := discoverRelease(context.Background(), p, cs, "default", true)
+	release, nsUsed, err := discoverRelease(context.Background(), p, cs, "default", true, true)
 	if err != nil {
 		t.Fatalf("expected scan to find the client, got: %v", err)
 	}
@@ -228,18 +228,19 @@ func TestDiscoverRelease_ScanFindsSingleClientElsewhere(t *testing.T) {
 	if !strings.Contains(buf.String(), "lukas-01") {
 		t.Errorf("expected a visible note about the redirect, got: %q", buf.String())
 	}
-	// §380: the redirect self-leads with exactly one blank so every caller gets
-	// one leading blank without a per-command pre-resolve Newline() (which would
-	// stack into a double). It's the first thing printed on this path, so the
-	// output must open with a single "\n", not zero and not "\n\n".
-	if !strings.HasPrefix(buf.String(), "\n  ") || strings.HasPrefix(buf.String(), "\n\n") {
+	// §380: with leadRedirect=true (resolve-first callers) the redirect self-leads
+	// with exactly one blank, so a resolve-first command gets one leading blank
+	// without a pre-resolve Newline() that would stack into a double. The output
+	// must open with "\n  " (one blank, then the indented note) — anything opening
+	// with "\n\n" already fails this check, so no separate "\n\n" guard is needed.
+	if !strings.HasPrefix(buf.String(), "\n  ") {
 		t.Errorf("redirect must self-lead with exactly one blank line, got: %q", buf.String())
 	}
 }
 
 func TestDiscoverRelease_ScanMultipleNamespacesRefuses(t *testing.T) {
 	cs := fake.NewSimpleClientset(jmDep("alpha"), jmDep("beta"))
-	_, _, err := discoverRelease(context.Background(), nil, cs, "default", true)
+	_, _, err := discoverRelease(context.Background(), nil, cs, "default", true, false)
 	if err == nil {
 		t.Fatal("expected an error for multiple client namespaces")
 	}
@@ -257,7 +258,7 @@ func TestDiscoverRelease_NoScanWhenExplicit(t *testing.T) {
 	// The client exists in lukas-01, but the caller pinned the namespace —
 	// the scan must NOT engage and the plain discovery error stands.
 	cs := fake.NewSimpleClientset(jmDep("lukas-01"))
-	_, nsUsed, err := discoverRelease(context.Background(), nil, cs, "default", false)
+	_, nsUsed, err := discoverRelease(context.Background(), nil, cs, "default", false, false)
 	if err == nil {
 		t.Fatal("expected the namespace miss to stand when scan is disallowed")
 	}
@@ -275,7 +276,7 @@ func TestDiscoverRelease_NoScanWhenExplicit(t *testing.T) {
 // ErrNoParentRelease so the exit-4 mapping holds.
 func TestDiscoverRelease_ScanFindsNothing_InstallerGuidance(t *testing.T) {
 	cs := fake.NewSimpleClientset() // empty cluster — scan succeeds, finds nothing
-	_, _, err := discoverRelease(context.Background(), nil, cs, "default", true)
+	_, _, err := discoverRelease(context.Background(), nil, cs, "default", true, false)
 	if err == nil {
 		t.Fatal("expected an error on an empty cluster")
 	}
@@ -310,7 +311,7 @@ func TestDiscoverRelease_ScanUnavailable_KeepsOriginalError(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	_, _, err := discoverRelease(context.Background(), nil, cs, "default", true)
+	_, _, err := discoverRelease(context.Background(), nil, cs, "default", true, false)
 	if err == nil {
 		t.Fatal("expected an error when the scan can't run")
 	}

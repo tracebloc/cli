@@ -88,7 +88,9 @@ func runResourcesShow(ctx context.Context, p *ui.Printer, opts cluster.Kubeconfi
 	// self-leads its own blank, so a pre-resolve Newline() here would stack a
 	// second one onto it in the multi-client case.
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false)
+	// leadRedirect=true: this resolve is the command's first output, so the
+	// multi-client redirect note self-leads its one leading blank (§380).
+	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true)
 	if err != nil {
 		return binding.explain(err)
 	}

@@ -120,7 +120,9 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
 	binding := bindActiveClientNamespace(&opts)
-	target, err := resolveClusterTarget(ctx, p, opts, binding, false)
+	// leadRedirect=true: data list prints nothing before resolving, so the
+	// multi-client redirect note is the opening line and self-leads its blank.
+	target, err := resolveClusterTarget(ctx, p, opts, binding, false, true)
 	if err != nil {
 		return binding.explain(err)
 	}

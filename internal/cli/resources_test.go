@@ -88,16 +88,17 @@ func TestRenderResources_ShowsMachineAndTrainingCeiling(t *testing.T) {
 // TestShow_OpensWithSingleBlank: after the banner removal (#375), the outer
 // runResourcesShow must open with exactly ONE blank line before the view. Since
 // §380 the leading Newline() lives in renderResources (before the first Stat),
-// not in runResourcesShow before resolve — so a resolve-time redirect self-leads
-// its own blank instead of stacking on a pre-resolve one. Driving the outer
-// function through the resolve seam still pins the single-blank open end-to-end.
-// Mirrors TestSet_ConfirmOpensWithSingleBlank. (Asad review, #375.)
+// not in runResourcesShow before resolve. This test stubs resolveClusterTargetFn
+// to an already-resolved target, so it pins the SINGLE-CLIENT (no-redirect) open:
+// renderResources' one blank leads the view. The MULTI-CLIENT redirect+view open
+// is pinned separately by TestShow_MultiClientRedirectOpensWithSingleBlank, which
+// runs the real resolve seam so the redirect actually fires. (Asad review, #375.)
 func TestShow_OpensWithSingleBlank(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	orig := resolveClusterTargetFn
 	t.Cleanup(func() { resolveClusterTargetFn = orig })
 	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=4,memory=16Gi"})
-	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _ bool) (*clusterTarget, error) {
+	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _ bool) (*clusterTarget, error) {
 		return resTarget(cs), nil
 	}
 
@@ -116,6 +117,45 @@ func TestShow_OpensWithSingleBlank(t *testing.T) {
 	}
 	if strings.HasPrefix(out, "\n\n") {
 		t.Errorf("show opens with a DOUBLE blank line: %q", head)
+	}
+}
+
+// TestShow_MultiClientRedirectOpensWithSingleBlank drives runResourcesShow
+// through the REAL resolveClusterTarget (loadClusterFn/newClientsetFn seams — NO
+// resolveClusterTargetFn stub) on the §380 multi-client path: the kubeconfig's
+// default namespace hosts no client, the cluster-wide scan finds exactly one in
+// another namespace, so discoverRelease emits its redirect note (leadRedirect=
+// true → self-leading blank) before renderResources prints the view. The open
+// must be exactly ONE leading blank then the note — never zero (butting the
+// shell prompt, the original `set` bug) and never a double. This is the seam the
+// resolveClusterTargetFn-stubbing tests can't reach.
+func TestShow_MultiClientRedirectOpensWithSingleBlank(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // no active-client binding → scan allowed
+	// A Ready node for the machine line, plus a chart-labeled jobs-manager in a
+	// NON-default namespace so the scan retargets there. "default" (the seam's
+	// resolved namespace) hosts none, so per-namespace discovery misses and the
+	// cluster-wide scan engages.
+	cs := fake.NewClientset(resNode("n1", "8", "32Gi"), jmDep("lukas-01"))
+	withClusterSeams(t, cs)
+
+	var buf bytes.Buffer
+	// No --context/--namespace: allowScan stays true so the redirect can fire.
+	if err := runResourcesShow(context.Background(), ui.New(&buf, ui.WithColor(false)), cluster.KubeconfigOptions{}); err != nil {
+		t.Fatalf("runResourcesShow (multi-client): %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "lukas-01") {
+		t.Fatalf("redirect must actually run (note naming the retargeted namespace), got:\n%s", out)
+	}
+	head := out
+	if len(head) > 64 {
+		head = head[:64]
+	}
+	if !strings.HasPrefix(out, "\n  ") {
+		t.Errorf("multi-client show must open with a single blank then the redirect, got %q", head)
+	}
+	if strings.HasPrefix(out, "\n\n") {
+		t.Errorf("multi-client show opens with a DOUBLE blank line: %q", head)
 	}
 }
 
