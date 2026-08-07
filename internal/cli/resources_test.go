@@ -86,10 +86,11 @@ func TestRenderResources_ShowsMachineAndTrainingCeiling(t *testing.T) {
 }
 
 // TestShow_OpensWithSingleBlank: after the banner removal (#375), the outer
-// runResourcesShow must open with exactly ONE blank line before the view. The
-// leading Newline() lives in runResourcesShow (before resolve, so a resolve-time
-// redirect line also gets a blank) — a spot every renderResources-level test
-// skips — so pin it by driving the outer function through the resolve seam.
+// runResourcesShow must open with exactly ONE blank line before the view. Since
+// §380 the leading Newline() lives in renderResources (before the first Stat),
+// not in runResourcesShow before resolve — so a resolve-time redirect self-leads
+// its own blank instead of stacking on a pre-resolve one. Driving the outer
+// function through the resolve seam still pins the single-blank open end-to-end.
 // Mirrors TestSet_ConfirmOpensWithSingleBlank. (Asad review, #375.)
 func TestShow_OpensWithSingleBlank(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())

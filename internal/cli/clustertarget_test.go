@@ -228,6 +228,13 @@ func TestDiscoverRelease_ScanFindsSingleClientElsewhere(t *testing.T) {
 	if !strings.Contains(buf.String(), "lukas-01") {
 		t.Errorf("expected a visible note about the redirect, got: %q", buf.String())
 	}
+	// §380: the redirect self-leads with exactly one blank so every caller gets
+	// one leading blank without a per-command pre-resolve Newline() (which would
+	// stack into a double). It's the first thing printed on this path, so the
+	// output must open with a single "\n", not zero and not "\n\n".
+	if !strings.HasPrefix(buf.String(), "\n  ") || strings.HasPrefix(buf.String(), "\n\n") {
+		t.Errorf("redirect must self-lead with exactly one blank line, got: %q", buf.String())
+	}
 }
 
 func TestDiscoverRelease_ScanMultipleNamespacesRefuses(t *testing.T) {

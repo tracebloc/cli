@@ -140,6 +140,12 @@ func discoverRelease(ctx context.Context, p *ui.Printer, cs kubernetes.Interface
 			cluster.ErrNoParentRelease, namespace, strings.Join(found, ", "))
 	}
 	if p != nil {
+		// Self-lead with a single blank so this resolve-time redirect opens with
+		// exactly one leading blank for EVERY caller (§380) — no per-command
+		// pre-resolve Newline() needed (which would stack into a double). It's the
+		// first thing printed on the multi-client path, so the blank separates it
+		// from the shell prompt just as a command's own opening line would.
+		p.Newline()
 		p.Infof("No client in namespace %q — using the one in %q (override with --namespace).", namespace, found[0])
 	}
 	release, err = cluster.DiscoverParentRelease(ctx, cs, found[0])
