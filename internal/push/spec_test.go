@@ -666,3 +666,20 @@ func TestBuild_EmitsDetectedExtension_PassesSchema(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateTableName_ErrorMentionsHyphensAndSpaces pins the #386 wording:
+// the pattern-rejection error's first clause must spell out that hyphens and
+// spaces are not allowed and that _ is the separator — kebab-case (tsc-train)
+// is the common mistake, so the rejection has to say so up front.
+func TestValidateTableName_ErrorMentionsHyphensAndSpaces(t *testing.T) {
+	err := ValidateTableName("tsc-train")
+	if err == nil {
+		t.Fatal("ValidateTableName(\"tsc-train\") = nil, want a rejection")
+	}
+	msg := err.Error()
+	for _, want := range []string{"no hyphens or spaces", "use _"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %q", msg, want)
+		}
+	}
+}

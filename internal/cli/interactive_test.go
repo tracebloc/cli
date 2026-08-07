@@ -644,3 +644,71 @@ func orderedSubsequence(got, want []string) bool {
 	}
 	return i == len(want)
 }
+
+// TestStripSurroundingQuotes / TestDequotePath / TestValidateDatasetPathDequote
+// pin the interactive path-prompt quote handling (#386): a pasted quoted path
+// must resolve identically to the bare path, an unquoted path with spaces must
+// survive untouched, and a name that really contains a quote must not be
+// corrupted beyond the single matched outer pair.
+func TestStripSurroundingQuotes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"single-quoted", "'/a/b'", "/a/b"},
+		{"double-quoted", `"/a/b"`, "/a/b"},
+		{"bare", "/a/b", "/a/b"},
+		{"bare-with-spaces", "/a/b c/train", "/a/b c/train"},
+		{"quoted-with-spaces", "'/home/me/my data/train'", "/home/me/my data/train"},
+		{"name-contains-a-quote-unquoted", "/a/b's", "/a/b's"},
+		{"name-contains-a-quote-quoted-strips-one-pair", "'/a/b's'", "/a/b's"},
+		{"inner-quotes-left-untouched", `/a/"b"/c`, `/a/"b"/c`},
+		{"mismatched-quotes-left-untouched", `'/a/b"`, `'/a/b"`},
+		{"single-char-not-stripped", "'", "'"},
+		{"empty", "", ""},
+		{"empty-single-quotes", "''", ""},
+		{"empty-double-quotes", `""`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripSurroundingQuotes(tc.in); got != tc.want {
+				t.Errorf("stripSurroundingQuotes(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDequotePath(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"quoted-with-surrounding-space", "  '/a/b'  ", "/a/b"},
+		{"double-quoted", `"/a/b"`, "/a/b"},
+		{"bare-with-interior-spaces", " /a/b c ", "/a/b c"},
+		{"quoted-path-with-spaces", "'/home/me/my data/train'", "/home/me/my data/train"},
+		{"only-quotes", "''", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dequotePath(tc.in); got != tc.want {
+				t.Errorf("dequotePath(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateDatasetPathRejectsEmptyQuotes(t *testing.T) {
+	for _, in := range []string{"", "   ", "''", `""`, "  ''  "} {
+		if err := validateDatasetPath(in); err == nil {
+			t.Errorf("validateDatasetPath(%q) = nil, want a required-path error", in)
+		}
+	}
+	for _, in := range []string{"'/a/b'", "/a/b", "/a/b c"} {
+		if err := validateDatasetPath(in); err != nil {
+			t.Errorf("validateDatasetPath(%q) = %v, want nil", in, err)
+		}
+	}
+}
