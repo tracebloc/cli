@@ -741,3 +741,45 @@ func TestSet_ConfirmOpensWithSingleBlank(t *testing.T) {
 		t.Errorf("confirm path opens with a DOUBLE blank line (banner-removal regression): %q", head)
 	}
 }
+
+// TestSet_MultiClientRedirectOpensWithSingleBlank is the §380 multi-client mirror
+// of TestSet_ConfirmOpensWithSingleBlank: it drives the OUTER runResourcesSet
+// through the REAL resolveClusterTarget (loadClusterFn/newClientsetFn seams — NOT
+// applyResourcesSet directly, the way runSet does), so discoverRelease's redirect
+// actually fires. The kubeconfig default namespace hosts no client; the scan
+// finds exactly one elsewhere; the redirect note (leadRedirect=true) self-leads
+// its single blank, then the confirm PromptHint self-leads its own. The open must
+// be exactly ONE leading blank then the note — never zero (the original
+// "missing lead blank on set" bug) and never the #375 double.
+func TestSet_MultiClientRedirectOpensWithSingleBlank(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // no active-client binding → scan allowed
+	fakeHelm(t)
+	// Ready node for the fit-check, plus a chart-labeled jobs-manager in a
+	// NON-default namespace so the scan retargets there.
+	cs := fake.NewClientset(resNode("n1", "8", "32Gi"), jmDep("lukas-01"))
+	withClusterSeams(t, cs)
+
+	var buf bytes.Buffer
+	// No --context/--namespace so allowScan stays true; a flag-driven change
+	// (cores 4, up from the chart-default 2) so it's not a no-op and reaches the
+	// confirm the proceedingPrompter accepts.
+	err := runResourcesSet(context.Background(), ui.New(&buf, ui.WithColor(false)), proceedingPrompter{},
+		cluster.KubeconfigOptions{}, setReq{cores: "4", coresSet: true})
+	if err != nil {
+		t.Fatalf("runResourcesSet (multi-client): %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "lukas-01") {
+		t.Fatalf("redirect must actually run (note naming the retargeted namespace), got:\n%s", out)
+	}
+	head := out
+	if len(head) > 64 {
+		head = head[:64]
+	}
+	if !strings.HasPrefix(out, "\n  ") {
+		t.Errorf("multi-client set must open with a single blank then the redirect, got %q", head)
+	}
+	if strings.HasPrefix(out, "\n\n") {
+		t.Errorf("multi-client set opens with a DOUBLE blank line: %q", head)
+	}
+}

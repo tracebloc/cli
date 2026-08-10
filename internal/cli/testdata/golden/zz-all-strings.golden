@@ -460,7 +460,7 @@ screen. %s/%d are runtime placeholders.
 "label column"
 "label policy"
 "labels.csv"
-"letters, digits, and underscores; start with a letter or underscore  e.g. churn_train"
+"letters, digits, and underscores — no hyphens or spaces, use _; start with a letter or underscore  e.g. churn_train"
 "listing Pods for service %s/%s: %w"
 "listing chart-managed deployments in namespace %s: %w"
 "listing client deployments to check for an existing client: %w"

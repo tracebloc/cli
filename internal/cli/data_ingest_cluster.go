@@ -53,7 +53,10 @@ func connectIngestTarget(ctx context.Context, a *runDataIngestArgs) (target *clu
 	//    Bound before we waste time provisioning a Pod that can't mount it.
 	opts := cluster.KubeconfigOptions{Path: a.Kubeconfig, Context: a.Context, Namespace: a.Namespace}
 	binding := bindActiveClientNamespace(&opts)
-	target, err = resolveClusterTarget(ctx, a.Printer, opts, binding, true)
+	// leadRedirect=false: the "Connecting…" line above is already this command's
+	// opening output, so the multi-client redirect note stays inline — no
+	// mid-output blank between "Connecting…" and the note (§380).
+	target, err = resolveClusterTarget(ctx, a.Printer, opts, binding, true, false)
 	if err != nil {
 		return nil, "", false, binding.explain(err)
 	}

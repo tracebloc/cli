@@ -111,7 +111,8 @@ func ValidateTableName(table string) error {
 	}
 	if !tableNamePattern.MatchString(table) {
 		return fmt.Errorf(
-			"%q won't work — use letters, digits, and underscores, "+
+			"%q won't work — no hyphens or spaces (use _); "+
+				"use letters, digits, and underscores, "+
 				"starting with a letter or underscore (e.g. churn_train)",
 			table)
 	}

@@ -507,7 +507,7 @@ func realProbeEnv(ctx context.Context) envProbe {
 		return envProbe{local: localUnreachable}
 	}
 
-	release, nsUsed, err := discoverRelease(ctx, nil, cs, resolved.Namespace, binding.allowScan())
+	release, nsUsed, err := discoverRelease(ctx, nil, cs, resolved.Namespace, binding.allowScan(), false)
 	if err != nil {
 		if errors.Is(err, cluster.ErrNoParentRelease) {
 			// Cluster reachable, but this release isn't in the resolved context.
