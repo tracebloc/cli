@@ -91,7 +91,7 @@ install-hooks:
 	    echo "note: $$hook already exists and is not ours — leaving it untouched."; \
 	    echo "      add 'make check' to it, or remove it and re-run 'make install-hooks'."; \
 	  else \
-	    mkdir -p "$$(dirname "$$hook")"; \
+	    mkdir -p "$$(dirname "$$hook")" && \
 	    printf '%s\n' \
 	      '#!/bin/sh' \
 	      '# tracebloc pre-push hook installed by make setup (backend#1606).' \
@@ -102,9 +102,9 @@ install-hooks:
 	      '# (e.g. Go buildvcs under go test) then fails in a linked worktree with' \
 	      '# exit status 128. Clear them so make check runs as if from the shell.' \
 	      'unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY' \
-	      'exec make check' > "$$hook"; \
-	    chmod +x "$$hook"; \
-	    echo "==> pre-push hook installed at $$hook"; \
+	      'exec make check' > "$$hook" && \
+	    chmod +x "$$hook" && \
+	    echo "==> pre-push hook installed at $$hook" && \
 	    echo "    'make check' now runs before each push (skip once with: git push --no-verify)"; \
 	  fi; \
 	fi
