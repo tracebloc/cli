@@ -62,7 +62,12 @@ type clusterTarget struct {
 // `cluster doctor` is deliberately NOT a caller — it has a different exit
 // contract (2/3 escalation, with discovery reported as a check Result rather
 // than a hard error).
-func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, b activeClientBinding, needPVC bool) (*clusterTarget, error) {
+// leadRedirect threads to discoverRelease: pass true when this resolve is the
+// command's first output (resources show/set, data list, seal — the redirect
+// note then self-leads its one clean leading blank), false when the command has
+// already printed something before resolving (data ingest's "Connecting…", data
+// delete's warning — the note stays inline, no mid-output blank). See §380.
+func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, b activeClientBinding, needPVC, leadRedirect bool) (*clusterTarget, error) {
 	resolved, err := loadClusterFn(opts)
 	if err != nil {
 		return nil, &exitError{code: exitLocalEnv, err: fmt.Errorf("loading kubeconfig: %w", err)}
@@ -76,7 +81,7 @@ func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.Kubec
 	// --namespace/--context) and not the active-client binding. A binding miss
 	// must NOT silently redirect to some other client (§7.5 — that could be a
 	// different machine's client); it keeps the §7.3 "runs elsewhere" message.
-	release, nsUsed, err := discoverRelease(ctx, p, cs, resolved.Namespace, b.allowScan())
+	release, nsUsed, err := discoverRelease(ctx, p, cs, resolved.Namespace, b.allowScan(), leadRedirect)
 	if err != nil {
 		// Only a genuine "namespace has no release" maps to the §7.3
 		// "runs elsewhere" rewrite; an API/RBAC list failure or an
@@ -107,7 +112,16 @@ func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.Kubec
 // (never a silent redirect); several → name them and ask the user to pick;
 // none, or a scan failure (e.g. RBAC forbids the cluster-wide list) → the
 // original discovery error stands. Returns the namespace actually used.
-func discoverRelease(ctx context.Context, p *ui.Printer, cs kubernetes.Interface, namespace string, allowScan bool) (*cluster.ParentRelease, string, error) {
+//
+// leadRedirect says the redirect note, when it fires, is the command's FIRST
+// output — so it self-leads a single blank to separate it from the shell prompt
+// (§380: gives resources show/set/data list/seal one clean leading blank on the
+// multi-client path without a pre-resolve Newline() that would stack into a
+// double). Commands that print BEFORE resolving — cluster info's "Kubeconfig"
+// section, data ingest's "Connecting…" line, data delete's warning paragraph —
+// pass false so the note stays inline and never splits their output with a
+// mid-blank.
+func discoverRelease(ctx context.Context, p *ui.Printer, cs kubernetes.Interface, namespace string, allowScan, leadRedirect bool) (*cluster.ParentRelease, string, error) {
 	release, err := cluster.DiscoverParentRelease(ctx, cs, namespace)
 	if err == nil || !allowScan || !errors.Is(err, cluster.ErrNoParentRelease) {
 		return release, namespace, err
@@ -140,6 +154,16 @@ func discoverRelease(ctx context.Context, p *ui.Printer, cs kubernetes.Interface
 			cluster.ErrNoParentRelease, namespace, strings.Join(found, ", "))
 	}
 	if p != nil {
+		// Self-lead with a single blank ONLY when this redirect is the command's
+		// opening line (leadRedirect) — resolve-first commands (resources
+		// show/set, data list, seal) then get exactly one leading blank on the
+		// multi-client path without a pre-resolve Newline() that would stack into
+		// a double (§380). Output-first commands (cluster info, data ingest, data
+		// delete) pass leadRedirect=false so the note stays inline and doesn't
+		// split their already-open output with a mid-blank.
+		if leadRedirect {
+			p.Newline()
+		}
 		p.Infof("No client in namespace %q — using the one in %q (override with --namespace).", namespace, found[0])
 	}
 	release, err = cluster.DiscoverParentRelease(ctx, cs, found[0])
