@@ -97,6 +97,11 @@ install-hooks:
 	      '# tracebloc pre-push hook installed by make setup (backend#1606).' \
 	      '# Runs make check so a push that would be red in CI is caught locally first.' \
 	      '# It catches forgetting, not defiance: git push --no-verify skips it.' \
+	      '#' \
+	      '# Git exports GIT_DIR/GIT_WORK_TREE/etc into hook processes; a nested git' \
+	      '# (e.g. Go buildvcs under go test) then fails in a linked worktree with' \
+	      '# exit status 128. Clear them so make check runs as if from the shell.' \
+	      'unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY' \
 	      'exec make check' > "$$hook"; \
 	    chmod +x "$$hook"; \
 	    echo "==> pre-push hook installed at $$hook"; \
