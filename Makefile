@@ -6,6 +6,64 @@
 # by .github/workflows/build.yml — divergence between local and CI
 # is the bug this file exists to prevent.
 
+# ---- uniform entry points (backend#1606) -------------------------
+#
+# Every active tracebloc repo exposes the SAME three targets, so
+# "run your tests before you push" stops being a rule you can only
+# obey with per-repo tribal knowledge:
+#
+#   make check      lint + fast tests.   Budget: under 60 s.
+#   make check-all  everything CI runs (bar the CI-only heavy suites).
+#   make setup      install what those targets need.
+#
+# These are thin aliases over the targets that already existed here —
+# they add no new tool and no new configuration.
+
+.DEFAULT_GOAL := help
+
+.PHONY: help
+help:
+	@echo "tracebloc/cli — make targets"
+	@echo
+	@echo "  check       lint + fast tests (under 60 s) — run this before every push"
+	@echo "  check-all   everything CI runs; alias for 'ci'"
+	@echo "  setup       download Go module dependencies"
+	@echo "  build       build ./tracebloc"
+	@echo "  install     go install ./cmd/tracebloc"
+	@echo
+	@echo "  individual: vet test lint lint-full fmt fmt-check schema-check"
+	@echo "              vulncheck deadcode file-budget check-style clean"
+	@echo "              cover cover-integration cover-merge test-integration"
+
+# check: the pre-push tier. Measured 18 s on a warm module cache
+# (macOS, 14 cores) versus 56 s for the same set with -race.
+#
+# What is deliberately NOT here, and why:
+#   * -race          — 3x the wall clock for the same assertions; `ci`
+#                      still runs it, so the race signal is not lost.
+#   * lint/lint-full — `go run tool@version` builds the tool from
+#                      source on a cold cache (golangci-lint alone is
+#                      1-2 min) and needs the network.
+#   * vulncheck      — needs https://vuln.go.dev.
+#   * schema-check   — fetches data-ingestors at the pinned ref.
+#   * deadcode       — another `go run tool@version` fetch.
+.PHONY: check
+check: vet test-fast fmt-check file-budget check-style
+	@echo "==> check: green (run 'make check-all' for the full CI set)"
+
+# check-all: the full PR gate. `ci` is the original name and stays —
+# too much muscle memory and too many docs point at it.
+.PHONY: check-all
+check-all: ci
+
+# setup: no hooks are installed here (that is a later step of
+# backend#1606). Just warm the module cache so the first `make check`
+# in a fresh clone isn't dominated by downloads.
+.PHONY: setup
+setup:
+	$(GO) mod download
+	@echo "==> setup: module cache warm; run 'make check'"
+
 # ---- toggles -----------------------------------------------------
 
 GO            ?= go
@@ -49,6 +107,14 @@ vet:
 .PHONY: test
 test:
 	$(GO) test -race -cover $(PKGS)
+
+# test-fast: the same assertions without the race detector — 18 s vs
+# 56 s, which is the difference between `make check` fitting the
+# under-a-minute budget and not. `test` (with -race) still runs in
+# `ci` / `check-all`, so nothing is dropped from the PR gate.
+.PHONY: test-fast
+test-fast:
+	$(GO) test $(PKGS)
 
 # Integration tests (build-tagged `integration`) run against a REAL
 # cluster reachable via the ambient kubeconfig — kind in CI, or your
