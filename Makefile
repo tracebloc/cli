@@ -70,8 +70,8 @@ setup:
 # install-hooks: put a pre-push hook in place that runs `make check`, so the
 # canon's "run the tests before you push" is carried by the tooling rather than
 # by memory. Factored out of `setup` so it is independently runnable and
-# testable, and so a contributor who only wants the hook need not rebuild the
-# (minutes-long) venv.
+# testable, and so a contributor who only wants the hook need not rerun the
+# full `make setup`.
 #
 # Honest by design: the hook catches FORGETTING, not defiance — `git push
 # --no-verify` skips it and always will. And it refuses to clobber a pre-push
