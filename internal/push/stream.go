@@ -295,7 +295,20 @@ func StreamLayout(
 	// is usually the upstream cause. streamErr-only (no tarErr)
 	// is the genuine network/RBAC/remote-tar-failed case where
 	// the exec wording is the right surface.
-	if tarErr != nil {
+	// ...WITH ONE EXCEPTION: io.ErrClosedPipe on the tar side is SELF-INFLICTED. It's what
+	// the `pr.Close()` above produces when exec returned before draining stdin — i.e. the
+	// remote script died early. Reporting it as the cause hides the only actionable
+	// information we have (the remote stderr), and produces a genuinely dead-end message:
+	//
+	//   Error: building tar archive: packaging <file>: io: read/write on closed pipe
+	//
+	// A real customer hit exactly that. The remote script is `set -e; rm -rf D; mkdir -p D;
+	// tar -xf - -C D`, so a `mkdir: Permission denied` (root-owned hostPath dataset dir)
+	// aborts the shell before tar ever reads stdin — and the diagnosis was thrown away,
+	// turning a one-line permissions fix into a long investigation. So when the tar side
+	// only failed because we closed the pipe, defer to streamErr, which carries the remote
+	// stderr hint. A tar error from any OTHER cause (e.g. the size-cap recheck) still wins.
+	if tarErr != nil && !(errors.Is(tarErr, io.ErrClosedPipe) && streamErr != nil) {
 		return fmt.Errorf("building tar archive: %w", tarErr)
 	}
 	if streamErr != nil {
@@ -304,6 +317,10 @@ func StreamLayout(
 			hint = fmt.Sprintf(" (remote tar stderr: %s)", remote)
 		}
 		return fmt.Errorf("streaming files to %s/%s: %w%s", namespace, podName, streamErr, hint)
+	}
+	// Belt and braces: a closed-pipe tar error with NO streamErr shouldn't be swallowed.
+	if tarErr != nil {
+		return fmt.Errorf("building tar archive: %w", tarErr)
 	}
 	return nil
 }

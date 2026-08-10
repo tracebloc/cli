@@ -153,7 +153,10 @@ func runClusterInfo(
 	// Discover the client's release — with the cluster-wide fallback scan
 	// when the namespace is just the kubeconfig default, so diagnostics find
 	// the client in its slug namespace instead of dead-ending on "default".
-	release, nsUsed, err := discoverRelease(ctx, p, cs, resolved.Namespace, binding.allowScan())
+	// leadRedirect=false: the "Kubeconfig" Section + context/server Fields above
+	// are already printed, so the multi-client redirect note stays inline between
+	// the server and namespace Fields — no mid-section blank (§380).
+	release, nsUsed, err := discoverRelease(ctx, p, cs, resolved.Namespace, binding.allowScan(), false)
 	if err != nil {
 		// 4 = "cluster reachable, but no tracebloc client here."
 		// Distinct from the kubeconfig error (3) so callers can

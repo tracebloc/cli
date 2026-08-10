@@ -66,6 +66,7 @@ func (s surveyPrompter) Input(label, help, def string, validate func(string) err
 			return validate(s)
 		}))
 	}
+	defer enableKeyEventInput()()
 	if err := survey.AskOne(q, &ans, opts...); err != nil {
 		return "", mapErr(err)
 	}
@@ -75,6 +76,10 @@ func (s surveyPrompter) Input(label, help, def string, validate func(string) err
 func (s surveyPrompter) Select(label, help string, options []string, def string) (string, error) {
 	var ans string
 	q := &survey.Select{Message: s.message(label), Help: help, Options: options, Default: def}
+	// Arrow keys only work while the console delivers VK_* key events; see
+	// enableKeyEventInput. Without this, ↓ typed "[B" into the filter on Windows and
+	// the selection never moved (#475).
+	defer enableKeyEventInput()()
 	if err := survey.AskOne(q, &ans); err != nil {
 		return "", mapErr(err)
 	}
@@ -87,6 +92,7 @@ func (s surveyPrompter) Confirm(label string, def bool) (bool, error) {
 	// the cluster phase, with nothing printed before it — a bare "? (y/N)"
 	// there would be a label-less destructive prompt.
 	ans := def
+	defer enableKeyEventInput()()
 	if err := survey.AskOne(&survey.Confirm{Message: label, Default: def}, &ans); err != nil {
 		return false, mapErr(err)
 	}
@@ -201,7 +207,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		p.PromptStep(2, 4, "Please name the dataset.")
 		p.Newline()
 		ans, err := pr.Input("Please name the dataset.",
-			"letters, digits, and underscores; start with a letter or underscore  e.g. churn_train", "",
+			"letters, digits, and underscores — no hyphens or spaces, use _; start with a letter or underscore  e.g. churn_train", "",
 			push.ValidateTableName)
 		if err != nil {
 			return err
@@ -224,12 +230,16 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		if err != nil {
 			return err
 		}
-		// Trim before storing: validateDatasetPath only trims to check for
-		// emptiness, so a pasted " ~/data" (stray leading/trailing space)
-		// would otherwise survive here and defeat expandHome (first char
-		// isn't '~') — filepath.Abs then prepends cwd and the sniff / label
-		// preview read a path that doesn't exist.
-		a.LocalPath = strings.TrimSpace(ans)
+		// Canonicalize before storing: dequotePath trims stray leading/
+		// trailing space (a pasted " ~/data" would otherwise defeat expandHome,
+		// whose first char isn't '~', and filepath.Abs would prepend cwd so the
+		// sniff / label preview read a path that doesn't exist) AND strips one
+		// matching pair of surrounding quotes. Dragging a folder into a terminal
+		// auto-quotes it, and users habitually quote paths with spaces; this
+		// prompt is read literally, not shell-parsed, so the quotes would
+		// otherwise become part of the path (#386). validateDatasetPath applies
+		// the same canonicalization, so the re-prompt guard stays consistent.
+		a.LocalPath = dequotePath(ans)
 		prompted = true
 	}
 	// Expand a leading ~ now so the family sniff + label-header preview read
@@ -576,12 +586,43 @@ func renderReview(p *ui.Printer, a *runDataIngestArgs) {
 // validateDatasetPath rejects an empty / whitespace-only answer. Without
 // it, a bare Enter at the path prompt yields "" — and SniffFamily(Abs(""))
 // would sniff the current working directory before any empty-path guard
-// runs, silently ingesting whatever happens to sit in the cwd.
+// runs, silently ingesting whatever happens to sit in the cwd. It validates
+// the canonicalized value (dequotePath) so an answer that is nothing but an
+// empty pair of quotes is rejected at the prompt rather than surviving to
+// statDatasetPath with a messy error (#386).
 func validateDatasetPath(s string) error {
-	if strings.TrimSpace(s) == "" {
+	if dequotePath(s) == "" {
 		return fmt.Errorf("a dataset path is required")
 	}
 	return nil
+}
+
+// dequotePath canonicalizes an interactive path answer: it trims surrounding
+// whitespace, then strips one matching pair of surrounding quotes (via
+// stripSurroundingQuotes), then trims again in case the quotes wrapped padding.
+// It is applied ONLY to the guided prompt answer, never to the flag/positional
+// path — the shell already de-quotes those.
+func dequotePath(s string) string {
+	return strings.TrimSpace(stripSurroundingQuotes(strings.TrimSpace(s)))
+}
+
+// stripSurroundingQuotes removes at most one matching pair of surrounding
+// single or double quotes from s, and only when the first and last rune are
+// the SAME quote char (' or ') and s has at least two runes. Inner quotes are
+// left untouched, mismatched quotes ('…" ) are left as-is, and a path whose
+// real name contains a quote loses only that single matched outer pair. This
+// exists because the interactive path prompt is read literally, not
+// shell-parsed, so a pasted quoted path would otherwise fail to resolve (#386).
+func stripSurroundingQuotes(s string) string {
+	r := []rune(s)
+	if len(r) < 2 {
+		return s
+	}
+	first, last := r[0], r[len(r)-1]
+	if (first == '\'' || first == '"') && first == last {
+		return string(r[1 : len(r)-1])
+	}
+	return s
 }
 
 // validatePositiveInt accepts a string that parses to an int > 0.
