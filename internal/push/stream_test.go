@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -446,3 +448,83 @@ type fakeProgress struct {
 
 func (p *fakeProgress) Add(n int) { p.added += n }
 func (p *fakeProgress) Finish()   { p.finished = true }
+
+// TestStreamLayout_ClosedPipeDoesNotMaskRemoteError pins the diagnostic
+// that a real customer needed and did not get.
+//
+// The remote script is `set -e; rm -rf D; mkdir -p D; tar -xf - -C D`.
+// When the dataset dir is root-owned (hostPath ignores fsGroup), `mkdir`
+// fails with EACCES and the shell aborts BEFORE tar reads a single byte.
+// StreamLayout's own pr.Close() then unblocks the tar goroutine with
+// io.ErrClosedPipe — a self-inflicted error, not the cause.
+//
+// Reporting that tar error first produced a dead end:
+//
+//	building tar archive: packaging <file>: io: read/write on closed pipe
+//
+// which says nothing about permissions and cost a long investigation.
+// The remote stderr must win: it is the only actionable signal.
+func TestStreamLayout_ClosedPipeDoesNotMaskRemoteError(t *testing.T) {
+	layout, err := Discover(imgcDir(t))
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	fe := &fakeExecutor{
+		stderrToReturn: []byte("mkdir: can't create directory '/data/shared/ds': Permission denied"),
+		errToReturn:    errors.New("command terminated with exit code 1"),
+		// The remote died early: stdin is never drained, so the tar
+		// goroutine ends up on the closed pipe.
+		drainBeforeReturn: false,
+	}
+	err = StreamLayout(context.Background(), fe, "tracebloc", "p", "stage",
+		layout, "t", NoOpProgress{})
+	if err == nil {
+		t.Fatal("StreamLayout returned nil when the remote script failed")
+	}
+	// The actionable cause must survive.
+	for _, want := range []string{"streaming files", "Permission denied", "exit code 1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+	// And the self-inflicted pipe error must NOT be what we surface.
+	if strings.Contains(err.Error(), "building tar archive") {
+		t.Errorf("closed-pipe tar error masked the remote cause: %v", err)
+	}
+}
+
+// TestStreamLayout_TarErrorStillWinsWhenNotClosedPipe guards the other
+// side of the exception above: a tar-side failure from a REAL cause
+// (not our own pr.Close) must still take precedence, because it is the
+// upstream reason the stream died. Without this, narrowing the closed-pipe
+// case could regress the size-cap diagnostic Bugbot originally asked for.
+func TestStreamLayout_TarErrorStillWinsWhenNotClosedPipe(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "labels.csv"),
+		[]byte("filename,label\nmissing.png,cat\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+	// A layout naming a file that does not exist: writeLayoutTar fails on
+	// open (a genuine tar-side cause), not on a closed pipe.
+	layout := &LocalLayout{
+		Root:      dir,
+		LabelsCSV: filepath.Join(dir, "labels.csv"),
+		Images:    []string{filepath.Join(dir, "missing.png")},
+	}
+	fe := &fakeExecutor{
+		errToReturn: errors.New("command terminated with exit code 2"),
+		// Drain, so the tar writes SUCCEED and the goroutine reaches the
+		// missing file — producing a real open error rather than a pipe error.
+		// (With an undrained pipe the first header write blocks and fails with
+		// ErrClosedPipe, which is precisely the self-inflicted case above.)
+		drainBeforeReturn: true,
+	}
+	err := StreamLayout(context.Background(), fe, "tracebloc", "p", "stage",
+		layout, "t", NoOpProgress{})
+	if err == nil {
+		t.Fatal("StreamLayout returned nil on a tar-side failure")
+	}
+	if !strings.Contains(err.Error(), "building tar archive") {
+		t.Errorf("real tar error should win, got: %v", err)
+	}
+}
