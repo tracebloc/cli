@@ -66,6 +66,7 @@ func (s surveyPrompter) Input(label, help, def string, validate func(string) err
 			return validate(s)
 		}))
 	}
+	defer enableKeyEventInput()()
 	if err := survey.AskOne(q, &ans, opts...); err != nil {
 		return "", mapErr(err)
 	}
@@ -75,6 +76,10 @@ func (s surveyPrompter) Input(label, help, def string, validate func(string) err
 func (s surveyPrompter) Select(label, help string, options []string, def string) (string, error) {
 	var ans string
 	q := &survey.Select{Message: s.message(label), Help: help, Options: options, Default: def}
+	// Arrow keys only work while the console delivers VK_* key events; see
+	// enableKeyEventInput. Without this, ↓ typed "[B" into the filter on Windows and
+	// the selection never moved (#475).
+	defer enableKeyEventInput()()
 	if err := survey.AskOne(q, &ans); err != nil {
 		return "", mapErr(err)
 	}
@@ -87,6 +92,7 @@ func (s surveyPrompter) Confirm(label string, def bool) (bool, error) {
 	// the cluster phase, with nothing printed before it — a bare "? (y/N)"
 	// there would be a label-less destructive prompt.
 	ans := def
+	defer enableKeyEventInput()()
 	if err := survey.AskOne(&survey.Confirm{Message: label, Default: def}, &ans); err != nil {
 		return false, mapErr(err)
 	}
