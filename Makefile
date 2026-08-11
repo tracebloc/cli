@@ -14,7 +14,8 @@
 #
 #   make check      lint + fast tests.   Budget: under 60 s.
 #   make check-all  everything CI runs (bar the CI-only heavy suites).
-#   make setup      install what those targets need.
+#   make setup      install what those targets need, and a git pre-push hook
+#                   that runs `make check` (skip once with --no-verify).
 #
 # These are thin aliases over the targets that already existed here —
 # they add no new tool and no new configuration.
@@ -27,7 +28,8 @@ help:
 	@echo
 	@echo "  check       lint + fast tests (under 60 s) — run this before every push"
 	@echo "  check-all   everything CI runs; alias for 'ci'"
-	@echo "  setup       download Go module dependencies"
+	@echo "  setup       download Go module dependencies; installs the pre-push hook"
+	@echo "  install-hooks  (re)install the git pre-push hook that runs 'make check'"
 	@echo "  build       build ./tracebloc"
 	@echo "  install     go install ./cmd/tracebloc"
 	@echo
@@ -56,13 +58,56 @@ check: vet test-fast fmt-check file-budget check-style
 .PHONY: check-all
 check-all: ci
 
-# setup: no hooks are installed here (that is a later step of
-# backend#1606). Just warm the module cache so the first `make check`
-# in a fresh clone isn't dominated by downloads.
+# setup: warm the module cache so the first `make check` in a fresh
+# clone isn't dominated by downloads, then install the pre-push hook
+# (backend#1606).
 .PHONY: setup
 setup:
 	$(GO) mod download
 	@echo "==> setup: module cache warm; run 'make check'"
+	@$(MAKE) --no-print-directory install-hooks
+
+# install-hooks: put a pre-push hook in place that runs `make check`, so the
+# canon's "run the tests before you push" is carried by the tooling rather than
+# by memory. Factored out of `setup` so it is independently runnable and
+# testable, and so a contributor who only wants the hook need not rerun the
+# full `make setup`.
+#
+# Honest by design: the hook catches FORGETTING, not defiance — `git push
+# --no-verify` skips it and always will. And it refuses to clobber a pre-push
+# hook that is already there and not ours (e.g. one the pre-commit framework
+# manages), rather than silently stomping a contributor's setup.
+#
+# `git rev-parse --git-path hooks` (not a hard-coded `.git/hooks`) so it lands
+# in the right place inside a linked worktree or a submodule, where the git dir
+# is not `.git`.
+.PHONY: install-hooks
+install-hooks:
+	@if ! git rev-parse --git-dir >/dev/null 2>&1; then \
+	  echo "note: not a git checkout — skipping pre-push hook install"; \
+	else \
+	  hook="$$(git rev-parse --git-path hooks)/pre-push"; \
+	  if [ -e "$$hook" ] && ! grep -q 'tracebloc pre-push hook' "$$hook" 2>/dev/null; then \
+	    echo "note: $$hook already exists and is not ours — leaving it untouched."; \
+	    echo "      add 'make check' to it, or remove it and re-run 'make install-hooks'."; \
+	  else \
+	    mkdir -p "$$(dirname "$$hook")" && \
+	    printf '%s\n' \
+	      '#!/bin/sh' \
+	      '# tracebloc pre-push hook installed by make setup (backend#1606).' \
+	      '# Runs make check so a push that would be red in CI is caught locally first.' \
+	      '# It catches forgetting, not defiance: git push --no-verify skips it.' \
+	      '#' \
+	      '# Git exports GIT_DIR/GIT_WORK_TREE/etc into hook processes; a nested git' \
+	      '# (e.g. Go buildvcs under go test) then fails in a linked worktree with' \
+	      '# exit status 128. Clear them so make check runs as if from the shell.' \
+	      'unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY' \
+	      'exec make check' > "$$hook" && \
+	    chmod +x "$$hook" && \
+	    echo "==> pre-push hook installed at $$hook" && \
+	    echo "    'make check' now runs before each push (skip once with: git push --no-verify)"; \
+	  fi; \
+	fi
 
 # ---- toggles -----------------------------------------------------
 
