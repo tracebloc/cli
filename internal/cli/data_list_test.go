@@ -378,3 +378,41 @@ func TestSizeCellDistinguishesUnknownFromZero(t *testing.T) {
 		}
 	}
 }
+
+// The JSON view must carry the same distinction as the human view. Without size_known, a
+// consumer reading `size_bytes: 0` has exactly the ambiguity that made an entire modality
+// look sizeless while the lookup was fine (#491) — fixing only the rendered table would
+// have left every scripted consumer with the original bug.
+func TestDataListJSONExposesSizeKnown(t *testing.T) {
+	var buf bytes.Buffer
+	writeDataListJSON(&buf, "ns", "rel", []push.DatasetInfo{
+		{Name: "measured_zero", Extension: "txt", Records: 5, SizeKnown: true, SizeBytes: 0},
+		{Name: "unmeasured", Extension: "jpg", Records: 6},
+	}, false)
+
+	var out struct {
+		Details []struct {
+			Name      string `json:"name"`
+			SizeBytes int64  `json:"size_bytes"`
+			SizeKnown bool   `json:"size_known"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	rows := out.Details
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if !rows[0].SizeKnown || rows[0].SizeBytes != 0 {
+		t.Errorf("a measured zero must report size_known=true with 0 bytes, got known=%v bytes=%d",
+			rows[0].SizeKnown, rows[0].SizeBytes)
+	}
+	if rows[1].SizeKnown {
+		t.Errorf("an unmeasured dataset must report size_known=false")
+	}
+	// Must be present even when false/zero — omitempty here would recreate the ambiguity.
+	if !strings.Contains(buf.String(), `"size_known"`) {
+		t.Errorf("size_known must always be emitted, got %s", buf.String())
+	}
+}

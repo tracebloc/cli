@@ -510,6 +510,10 @@ type datasetJSON struct {
 	Classes   int64  `json:"classes,omitempty"`
 	Format    string `json:"format"`
 	SizeBytes int64  `json:"size_bytes"`
+	// size_known distinguishes a MEASURED zero from "we couldn't measure it". Without it a
+	// consumer reading size_bytes: 0 has the same ambiguity the human view had — which is
+	// how an entire modality read as sizeless while the lookup was fine (#491).
+	SizeKnown bool   `json:"size_known"`
 	Ingested  string `json:"ingested,omitempty"`
 	System    bool   `json:"system,omitempty"`
 }
@@ -540,6 +544,7 @@ func writeDataListJSON(w io.Writer, namespace, release string, infos []push.Data
 			Classes:   d.Classes,
 			Format:    formatCell(d, m),
 			SizeBytes: d.SizeBytes,
+			SizeKnown: d.SizeKnown,
 			Ingested:  ingestedISO(d.CreatedUnix),
 			System:    d.System,
 		})
