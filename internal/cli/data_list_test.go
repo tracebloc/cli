@@ -18,16 +18,16 @@ import (
 // sample datasets spanning every modality + a system table.
 func sampleInfos() []push.DatasetInfo {
 	return []push.DatasetInfo{
-		{Name: "image_train", Intent: "train", Records: 20, Classes: 2, Extension: "jpg", SizeBytes: 13210,
+		{Name: "image_train", Intent: "train", Records: 20, Classes: 2, Extension: "jpg", SizeBytes: 13210, SizeKnown: true,
 			CreatedUnix: 1721556000,
 			Columns:     []string{"id", "label", "data_intent", "data_id", "filename", "extension"}},
-		{Name: "text_test", Intent: "test", Records: 10, Classes: 2, Extension: "txt", SizeBytes: 770,
+		{Name: "text_test", Intent: "test", Records: 10, Classes: 2, Extension: "txt", SizeBytes: 770, SizeKnown: true,
 			Columns: []string{"id", "label", "data_intent", "data_id", "filename", "extension"}},
-		{Name: "tabular_train", Intent: "train", Records: 20, Classes: 2, Extension: "", SizeBytes: 206,
+		{Name: "tabular_train", Intent: "train", Records: 20, Classes: 2, Extension: "", SizeBytes: 206, SizeKnown: true,
 			Columns: []string{"id", "label", "data_intent", "data_id", "age", "income"}},
-		{Name: "timeseries_train", Intent: "train", Records: 36, Classes: 2, Extension: "", SizeBytes: 695,
+		{Name: "timeseries_train", Intent: "train", Records: 36, Classes: 2, Extension: "", SizeBytes: 695, SizeKnown: true,
 			Columns: []string{"id", "label", "data_intent", "data_id", "sequence_id", "timestamp", "hr", "temp"}},
-		{Name: "tracebloc_ingest_runs", SizeBytes: 4096, System: true,
+		{Name: "tracebloc_ingest_runs", SizeBytes: 4096, SizeKnown: true, System: true,
 			Columns: []string{"ingestor_id", "table_name", "registered"}},
 	}
 }
@@ -124,11 +124,11 @@ func TestDatasetRow_EmptyIsWarned(t *testing.T) {
 func TestRenderDataList_ColumnsAlign(t *testing.T) {
 	infos := []push.DatasetInfo{
 		// small: "5 documents" / "0.75 KiB" (both short)
-		{Name: "text_small", Intent: "train", Records: 5, Classes: 2, Extension: "txt", SizeBytes: 770,
+		{Name: "text_small", Intent: "train", Records: 5, Classes: 2, Extension: "txt", SizeBytes: 770, SizeKnown: true,
 			Columns: []string{"id", "label", "data_intent", "data_id", "filename", "extension"}},
 		// wide: "100000 documents" (16) + "100.00 KiB" (10) — both overflow the
 		// old fixed %-12s / %9s and would shift later columns without dynamic sizing.
-		{Name: "text_big", Intent: "test", Records: 100000, Classes: 2, Extension: "txt", SizeBytes: 102400,
+		{Name: "text_big", Intent: "test", Records: 100000, Classes: 2, Extension: "txt", SizeBytes: 102400, SizeKnown: true,
 			Columns: []string{"id", "label", "data_intent", "data_id", "filename", "extension"}},
 	}
 	var buf bytes.Buffer
@@ -215,9 +215,9 @@ func TestGroupLabel(t *testing.T) {
 // generic modality), ordered by modality family (Image before Tabular family).
 func TestRenderDataList_GroupsByTask(t *testing.T) {
 	infos := []push.DatasetInfo{
-		{Name: "sepsis_train", Task: "time_series_classification", Intent: "train", Records: 4000, Classes: 2, SizeBytes: 20480,
+		{Name: "sepsis_train", Task: "time_series_classification", Intent: "train", Records: 4000, Classes: 2, SizeBytes: 20480, SizeKnown: true,
 			Columns: []string{"id", "label", "data_intent", "data_id", "sequence_id", "timestamp", "hr"}},
-		{Name: "xray_train", Task: "image_classification", Intent: "train", Records: 50, Classes: 2, Extension: "jpg", SizeBytes: 1048576,
+		{Name: "xray_train", Task: "image_classification", Intent: "train", Records: 50, Classes: 2, Extension: "jpg", SizeBytes: 1048576, SizeKnown: true,
 			Columns: []string{"id", "label", "data_intent", "data_id", "filename", "extension"}},
 	}
 	var buf bytes.Buffer
@@ -355,5 +355,64 @@ func TestWriteDataListJSON(t *testing.T) {
 	_ = json.Unmarshal(buf.Bytes(), &got)
 	if got.Count != 5 {
 		t.Errorf("--all JSON should include the system table (count 5), got %d", got.Count)
+	}
+}
+
+// A measured zero and "couldn't measure" are different facts. sizeCell gated on
+// `SizeBytes > 0`, which rendered both as "—" — so an entire modality looked sizeless
+// while the lookup was working fine (du reports 0 blocks for small files on a
+// bind-mounted host filesystem, which is every text dataset).
+func TestSizeCellDistinguishesUnknownFromZero(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		d    push.DatasetInfo
+		want string
+	}{
+		{"never measured renders unknown", push.DatasetInfo{SizeKnown: false}, "—"},
+		{"measured zero is NOT unknown", push.DatasetInfo{SizeKnown: true, SizeBytes: 0}, "0 B"},
+		{"measured sub-KiB reports bytes", push.DatasetInfo{SizeKnown: true, SizeBytes: 512}, "512 B"},
+		{"measured real size", push.DatasetInfo{SizeKnown: true, SizeBytes: 184320}, "180.00 KiB"},
+	} {
+		if got := sizeCell(tc.d); got != tc.want {
+			t.Errorf("%s: sizeCell() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The JSON view must carry the same distinction as the human view. Without size_known, a
+// consumer reading `size_bytes: 0` has exactly the ambiguity that made an entire modality
+// look sizeless while the lookup was fine (#491) — fixing only the rendered table would
+// have left every scripted consumer with the original bug.
+func TestDataListJSONExposesSizeKnown(t *testing.T) {
+	var buf bytes.Buffer
+	writeDataListJSON(&buf, "ns", "rel", []push.DatasetInfo{
+		{Name: "measured_zero", Extension: "txt", Records: 5, SizeKnown: true, SizeBytes: 0},
+		{Name: "unmeasured", Extension: "jpg", Records: 6},
+	}, false)
+
+	var out struct {
+		Details []struct {
+			Name      string `json:"name"`
+			SizeBytes int64  `json:"size_bytes"`
+			SizeKnown bool   `json:"size_known"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	rows := out.Details
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if !rows[0].SizeKnown || rows[0].SizeBytes != 0 {
+		t.Errorf("a measured zero must report size_known=true with 0 bytes, got known=%v bytes=%d",
+			rows[0].SizeKnown, rows[0].SizeBytes)
+	}
+	if rows[1].SizeKnown {
+		t.Errorf("an unmeasured dataset must report size_known=false")
+	}
+	// Must be present even when false/zero — omitempty here would recreate the ambiguity.
+	if !strings.Contains(buf.String(), `"size_known"`) {
+		t.Errorf("size_known must always be emitted, got %s", buf.String())
 	}
 }

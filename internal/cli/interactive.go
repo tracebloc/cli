@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -97,6 +98,23 @@ func (s surveyPrompter) Confirm(label string, def bool) (bool, error) {
 		return false, mapErr(err)
 	}
 	return ans, nil
+}
+
+// datasetPathExamples returns the per-modality example paths in the form the user's own
+// OS actually uses.
+//
+// The prompt used to show only ~/data/... . On Windows that is not a path anyone has, and with
+// no example to copy the shape of, users invent formats the CLI can't read -- a Python-style
+// r"C:\Users\..." literal was what prompted client#615. An example in the right shape is the
+// cheapest possible fix: it costs one line of output and removes the guesswork.
+//
+// Parameterised on goos rather than reading runtime.GOOS internally so a test can exercise the
+// Windows branch from a Linux or macOS runner, where it would otherwise never be covered.
+func datasetPathExamples(goos string) (tabular, images, text string) {
+	if goos == "windows" {
+		return `C:\Users\you\data\patients.csv`, `C:\Users\you\data\xray\`, `C:\Users\you\data\reviews\`
+	}
+	return "~/data/patients.csv", "~/data/xray/", "~/data/reviews/"
 }
 
 // mapErr translates survey's Ctrl-C (terminal.InterruptErr) into our
@@ -221,12 +239,13 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	if a.LocalPath == "" {
 		p.PromptStep(3, 4, "Where is your data?")
 		p.Newline()
+		exTab, exImg, exTxt := datasetPathExamples(runtime.GOOS)
 		p.Hintf("Give the path to a file or a folder — whichever holds your data:")
-		p.Infof("Tabular   one CSV file                        e.g. ~/data/patients.csv")
-		p.Infof("Images    a folder with labels.csv + images/   e.g. ~/data/xray/")
-		p.Infof("Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/")
+		p.Infof("Tabular   one CSV file                        e.g. %s", exTab)
+		p.Infof("Images    a folder with labels.csv + images/   e.g. %s", exImg)
+		p.Infof("Text      a folder with labels.csv + texts/     e.g. %s", exTxt)
 		p.Newline()
-		ans, err := pr.Input("Where is your data?", "e.g. ~/data/patients.csv or ~/data/xray/", "", validateDatasetPath)
+		ans, err := pr.Input("Where is your data?", fmt.Sprintf("e.g. %s or %s", exTab, exImg), "", validateDatasetPath)
 		if err != nil {
 			return err
 		}

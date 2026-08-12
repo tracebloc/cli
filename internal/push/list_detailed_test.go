@@ -266,3 +266,57 @@ func TestListDatasetsDetailedWith_SkipsTaskWhenColumnAbsent(t *testing.T) {
 		t.Errorf("task lookup must be skipped when the column is absent; got %d queries", len(fe.queries))
 	}
 }
+
+// --- text datasets measured 0 bytes and rendered as "unknown" ---------------
+
+// du -sk measures st_blocks. On a bind-mounted host filesystem (Docker Desktop on
+// Windows, and any mount that doesn't report block allocation for small files) that
+// comes back 0 for a directory of small files -- so every text dataset (dozens of
+// small .txt documents) measured 0 bytes, while image datasets measured fine because
+// their files are large enough to occupy reported blocks. --apparent-size measures
+// st_size instead, which is the number a user means by "how big is my dataset".
+func TestDuCommandMeasuresApparentSize(t *testing.T) {
+	cmd := duSharedCmd()
+	if !strings.Contains(cmd, "--apparent-size") {
+		t.Fatalf("du must measure apparent size, not disk blocks: %q", cmd)
+	}
+	// busybox du rejects the flag, so support has to be probed rather than assumed.
+	if !strings.Contains(cmd, "/dev/null") {
+		t.Errorf("expected a cheap support probe before using the flag: %q", cmd)
+	}
+	// The trap: `du --apparent-size … || du …` looks equivalent but is not. du exits
+	// non-zero if ANY path is unreadable, so that chain silently falls back to block
+	// sizes whenever a single dataset dir is inaccessible -- reintroducing this bug
+	// intermittently, which is harder to diagnose than never having the flag.
+	if strings.Count(cmd, "du -sk $A") != 1 {
+		t.Errorf("the real du must run exactly once, parameterised by the probe: %q", cmd)
+	}
+}
+
+func TestApplyDatasetSizesRecordsWhetherItMeasured(t *testing.T) {
+	infos := []DatasetInfo{
+		{Name: "txt_small", Extension: "txt", Records: 120},        // measured, but 0 bytes
+		{Name: "img", Extension: "jpg", Records: 6},                // measured, real bytes
+		{Name: "unmeasured", Extension: "jpg", Records: 6},         // no du entry at all
+		{Name: "rows", Extension: "", Records: 8, DBBytes: 16384},  // row-based
+		{Name: "empty", Extension: "", Records: 0, DBBytes: 16384}, // empty table
+	}
+	applyDatasetSizes(infos, map[string]int64{"txt_small": 0, "img": 184320})
+
+	for _, tc := range []struct {
+		i         int
+		wantKnown bool
+		wantBytes int64
+	}{
+		{0, true, 0},      // a measured zero is KNOWN — the whole point
+		{1, true, 184320}, //
+		{2, false, 0},     // genuinely unknown: du had no entry
+		{3, true, 16384},  //
+		{4, false, 0},     // empty table: data_length is an InnoDB page, not data
+	} {
+		if infos[tc.i].SizeKnown != tc.wantKnown || infos[tc.i].SizeBytes != tc.wantBytes {
+			t.Errorf("%s: got known=%v bytes=%d, want known=%v bytes=%d",
+				infos[tc.i].Name, infos[tc.i].SizeKnown, infos[tc.i].SizeBytes, tc.wantKnown, tc.wantBytes)
+		}
+	}
+}
