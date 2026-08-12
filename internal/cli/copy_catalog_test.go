@@ -226,8 +226,8 @@ func TestCopyCatalog(t *testing.T) {
 
 	// ── 02 data list ────────────────────────────────────────────────────────────
 	sample := []push.DatasetInfo{
-		{Name: "xray_train", Intent: "train", Task: "image_classification", Records: 12000, Classes: 2, Extension: "jpg", SizeBytes: 1 << 30},
-		{Name: "xray_test", Intent: "test", Task: "image_classification", Records: 3000, Classes: 2, Extension: "jpg", SizeBytes: 256 << 20},
+		{Name: "xray_train", Intent: "train", Task: "image_classification", Records: 12000, Classes: 2, Extension: "jpg", SizeBytes: 1 << 30, SizeKnown: true},
+		{Name: "xray_test", Intent: "test", Task: "image_classification", Records: 3000, Classes: 2, Extension: "jpg", SizeBytes: 256 << 20, SizeKnown: true},
 		{Name: "ingest_run_journal", System: true},
 	}
 	dataListFile := doc(
