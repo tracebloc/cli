@@ -284,13 +284,19 @@ func datasetRow(d push.DatasetInfo, modality string, nameW, recW, sizeW, fmtW in
 		relativeTime(d.CreatedUnix)
 }
 
-// sizeCell renders a dataset's size, or an em dash when the du size is unknown
-// (jobs-manager unreachable, or a system table that isn't du-sized).
+// sizeCell renders a dataset's size, or an em dash when the size is genuinely
+// UNKNOWN — jobs-manager unreachable, or a system table that isn't du-sized.
+//
+// A measured zero is not unknown. Gating on `SizeBytes > 0` conflated the two, so a
+// dataset whose bytes measured 0 was indistinguishable from one the CLI never managed
+// to measure. That is how a whole modality could look sizeless while nothing was
+// actually wrong with the lookup: on a bind-mounted host filesystem `du` reports 0
+// blocks for small files, so every text dataset rendered "—". Report what we know.
 func sizeCell(d push.DatasetInfo) string {
-	if d.SizeBytes > 0 {
-		return push.HumanBytes(d.SizeBytes)
+	if !d.SizeKnown {
+		return "—"
 	}
-	return "—"
+	return push.HumanBytes(d.SizeBytes)
 }
 
 // dispW is a string's width in display columns (runes), not bytes — so the em
