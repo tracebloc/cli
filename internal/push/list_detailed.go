@@ -26,6 +26,7 @@ type DatasetInfo struct {
 	Classes     int64    // COUNT(DISTINCT label); 0 when unlabelled
 	Extension   string   // per-row file extension (jpg/png/txt); "" for CSV tasks
 	SizeBytes   int64    // dataset size: du of the shared PVC for file datasets, else the DB data_length; 0 if unavailable
+	SizeKnown   bool     // whether SizeBytes was actually MEASURED. 0 bytes and "couldn't measure" are different facts and must not render alike
 	DBBytes     int64    // information_schema.data_length — the size source for row-based (non-file) datasets
 	CreatedUnix int64    // create_time as a UTC epoch (tz-safe) — the sole time SoT, for both "ago" and JSON
 	Columns     []string // all column names — drives modality inference
@@ -79,9 +80,11 @@ func applyDatasetSizes(infos []DatasetInfo, duSizes map[string]int64) {
 		if infos[i].Extension != "" {
 			if b, ok := duSizes[infos[i].Name]; ok {
 				infos[i].SizeBytes = b // file dataset: real PVC size
+				infos[i].SizeKnown = true
 			}
 		} else if infos[i].Records > 0 {
 			infos[i].SizeBytes = infos[i].DBBytes // row-based with rows: DB data_length
+			infos[i].SizeKnown = true
 		}
 	}
 }
@@ -95,15 +98,36 @@ func datasetSizesFromShared(ctx context.Context, exec Executor, cs kubernetes.In
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
+	// --apparent-size measures st_size, plain `du -sk` measures st_blocks. That
+	// distinction is not cosmetic: on a bind-mounted host filesystem (Docker Desktop
+	// on Windows, and any mount that doesn't report block allocation for small files)
+	// st_blocks comes back 0 for a directory of small files, so every text dataset --
+	// dozens of small .txt documents -- measured 0 bytes and rendered as if its size
+	// were unknown, while image datasets measured fine because their files are large
+	// enough to occupy reported blocks.
+	//
+	// --apparent-size is GNU coreutils; busybox du rejects it. Probe support once on a
+	// trivial path and only then use it, rather than running the real du twice: du exits
+	// non-zero if ANY entry is unreadable, so a `du --apparent-size … || du …` chain
+	// would silently fall back to block sizes whenever a single path was unreadable --
+	// reintroducing the bug intermittently, which is worse than never having the flag.
+	//
 	// `|| true`: du exits non-zero if ANY entry is unreadable (jobs-manager can
 	// hit EACCES on some shared-PVC paths), but the readable entries are already
 	// on stdout — keep them rather than blanking every dataset's size.
 	if err := exec.Exec(ctx, namespace, pod, container,
-		[]string{"sh", "-c", "du -sk " + SharedRoot + "/* 2>/dev/null || true"},
+		[]string{"sh", "-c", duSharedCmd()},
 		nil, &stdout, &stderr); err != nil {
 		return nil
 	}
 	return parseDuOutput(stdout.String())
+}
+
+// duSharedCmd is the shell run inside jobs-manager to size the shared PVC. Kept as a
+// function so tests assert the string that actually ships rather than a copy of it.
+func duSharedCmd() string {
+	return "A=; du -sk --apparent-size /dev/null >/dev/null 2>&1 && A=--apparent-size; " +
+		"du -sk $A " + SharedRoot + "/* 2>/dev/null || true"
 }
 
 // parseDuOutput parses `du -sk` output ("<KiB>\t<path>" per line) into a
