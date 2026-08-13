@@ -3,6 +3,7 @@ package nodeboot
 import (
 	"context"
 	"errors"
+	"path"
 	"reflect"
 	"strings"
 	"testing"
@@ -194,6 +195,26 @@ func TestUninstallChart(t *testing.T) {
 	})
 }
 
+// Fixtures for the reclaim tests are image names a PRODUCER actually publishes
+// under the org's ghcr namespace, not names invented to match the code under test.
+// A fixture copied from the constant it is meant to guard can only ever confirm
+// self-consistency — which is how the constant's scope went unexamined (backend#1861).
+const (
+	// The GPU node image the Windows GPU installer pulls into the host docker daemon
+	// (client's scripts/install-k8s.ps1) and docker/k3s-cuda/build.sh publishes. The
+	// TAG here is illustrative — the k3s/CUDA pins live in the client repo, and this
+	// assertion is about the repository, not the pin — but the repository is exact.
+	prodGPUNodeImage = "ghcr.io/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04"
+	// The ingestor, the org's other published ghcr container package. It normally runs
+	// as an in-cluster Job rather than landing in the host daemon, but if it ever does,
+	// it is in scope.
+	prodIngestorImage = "ghcr.io/tracebloc/ingestor:0.8"
+	// A chart image, as the host daemon would print it: Docker Hub images are stored
+	// under their SHORT name, so this is what a `tracebloc/*` filter would match — and
+	// what imageReference must NOT reach.
+	prodChartImage = "tracebloc/jobs-manager:prod"
+)
+
 func TestPruneImages(t *testing.T) {
 	// Removal is by REFERENCE (repo:tag), not image ID (-q): an ID shared across
 	// repos refuses `docker rmi <id>` ("must be forced"). Removing by reference
@@ -203,15 +224,19 @@ func TestPruneImages(t *testing.T) {
 	t.Run("removes tracebloc images by reference, scoped + deduped", func(t *testing.T) {
 		f := newFakeRunner()
 		// A reference listed twice must be passed to rmi once.
-		f.on(listCmd, "ghcr.io/tracebloc/jobs-manager:1.9.5\nghcr.io/tracebloc/requests-proxy:1.9.5\nghcr.io/tracebloc/jobs-manager:1.9.5\n", nil)
+		f.on(listCmd, prodGPUNodeImage+"\n"+prodIngestorImage+"\n"+prodGPUNodeImage+"\n", nil)
 		f.install(t)
 
-		if err := PruneImages(context.Background()); err != nil {
+		n, err := PruneImages(context.Background())
+		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if n != 2 {
+			t.Fatalf("removed count = %d, want 2 (the deduped reference count)", n)
 		}
 		want := []string{
 			listCmd,
-			"docker rmi ghcr.io/tracebloc/jobs-manager:1.9.5 ghcr.io/tracebloc/requests-proxy:1.9.5",
+			"docker rmi " + prodGPUNodeImage + " " + prodIngestorImage,
 		}
 		if !reflect.DeepEqual(f.calls, want) {
 			t.Fatalf("calls = %v, want %v", f.calls, want)
@@ -231,28 +256,40 @@ func TestPruneImages(t *testing.T) {
 
 	t.Run("dangling <none> references are skipped", func(t *testing.T) {
 		f := newFakeRunner()
-		f.on(listCmd, "ghcr.io/tracebloc/jobs-manager:1.9.5\n<none>:<none>\nghcr.io/tracebloc/x:latest\n", nil)
+		f.on(listCmd, prodGPUNodeImage+"\n<none>:<none>\n"+prodIngestorImage+"\n", nil)
 		f.install(t)
 
-		if err := PruneImages(context.Background()); err != nil {
+		n, err := PruneImages(context.Background())
+		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		// The skipped <none> must not be counted as reclaimed either.
+		if n != 2 {
+			t.Fatalf("removed count = %d, want 2 (<none> is not reclaimed)", n)
 		}
 		want := []string{
 			listCmd,
-			"docker rmi ghcr.io/tracebloc/jobs-manager:1.9.5 ghcr.io/tracebloc/x:latest",
+			"docker rmi " + prodGPUNodeImage + " " + prodIngestorImage,
 		}
 		if !reflect.DeepEqual(f.calls, want) {
 			t.Fatalf("calls = %v, want %v (must skip <none>)", f.calls, want)
 		}
 	})
 
-	t.Run("no matching images is a clean no-op", func(t *testing.T) {
+	t.Run("no matching images reports 0 removed, not a silent success", func(t *testing.T) {
 		f := newFakeRunner()
 		f.on(listCmd, "\n  \n", nil)
 		f.install(t)
 
-		if err := PruneImages(context.Background()); err != nil {
+		// The ordinary outcome on every non-Windows-GPU host. It must be reportable as
+		// "nothing reclaimed" — a count of 0 with no error — so `tracebloc delete`
+		// cannot tell the operator it reclaimed disk it never touched (backend#1861).
+		n, err := PruneImages(context.Background())
+		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("removed count = %d, want 0", n)
 		}
 		want := []string{listCmd} // no rmi when there's nothing to remove
 		if !reflect.DeepEqual(f.calls, want) {
@@ -260,16 +297,20 @@ func TestPruneImages(t *testing.T) {
 		}
 	})
 
-	t.Run("best-effort: rmi failure surfaces to the caller", func(t *testing.T) {
+	t.Run("best-effort: rmi failure surfaces to the caller, and claims nothing removed", func(t *testing.T) {
 		f := newFakeRunner()
-		f.on(listCmd, "ghcr.io/tracebloc/x:1", nil)
-		f.on("docker rmi ghcr.io/tracebloc/x:1", "image is being used by running container", errors.New("exit 1"))
+		f.on(listCmd, prodGPUNodeImage, nil)
+		f.on("docker rmi "+prodGPUNodeImage, "image is being used by running container", errors.New("exit 1"))
 		f.install(t)
 
 		// PruneImages returns the error; the CALLER (tracebloc delete) treats it as
 		// best-effort and only notes it — that policy lives in the command, not here.
-		if err := PruneImages(context.Background()); err == nil {
+		n, err := PruneImages(context.Background())
+		if err == nil {
 			t.Fatal("want the rmi error surfaced, got nil")
+		}
+		if n != 0 {
+			t.Fatalf("removed count = %d, want 0: the rmi that would have reclaimed it failed", n)
 		}
 	})
 
@@ -278,8 +319,59 @@ func TestPruneImages(t *testing.T) {
 		f.on(listCmd, "", errors.New("docker daemon not running"))
 		f.install(t)
 
-		if err := PruneImages(context.Background()); err == nil {
+		if _, err := PruneImages(context.Background()); err == nil {
 			t.Fatal("want the docker images error surfaced, got nil")
+		}
+	})
+}
+
+// TestImageReferenceScope guards the reclaim's SCOPE against producer facts rather
+// than against itself. TestPruneImages can only check the shape of the commands —
+// its fake Runner is keyed on the exact command string, so it agrees with whatever
+// imageReference happens to say. That is why the scope went unexamined until
+// backend#1861.
+//
+// The two directions below are the decision, encoded: the pattern must cover the
+// GPU node image the installer really pulls into the host docker daemon, and must
+// NOT reach Docker Hub's tracebloc namespace, where the chart images (which the host
+// daemon never holds — containerd inside the k3d node pulls them) and a developer's
+// own locally built images live. Widening it to `tracebloc/*` reddens this test;
+// read imageReference's comment before changing either side.
+//
+// Scope only: this asserts which namespace the pattern selects, and deliberately does
+// not re-implement docker's reference matcher. That `docker images
+// --filter=reference=docker.io/tracebloc/*` matches nothing while `tracebloc/*`
+// matches Hub images — because the daemon stores Hub images under their short name —
+// was confirmed against a real daemon by hand, and is recorded in imageReference.
+func TestImageReferenceScope(t *testing.T) {
+	t.Run("covers the images published under the org's ghcr namespace", func(t *testing.T) {
+		for _, ref := range []string{prodGPUNodeImage, prodIngestorImage} {
+			ok, err := path.Match(imageReference, ref)
+			if err != nil {
+				t.Fatalf("bad pattern %q: %v", imageReference, err)
+			}
+			if !ok {
+				t.Errorf("imageReference %q does not cover %q — the reclaim would miss an image the installer pulls into the host daemon", imageReference, ref)
+			}
+		}
+	})
+
+	t.Run("does not reach Docker Hub's tracebloc namespace", func(t *testing.T) {
+		// Widening to reach these buys nothing (the host daemon never holds a chart
+		// image) and costs a developer their locally built images.
+		for _, ref := range []string{
+			prodChartImage,
+			"tracebloc/resource-monitor:prod",
+			"tracebloc/mysql-client:prod",
+			"tracebloc/client-image_classification-cpu:local",
+		} {
+			ok, err := path.Match(imageReference, ref)
+			if err != nil {
+				t.Fatalf("bad pattern %q: %v", imageReference, err)
+			}
+			if ok {
+				t.Errorf("imageReference %q reaches %q — an offboard must not remove Docker Hub tracebloc images the installer never pulled", imageReference, ref)
+			}
 		}
 	})
 }
