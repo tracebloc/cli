@@ -25,15 +25,21 @@ var Cmd = Script("", "")
 // Every part of the shape below is load-bearing. It is both executed (via
 // `bash -c`) and printed for a human to paste, so it has to hold up in both.
 //
-//   - A downloaded FILE, never `curl … | bash` and never `bash <(curl …)`.
-//     Piping makes the inner bash read its *program* from the pipe, so the
-//     installer's stdin is no longer the terminal and any interactive prompt
-//     (sign-in, or which non-admin user gets runtime access) gets EOF. Running a
-//     file leaves stdin on the TTY.
+//   - A downloaded FILE, run as `bash "$tmp"` — never `curl … | bash` and never
+//     `bash <(curl …)`. The two rejected forms fail for DIFFERENT reasons, worth
+//     keeping apart. `curl … | bash` steals stdin: the inner bash reads its
+//     *program* from the pipe, so the installer's stdin is no longer the terminal
+//     and any interactive prompt (sign-in, or which non-admin user gets runtime
+//     access) gets EOF. `bash <(curl …)` does NOT steal stdin — process
+//     substitution hands bash a `/dev/fd/N` *filename* to read the program from,
+//     so stdin stays the TTY; that's exactly why it was the original choice, and
+//     its only fatal flaw is fail-open (next bullet). Running a downloaded file
+//     gets both properties at once: stdin stays the TTY AND curl's exit is checked.
 //
 //   - `set -e` + `curl -o`, so a failed download (network/DNS/HTTP) aborts with
-//     curl's real exit status. Both of the shapes we replaced were fail-OPEN:
-//     `curl | bash` and `bash <(curl …)` both leave bash reading an empty script
+//     curl's real exit status. This is the load-bearing reason to reject BOTH
+//     pipe/substitution forms — and the ONLY thing wrong with `bash <(curl …)`:
+//     `curl | bash` and `bash <(curl …)` alike leave bash reading an empty script
 //     and exiting 0, so we'd report success while nothing ran. Downloading first
 //     also means a truncated mid-stream download is never partially executed.
 //
