@@ -7,6 +7,8 @@ import (
 	"runtime"
 
 	"github.com/spf13/cobra"
+
+	"github.com/tracebloc/cli/internal/installer"
 )
 
 // upgradeCmdName is the command that re-runs the installer; the update nudge
@@ -18,12 +20,12 @@ const upgradeCmdName = "upgrade"
 // installer ourselves: it re-downloads + cosign-verifies the release, replaces
 // the CLI, and upgrades the secure environment's services to match — so we never
 // re-implement (and risk diverging from) the installer's signature verification.
-// We download-then-execute the installer (installerRunScript, shared with
-// prepare-host) rather than `curl … | bash`: piping makes the inner bash read
-// its program from the pipe, stealing the installer's stdin so its interactive
-// prompts (sign-in, etc.) can't read the TTY. The URL is derived from
-// installerURL (doctor.go) so it can't drift from the other installer paths
-// (Bugbot #397).
+// We download-then-execute the installer (installer.Cmd, the shared bootstrap
+// idiom) rather than `curl … | bash`: piping makes the inner bash read its
+// program from the pipe, stealing the installer's stdin so its interactive
+// prompts (sign-in, etc.) can't read the TTY. Both the URL and the idiom come
+// from internal/installer so they can't drift from the other installer paths
+// (Bugbot #397, cli#396).
 //
 // Windows is different: we do NOT self-exec there. A running .exe is locked, so
 // install.ps1's Move-Item can't overwrite the very binary we're running, and
@@ -47,16 +49,17 @@ func upgradePlanFor(goos string) upgradePlan {
 	if goos == "windows" {
 		return upgradePlan{exec: false, manual: upgradeInstallerCmdWindows}
 	}
-	// Download-then-execute the verified installer (installerRunScript, shared
-	// with prepare-host): its `set -e`+`curl -o` fails closed on a bad download,
-	// and running a file (not a pipe) keeps the installer's stdin on the TTY. The
-	// manual hint reuses installCmd (doctor.go), the shared bootstrap idiom, so
-	// the URL has a single source.
+	// Download-then-execute the verified installer (installer.Cmd, shared with
+	// prepare-host and every printed remedy): its `set -e`+`curl -o` fails closed
+	// on a bad download, and running a file (not a pipe) keeps the installer's
+	// stdin on the TTY. exec and manual are deliberately the SAME string — if the
+	// run fails, the command we hand the user is byte-identical to the one that
+	// just failed.
 	return upgradePlan{
 		exec:   true,
 		name:   "bash",
-		args:   []string{"-c", installerRunScript("")},
-		manual: installCmd,
+		args:   []string{"-c", installer.Cmd},
+		manual: installer.Cmd,
 	}
 }
 
@@ -120,7 +123,7 @@ Safe to run anytime; safe to re-run.`,
 			// Stream the installer straight to the user's terminal, and keep
 			// stdin wired so its interactive prompts (sign-in, etc.) still work.
 			ctx := cmd.Context()
-			c := exec.CommandContext(ctx, plan.name, plan.args...) // #nosec G204 -- upgradePlanFor(runtime.GOOS) yields compile-time constants: "bash" -c installerRunScript(""); only the GOOS branch varies, no user input.
+			c := exec.CommandContext(ctx, plan.name, plan.args...) // #nosec G204 -- upgradePlanFor(runtime.GOOS) yields compile-time constants: "bash" -c installer.Cmd; only the GOOS branch varies, no user input.
 			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 			if err := c.Run(); err != nil {
 				// User aborted (Ctrl-C) or the parent context was cancelled: exit
