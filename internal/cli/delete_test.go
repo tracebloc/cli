@@ -33,10 +33,14 @@ func (typedNamePrompter) Confirm(_ string, def bool) (bool, error) { return def,
 // itself over the delete.go seams (no real k3d/helm/docker). Each step can be
 // scripted to fail so a test exercises the best-effort warn paths.
 type fakeNodeboot struct {
-	calls         []string
-	uninstallErr  error
-	teardownErr   error
-	pruneErr      error
+	calls        []string
+	uninstallErr error
+	teardownErr  error
+	pruneErr     error
+	// pruned is how many images the reclaim reports removing. Default 0 — the
+	// ordinary outcome, and the one `tracebloc delete` must not report as reclaimed
+	// disk (backend#1861).
+	pruned        int
 	removedPaths  []string
 	removeErr     map[string]error // path → error to return from osRemoveAll
 	statPresent   bool             // when true, osStat reports the data dir still exists after rm
@@ -61,9 +65,9 @@ func (f *fakeNodeboot) install(t *testing.T) {
 		f.calls = append(f.calls, "teardown:"+name)
 		return f.teardownErr
 	}
-	pruneImages = func(_ context.Context) error {
+	pruneImages = func(_ context.Context) (int, error) {
 		f.calls = append(f.calls, "prune")
-		return f.pruneErr
+		return f.pruned, f.pruneErr
 	}
 	osExecutable = func() (string, error) {
 		if f.executableErr != nil {
@@ -248,6 +252,78 @@ func TestDelete_RevokeNon403_ContinuesTeardown(t *testing.T) {
 	}
 	if strings.Contains(s, "Revoked this machine's credential") {
 		t.Errorf("must NOT claim the credential was revoked when it wasn't:\n%s", s)
+	}
+}
+
+// The image reclaim must report what it actually did. On every install except a
+// Windows GPU host there is no tracebloc image in the host docker daemon to remove
+// (the chart's images are pulled by containerd inside the k3d node and go with the
+// cluster teardown), so the reclaim is a no-op — and the offboard used to print
+// "Reclaimed tracebloc's downloaded images." regardless, telling the operator disk
+// was freed when nothing was touched (backend#1861).
+func TestDelete_ImageReclaim_ReportsWhatItDid(t *testing.T) {
+	cases := []struct {
+		name     string
+		pruned   int
+		pruneErr error
+		want     string
+		notWant  string
+	}{
+		{
+			name:    "nothing matched: says so instead of claiming a reclaim",
+			pruned:  0,
+			want:    "No tracebloc images left to reclaim",
+			notWant: "Reclaimed",
+		},
+		{
+			name:    "images removed: reports the count",
+			pruned:  2,
+			want:    "Reclaimed 2 tracebloc images.",
+			notWant: "No tracebloc images left",
+		},
+		{
+			name:    "a single image is not pluralized",
+			pruned:  1,
+			want:    "Reclaimed 1 tracebloc image.",
+			notWant: "images.",
+		},
+		{
+			name:     "removal failed: notes it, and claims no reclaim",
+			pruneErr: errors.New("docker daemon not running"),
+			want:     "Some tracebloc images couldn't be reclaimed",
+			notWant:  "Reclaimed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/edge-device/5/":
+					_, _ = w.Write([]byte(`{"id":5,"first_name":"gpu-box-01","namespace":"gpu-box-01","status":0}`))
+				default:
+					w.WriteHeader(http.StatusOK)
+				}
+			})
+			setActiveForDelete(t, "5", "gpu-box-01", "gpu-box-01")
+			fn := &fakeNodeboot{
+				executable: writeBinaryWithTBAlias(t),
+				pruned:     tc.pruned,
+				pruneErr:   tc.pruneErr,
+			}
+			fn.install(t)
+
+			var out bytes.Buffer
+			if err := runDelete(context.Background(), ui.New(&out), nil, deleteOpts{yes: true}); err != nil {
+				t.Fatalf("offboard: %v", err)
+			}
+			s := out.String()
+			if !strings.Contains(s, tc.want) {
+				t.Errorf("want %q in the output, got:\n%s", tc.want, s)
+			}
+			if strings.Contains(s, tc.notWant) {
+				t.Errorf("must NOT contain %q, got:\n%s", tc.notWant, s)
+			}
+		})
 	}
 }
 
