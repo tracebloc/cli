@@ -737,9 +737,13 @@ is "remove tracebloc," and the verb no longer collides with `data delete`. It is
 a typed confirm:
 
 1. **Removed from this machine.** Revoke the machine credential (below); `helm
-   uninstall`; `k3d cluster delete` (this also prunes the dangling kubeconfig entry);
-   reclaim the tracebloc container images (scoped to `ghcr.io/tracebloc/*` — **never** a
-   blanket `docker system prune`); `rm -rf ~/.tracebloc`. On the single-host path the
+   uninstall`; `k3d cluster delete` (this also prunes the dangling kubeconfig entry —
+   and, since the chart's images are pulled by containerd *inside* the k3d node, this
+   is the step that reclaims them); reclaim the tracebloc images left in the **host**
+   docker daemon (scoped to `ghcr.io/tracebloc/*`, which on the host means the GPU node
+   image — **never** a blanket `docker system prune`, and never Docker Hub's
+   `tracebloc/*`, where an operator's own locally built images live); `rm -rf
+   ~/.tracebloc`. On the single-host path the
    on-prem datasets live *there* (host bind-mount, not node-ephemeral — neither
    `helm uninstall` nor `k3d cluster delete` erases them), so this is the one
    irreversible step. Finally remove the CLI binary + `tb` alias.

@@ -23,10 +23,36 @@ import (
 // (scripts/lib/common.sh) so the CLI-driven teardown targets the same cluster.
 const ClusterName = "tracebloc"
 
-// imageReference is the ghcr namespace the installer pulls tracebloc images from.
-// PruneImages is SCOPED to this reference so an offboard reclaims only tracebloc's
-// images — never a blanket `docker system prune` that would evict images other
-// workloads on the host depend on (RFC-0001 §7.10 "never a blanket prune").
+// imageReference scopes the offboard's image reclaim.
+//
+// `docker images` reads the HOST docker daemon, and the only tracebloc-namespaced
+// image the installer ever puts there is the GPU node image the Windows GPU path
+// pulls — `docker pull ghcr.io/tracebloc/k3s-cuda:<k3s>-cuda-<cuda-base>`, see the
+// client repo's scripts/install-k8s.ps1 (which also builds it locally under the
+// same name when no prebuilt one is reachable).
+//
+// The chart's own images are deliberately NOT in scope, and widening the pattern
+// to reach them would be wrong twice over:
+//
+//   - They never enter the host daemon. Every chart image (jobs-manager,
+//     pods-monitor, resource-monitor, mysql-client), the ingestor Job, and the
+//     spawned training images are pulled by containerd INSIDE the k3d node, so
+//     `docker images` on the host does not list them — nothing in the installer
+//     does a host `docker pull` or `k3d image import` for them. Their disk is
+//     reclaimed by `k3d cluster delete`, which runs before this step and takes the
+//     node container's image store with it.
+//   - Docker Hub images are stored under their SHORT name, so `tracebloc/*` is the
+//     only filter form that would match them — and that also matches a developer's
+//     locally built `tracebloc/…` images, which the installer never pulled and the
+//     operator never asked us to delete.
+//
+// So the reclaim stays SCOPED to this reference rather than being a blanket
+// `docker system prune` that would evict images other workloads on the host depend
+// on (RFC-0001 §7.10 "never a blanket prune").
+//
+// Known gap: a mirror / air-gapped install re-homes the node image onto the
+// operator's own registry host, which this pattern cannot name, so on that path the
+// node image is left behind.
 const imageReference = "ghcr.io/tracebloc/*"
 
 // Runner executes an external command and returns its combined output. A package
@@ -102,18 +128,23 @@ func UninstallChart(ctx context.Context, namespace, kubeconfig, kubeContext stri
 	return err
 }
 
-// PruneImages reclaims the tracebloc container images pulled during install by
-// reference — `docker images --filter=reference="ghcr.io/tracebloc/*" --format
-// {{.Repository}}:{{.Tag}} | docker rmi` (by repo:tag, NOT image ID: a shared ID
-// refuses `docker rmi <id>` — see the body). It is
-// SCOPED to the tracebloc image reference and best-effort by design (RFC-0001
-// §7.10): reclaiming disk is a nice-to-have on offboard, not a hard step, so a
-// docker failure or an image still in use by a container is not fatal. It is
-// NEVER a blanket `docker system prune`, which would evict images other workloads
-// on the host depend on.
+// PruneImages reclaims the tracebloc images the installer left in the host docker
+// daemon, by reference — `docker images --filter=reference="ghcr.io/tracebloc/*"
+// --format {{.Repository}}:{{.Tag}} | docker rmi` (by repo:tag, NOT image ID: a
+// shared ID refuses `docker rmi <id>` — see the body). It is SCOPED to
+// imageReference (read the rationale there before widening it) and best-effort by
+// design (RFC-0001 §7.10): reclaiming disk is a nice-to-have on offboard, not a
+// hard step, so a docker failure or an image still in use by a container is not
+// fatal. It is NEVER a blanket `docker system prune`, which would evict images
+// other workloads on the host depend on.
 //
-// No matching images (nothing to reclaim) is a clean no-op, not an error.
-func PruneImages(ctx context.Context) error {
+// It returns how many references it removed, so the caller can tell a real reclaim
+// from a no-op instead of reporting reclaimed disk either way. No matching images
+// is a clean no-op — (0, nil), not an error — and that is the ordinary outcome:
+// only a Windows GPU host has a tracebloc image in the host daemon to begin with.
+// A removal failure returns (0, err): nothing is claimed reclaimed when the `rmi`
+// that would have reclaimed it did not succeed.
+func PruneImages(ctx context.Context) (int, error) {
 	// List by REFERENCE (repo:tag), not image ID (-q). An image ID shared across
 	// multiple repositories refuses `docker rmi <id>` ("must be forced — image is
 	// referenced in multiple repositories"). Removing by reference untags only OUR
@@ -123,7 +154,7 @@ func PruneImages(ctx context.Context) error {
 	out, err := run(ctx, "docker", "images", "--filter=reference="+imageReference,
 		"--format", "{{.Repository}}:{{.Tag}}")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	// Dedupe and drop dangling refs: an image that lost its tag prints "<none>"
 	// for the repo or tag, which can't be removed by reference (`docker image
@@ -136,10 +167,12 @@ func PruneImages(ctx context.Context) error {
 		refs = append(refs, ref)
 	}
 	if len(refs) == 0 {
-		return nil // nothing tracebloc-owned to reclaim
+		return 0, nil // nothing tracebloc-owned in the host daemon to reclaim
 	}
-	_, err = run(ctx, "docker", append([]string{"rmi"}, refs...)...)
-	return err
+	if _, err = run(ctx, "docker", append([]string{"rmi"}, refs...)...); err != nil {
+		return 0, err
+	}
+	return len(refs), nil
 }
 
 // dedupeLines splits combined `docker images` output into unique, non-empty,

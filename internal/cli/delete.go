@@ -303,9 +303,12 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		p.Successf("Removed the local environment.")
 	}
 
-	// 4. Reclaim the tracebloc container images (SCOPED to ghcr.io/tracebloc/*,
-	//    never a blanket prune — best-effort).
-	if perr := pruneImages(ctx); perr != nil {
+	// 4. Reclaim the tracebloc images left in the HOST docker daemon (SCOPED to
+	//    ghcr.io/tracebloc/* — see nodeboot.imageReference for why that is the right
+	//    scope and not a wider one; never a blanket prune — best-effort). Step 3
+	//    above already took the images the cluster pulled, so 0 removed here is the
+	//    ordinary outcome and must not be reported as reclaimed disk.
+	if n, perr := pruneImages(ctx); perr != nil {
 		// Pure disk cleanup — a failure here changes nothing about the offboard
 		// (it's excluded from `degraded`). Keep it a quiet, plain note; don't leak
 		// the raw docker/daemon error at the user.
@@ -314,8 +317,12 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 		// at the scoped removal that actually matches the failure mode — the same
 		// reference PruneImages targets — never a blanket prune.
 		p.Infof("Some tracebloc images couldn't be reclaimed (harmless) — remove them later with `docker rmi $(docker images --filter=reference='ghcr.io/tracebloc/*' --format '{{.Repository}}:{{.Tag}}')`.")
+	} else if n == 0 {
+		// Say nothing happened, rather than claiming disk we didn't reclaim. This is
+		// the normal path: the cluster teardown already took the images it pulled.
+		p.Infof("No tracebloc images left to reclaim.")
 	} else {
-		p.Successf("Reclaimed tracebloc's downloaded images.")
+		p.Successf("Reclaimed %d tracebloc image%s.", n, plural(n))
 	}
 
 	// 5. Spare or wipe ~/.tracebloc. The active-client pointer was already cleared
