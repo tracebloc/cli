@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/tracebloc/cli/internal/installer"
 )
 
 // TestUpgradeCmd_Metadata pins the command's shape without running it (RunE
@@ -50,8 +52,9 @@ func TestUpgradeCmd_HelpMentionsVerified(t *testing.T) {
 // TestUpgradePlanFor_PerOS: Windows must NOT self-exec (a running .exe is locked
 // and install.ps1 is CLI-only) — it only prints the manual command. Unix runs
 // the verified installer via the shared download-then-execute script, never
-// `curl | bash` (which would steal the installer's stdin), and reuses installCmd
-// for the manual hint so the URL has one source (Bugbot #397).
+// `curl | bash` (which would steal the installer's stdin), and reuses
+// installer.Cmd for the manual hint so the URL and idiom have one source
+// (Bugbot #397, cli#396).
 func TestUpgradePlanFor_PerOS(t *testing.T) {
 	win := upgradePlanFor("windows")
 	if win.exec {
@@ -83,9 +86,11 @@ func TestUpgradePlanFor_PerOS(t *testing.T) {
 		if !strings.Contains(joined, "i.sh") {
 			t.Errorf("%s upgrade must run i.sh: %q", goos, joined)
 		}
-		// Manual hint reuses installCmd (single URL source), not a re-hardcoded URL.
-		if p.manual != installCmd {
-			t.Errorf("%s manual hint = %q, want installCmd %q", goos, p.manual, installCmd)
+		// Manual hint reuses installer.Cmd (single source for URL *and* idiom), not
+		// a re-hardcoded command — and it's the same string we exec, so the hint we
+		// print after a failed run is exactly what failed (cli#396).
+		if p.manual != installer.Cmd {
+			t.Errorf("%s manual hint = %q, want installer.Cmd %q", goos, p.manual, installer.Cmd)
 		}
 	}
 }

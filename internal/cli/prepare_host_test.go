@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/tracebloc/cli/internal/installer"
 )
 
 // A failed download must abort rather than run an empty script: with the old
@@ -28,15 +30,15 @@ func TestPrepareHostCmdFailsClosedOnDownloadError(t *testing.T) {
 // Every curl in the shared installer script must pin the TLS 1.2 floor
 // (--tlsv1.2), matching scripts/install.sh, so this privileged download can never
 // negotiate a weaker protocol. Guards both the upgrade (no subcommand) and
-// prepare-host paths since they share installerRunScript (Bugbot #397).
+// prepare-host paths since they share installer.Script (Bugbot #397).
 func TestInstallerRunScriptPinsTLSFloor(t *testing.T) {
 	for _, sub := range []string{"", "prepare-host"} {
-		script := installerRunScript(sub)
+		script := installer.Script(sub, "")
 		if !strings.Contains(script, "curl") {
-			t.Fatalf("installerRunScript(%q) must curl the installer; got: %q", sub, script)
+			t.Fatalf("installer.Script(%q) must curl the installer; got: %q", sub, script)
 		}
 		if !strings.Contains(script, "--tlsv1.2") {
-			t.Errorf("installerRunScript(%q) must pin --tlsv1.2 on the download (matches install.sh); got: %q", sub, script)
+			t.Errorf("installer.Script(%q) must pin --tlsv1.2 on the download (matches install.sh); got: %q", sub, script)
 		}
 	}
 }
@@ -169,6 +171,15 @@ func TestPrepareHostManualHint_CarriesUser(t *testing.T) {
 	}
 	if !strings.Contains(h, "prepare-host") {
 		t.Errorf("hint must invoke prepare-host: %q", h)
+	}
+}
+
+// The no-username manual hint must be the EXACT command we just tried, so a user
+// pasting it reproduces the automated run rather than a lookalike that could
+// drift from it (cli#396).
+func TestPrepareHostManualHint_MatchesTheCommandWeRan(t *testing.T) {
+	if got := prepareHostManualHint(""); got != prepareHostInstallerCmd {
+		t.Errorf("manual hint = %q, want the command we executed %q", got, prepareHostInstallerCmd)
 	}
 }
 
