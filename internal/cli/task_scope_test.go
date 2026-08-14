@@ -189,6 +189,40 @@ func TestGuided_AMisappliedFlagIsStillRejectedWhenNoTaskWasSupplied(t *testing.T
 	}
 }
 
+// The edge Shujaat named on review: the user changes A -> B and the flag was
+// invalid for BOTH. It is tempting to treat a re-pick as blanket permission to
+// drop, but the flag was already wrong when they typed it and no answer they
+// gave walks away from it — so it must still be rejected, exactly as it would
+// be under --no-input. `v.inScope(from)` is what makes that true; a reset
+// keyed only on the picked task would swallow it.
+func TestGuided_AFlagInvalidForBothTasksIsStillRejected(t *testing.T) {
+	dir := imageDirLayout(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Please name the dataset.":      "t",
+		"Which task?":                   "image_classification",
+		"Which column holds the label?": "label",
+	}}
+	a := &runDataIngestArgs{
+		LocalPath: dir,
+		Spec: push.SpecArgs{
+			Category:    "keypoint_detection",
+			LabelColumn: "label",
+			// --time-column applies to neither keypoint_detection nor
+			// image_classification.
+			TimeColumn: "t",
+		},
+	}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.Spec.TimeColumn != "t" {
+		t.Fatalf("TimeColumn = %q — a re-pick is not permission to drop a flag that was always wrong", a.Spec.TimeColumn)
+	}
+	if err := rejectMisappliedTaskValues(a); err == nil {
+		t.Error("the misapplied --time-column was accepted after a task change")
+	}
+}
+
 // The property the shared predicate buys: from ANY legal starting state — the
 // values in scope for the task the user arrived with — a change to ANY other
 // task leaves a state the guard accepts. Both sides are built from the table,
