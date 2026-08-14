@@ -3,6 +3,7 @@ package telemetry
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tracebloc/cli/internal/api"
 )
@@ -308,5 +309,218 @@ func TestResourceIsACopy(t *testing.T) {
 	e.Resource()["service.name"] = "backend"
 	if e.Resource()["service.name"] != "cli" {
 		t.Fatal("the resource is mutable from outside")
+	}
+}
+
+// --- review findings on cli#503 (merged) ------------------------------------
+
+func TestNoResourceScopeKeyMayComeFromACallSite(t *testing.T) {
+	// §1 — a call site that sets a resource attribute is a bug. One flat
+	// allowlist let a caller smuggle one into the RECORD layer, so a single
+	// record could contradict its own process identity: the cloud_RoleName
+	// cross-layer confusion, at the call site of the package meant to close it.
+	e := New(api.EnvProd, "0.10.7", "h")
+	for key := range resourceScope {
+		t.Run(key, func(t *testing.T) {
+			err := e.Emit("cli.command.succeeded", Attrs{key: "impostor"})
+			if err == nil {
+				t.Fatalf("accepted resource-scope key %q from a call site", key)
+			}
+			if !strings.Contains(err.Error(), "RESOURCE scope") {
+				t.Fatalf("%q was rejected by another rule, so the layer check "+
+					"is doing no work for it: %v", key, err)
+			}
+		})
+	}
+}
+
+func TestEventNameCannotBePassedAsAnAttribute(t *testing.T) {
+	// It is Emit's first argument. Accepting it would replace the name AFTER
+	// the grammar and failure-set checks ran against the real one — delivering
+	// a failure-shaped name that skipped §8.4.
+	e := New(api.EnvProd, "0.10.7", "h")
+	err := e.Emit("cli.command.succeeded", Attrs{"event.name": "cli.command.failed"})
+	if err == nil {
+		t.Fatal("accepted event.name as an attribute")
+	}
+	// Asserting WHICH rule: event.name is also not tracebloc.-prefixed, so the
+	// namespace rule would reject it too, and a test that only checked "it
+	// errors" would pass with this guard deleted.
+	if !strings.Contains(err.Error(), "Emit's first argument") {
+		t.Fatalf("rejected by another rule: %v", err)
+	}
+}
+
+func TestRecordScopeOTelKeysStillPass(t *testing.T) {
+	// The split must not become a blanket ban on OTel names.
+	e := New(api.EnvProd, "0.10.7", "h")
+	if err := e.Emit("cli.command.failed", Attrs{
+		"error.type":           "network",
+		"exception.type":       "net.OpError",
+		"exception.message":    "boom",
+		"exception.stacktrace": "goroutine 1…",
+	}); err != nil {
+		t.Fatalf("rejected record-scope OTel keys: %v", err)
+	}
+}
+
+func TestGoScalarKindsAreAcceptedNotJustNamedTypes(t *testing.T) {
+	// A Go type switch matches the DYNAMIC type, so `case int64` does not match
+	// a time.Duration. An idiomatic caller in #1907 would have been told their
+	// duration was the retired extraData defect.
+	e := New(api.EnvProd, "0.10.7", "h")
+	for name, v := range map[string]any{
+		"duration": 5 * time.Second,
+		"int32":    int32(3),
+		"uint":     uint(3),
+		"uint64":   uint64(3),
+		"float32":  float32(1.5),
+		"named":    time.Duration(7),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := e.Emit("cli.command.succeeded", Attrs{"tracebloc.v": v}); err != nil {
+				t.Fatalf("rejected a Go scalar %T: %v", v, err)
+			}
+		})
+	}
+	// …and a genuine non-scalar is still refused.
+	if err := e.Emit("cli.command.succeeded", Attrs{
+		"tracebloc.v": map[string]string{"a": "b"},
+	}); err == nil {
+		t.Fatal("accepted a map — that is the extraData defect")
+	}
+}
+
+func TestDurationHelperRendersMilliseconds(t *testing.T) {
+	// time.Duration passes checkAttrValue as a raw NANOSECOND count, which is a
+	// number nobody reading a dashboard can interpret. The helper names the unit.
+	if got := Duration(1500 * time.Millisecond); got != 1500 {
+		t.Fatalf("Duration = %d, want 1500", got)
+	}
+}
+
+func TestAnEmptyInstanceIDIsOmittedNotStamped(t *testing.T) {
+	// os.Hostname() returns "" on error. An empty service.instance.id is the
+	// "sent as empty rather than omitted" defect the RECORD layer already
+	// refuses; the resource layer must hold the same line.
+	for _, id := range []string{"", "   "} {
+		r := New(api.EnvProd, "0.10.7", id).Resource()
+		if v, ok := r["service.instance.id"]; ok {
+			t.Fatalf("stamped service.instance.id = %q for input %q", v, id)
+		}
+	}
+	if r := New(api.EnvProd, "0.10.7", "host-1").Resource(); r["service.instance.id"] != "host-1" {
+		t.Fatal("a real instance id was lost")
+	}
+}
+
+func TestDeliveryIsGatedOnExports(t *testing.T) {
+	// The "unrecognised environment never exports" guarantee lived entirely in
+	// caller discipline, even though the emitter already knew.
+	u := New("staging", "0.10.7", "h") // not a known env
+	delivered := false
+	u.SetSink(func(map[string]string, map[string]any) { delivered = true })
+	if err := u.Emit("cli.command.succeeded", Attrs{}); err != nil {
+		t.Fatalf("validation should still run: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered a record although Exports() is false")
+	}
+
+	// …and validation still runs on that path, so a bad event fails in CI
+	// wherever the binary is built.
+	if err := u.Emit("cli.command.refreshed", Attrs{}); err == nil {
+		t.Fatal("a non-exporting emitter skipped validation")
+	}
+
+	// The exporting path still delivers.
+	e := New(api.EnvProd, "0.10.7", "h")
+	got := false
+	e.SetSink(func(map[string]string, map[string]any) { got = true })
+	if err := e.Emit("cli.command.succeeded", Attrs{}); err != nil || !got {
+		t.Fatalf("an exporting emitter did not deliver (err=%v)", err)
+	}
+}
+
+func TestAKeyIsValidatedEvenWhenItsValueIsDropped(t *testing.T) {
+	// A retired or malformed key that happened to carry an empty value escaped
+	// every rule — contradicting this package's own "a malformed event must not
+	// pass silently".
+	e := New(api.EnvProd, "0.10.7", "h")
+	for name, attrs := range map[string]Attrs{
+		"retired nil":   {"experimentKey": nil},
+		"retired empty": {"extraData": ""},
+		"bad shape nil": {"tracebloc.clientID": nil},
+		"unprefixed":    {"cluster.name": ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := e.Emit("cli.command.succeeded", attrs); err == nil {
+				t.Fatalf("a bad key passed silently because its value was empty: %v", attrs)
+			}
+		})
+	}
+	// A GOOD key with an empty value is still dropped, not an error.
+	var got map[string]any
+	e.SetSink(func(_ map[string]string, r map[string]any) { got = r })
+	if err := e.Emit("cli.command.succeeded", Attrs{"tracebloc.note": ""}); err != nil {
+		t.Fatalf("a valid key with an empty value should be dropped, not rejected: %v", err)
+	}
+	if _, ok := got["tracebloc.note"]; ok {
+		t.Fatal("an empty value was sent rather than omitted")
+	}
+}
+
+// A named string type is accepted by checkAttrValue (it is a string KIND), so
+// the omit rule has to recognise it too. It did not: the drop type-asserted to
+// builtin `string`, so `type Reason string; Reason("")` landed on the record —
+// reopening §1.2 for exactly the callers the kind-based value check was widened
+// to serve.
+func TestAnEmptyNamedStringIsDroppedLikeAnEmptyString(t *testing.T) {
+	type Reason string
+	e := New(api.EnvProd, "0.10.7", "host-1")
+	var got map[string]any
+	e.SetSink(func(_ map[string]string, r map[string]any) { got = r })
+	if err := e.Emit("cli.command.succeeded", Attrs{"tracebloc.reason": Reason("  ")}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if v, ok := got["tracebloc.reason"]; ok {
+		t.Errorf("an empty named string was emitted: %#v", v)
+	}
+}
+
+// The consequence that makes it worth a test rather than a tidy-up: on a
+// failure, an empty named error.type would satisfy the failure-set check by key
+// presence alone — a failure that cannot be grouped, reported as one that can.
+func TestAnEmptyNamedErrorTypeDoesNotSatisfyTheFailureCheck(t *testing.T) {
+	type Reason string
+	e := New(api.EnvProd, "0.10.7", "host-1")
+	if err := e.Emit("cli.command.failed", Attrs{"error.type": Reason("")}); err == nil {
+		t.Error("a failure with a blank named error.type was accepted")
+	}
+}
+
+// The other half: a named string with real content must still arrive, and a
+// zero number must not be mistaken for absence.
+func TestNamedStringsAndZeroValuesStillArrive(t *testing.T) {
+	type Reason string
+	e := New(api.EnvProd, "0.10.7", "host-1")
+	var got map[string]any
+	e.SetSink(func(_ map[string]string, r map[string]any) { got = r })
+	err := e.Emit("cli.command.succeeded", Attrs{
+		"tracebloc.reason":  Reason("timeout"),
+		"tracebloc.retries": 0,
+		"tracebloc.cached":  false,
+	})
+	if err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if got["tracebloc.reason"] != Reason("timeout") {
+		t.Errorf("named string lost: %#v", got["tracebloc.reason"])
+	}
+	if _, ok := got["tracebloc.retries"]; !ok {
+		t.Error("0 was dropped as absent — it is a measurement, not an absence")
+	}
+	if _, ok := got["tracebloc.cached"]; !ok {
+		t.Error("false was dropped as absent")
 	}
 }
