@@ -200,7 +200,7 @@ func defaultInOptions(want string, options []string, fallback string) string {
 // (RFC-0002 §12.1): intent → name → path → task → task-specific questions →
 // review.
 //
-// It asks EVERY question relevant to the chosen task (#711). A value the user
+// It asks EVERY question relevant to the chosen task (#509). A value the user
 // passed on the command line pre-fills the answer — Enter accepts it — but never
 // suppresses the question. Which questions are relevant still depends on the
 // task picked at step 4; that is the only gate.
@@ -230,7 +230,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 	// answer (the sniff echo) attaches to it with no blank.
 
 	// Guided mode ASKS. A value that arrived on the command line becomes the
-	// prompt's DEFAULT — never a reason to skip the question (#711).
+	// prompt's DEFAULT — never a reason to skip the question (#509).
 	//
 	// It used to skip: each step was wrapped in `if <value> == ""`. That turned a
 	// path which had merely gone stale into a dead end — the user was sitting at
@@ -319,7 +319,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 		return err
 	}
 
-	// (d) task — family-scoped, and always asked (#711).
+	// (d) task — family-scoped, and always asked (#509).
 	//
 	// An explicit --task no longer skips the picker; it selects the family and
 	// becomes the pre-selected option. Taking the family from the SUPPLIED task
@@ -360,7 +360,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 		return err
 	}
 
-	// (f) review + single confirm — unconditional now (#711). It used to be
+	// (f) review + single confirm — unconditional now (#509). It used to be
 	// gated on "did we actually prompt anything", so an ingest fully specified
 	// by flags wasn't nagged. Guided mode always prompts now, so that gate can
 	// only ever be true; keeping it would be a condition that reads as a choice
@@ -470,7 +470,7 @@ func pickTask(p *ui.Printer, pr prompter, fam push.Family, want string) (string,
 	for i, s := range available {
 		opts[i] = s.ID
 	}
-	// def pre-selects a task the user already named (#711), honoured only when it
+	// def pre-selects a task the user already named (#509), honoured only when it
 	// is actually in this family's list (defaultInOptions) — survey would
 	// otherwise render a default the user cannot see, and an Enter on it would be
 	// unexplainable.
@@ -488,7 +488,7 @@ func pickTask(p *ui.Printer, pr prompter, fam push.Family, want string) (string,
 }
 
 // promptCategorySpecific prompts for the inputs a particular task needs
-// beyond the core fields. Like the core steps (#711), each question is always
+// beyond the core fields. Like the core steps (#509), each question is always
 // asked with any supplied value pre-filled as the default — never skipped. The
 // label column comes first (the one question every non-self-supervised task
 // shares), then the family-specific extras. Returns whether it prompted anything
@@ -509,7 +509,7 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 	// to predict (§8).
 	//
 	// A supplied --label-column pre-fills the pick (like every other value under
-	// #711) — it no longer SKIPS the question, so a wrong or mistyped column can
+	// #509) — it no longer SKIPS the question, so a wrong or mistyped column can
 	// be corrected here the same way a stale path can. Only self-supervised text
 	// (no label at all) still bypasses it.
 	if !push.SelfSupervisedText(cat) {

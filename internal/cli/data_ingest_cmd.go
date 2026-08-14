@@ -338,7 +338,7 @@ type runDataIngestArgs struct {
 	// Interactive guided mode (#28). When Interactive is true, runDataIngest
 	// walks every question relevant to the chosen task (via Prompter) before
 	// validation, pre-filling each from whatever arrived on the command line
-	// (#711). Prompter is nil off a TTY / --no-input, which is what keeps
+	// (#509). Prompter is nil off a TTY / --no-input, which is what keeps
 	// scripts flag-only.
 	Interactive bool
 	Prompter    prompter

@@ -276,7 +276,7 @@ func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 }
 
 // TestRunInteractive_ExplicitTaskStillAsks: an explicit --task no longer skips
-// the picker (#711) — it PRE-SELECTS. It does still settle the family directly,
+// the picker (#509) — it PRE-SELECTS. It does still settle the family directly,
 // so the sniff is unnecessary and the user's own task is among the options.
 func TestRunInteractive_ExplicitTaskStillAsks(t *testing.T) {
 	dir := tabularDir(t)
@@ -490,7 +490,7 @@ func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 }
 
 // TestRunInteractive_AsksEvenWhenFullySpecified is the inverse of the rule this
-// replaced (#711). Guided mode used to prompt for nothing when every value
+// replaced (#509). Guided mode used to prompt for nothing when every value
 // arrived on the command line — which is what turned a path that had merely gone
 // stale into a dead end, with the user sitting at a prompt that never came.
 //
