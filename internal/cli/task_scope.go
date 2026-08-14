@@ -158,8 +158,21 @@ func rejectMisappliedTaskValues(a *runDataIngestArgs) error {
 //
 // A run with no --task supplied is not a change either: the user never declared
 // a task to move away from, so every value stands or falls on the guard.
+//
+// Nor is a --task the registry does not recognize. A typo is not a task anyone
+// walked away from, and treating it as one clears values on its behalf: every
+// `inScope` predicate answers from the registry, so an unknown id lands on the
+// default side of each one — `!SelfSupervisedText("tabular_clasification")` is
+// true because the lookup misses, not because the task uses a label column. So
+// `--task tabular_clasification --label-column x`, picking a self-supervised
+// text task, silently dropped --label-column, and the guided flow runs BEFORE
+// the category gate (data_ingest_local.go:103 vs :165), so the typo itself was
+// never reported either — the picker had already overwritten it with a valid id.
+// Two values lost, no message, where --no-input exits 2 on the same command.
+// An unknown `from` is therefore the no-task case: clear nothing, and let
+// rejectMisappliedTaskValues speak (Bugbot).
 func dropValuesLeftBehindByATaskChange(a *runDataIngestArgs, from string) {
-	if from == "" || from == a.Spec.Category {
+	if from == "" || !push.IsKnown(from) || from == a.Spec.Category {
 		return
 	}
 	for _, v := range taskScopedValues {
