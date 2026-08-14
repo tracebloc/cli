@@ -53,7 +53,17 @@ for row in "${TOOLS[@]}"; do
   # Any workflow naming the module with an @version is holding its own copy.
   # `make <target>` references carry no version and are therefore invisible here,
   # which is the whole point.
-  offenders="$(grep -rn -- "${module}@" .github/workflows/ 2>/dev/null || true)"
+  #
+  # No 2>/dev/null and no `|| true`: grep rc 1 is "no offender" and fine, but rc>=2
+  # is a real error (unreadable tree, bad invocation) and must fail CLOSED. Laundering
+  # it into an empty hit list is the unearned exit 0 this guard was written against
+  # (backend#1729); scan() in check-style.sh handles the same grep class this way.
+  offenders="$(grep -rn -- "${module}@" .github/workflows/)"
+  rc=$?
+  if (( rc >= 2 )); then
+    echo "check-tool-pins: grep errored (rc=${rc}) scanning .github/workflows for '${module}@' — refusing to report clean" >&2
+    exit 2
+  fi
   if [[ -n "$offenders" ]]; then
     echo "A workflow pins ${module} directly:" >&2
     printf '%s\n' "$offenders" >&2
