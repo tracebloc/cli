@@ -339,18 +339,20 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 			}
 			fam = f
 		}
-		id, err := pickTask(p, pr, fam, a.Spec.Category)
+		supplied := a.Spec.Category
+		id, err := pickTask(p, pr, fam, supplied)
 		if err != nil {
 			return err
 		}
 		a.Spec.Category = id
-		// The picked task decides which task-scoped values still mean anything.
-		// A run started as `--task time_to_event_prediction --time-column t`
-		// that picks tabular_classification here would otherwise carry
-		// TimeColumn through: no prompt asks about it (it is
-		// time_to_event_prediction-only), Review shows it anyway, and the run
-		// dies AFTER the confirm blaming a flag the user just walked away from.
-		dropOutOfScopeTaskValues(a)
+		// What the user just walked away from goes with it. A run started as
+		// `--task time_to_event_prediction --time-column t` that picks
+		// tabular_classification here would otherwise carry TimeColumn through:
+		// no prompt asks about it (it is time_to_event_prediction-only), Review
+		// shows it anyway, and the run dies AFTER the confirm blaming a flag the
+		// user just walked away from. Scoped to the CHANGE, so a flag that was
+		// misapplied on the command line survives to be rejected.
+		dropValuesLeftBehindByATaskChange(a, supplied)
 	}
 
 	// (e) task-specific questions, including the label column.

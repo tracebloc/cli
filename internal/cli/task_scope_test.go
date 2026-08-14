@@ -20,45 +20,70 @@ func TestGuided_TaskScopedValuesDoNotSurviveATaskChange(t *testing.T) {
 		"Which task?":                   "tabular_classification",
 		"Which column holds the label?": "churned",
 	}}
+	// A LEGAL starting state: every value here is in scope for the supplied
+	// task. Starting from an illegal one would test the wrong thing — a flag
+	// misapplied from the outset is the guard's job, not the reset's.
 	a := &runDataIngestArgs{
-		LocalPath:      dir,
-		TargetSizeFlag: "224x224",
-		MinSizeFlag:    "32x32",
+		LocalPath: dir,
 		Spec: push.SpecArgs{
-			Category:          "time_to_event_prediction",
-			TimeColumn:        "t",
-			LabelPolicy:       "bucket",
-			NumberOfKeypoints: 17,
+			Category:    "time_to_event_prediction",
+			TimeColumn:  "t",
+			LabelPolicy: "bucket",
+			LabelColumn: "churned",
 		},
 	}
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
-	for _, c := range []struct {
-		name string
-		got  string
-	}{
-		{"TimeColumn", a.Spec.TimeColumn},
-		{"LabelPolicy", a.Spec.LabelPolicy},
-		{"TargetSizeFlag", a.TargetSizeFlag},
-		{"MinSizeFlag", a.MinSizeFlag},
-	} {
-		if c.got != "" {
-			t.Errorf("%s = %q survived the task change to tabular_classification", c.name, c.got)
-		}
+	if a.Spec.TimeColumn != "" {
+		t.Errorf("TimeColumn = %q survived the change to tabular_classification", a.Spec.TimeColumn)
 	}
-	if a.Spec.NumberOfKeypoints != 0 {
-		t.Errorf("NumberOfKeypoints = %d survived the task change", a.Spec.NumberOfKeypoints)
+	if a.Spec.LabelPolicy != "" {
+		t.Errorf("LabelPolicy = %q survived the change", a.Spec.LabelPolicy)
 	}
-	// The reset is not a blanket wipe: the label column IS in scope for
-	// tabular_classification, and the answer just given must stand.
+	// Not a blanket wipe: the label column IS in scope for the new task, and
+	// the answer just given must stand.
 	if a.Spec.LabelColumn != "churned" {
 		t.Errorf("LabelColumn = %q, want the answer just given", a.Spec.LabelColumn)
+	}
+	if err := rejectMisappliedTaskValues(a); err != nil {
+		t.Errorf("the state left behind is one the guard rejects: %v", err)
+	}
+}
+
+// The same within the image family, where the value dropped is a number rather
+// than a string and two neighbouring flags must survive.
+func TestGuided_KeypointsGoWhenTheTaskStopsUsingThem(t *testing.T) {
+	dir := imageDirLayout(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Please name the dataset.":      "t",
+		"Which task?":                   "image_classification",
+		"Which column holds the label?": "label",
+	}}
+	a := &runDataIngestArgs{
+		LocalPath:      dir,
+		TargetSizeFlag: "224x224",
+		MinSizeFlag:    "32x32",
+		Spec: push.SpecArgs{
+			Category:          "keypoint_detection",
+			NumberOfKeypoints: 17,
+			LabelColumn:       "label",
+		},
+	}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.Spec.NumberOfKeypoints != 0 {
+		t.Errorf("NumberOfKeypoints = %d survived the change to image_classification", a.Spec.NumberOfKeypoints)
+	}
+	if a.TargetSizeFlag == "" || a.MinSizeFlag == "" {
+		t.Errorf("image flags were wiped though both tasks are image tasks: target=%q min=%q",
+			a.TargetSizeFlag, a.MinSizeFlag)
 	}
 }
 
 // The reset must be a no-op when the picked task is the supplied one — the
-// test above cannot tell "cleared what went out of scope" from "cleared
+// tests above cannot tell "cleared what the change left behind" from "cleared
 // everything", and clearing everything would silently discard flags the user
 // meant and the prompts pre-fill from.
 func TestGuided_TaskScopedValuesSurviveWhenTheTaskIsUnchanged(t *testing.T) {
@@ -118,32 +143,79 @@ func TestEveryTaskScopedValueRejectsOutOfScopeAndNamesItsFlag(t *testing.T) {
 	}
 }
 
-// The clearer and the guard read the same predicate, which is the point of the
-// table — but "same predicate" is only worth something if clearing actually
-// satisfies the guard. Walk every row against every supported task: after the
-// reset, nothing may be rejected.
-func TestClearingAlwaysSatisfiesTheGuard(t *testing.T) {
-	for _, cat := range push.SupportedCategoryIDs() {
-		t.Run(cat, func(t *testing.T) {
-			a := &runDataIngestArgs{
-				TargetSizeFlag: "224x224",
-				MinSizeFlag:    "32x32",
-				SchemaFlag:     "age:INT",
-				Spec: push.SpecArgs{
-					Category:          cat,
-					LabelColumn:       "label",
-					LabelPolicy:       "bucket",
-					TimeColumn:        "t",
-					NumberOfKeypoints: 17,
-				},
+// A flag misapplied on the COMMAND LINE must still be rejected in guided mode.
+// The first version of the reset cleared everything out of scope for the picked
+// task, which also cleared a flag that was wrong from the start — so pressing
+// Enter on the pre-selected task silently dropped it while the identical
+// invocation under --no-input exited 2. Guided mode quietly meaning something
+// different from the flags it echoes is worse than the bug it replaced.
+func TestGuided_AMisappliedFlagIsStillRejectedWhenTheTaskIsKept(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Please name the dataset.":      "t",
+		"Which task?":                   "tabular_classification",
+		"Which column holds the label?": "churned",
+	}}
+	a := &runDataIngestArgs{
+		LocalPath: dir,
+		Spec:      push.SpecArgs{Category: "tabular_classification", TimeColumn: "t"},
+	}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.Spec.TimeColumn != "t" {
+		t.Fatalf("TimeColumn = %q — the reset swallowed a flag no task change walked away from", a.Spec.TimeColumn)
+	}
+	if err := rejectMisappliedTaskValues(a); err == nil {
+		t.Error("the misapplied --time-column was accepted; --no-input would exit 2 on the same command line")
+	}
+}
+
+// Same, with no --task supplied at all: the user never declared a task to move
+// away from, so nothing was walked away from and the guard still speaks.
+func TestGuided_AMisappliedFlagIsStillRejectedWhenNoTaskWasSupplied(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Please name the dataset.":      "t",
+		"Which task?":                   "tabular_classification",
+		"Which column holds the label?": "churned",
+	}}
+	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{TimeColumn: "t"}}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if err := rejectMisappliedTaskValues(a); err == nil {
+		t.Error("a --time-column with no --task was silently dropped rather than rejected")
+	}
+}
+
+// The property the shared predicate buys: from ANY legal starting state — the
+// values in scope for the task the user arrived with — a change to ANY other
+// task leaves a state the guard accepts. Both sides are built from the table,
+// so a scope widened later is exercised here without editing this test.
+func TestAnyLegalStateSurvivesAnyTaskChange(t *testing.T) {
+	cats := push.SupportedCategoryIDs()
+	for _, from := range cats {
+		for _, to := range cats {
+			if from == to {
+				continue
 			}
-			if err := rejectMisappliedTaskValues(a); err == nil {
-				t.Fatalf("everything set on %s was accepted — the guard is inert", cat)
-			}
-			dropOutOfScopeTaskValues(a)
-			if err := rejectMisappliedTaskValues(a); err != nil {
-				t.Errorf("after the reset the guard still rejects: %v", err)
-			}
-		})
+			t.Run(from+"->"+to, func(t *testing.T) {
+				a := &runDataIngestArgs{Spec: push.SpecArgs{Category: from}}
+				for _, v := range taskScopedValues {
+					if v.inScope(from) {
+						v.set(a)
+					}
+				}
+				if err := rejectMisappliedTaskValues(a); err != nil {
+					t.Fatalf("the starting state is not legal, so this proves nothing: %v", err)
+				}
+				a.Spec.Category = to
+				dropValuesLeftBehindByATaskChange(a, from)
+				if err := rejectMisappliedTaskValues(a); err != nil {
+					t.Errorf("after the change the guard rejects: %v", err)
+				}
+			})
+		}
 	}
 }
