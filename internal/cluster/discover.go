@@ -12,6 +12,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/tracebloc/cli/internal/installer"
 )
 
 // ErrNoParentRelease is the sentinel for DiscoverParentRelease's "the namespace
@@ -128,9 +130,9 @@ func DiscoverParentRelease(ctx context.Context, cs kubernetes.Interface, namespa
 			"%w in namespace %q. "+
 				"If your client runs in another namespace, pass --namespace; "+
 				"if this cluster has no tracebloc client yet, run the installer: "+
-				"bash <(curl -fsSL https://tracebloc.io/i.sh). "+
+				"%s. "+
 				"Diagnose with `tracebloc doctor`.",
-			ErrNoParentRelease, namespace,
+			ErrNoParentRelease, namespace, installer.Cmd,
 		)
 	case 1:
 		// happy path

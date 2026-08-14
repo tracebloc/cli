@@ -12,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/tracebloc/cli/internal/installer"
 )
 
 // jobsManagerDeployment builds the minimal Deployment the chart
@@ -186,7 +188,7 @@ func TestDiscoverParentRelease_NoReleaseFound(t *testing.T) {
 	// The error message has to be customer-actionable. Pin the
 	// key remediation phrase so a future refactor that loses it
 	// (or worse, replaces it with a stack trace) fails this test.
-	for _, want := range []string{"no tracebloc client found", "--namespace", "https://tracebloc.io/i.sh", "tracebloc doctor"} {
+	for _, want := range []string{"no tracebloc client found", "--namespace", installer.URL, "tracebloc doctor"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("expected error to mention %q, got: %s", want, err)
 		}

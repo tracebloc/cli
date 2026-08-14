@@ -17,19 +17,9 @@ import (
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/doctor"
+	"github.com/tracebloc/cli/internal/installer"
 	"github.com/tracebloc/cli/internal/ui"
 )
-
-// installerURL is the single source of truth for the installer script URL.
-// Everything that downloads or points at the installer (installCmd here,
-// prepareHostInstallerCmd in prepare_host.go) derives from this so a URL change
-// updates every path at once.
-const installerURL = "https://tracebloc.io/i.sh"
-
-// installCmd is the one-line installer we point people at when there's no
-// secure environment on this machine, or a component needs reinstalling. Kept in
-// one place so every remedy says the same thing.
-const installCmd = "bash <(curl -fsSL " + installerURL + ")"
 
 // doctorRunFn is a test seam over doctor.Run (the cluster-side probe). Tests
 // inject a fixed []doctor.Result so the roll-up + render can be exercised with a
@@ -133,7 +123,7 @@ func runClusterDoctor(
 			return &exitError{code: exitChecksFailed, err: nil}
 		case errors.As(werr, &ue):
 			p.Newline()
-			p.Errorf("This CLI is out of date — update it: %s", installCmd)
+			p.Errorf("This CLI is out of date — update it: %s", installer.Cmd)
 			return &exitError{code: exitChecksFailed, err: nil}
 		case errors.As(werr, &ae):
 			tok = tokenServerErr // tracebloc answered, just not with 200
@@ -172,7 +162,7 @@ func runClusterDoctor(
 		p.Newline()
 		noteSessionProblem(p, tok)
 		p.Errorf("No secure environment on this machine yet.")
-		p.Hintf("     Set one up: %s", installCmd)
+		p.Hintf("     Set one up: %s", installer.Cmd)
 		return &exitError{code: earlyExitCode(tok), err: nil}
 	}
 	cs, err := newClientsetFn(resolved)
@@ -195,7 +185,7 @@ func runClusterDoctor(
 		p.Newline()
 		noteSessionProblem(p, tok)
 		p.Errorf("No secure environment on this machine yet.")
-		p.Hintf("     Set one up: %s", installCmd)
+		p.Hintf("     Set one up: %s", installer.Cmd)
 		renderDetailsIfVerbose(p, resolved, results)
 		return &exitError{code: earlyExitCode(tok), err: nil}
 	}
@@ -372,7 +362,7 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 	case by["Pod health"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — part of your secure environment isn't running.",
-			fmt.Sprintf("Reinstall with `%s`, or email support@tracebloc.io with `%s doctor --diagnose`.", installCmd, launcher())}
+			fmt.Sprintf("Reinstall with `%s`, or email support@tracebloc.io with `%s doctor --diagnose`.", installer.Cmd, launcher())}
 	case by["Pod health"].Status == doctor.StatusWarn && strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
 		// checkPods returns StatusWarn for TWO different situations: pods stuck
 		// Pending (below) AND a failure to list pods at all (e.g. RBAC, doctor.go

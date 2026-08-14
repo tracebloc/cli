@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/tracebloc/cli/internal/installer"
 )
 
 // prepareHostUserRe validates the researcher username before we pass it to the
@@ -20,58 +22,25 @@ import (
 // early with a clear error rather than a confusing failure deep in the installer).
 var prepareHostUserRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$`)
 
-// installerRunScript builds the bash program that downloads the cosign-verified
-// installer to a temp file and runs THAT — optionally with a subcommand (e.g.
-// "prepare-host"). Shared by `tracebloc upgrade` (no subcommand, full install)
-// and `tracebloc prepare-host`, so both stay on one download-then-execute idiom.
-//
-// We run a downloaded FILE rather than `curl … | bash`. Two reasons, both Bugbot
-// (#394, #397):
-//   - stdin: with `curl | bash`, the inner bash reads its *program* from the
-//     pipe, so the installer's stdin is no longer the terminal. Any interactive
-//     prompt (sign-in, or which non-admin user gets runtime access) would get
-//     EOF. Running a downloaded file leaves stdin on the TTY.
-//   - fail-closed: `set -e` + `curl -o` makes a failed download (network/DNS/HTTP
-//     error) abort with a non-zero status instead of silently running nothing.
-//     (`curl | bash` swallowed this — bash read empty stdin and exited 0.)
-//
-// The download uses `--tlsv1.2` — the TLS 1.2 floor scripts/install.sh enforces
-// on every security-sensitive fetch — so this privileged installer download can
-// never negotiate a weaker protocol (Bugbot #397). The temp file is removed on
-// exit. The URL comes from installerURL (doctor.go) so every installer path
-// shares one source and can't drift (Bugbot #394/#397).
-func installerRunScript(subcommand string) string {
-	run := `bash "$tmp"`
-	if subcommand != "" {
-		run += " " + subcommand
-	}
-	return `set -e
-tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
-curl -fsSL --tlsv1.2 ` + installerURL + ` -o "$tmp"
-` + run
-}
-
 // prepareHostInstallerCmd runs the official installer's admin-only prepare-host
 // step. Like `tracebloc upgrade`, this deliberately delegates to the verified
 // installer (cosign-checked) instead of re-implementing any privileged host prep
 // in the CLI — the privileged surface stays in one audited place. See
-// installerRunScript for why we download-then-execute rather than pipe.
-var prepareHostInstallerCmd = installerRunScript("prepare-host")
+// installer.Script for why we download-then-execute rather than pipe.
+var prepareHostInstallerCmd = installer.Script("prepare-host", "")
 
 // prepareHostManualHint is the copy-pasteable command we show if the automated
-// run fails. Built from installCmd (doctor.go) — the single shared bootstrap
-// idiom — so a URL/idiom change updates every hint at once (Bugbot #394); we
-// only append the prepare-host subcommand. installCmd uses process substitution
-// (bash <(curl …)), which keeps stdin on the terminal for interactive prompts.
-// When a researcher username was given we prefix TB_PREPARE_USER=<user> so a
-// copy-pasted retry still grants access — otherwise the manual fallback would
-// silently do less than the original request (Bugbot #394).
+// run fails. It's built from installer.Script — the same single bootstrap idiom
+// we just executed — so the hint is byte-identical to the command that failed,
+// and a URL/idiom change updates every hint at once (Bugbot #394, cli#396).
+// When a researcher username was given we carry TB_PREPARE_USER=<user> into the
+// installer so a copy-pasted retry still grants access — otherwise the manual
+// fallback would silently do less than the original request (Bugbot #394).
 func prepareHostManualHint(user string) string {
-	if user != "" {
-		return "TB_PREPARE_USER=" + user + " " + installCmd + " prepare-host"
+	if user == "" {
+		return prepareHostInstallerCmd
 	}
-	return installCmd + " prepare-host"
+	return installer.Script("prepare-host", "TB_PREPARE_USER="+user)
 }
 
 // prepareHostEnv is the child's environment: the parent's, but with any ambient
@@ -110,7 +79,7 @@ func prepareHostEnv(user string) []string {
 // that traps signals. We rely on the default SIGKILL rather than a custom
 // SIGINT-only Cancel (which a privileged child could ignore, hanging Wait).
 func prepareHostCmd(ctx context.Context) *exec.Cmd {
-	c := exec.CommandContext(ctx, "bash", "-c", prepareHostInstallerCmd) // #nosec G204 -- argv is compile-time constant: literal "bash" -c installerRunScript("prepare-host"), built only from the installerURL const; no runtime input.
+	c := exec.CommandContext(ctx, "bash", "-c", prepareHostInstallerCmd) // #nosec G204 -- argv is compile-time constant: literal "bash" -c installer.Script("prepare-host", ""), built only from the installer.URL const; no runtime input.
 	c.WaitDelay = 5 * time.Second
 	return c
 }
