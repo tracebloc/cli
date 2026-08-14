@@ -242,10 +242,7 @@ func normalise(attrs Attrs) (map[string]any, error) {
 		}
 		// §1.2 — an absent value is omitted, never sent as nil or "". The
 		// retired `traceback` key rode on every record and was empty on 99.8%.
-		if value == nil {
-			continue
-		}
-		if s, ok := value.(string); ok && strings.TrimSpace(s) == "" {
+		if absentValue(value) {
 			continue
 		}
 		if err := checkAttrValue(key, value); err != nil {
@@ -254,6 +251,26 @@ func normalise(attrs Attrs) (map[string]any, error) {
 		out[key] = value
 	}
 	return out, nil
+}
+
+// absentValue applies §1.2's "there is nothing here" test. It asks the same
+// question checkAttrValue asks — by KIND, not by concrete type — because the
+// two must agree on what a string is. A `value.(string)` assertion here while
+// checkAttrValue accepted any string kind let a named string type
+// (`type Reason string`) carry an empty value onto the record, reopening the
+// hole for exactly the callers the kind-based check was widened to serve. On a
+// failure an empty named `error.type` would then satisfy checkFailureSet by key
+// presence alone — a failure that cannot be grouped, reported as one that can
+// (Bugbot).
+//
+// A zero number and a false bool are NOT absent: they are measurements that
+// happen to be falsey, and dropping them would lose the records worth querying.
+func absentValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	v := reflect.ValueOf(value)
+	return v.Kind() == reflect.String && strings.TrimSpace(v.String()) == ""
 }
 
 func checkAttrKey(key string) error {

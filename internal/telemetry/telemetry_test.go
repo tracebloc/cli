@@ -469,3 +469,58 @@ func TestAKeyIsValidatedEvenWhenItsValueIsDropped(t *testing.T) {
 		t.Fatal("an empty value was sent rather than omitted")
 	}
 }
+
+// A named string type is accepted by checkAttrValue (it is a string KIND), so
+// the omit rule has to recognise it too. It did not: the drop type-asserted to
+// builtin `string`, so `type Reason string; Reason("")` landed on the record —
+// reopening §1.2 for exactly the callers the kind-based value check was widened
+// to serve.
+func TestAnEmptyNamedStringIsDroppedLikeAnEmptyString(t *testing.T) {
+	type Reason string
+	e := New(api.EnvProd, "0.10.7", "host-1")
+	var got map[string]any
+	e.SetSink(func(_ map[string]string, r map[string]any) { got = r })
+	if err := e.Emit("cli.command.succeeded", Attrs{"tracebloc.reason": Reason("  ")}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if v, ok := got["tracebloc.reason"]; ok {
+		t.Errorf("an empty named string was emitted: %#v", v)
+	}
+}
+
+// The consequence that makes it worth a test rather than a tidy-up: on a
+// failure, an empty named error.type would satisfy the failure-set check by key
+// presence alone — a failure that cannot be grouped, reported as one that can.
+func TestAnEmptyNamedErrorTypeDoesNotSatisfyTheFailureCheck(t *testing.T) {
+	type Reason string
+	e := New(api.EnvProd, "0.10.7", "host-1")
+	if err := e.Emit("cli.command.failed", Attrs{"error.type": Reason("")}); err == nil {
+		t.Error("a failure with a blank named error.type was accepted")
+	}
+}
+
+// The other half: a named string with real content must still arrive, and a
+// zero number must not be mistaken for absence.
+func TestNamedStringsAndZeroValuesStillArrive(t *testing.T) {
+	type Reason string
+	e := New(api.EnvProd, "0.10.7", "host-1")
+	var got map[string]any
+	e.SetSink(func(_ map[string]string, r map[string]any) { got = r })
+	err := e.Emit("cli.command.succeeded", Attrs{
+		"tracebloc.reason":  Reason("timeout"),
+		"tracebloc.retries": 0,
+		"tracebloc.cached":  false,
+	})
+	if err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if got["tracebloc.reason"] != Reason("timeout") {
+		t.Errorf("named string lost: %#v", got["tracebloc.reason"])
+	}
+	if _, ok := got["tracebloc.retries"]; !ok {
+		t.Error("0 was dropped as absent — it is a measurement, not an absence")
+	}
+	if _, ok := got["tracebloc.cached"]; !ok {
+		t.Error("false was dropped as absent")
+	}
+}
