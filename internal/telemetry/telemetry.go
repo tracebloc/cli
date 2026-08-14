@@ -20,9 +20,11 @@ package telemetry
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/tracebloc/cli/internal/api"
 )
@@ -75,12 +77,27 @@ var retired = map[string]bool{
 	"experimentKey": true, "experimentId": true,
 }
 
-// otelAttrs are the only keys allowed outside the tracebloc. namespace (§1.1).
-var otelAttrs = map[string]bool{
+// The two layers of §1, kept as two sets. One flat allowlist is what let a call
+// site smuggle a resource key into the RECORD layer — the cross-layer confusion
+// that made cloud_RoleName report a process name, reintroduced at the call site
+// of the package meant to close it.
+
+// resourceScope is set once per process by New. A call site may never send one.
+// tracebloc.component is listed even though it is correctly tracebloc.-prefixed:
+// the namespace rule alone would wave it past.
+var resourceScope = map[string]bool{
 	"service.name": true, "service.version": true, "service.instance.id": true,
-	"deployment.environment": true, "error.type": true,
-	"exception.type": true, "exception.message": true, "exception.stacktrace": true,
-	"event.name": true,
+	"deployment.environment": true, "tracebloc.component": true,
+	"tracebloc.tenant.id": true,
+}
+
+// recordScope is the set of OTel names a call site MAY send. event.name is
+// absent deliberately — it is Emit's first argument, and accepting it here
+// would let a caller replace the name after the grammar and failure-set checks
+// had already run against the real one.
+var recordScope = map[string]bool{
+	"error.type": true, "exception.type": true, "exception.message": true,
+	"exception.stacktrace": true,
 }
 
 // Attrs is one event's record attributes. Values are primitives (§1.2); a map
@@ -110,8 +127,14 @@ func New(env, version, instanceID string) *Emitter {
 		"service.name":        Service,
 		"tracebloc.component": Component,
 		"service.version":     normaliseVersion(version),
-		"service.instance.id": instanceID,
 	}}
+	// §1.2 — omitted rather than stamped empty. os.Hostname() returns "" on
+	// error, and an empty service.instance.id is the "sent as empty rather than
+	// omitted" defect the record layer already refuses; the resource layer must
+	// hold the same line, or the rule only applies where it is easiest.
+	if id := strings.TrimSpace(instanceID); id != "" {
+		e.resource["service.instance.id"] = id
+	}
 	if api.IsKnownEnv(env) {
 		e.resource["deployment.environment"] = strings.ToLower(env)
 	}
@@ -165,7 +188,12 @@ func (e *Emitter) Emit(eventName string, attrs Attrs) error {
 		return err
 	}
 	record["event.name"] = eventName
-	if e.sink != nil {
+	// Validation above ALWAYS runs; delivery does not. The "an unrecognised
+	// environment never exports" guarantee lived entirely in caller discipline
+	// — don't install a sink when !Exports() — even though the emitter already
+	// knows. A guarantee enforced by convention at every call site is a
+	// guarantee until the first call site forgets.
+	if e.sink != nil && e.Exports() {
 		e.sink(e.Resource(), record)
 	}
 	return nil
@@ -204,16 +232,21 @@ func CheckEventName(name string) error {
 func normalise(attrs Attrs) (map[string]any, error) {
 	out := make(map[string]any, len(attrs))
 	for key, value := range attrs {
+		// The KEY is validated first, always — even when the value is about to
+		// be dropped. Skipping straight to `continue` let a retired or malformed
+		// key pass silently whenever it happened to carry an empty value
+		// (`Attrs{"experimentKey": nil}` raised nothing), which contradicts this
+		// package's own rule that a malformed event must not pass quietly.
+		if err := checkAttrKey(key); err != nil {
+			return nil, err
+		}
 		// §1.2 — an absent value is omitted, never sent as nil or "". The
 		// retired `traceback` key rode on every record and was empty on 99.8%.
 		if value == nil {
 			continue
 		}
-		if s, ok := value.(string); ok && s == "" {
+		if s, ok := value.(string); ok && strings.TrimSpace(s) == "" {
 			continue
-		}
-		if err := checkAttrKey(key); err != nil {
-			return nil, err
 		}
 		if err := checkAttrValue(key, value); err != nil {
 			return nil, err
@@ -229,7 +262,15 @@ func checkAttrKey(key string) error {
 			"telemetry: attribute %q is retired (contract §8.5) and must not be emitted; "+
 				"retired names are replaced, not renamed", key)
 	}
-	if otelAttrs[key] {
+	if resourceScope[key] || key == "event.name" {
+		return fmt.Errorf(
+			"telemetry: attribute %q is RESOURCE scope (contract §1) and is set once per "+
+				"process by New(); a call site may not send it. Accepting it would let one "+
+				"record contradict its own process identity. event.name is Emit's first "+
+				"argument, not an attribute: passing it would replace the name after the "+
+				"grammar and failure-set checks had run", key)
+	}
+	if recordScope[key] {
 		return nil
 	}
 	if !attrKeyRe.MatchString(key) {
@@ -245,9 +286,17 @@ func checkAttrKey(key string) error {
 	return nil
 }
 
+// checkAttrValue applies §1.2. The accepted set is every Go scalar KIND, not a
+// list of concrete types: a Go type switch matches the DYNAMIC type, so
+// `case int64` does not match a time.Duration (a named type over int64) and an
+// idiomatic caller would be told their duration was the retired extraData
+// defect. Reflection asks the question that was actually meant.
 func checkAttrValue(key string, value any) error {
-	switch value.(type) {
-	case string, bool, int, int64, float64:
+	switch reflect.ValueOf(value).Kind() {
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
 		return nil
 	default:
 		return fmt.Errorf(
@@ -256,6 +305,12 @@ func checkAttrValue(key string, value any) error {
 				"defect — nothing can query inside it", key, value)
 	}
 }
+
+// Duration renders d for an attribute value. time.Duration IS an int64 kind and
+// so would pass checkAttrValue as a raw nanosecond count — which is a number
+// nobody reading a dashboard can interpret. Naming the unit at the call site is
+// the point: use `telemetry.Duration(elapsed)` with a `…_ms` attribute key.
+func Duration(d time.Duration) int64 { return d.Milliseconds() }
 
 func checkFailureSet(eventName string, record map[string]any) error {
 	parts := strings.Split(eventName, ".")
