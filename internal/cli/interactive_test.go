@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -42,7 +43,17 @@ func (f *fakePrompter) Input(label, _ /*help*/, def string, validate func(string
 	return ans, nil
 }
 
-func (f *fakePrompter) Select(label, _ /*help*/ string, _ []string, def string) (string, error) {
+func (f *fakePrompter) Select(label, _ /*help*/ string, options []string, def string) (string, error) {
+	// Honour survey.Select's real contract: a non-empty Default that is not one
+	// of the Options aborts the prompt on a terminal ("default value … not found
+	// in options"). The original double ignored Options entirely, so a Select
+	// whose pre-filled default came from a mistyped flag stayed green here while
+	// crashing on a real TTY (PR #505). Validating the default in the double is
+	// what connects these tests to that failure — an unguarded supplied default
+	// now reddens instead of passing.
+	if def != "" && !slices.Contains(options, def) {
+		return "", fmt.Errorf("default value %q not found in options %v", def, options)
+	}
 	return f.answer(label, def), nil
 }
 
@@ -581,6 +592,140 @@ func TestRunInteractive_SuppliedValuesArePrefilled(t *testing.T) {
 	}
 	if a.LocalPath != dir {
 		t.Errorf("LocalPath = %q, want the supplied path pre-filled", a.LocalPath)
+	}
+}
+
+// TestDefaultInOptions pins the guard that keeps a command-line value from
+// crashing a survey.Select: a valid value passes through, an empty or unknown
+// one drops to the fallback. Reverting the helper body to `return want` reddens
+// the empty, typo and case-mismatch rows.
+func TestDefaultInOptions(t *testing.T) {
+	opts := []string{"train", "test"}
+	cases := []struct {
+		name, supplied, fallback, want string
+	}{
+		{"valid-supplied-passes-through", "test", "train", "test"},
+		{"first-option-supplied", "train", "train", "train"},
+		{"empty-uses-fallback", "", "train", "train"},
+		{"unknown-typo-uses-fallback", "training", "train", "train"},
+		{"case-mismatch-uses-fallback", "Train", "train", "train"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultInOptions(tc.supplied, opts, tc.fallback); got != tc.want {
+				t.Errorf("defaultInOptions(%q, %v, %q) = %q, want %q",
+					tc.supplied, opts, tc.fallback, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunInteractive_InvalidSuppliedSelectDefaultFallsBack: a mistyped --intent
+// or --label-policy must not crash the guided prompt. survey.Select aborts when
+// its Default is not one of the Options; guided mode pre-fills those Selects with
+// the command-line value, so a typo like --intent training would open a prompt
+// survey refuses to draw (#505, High). The value is guarded (defaultInOptions):
+// an unknown supplied value drops back to the flow's own default, and the
+// question is still ASKED.
+//
+// Mutation-proof: the strict fake Select errors on a default that isn't in its
+// options, so reverting either guard makes runInteractive return that error and
+// this test fails.
+func TestRunInteractive_InvalidSuppliedSelectDefaultFallsBack(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Which column holds the value to predict?": "income",
+	}}
+	a := &runDataIngestArgs{
+		LocalPath: dir,
+		Spec: push.SpecArgs{
+			Category:    "tabular_regression",
+			Table:       "reg_train",
+			Intent:      "training", // typo — not train/test
+			LabelPolicy: "buckets",  // typo — not bucket/passthrough
+		},
+	}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("a mistyped supplied Select default must not crash the prompt: %v", err)
+	}
+	// Typo'd values were dropped to the flow's own valid defaults (the fake
+	// returns the prompt default when nothing is scripted for that question).
+	if a.Spec.Intent != "train" {
+		t.Errorf("Intent = %q, want the \"train\" fallback after a typo'd --intent", a.Spec.Intent)
+	}
+	if a.Spec.LabelPolicy != "bucket" {
+		t.Errorf("LabelPolicy = %q, want the \"bucket\" fallback after a typo'd --label-policy", a.Spec.LabelPolicy)
+	}
+}
+
+// TestRunInteractive_SuppliedLabelColumnStillAsks: a supplied --label-column no
+// longer SKIPS the label question (#505, Medium) — it PRE-FILLS it, exactly like
+// a stale path. The old gate (LabelColumn == "") left a user who mistyped the
+// column with no way to correct it at the prompt; now the header-backed picker
+// still opens, so re-answering wins.
+//
+// Mutation-proof: restoring the `&& a.Spec.LabelColumn == ""` gate skips the
+// question — f.asked loses it AND the re-answer no longer takes — so both
+// assertions redden.
+func TestRunInteractive_SuppliedLabelColumnStillAsks(t *testing.T) {
+	dir := tabularDir(t) // header: age,income,churned
+	f := &fakePrompter{answers: map[string]string{
+		// Re-answer the label with a different real column: only reachable if the
+		// question was actually asked rather than skipped by the supplied value.
+		"Which column holds the label?": "churned",
+	}}
+	a := &runDataIngestArgs{
+		LocalPath: dir,
+		Spec: push.SpecArgs{
+			Category: "tabular_classification", Table: "t", Intent: "train",
+			LabelColumn: "income", // supplied — must pre-fill, not skip
+		},
+	}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if !contains(f.asked, "Which column holds the label?") {
+		t.Errorf("a supplied --label-column must still ASK the label question; asked=%v", f.asked)
+	}
+	if a.Spec.LabelColumn != "churned" {
+		t.Errorf("LabelColumn = %q, want the re-answered \"churned\" (prompt was live, not skipped)", a.Spec.LabelColumn)
+	}
+}
+
+// TestPromptLabelColumn_SuppliedDefaultPrefillsAndGuards drives the label picker
+// directly: a supplied column that names a real header is pre-selected, while an
+// empty or mistyped one falls back to the header-derived default without crashing
+// the Select. It is the same defaultInOptions guard used for --intent, applied to
+// the column the label question now pre-fills (#505).
+//
+// Mutation-proof: passing `supplied` straight to pr.Select (dropping the guard)
+// makes the "mistyped" row error under the strict fake; not threading the value
+// at all makes the "valid-supplied" row return the header default instead.
+func TestPromptLabelColumn_SuppliedDefaultPrefillsAndGuards(t *testing.T) {
+	dir := tabularDir(t) // header: age,income,churned  (no column named "label")
+	const cat = "tabular_classification"
+	const q = "Which column holds the label?"
+
+	cases := []struct {
+		name, supplied, want string
+	}{
+		// Nothing scripted → the strict fake returns the Select's default, so the
+		// asserted value IS whatever default promptLabelColumn passed in.
+		{"valid-supplied-is-preselected", "income", "income"},
+		{"empty-supplied-uses-header-default", "", "age"}, // defaultLabelChoice → first header
+		{"mistyped-supplied-falls-back", "incom", "age"},  // guarded, no crash
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakePrompter{answers: map[string]string{}}
+			got, err := promptLabelColumn(f, cat, dir, q, tc.supplied)
+			if err != nil {
+				t.Fatalf("promptLabelColumn(supplied=%q) errored (default not guarded into options?): %v", tc.supplied, err)
+			}
+			if got != tc.want {
+				t.Errorf("promptLabelColumn(supplied=%q) = %q, want %q", tc.supplied, got, tc.want)
+			}
+		})
 	}
 }
 
