@@ -14,8 +14,14 @@ name: Vulncheck
 # new CVE needs to surface first — main gets the same signal on its
 # next promotion via build.yml's copy.
 #
-# Keep the job in lockstep with build.yml's govulncheck job and
-# GOVULNCHECK_VERSION in the Makefile. Bump deliberately.
+# backend#1972: this job and build.yml's no longer hold their own copy of the
+# pinned version. Both run `make vulncheck`, so GOVULNCHECK_VERSION in the
+# Makefile is the single declaration and the "keep in lockstep" instruction
+# this comment used to carry is now a machine check
+# (scripts/check-tool-pins.sh, in the Lint job).
+#
+# The two jobs still differ, deliberately, and it is only the REF: this one
+# checks out develop on a schedule, build.yml judges the PR head.
 
 on:
   schedule:
@@ -44,6 +50,4 @@ jobs:
           cache: true
 
       - name: govulncheck ./...
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-          govulncheck ./...
+        run: make vulncheck
