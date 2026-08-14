@@ -1,0 +1,147 @@
+package cli
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/tracebloc/cli/internal/push"
+)
+
+// taskScopedValue is one value that only some tasks use — the flags each read
+// inside a single category branch, so a value passed against a task that
+// doesn't consume it would otherwise be silently dropped.
+//
+// The scope predicate lives HERE, once, because two callers need the same
+// answer to "does this task use this value?":
+//
+//   - the misapplied-flag guard in runDataIngestLocal, which rejects a value
+//     the chosen task cannot use, and
+//   - dropOutOfScopeTaskValues, which the guided flow runs after the task
+//     picker so a value the user is no longer choosing doesn't survive.
+//
+// Written as two copies of each predicate, they would agree today and drift on
+// the next task added to a family — and drift here is invisible: both copies
+// keep passing their own tests while disagreeing with each other.
+type taskScopedValue struct {
+	// flag names the value as the user typed it, for the message.
+	flag string
+	// inScope answers whether this task consumes the value.
+	inScope func(category string) bool
+	// isSet reports whether the value is present at all.
+	isSet func(*runDataIngestArgs) bool
+	// clear returns the value to "not supplied".
+	clear func(*runDataIngestArgs)
+	// message is the whole rejection sentence, written out rather than
+	// composed, so the copy catalog (zz-all-strings.golden) shows a reviewer
+	// the exact string a user sees instead of a fragment. A test pins that each
+	// one names its own flag.
+	message func(category string) string
+}
+
+// taskScopedValues is the whole set. Order fixes the order of rejection when
+// more than one is misapplied, so the message a user sees is deterministic.
+var taskScopedValues = []taskScopedValue{
+	{
+		flag:    "--target-size",
+		inScope: push.IsImage,
+		isSet:   func(a *runDataIngestArgs) bool { return a.TargetSizeFlag != "" },
+		clear:   func(a *runDataIngestArgs) { a.TargetSizeFlag = "" },
+		message: func(cat string) string {
+			return fmt.Sprintf("--target-size is image tasks only; it doesn't apply to task %q", cat)
+		},
+	},
+	{
+		flag:    "--min-size",
+		inScope: push.IsImage,
+		isSet:   func(a *runDataIngestArgs) bool { return a.MinSizeFlag != "" },
+		clear:   func(a *runDataIngestArgs) { a.MinSizeFlag = "" },
+		message: func(cat string) string {
+			return fmt.Sprintf("--min-size is image tasks only; it doesn't apply to task %q", cat)
+		},
+	},
+	{
+		flag:    "--schema",
+		inScope: push.IsTabular,
+		isSet:   func(a *runDataIngestArgs) bool { return a.SchemaFlag != "" },
+		clear:   func(a *runDataIngestArgs) { a.SchemaFlag = "" },
+		message: func(cat string) string {
+			return fmt.Sprintf("--schema is tabular/time-series tasks only; it doesn't apply to task %q", cat)
+		},
+	},
+	{
+		flag:    "--label-policy",
+		inScope: push.IsRegressionClass,
+		isSet:   func(a *runDataIngestArgs) bool { return a.Spec.LabelPolicy != "" },
+		clear:   func(a *runDataIngestArgs) { a.Spec.LabelPolicy = "" },
+		message: func(cat string) string {
+			return fmt.Sprintf("--label-policy is regression-class tasks only (tabular_regression, "+
+				"time_series_forecasting, time_to_event_prediction); it doesn't apply to task %q", cat)
+		},
+	},
+	{
+		flag:    "--time-column",
+		inScope: func(cat string) bool { return cat == "time_to_event_prediction" },
+		isSet:   func(a *runDataIngestArgs) bool { return a.Spec.TimeColumn != "" },
+		clear:   func(a *runDataIngestArgs) { a.Spec.TimeColumn = "" },
+		message: func(cat string) string {
+			return fmt.Sprintf("--time-column is time_to_event_prediction only; it doesn't apply to task %q", cat)
+		},
+	},
+	{
+		flag:    "--number-of-keypoints",
+		inScope: func(cat string) bool { return cat == "keypoint_detection" },
+		isSet:   func(a *runDataIngestArgs) bool { return a.Spec.NumberOfKeypoints != 0 },
+		clear:   func(a *runDataIngestArgs) { a.Spec.NumberOfKeypoints = 0 },
+		message: func(cat string) string {
+			return fmt.Sprintf("--number-of-keypoints is keypoint_detection only; it doesn't apply to task %q", cat)
+		},
+	},
+	{
+		// The one inverted scope: every task uses a label column EXCEPT
+		// self-supervised text, which trains on the text itself. buildText drops
+		// the value, so accepting it silently discarded the user's answer and
+		// the review echoed a column that never shipped.
+		flag:    "--label-column",
+		inScope: func(cat string) bool { return !push.SelfSupervisedText(cat) },
+		isSet:   func(a *runDataIngestArgs) bool { return a.Spec.LabelColumn != "" },
+		clear:   func(a *runDataIngestArgs) { a.Spec.LabelColumn = "" },
+		message: func(cat string) string {
+			return fmt.Sprintf("--label-column doesn't apply to task %q — it trains on the text itself, with no label column", cat)
+		},
+	},
+}
+
+// rejectMisappliedTaskValues returns the first value present that the chosen
+// task cannot use. Flag-only runs reach this with whatever the user typed;
+// guided runs reach it after dropOutOfScopeTaskValues has already removed
+// anything the user re-chose away from, so it can only fire on a real mistake.
+func rejectMisappliedTaskValues(a *runDataIngestArgs) error {
+	for _, v := range taskScopedValues {
+		if v.isSet(a) && !v.inScope(a.Spec.Category) {
+			return errors.New(v.message(a.Spec.Category))
+		}
+	}
+	return nil
+}
+
+// dropOutOfScopeTaskValues clears every task-scoped value the chosen task does
+// not use.
+//
+// The guided flow calls this immediately after the task picker. Without it, a
+// run started as `--task time_to_event_prediction --time-column t` that picks
+// tabular_classification at the prompt keeps `TimeColumn` on the spec: the
+// prompt for it never appears (it is time_to_event_prediction-only), Review
+// still shows it, and the run then dies AFTER the confirm — blaming a flag the
+// user just spent a prompt walking away from. Guided mode's promise is that the
+// answers on screen are the run; a value that no question asked about and no
+// answer can reach is not one of them.
+//
+// It is safe to call unconditionally: when the task is unchanged every
+// predicate still holds and nothing is cleared.
+func dropOutOfScopeTaskValues(a *runDataIngestArgs) {
+	for _, v := range taskScopedValues {
+		if !v.inScope(a.Spec.Category) {
+			v.clear(a)
+		}
+	}
+}

@@ -201,55 +201,18 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 			a.Spec.Category, push.SupportedCategoriesList())}
 	}
 
-	// Image-only flags. --target-size / --min-size describe image
-	// resolution, so they're meaningless on a tabular / text task.
-	// Reject them explicitly here: without this guard they'd be parsed
-	// only inside the image branch below, so on a non-image task the
-	// value — even a malformed one — was silently dropped with no error.
-	if !push.IsImage(a.Spec.Category) {
-		for _, f := range []struct{ name, val string }{
-			{"--target-size", a.TargetSizeFlag},
-			{"--min-size", a.MinSizeFlag},
-		} {
-			if f.val != "" {
-				return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
-					"%s is image tasks only; it doesn't apply to task %q",
-					f.name, a.Spec.Category)}
-			}
-		}
-	}
-
-	// Task-scoped flags. Like --target-size/--min-size above, each of these is
-	// read only inside the one category branch that consumes it, so passing one
-	// on a task that doesn't use it silently dropped the value — and the user's
-	// intent — with no error, even though the help text says each is scoped.
-	// Reject a misapplied flag explicitly so it fails fast instead of being
-	// ignored (the scope mirrors spec.go's build gates exactly).
-	if a.SchemaFlag != "" && !push.IsTabular(a.Spec.Category) {
-		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
-			"--schema is tabular/time-series tasks only; it doesn't apply to task %q", a.Spec.Category)}
-	}
-	if a.Spec.LabelPolicy != "" && !push.IsRegressionClass(a.Spec.Category) {
-		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
-			"--label-policy is regression-class tasks only (tabular_regression, "+
-				"time_series_forecasting, time_to_event_prediction); it doesn't apply to task %q",
-			a.Spec.Category)}
-	}
-	if a.Spec.TimeColumn != "" && a.Spec.Category != "time_to_event_prediction" {
-		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
-			"--time-column is time_to_event_prediction only; it doesn't apply to task %q", a.Spec.Category)}
-	}
-	if a.Spec.NumberOfKeypoints != 0 && a.Spec.Category != "keypoint_detection" {
-		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
-			"--number-of-keypoints is keypoint_detection only; it doesn't apply to task %q", a.Spec.Category)}
-	}
-	// --label-column is meaningless for self-supervised text (the label is the
-	// text itself); buildText drops it, so accepting it silently discarded the
-	// user's value and the review echoed a column that never shipped.
-	if a.Spec.LabelColumn != "" && push.SelfSupervisedText(a.Spec.Category) {
-		return nil, nil, nil, false, &exitError{code: exitBadInput, err: fmt.Errorf(
-			"--label-column doesn't apply to task %q — it trains on the text itself, with no label column",
-			a.Spec.Category)}
+	// Task-scoped flags. Each of these is read only inside the one category
+	// branch that consumes it, so passing one on a task that doesn't use it
+	// silently dropped the value — and the user's intent — with no error, even
+	// though the help text says each is scoped. Reject a misapplied flag
+	// explicitly so it fails fast instead of being ignored (the scope mirrors
+	// spec.go's build gates exactly).
+	//
+	// The scopes themselves live in task_scope.go, shared with the guided
+	// flow's post-picker reset: both need the same answer to "does this task
+	// use this value?", and two copies of that answer would drift silently.
+	if err := rejectMisappliedTaskValues(a); err != nil {
+		return nil, nil, nil, false, &exitError{code: exitBadInput, err: err}
 	}
 
 	// 3. Walk the local directory FIRST (local "fail fast"), dispatched
