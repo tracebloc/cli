@@ -50,7 +50,7 @@ help:
 #   * schema-check   — fetches data-ingestors at the pinned ref.
 #   * deadcode       — another `go run tool@version` fetch.
 .PHONY: check
-check: vet test-fast fmt-check file-budget check-style
+check: vet test-fast fmt-check file-budget check-style check-tool-pins
 	@echo "==> check: green (run 'make check-all' for the full CI set)"
 
 # check-all: the full PR gate. `ci` is the original name and stays —
@@ -132,7 +132,7 @@ GOIMPORTS_VERSION   ?= v0.48.0
 # which fails on findings since #430. A green `make ci` must imply a green
 # PR; lint-full's own guard tells you how to install the tool if missing.
 .PHONY: ci
-ci: vet test lint lint-full fmt-check schema-check vulncheck file-budget deadcode check-style
+ci: vet test lint lint-full fmt-check schema-check vulncheck file-budget deadcode check-style check-tool-pins
 	@echo "==> ci: all green"
 
 .PHONY: build
@@ -237,6 +237,12 @@ deadcode:
 # reachable vulns before this gate existed (#276). Mirrors the govulncheck
 # job in build.yml (PR gate) and vulncheck.yml (weekly cron on develop).
 # Needs network for the vuln DB (https://vuln.go.dev), like schema-check.
+# backend#1972: asserts no workflow restates a version this Makefile declares.
+# Runs in the Lint job beside check-style.sh.
+.PHONY: check-tool-pins
+check-tool-pins:
+	bash scripts/check-tool-pins.sh
+
 .PHONY: vulncheck
 vulncheck:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
