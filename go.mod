@@ -11,7 +11,30 @@ go 1.26.0
 // Pin the build toolchain to the latest 1.26.x patch so release binaries
 // pick up stdlib security fixes (GO-2026-5856 needs go1.26.5; three more
 // stdlib CVEs need go1.26.4). Bump this on each Go patch release.
-toolchain go1.26.5
+//
+// go1.26.6 clears four stdlib vulnerabilities govulncheck reports as CALLED
+// from this module — not merely present in the dependency graph:
+//
+//   GO-2026-6090  crypto/tls    post-handshake message flood
+//                 <- api.userAgentTransport.RoundTrip, submit.HTTPSubmitter.Submit
+//   GO-2026-5972  encoding/asn1 unbounded recursion depth
+//                 <- submit.PortForwardJobsManager -> spdy.RoundTripperFor
+//   GO-2026-5026  net/http      x/net/idna Punycode label handling
+//                 <- api.userAgentTransport.RoundTrip, submit.HTTPSubmitter.Submit
+//   GO-2026-6218  net/url       quadratic complexity in resolvePath
+//                 <- submit.HTTPSubmitter.Submit, schema.NewV1Validator
+//
+// All four are fixed in go1.26.6 and none needs a code or dependency change,
+// because every workflow resolves Go through `go-version-file: go.mod` — so
+// this line is the whole fix for build.yml, golangci.yml, e2e.yml, mutation.yml,
+// release.yml and chart-drift.yml at once.
+//
+// Found on the 2026-08-14 prod hop: `govulncheck` went red on the main tip and
+// the promotion merged anyway, because it is NOT one of this repo's required
+// status checks (backend#1972). Making it required is deliberately a SEPARATE
+// change, and only after this reaches main — arming that gate first would block
+// every promotion on a branch that is still on go1.26.5.
+toolchain go1.26.6
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
