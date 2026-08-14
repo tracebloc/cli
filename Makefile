@@ -237,6 +237,12 @@ deadcode:
 # reachable vulns before this gate existed (#276). Mirrors the govulncheck
 # job in build.yml (PR gate) and vulncheck.yml (weekly cron on develop).
 # Needs network for the vuln DB (https://vuln.go.dev), like schema-check.
+# backend#1972: asserts no workflow restates a version this Makefile declares.
+# Runs in the Lint job beside check-style.sh.
+.PHONY: check-tool-pins
+check-tool-pins:
+	bash scripts/check-tool-pins.sh
+
 .PHONY: vulncheck
 vulncheck:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...

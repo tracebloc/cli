@@ -52,6 +52,7 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck dash
           shellcheck --shell=sh --severity=error scripts/install.sh
           shellcheck --shell=bash --severity=error scripts/check-style.sh
+          shellcheck --shell=bash --severity=error scripts/check-tool-pins.sh
           dash -n scripts/install.sh
           bash -n scripts/tests/install-verify.sh
       - name: Verification harness (mandatory cosign / fail-closed)
@@ -188,16 +189,25 @@ jobs:
         # checks only — role/wording judgement stays with review.
         run: bash scripts/check-style.sh
 
+      - name: Tool-pin guard (one declaration per pinned tool)
+        # backend#1972: fails if a workflow restates a tool version the Makefile
+        # already declares. govulncheck's pin lived in three places, kept in step
+        # by a comment; this is that comment turned into a check.
+        run: bash scripts/check-tool-pins.sh
+
   govulncheck:
     timeout-minutes: 10
     name: govulncheck
     # Reachability-scans the module for known vulnerabilities (stdlib +
     # deps) on every PR and push. This is a customer-installed binary —
     # 6 reachable CVEs shipped in v0.8.0 before this gate existed (#276).
-    # Pinned version, same rationale as the lint tools above; keep in
-    # lockstep with GOVULNCHECK_VERSION in the Makefile and the copy of
-    # this job in vulncheck.yml (the weekly cron that catches CVEs
-    # published between PRs). Bump deliberately.
+    #
+    # backend#1972: the version is NOT restated here. It lived in three
+    # places — this job, vulncheck.yml, and GOVULNCHECK_VERSION in the
+    # Makefile — held in lockstep by a comment asking people to remember.
+    # All three now resolve to the Makefile declaration, because `make
+    # vulncheck` is what runs. scripts/check-tool-pins.sh fails the Lint
+    # job if a literal pin creeps back in.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -209,9 +219,10 @@ jobs:
           cache: true
 
       - name: govulncheck ./...
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-          govulncheck ./...
+        # `make vulncheck`, not a restated `go install ...@version`: a green
+        # `make ci` locally and this gate can then never disagree about which
+        # govulncheck ran. Same reasoning as lint-full/GOLANGCI_LINT_VERSION.
+        run: make vulncheck
 
   build:
     timeout-minutes: 20
