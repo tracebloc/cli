@@ -189,10 +189,10 @@ func TestGuided_AMisappliedFlagIsStillRejectedWhenNoTaskWasSupplied(t *testing.T
 	}
 }
 
-// A TYPO'd --task is not a task the user walked away from, and this is the case
+// An UNRECOGNIZED --task is not a task the user walked away from, and this is the
 // that made the reset silently eat two values at once. Every `inScope` predicate
 // answers from the registry, so an unknown id lands on the DEFAULT side of each:
-// `!SelfSupervisedText("tabular_clasification")` is true because the lookup
+// `!SelfSupervisedText("tabular_classifier")` is true because the lookup
 // misses. Pick a self-supervised text task and --label-column then reads as
 // "in scope before, out of scope now" and gets cleared — so
 // rejectMisappliedTaskValues finds nothing to complain about. The typo is gone
@@ -200,7 +200,7 @@ func TestGuided_AMisappliedFlagIsStillRejectedWhenNoTaskWasSupplied(t *testing.T
 // (data_ingest_local.go:103 vs :165) and the picker has already overwritten it
 // with a valid id, so the run proceeds as though the user typed neither flag,
 // where --no-input exits 2 on the same command line.
-func TestGuided_ATypoedTaskIsNotATaskChange(t *testing.T) {
+func TestGuided_AnUnrecognizedTaskIsNotATaskChange(t *testing.T) {
 	dir := textDirLayout(t)
 	f := &fakePrompter{answers: map[string]string{
 		"Please name the dataset.": "mlm_train",
@@ -208,9 +208,10 @@ func TestGuided_ATypoedTaskIsNotATaskChange(t *testing.T) {
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
-		// A near-miss on tabular_classification: unknown to the registry, so
-		// SelfSupervisedText() misses and every inScope() defaults to true.
-		Spec: push.SpecArgs{Category: "tabular_clasification", LabelColumn: "churned"},
+		// A plausible wrong name (not tabular_classification): unknown to the
+		// registry, so SelfSupervisedText() misses and every inScope() defaults
+		// to true. Spelled correctly on purpose — `misspell` is a lint gate here.
+		Spec: push.SpecArgs{Category: "tabular_classifier", LabelColumn: "churned"},
 	}
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
@@ -219,7 +220,7 @@ func TestGuided_ATypoedTaskIsNotATaskChange(t *testing.T) {
 		t.Fatalf("LabelColumn = %q — the reset cleared it on behalf of a task that does not exist", a.Spec.LabelColumn)
 	}
 	if err := rejectMisappliedTaskValues(a); err == nil {
-		t.Error("a --label-column misapplied alongside a typo'd --task was accepted; --no-input would exit 2")
+		t.Error("a --label-column misapplied alongside an unrecognized --task was accepted; --no-input would exit 2")
 	}
 }
 

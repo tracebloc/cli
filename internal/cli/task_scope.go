@@ -159,12 +159,13 @@ func rejectMisappliedTaskValues(a *runDataIngestArgs) error {
 // A run with no --task supplied is not a change either: the user never declared
 // a task to move away from, so every value stands or falls on the guard.
 //
-// Nor is a --task the registry does not recognize. A typo is not a task anyone
-// walked away from, and treating it as one clears values on its behalf: every
+// Nor is a --task the registry does not recognize. A name nobody registered is
+// not a task anyone walked away from, and treating it as one clears values on
+// its behalf: every
 // `inScope` predicate answers from the registry, so an unknown id lands on the
-// default side of each one — `!SelfSupervisedText("tabular_clasification")` is
+// default side of each one — `!SelfSupervisedText("tabular_classifier")` is
 // true because the lookup misses, not because the task uses a label column. So
-// `--task tabular_clasification --label-column x`, picking a self-supervised
+// `--task tabular_classifier --label-column x`, picking a self-supervised
 // text task, silently dropped --label-column, and the guided flow runs BEFORE
 // the category gate (data_ingest_local.go:103 vs :165), so the typo itself was
 // never reported either — the picker had already overwritten it with a valid id.
