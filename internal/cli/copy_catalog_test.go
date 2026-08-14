@@ -131,7 +131,7 @@ func TestCopyCatalog(t *testing.T) {
 		p.Hintf("For help: https://docs.tracebloc.io/create-use-case/prepare-dataset")
 		pr := &catalogPrompter{w: &b, answers: answers}
 		a := &runDataIngestArgs{}
-		if err := runInteractive(p, pr, a, false /*taskSet*/); err != nil {
+		if err := runInteractive(p, pr, a); err != nil {
 			t.Fatalf("driveIngest(%s): %v", dir, err)
 		}
 		return strings.ReplaceAll(b.String(), dir, shownPath)
@@ -211,7 +211,7 @@ func TestCopyCatalog(t *testing.T) {
 	}
 	dataIngestFile := doc(
 		"tb data ingest — stage a dataset into your secure environment",
-		"What you see when you run `tb data ingest` with no flags: a short intro, a\nfour-step guided setup (intent, name, path, task) then the task-specific\nquestions, and — after you confirm — the run itself. The setup is\ndriven through the real flow for one task in each family (tabular, image, text)\nso the task-specific questions are visible; each core question prints as a\n`Step N of 4 · …` header, the task-specific ones (the label column, and extras\nlike resolution or schema) as their own header, the\nsupporting line beneath it, and the `?` line shows your answer. The run (shown\nonce, for tabular) is the three steps + the final summary as the CLI renders\nthem. Passing flags (--as, --task, a path, …) skips the matching questions. The\nother tasks' extra questions (keypoints, label policy, time column),\nself-supervised text (which skips the label question), and the failure-summary\nwordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams\nthrough (MySQL waits, the 📊 banner, per-validator lines) is the engine's own\nstdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
+		"What you see when you run `tb data ingest` with no flags: a short intro, a\nfour-step guided setup (intent, name, path, task) then the task-specific\nquestions, and — after you confirm — the run itself. The setup is\ndriven through the real flow for one task in each family (tabular, image, text)\nso the task-specific questions are visible; each core question prints as a\n`Step N of 4 · …` header, the task-specific ones (the label column, and extras\nlike resolution or schema) as their own header, the\nsupporting line beneath it, and the `?` line shows your answer. The run (shown\nonce, for tabular) is the three steps + the final summary as the CLI renders\nthem. Values passed as flags (--as, --task, a path, …) pre-fill the matching\nquestions rather than skipping them — guided mode always asks. The\nother tasks' extra questions (keypoints, label policy, time column),\nself-supervised text (which skips the label question), and the failure-summary\nwordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams\nthrough (MySQL waits, the 📊 banner, per-validator lines) is the engine's own\nstdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
 		[]run{
 			{"tb data ingest   # guided · tabular classification", tabularIngest},
 			{"tb data ingest   # guided · image classification", imageIngest},

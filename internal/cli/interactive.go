@@ -178,17 +178,22 @@ func isInteractiveTTY() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
-// runInteractive fills the gaps in a's core ingest fields by prompting,
-// data-first (RFC-0002 §12.1): intent → name → path → task → task-specific
-// questions → review. It only prompts for what's still missing, so flags
-// the user already passed win. taskSet says whether the task was passed
-// explicitly (via --task or the hidden --category alias); when it wasn't,
-// the family is sniffed from the data the user pointed at (echoed back, or
-// asked plainly when ambiguous) and only that family's tasks are offered.
+// runInteractive walks a's core ingest fields by prompting, data-first
+// (RFC-0002 §12.1): intent → name → path → task → task-specific questions →
+// review.
+//
+// It asks EVERY question relevant to the chosen task (#711). A value the user
+// passed on the command line pre-fills the answer — Enter accepts it — but never
+// suppresses the question. Which questions are relevant still depends on the
+// task picked at step 4; that is the only gate.
+//
+// When no task was supplied, the family is sniffed from the data the user
+// pointed at (echoed back, or asked plainly when ambiguous) and only that
+// family's tasks are offered. When one WAS supplied it selects the family
+// directly, so the user's own answer is always among the options.
 //
 // Mutates a through the pointer.
-func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bool) error {
-	prompted := false
+func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 
 	// The guided flow is a four-step setup: intent → name → path → task. Each
 	// question prints as its own step header (PromptStep), with any supporting
@@ -206,37 +211,57 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	// blank sits directly between header and prompt. A result that belongs to an
 	// answer (the sniff echo) attaches to it with no blank.
 
+	// Guided mode ASKS. A value that arrived on the command line becomes the
+	// prompt's DEFAULT — never a reason to skip the question (#711).
+	//
+	// It used to skip: each step was wrapped in `if <value> == ""`. That turned a
+	// path which had merely gone stale into a dead end — the user was sitting at
+	// a prompt, ready to answer, and instead got "no such file or directory" with
+	// no way to correct it. Data moves between runs; a name or a task does not
+	// stop being true, but the flow should not have to reason about which is
+	// which. So: always ask, pre-filled, Enter accepts.
+	//
+	// Only the TASK gate survives, one level down — which questions apply still
+	// depends on the task chosen at step 4 (self-supervised text has no label and
+	// no extras). That gate is about relevance, not about what the user typed.
+	//
+	// Non-interactive is untouched: runInteractive is only reached on a TTY
+	// without --no-input/--output-json, so scripts still take flags silently.
+
 	// Step 1 — intent: what this data is for.
-	if a.Spec.Intent == "" {
+	{
+		def := a.Spec.Intent
+		if def == "" {
+			def = "train"
+		}
 		p.PromptStep(1, 4, "Do you want to ingest training or test data?")
 		p.Newline()
 		ans, err := pr.Select("Do you want to ingest training or test data?", "which split this data is",
-			[]string{"train", "test"}, "train")
+			[]string{"train", "test"}, def)
 		if err != nil {
 			return err
 		}
 		a.Spec.Intent = ans
-		prompted = true
 	}
 
-	// Step 2 — name. No auto-fill; the character rules surface only if the
-	// name is rejected (see ValidateTableName), so the prompt stays clean.
-	if a.Spec.Table == "" {
+	// Step 2 — name. The character rules surface only if the name is rejected
+	// (see ValidateTableName), so the prompt stays clean.
+	{
 		p.PromptStep(2, 4, "Please name the dataset.")
 		p.Newline()
 		ans, err := pr.Input("Please name the dataset.",
-			"letters, digits, and underscores — no hyphens or spaces, use _; start with a letter or underscore  e.g. churn_train", "",
+			"letters, digits, and underscores — no hyphens or spaces, use _; start with a letter or underscore  e.g. churn_train",
+			a.Spec.Table,
 			push.ValidateTableName)
 		if err != nil {
 			return err
 		}
 		a.Spec.Table = ans
-		prompted = true
 	}
 
 	// Step 3 — path. Show what "file or folder" means per modality, then
 	// detect the family from the layout and echo it back.
-	if a.LocalPath == "" {
+	{
 		p.PromptStep(3, 4, "Where is your data?")
 		p.Newline()
 		exTab, exImg, exTxt := datasetPathExamples(runtime.GOOS)
@@ -245,7 +270,8 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		p.Infof("Images    a folder with labels.csv + images/   e.g. %s", exImg)
 		p.Infof("Text      a folder with labels.csv + texts/     e.g. %s", exTxt)
 		p.Newline()
-		ans, err := pr.Input("Where is your data?", fmt.Sprintf("e.g. %s or %s", exTab, exImg), "", validateDatasetPath)
+		ans, err := pr.Input("Where is your data?", fmt.Sprintf("e.g. %s or %s", exTab, exImg),
+			a.LocalPath, validateDatasetPath)
 		if err != nil {
 			return err
 		}
@@ -259,7 +285,6 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		// otherwise become part of the path (#386). validateDatasetPath applies
 		// the same canonicalization, so the re-prompt guard stays consistent.
 		a.LocalPath = dequotePath(ans)
-		prompted = true
 	}
 	// Expand a leading ~ now so the family sniff + label-header preview read
 	// the real path; runDataIngest's own expandHome then no-ops.
@@ -275,33 +300,44 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		return err
 	}
 
-	// (d) task — family-scoped. An explicit --task wins and skips both the
-	// sniff and the picker (§5.1). Otherwise the family is sniffed from the
-	// layout (and echoed), or asked plainly when the layout is ambiguous,
-	// and then only that family's tasks are offered.
-	if !taskSet {
-		fam, err := resolveFamily(p, pr, a.LocalPath)
-		if err != nil {
-			return err
+	// (d) task — family-scoped, and always asked (#711).
+	//
+	// An explicit --task no longer skips the picker; it selects the family and
+	// becomes the pre-selected option. Taking the family from the SUPPLIED task
+	// rather than the sniff matters: the two can disagree (a tabular task passed
+	// against a folder that sniffs image), and scoping the list to the sniffed
+	// family would leave the user's own answer missing from its own default.
+	// With no task supplied, the family is sniffed from the layout (and echoed),
+	// or asked plainly when the layout is ambiguous — unchanged.
+	{
+		var fam push.Family
+		if spec, ok := push.Lookup(a.Spec.Category); ok {
+			fam = spec.Family
+		} else {
+			f, err := resolveFamily(p, pr, a.LocalPath)
+			if err != nil {
+				return err
+			}
+			fam = f
 		}
-		id, err := pickTask(p, pr, fam)
+		id, err := pickTask(p, pr, fam, a.Spec.Category)
 		if err != nil {
 			return err
 		}
 		a.Spec.Category = id
-		prompted = true
 	}
 
 	// (e) task-specific questions, including the label column.
-	cp, err := promptCategorySpecific(p, pr, a)
-	if err != nil {
+	if _, err := promptCategorySpecific(p, pr, a); err != nil {
 		return err
 	}
-	prompted = prompted || cp
 
-	// (f) review + single confirm. Only when we actually prompted something
-	// — an ingest fully specified by flags (on a TTY) isn't nagged.
-	if prompted {
+	// (f) review + single confirm — unconditional now (#711). It used to be
+	// gated on "did we actually prompt anything", so an ingest fully specified
+	// by flags wasn't nagged. Guided mode always prompts now, so that gate can
+	// only ever be true; keeping it would be a condition that reads as a choice
+	// while having none.
+	{
 		renderReview(p, a)
 		a.ReviewShown = true
 		// No header here: Confirm keeps its own label ("Proceed with the
@@ -354,7 +390,7 @@ func resolveFamily(p *ui.Printer, pr prompter, path string) (push.Family, error)
 // task_id", split into Available now and (greyed) Not yet in the CLI —
 // and asks the user to pick one of the available ones. It never shows the
 // flat 15-item wall: only this family's tasks appear (§7).
-func pickTask(p *ui.Printer, pr prompter, fam push.Family) (string, error) {
+func pickTask(p *ui.Printer, pr prompter, fam push.Family, want string) (string, error) {
 	var available, pending []push.CategorySpec
 	for _, s := range push.CategoriesByFamily(fam) {
 		if s.CLISupported {
@@ -406,7 +442,17 @@ func pickTask(p *ui.Printer, pr prompter, fam push.Family) (string, error) {
 	for i, s := range available {
 		opts[i] = s.ID
 	}
-	ans, err := pr.Select("Which task?", "pick the task this data is for", opts, opts[0])
+	// def pre-selects a task the user already named (#711). Only honoured when
+	// it is actually in this family's list — survey would otherwise render a
+	// default the user cannot see, and an Enter on it would be unexplainable.
+	def := opts[0]
+	for _, o := range opts {
+		if o == want {
+			def = want
+			break
+		}
+	}
+	ans, err := pr.Select("Which task?", "pick the task this data is for", opts, def)
 	if err != nil {
 		return "", err
 	}
@@ -461,13 +507,17 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 	// depends on the task.
 	switch {
 	case push.IsImage(cat):
-		if cat == "keypoint_detection" && a.Spec.NumberOfKeypoints <= 0 {
+		if cat == "keypoint_detection" {
 			p.Section("How many keypoints per sample?")
 			p.Newline()
 			p.Hintf("The number of landmark points each sample is annotated with — dataset-specific.  e.g. 17 for COCO human pose")
 			p.Newline()
+			kpDef := ""
+			if a.Spec.NumberOfKeypoints > 0 {
+				kpDef = strconv.Itoa(a.Spec.NumberOfKeypoints)
+			}
 			ans, err := pr.Input("How many keypoints per sample?",
-				"e.g. 17 for COCO pose", "", validatePositiveInt)
+				"e.g. 17 for COCO pose", kpDef, validatePositiveInt)
 			if err != nil {
 				return prompted, err
 			}
@@ -475,13 +525,13 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			a.Spec.NumberOfKeypoints = n
 			prompted = true
 		}
-		if a.TargetSizeFlag == "" {
+		{
 			p.Section("Image resolution")
 			p.Newline()
 			p.Hintf("The size your images already are, as WxH — tracebloc checks every image matches and never resizes. Press Enter to read it from your first image.  e.g. 224x224")
 			p.Newline()
 			ans, err := pr.Input("Image resolution",
-				"the size your images already are; tracebloc checks it, it never resizes", "",
+				"the size your images already are; tracebloc checks it, it never resizes", a.TargetSizeFlag,
 				validateOptionalTargetSize)
 			if err != nil {
 				return prompted, err
@@ -490,38 +540,46 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			prompted = true
 		}
 	case push.IsTabular(cat):
-		if a.SchemaFlag == "" {
+		{
 			p.Section("Column types")
 			p.Newline()
 			p.Hintf("We infer each column's type from your CSV. Press Enter to accept, or type overrides like age:INT,price:FLOAT.")
 			p.Newline()
-			ans, err := pr.Input("Column types", "e.g. age:INT,price:FLOAT", "", validateOptionalSchema)
+			ans, err := pr.Input("Column types", "e.g. age:INT,price:FLOAT", a.SchemaFlag, validateOptionalSchema)
 			if err != nil {
 				return prompted, err
 			}
 			a.SchemaFlag = strings.TrimSpace(ans)
 			prompted = true
 		}
-		if push.IsRegressionClass(cat) && a.Spec.LabelPolicy == "" {
+		if push.IsRegressionClass(cat) {
 			p.Section("Label policy")
 			p.Newline()
 			p.Hintf("Regression targets are continuous. 'bucket' groups them into ranges before they leave the cluster; 'passthrough' keeps raw values.")
 			p.Newline()
+			lpDef := a.Spec.LabelPolicy
+			if lpDef == "" {
+				lpDef = "bucket"
+			}
 			ans, err := pr.Select("Label policy",
 				"bucket bins the target before it leaves the cluster",
-				[]string{"bucket", "passthrough"}, "bucket")
+				[]string{"bucket", "passthrough"}, lpDef)
 			if err != nil {
 				return prompted, err
 			}
 			a.Spec.LabelPolicy = ans
 			prompted = true
 		}
-		if cat == "time_to_event_prediction" && a.Spec.TimeColumn == "" {
+		if cat == "time_to_event_prediction" {
 			p.Section("Time column")
 			p.Newline()
 			p.Hintf("The column holding the duration / time-to-event.  e.g. time, tenure_days")
 			p.Newline()
-			ans, err := pr.Input("Time column", "the duration/time column name", "time", nil)
+			tcDef := a.Spec.TimeColumn
+			if tcDef == "" {
+				tcDef = "time"
+			}
+			ans, err := pr.Input("Time column", "the duration/time column name", tcDef, nil)
 			if err != nil {
 				return prompted, err
 			}

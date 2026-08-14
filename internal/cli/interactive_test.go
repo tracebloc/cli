@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -110,7 +111,7 @@ func TestRunInteractive_PromptOrder(t *testing.T) {
 		"Which column holds the label?":                "churned",
 	}}
 	a := &runDataIngestArgs{}
-	if err := runInteractive(discardPrinter(), f, a, false /*taskSet*/); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 
@@ -146,7 +147,7 @@ func TestRunInteractive_PathPromptCopyIsFileOrFolder(t *testing.T) {
 		"Which column holds the label?":                "churned",
 	}}
 	a := &runDataIngestArgs{}
-	if err := runInteractive(discardPrinter(), f, a, false /*taskSet*/); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	found := false
@@ -174,7 +175,7 @@ func TestRunInteractive_SniffEchoesFamily(t *testing.T) {
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	if err := runInteractive(p, f, a, false); err != nil {
+	if err := runInteractive(p, f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if !strings.Contains(buf.String(), "Found a CSV table") {
@@ -201,7 +202,7 @@ func TestRunInteractive_SniffIsHintNotLock(t *testing.T) {
 		"Which column holds the label?": "label",
 	}}
 	a := &runDataIngestArgs{LocalPath: empty, Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if !contains(f.asked, "What kind of data is this?") {
@@ -263,9 +264,10 @@ func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 	}
 }
 
-// TestRunInteractive_ExplicitTaskSkipsSniff: an explicit --task wins — no
-// sniff echo, no family question, no task picker.
-func TestRunInteractive_ExplicitTaskSkipsSniff(t *testing.T) {
+// TestRunInteractive_ExplicitTaskStillAsks: an explicit --task no longer skips
+// the picker (#711) — it PRE-SELECTS. It does still settle the family directly,
+// so the sniff is unnecessary and the user's own task is among the options.
+func TestRunInteractive_ExplicitTaskStillAsks(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
 		"Please name the dataset.":      "t",
@@ -277,16 +279,26 @@ func TestRunInteractive_ExplicitTaskSkipsSniff(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	if err := runInteractive(p, f, a, true /*taskSet*/); err != nil {
+	if err := runInteractive(p, f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
+	if !slices.Contains(f.asked, "Which task?") {
+		t.Errorf("the task question must still be asked; asked: %v", f.asked)
+	}
+	// The family came from the supplied task, so the layout sniff is not needed
+	// and its echo must not appear.
 	for _, l := range f.asked {
-		if l == "Which task?" || l == "What kind of data is this?" {
-			t.Errorf("explicit --task must skip the picker/sniff; asked %q", l)
+		if l == "What kind of data is this?" {
+			t.Errorf("a supplied task settles the family; must not ask %q", l)
 		}
 	}
 	if strings.Contains(buf.String(), "Found a CSV table") {
-		t.Errorf("explicit --task must not echo a sniff")
+		t.Errorf("a supplied task must not echo a sniff")
+	}
+	// Unanswered by the fake, so it returns the prompt's default — proving the
+	// supplied task was pre-selected rather than discarded.
+	if a.Spec.Category != "tabular_classification" {
+		t.Errorf("Category = %q, want the supplied task pre-selected", a.Spec.Category)
 	}
 }
 
@@ -301,7 +313,7 @@ func TestPickTask_FamilyScoped(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Which task?": "text_classification"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	id, err := pickTask(p, f, push.FamilyText)
+	id, err := pickTask(p, f, push.FamilyText, "")
 	if err != nil {
 		t.Fatalf("pickTask: %v", err)
 	}
@@ -341,7 +353,7 @@ func TestPickTask_ImageAllAvailable(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Which task?": "image_classification"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	if _, err := pickTask(p, f, push.FamilyImage); err != nil {
+	if _, err := pickTask(p, f, push.FamilyImage, ""); err != nil {
 		t.Fatalf("pickTask: %v", err)
 	}
 	out := buf.String()
@@ -367,7 +379,7 @@ func TestPickTask_TabularGloss(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Which task?": "time_to_event_prediction"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	id, err := pickTask(p, f, push.FamilyTabular)
+	id, err := pickTask(p, f, push.FamilyTabular, "")
 	if err != nil {
 		t.Fatalf("pickTask: %v", err)
 	}
@@ -391,7 +403,7 @@ func TestRunInteractive_LabelSelectFromHeaders(t *testing.T) {
 		"Which column holds the label?": "income",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if a.Spec.LabelColumn != "income" {
@@ -410,7 +422,7 @@ func TestRunInteractive_RegressionLabelWording(t *testing.T) {
 		LocalPath: dir,
 		Spec:      push.SpecArgs{Category: "tabular_regression", Table: "t", Intent: "train"},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true /*taskSet*/); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if !contains(f.asked, "Which column holds the value to predict?") {
@@ -436,7 +448,7 @@ func TestRunInteractive_LabelFreeTextFallback(t *testing.T) {
 		LocalPath: empty,
 		Spec:      push.SpecArgs{Category: "image_classification", Table: "t", Intent: "train"},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if a.Spec.LabelColumn != "my_label" {
@@ -453,7 +465,7 @@ func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 		"Which task?":              "masked_language_modeling",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	for _, l := range f.asked {
@@ -466,9 +478,15 @@ func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 	}
 }
 
-// TestRunInteractive_SkipsProvidedValues: flags already set (and an
-// explicit --task) mean nothing is prompted.
-func TestRunInteractive_SkipsProvidedValues(t *testing.T) {
+// TestRunInteractive_AsksEvenWhenFullySpecified is the inverse of the rule this
+// replaced (#711). Guided mode used to prompt for nothing when every value
+// arrived on the command line — which is what turned a path that had merely gone
+// stale into a dead end, with the user sitting at a prompt that never came.
+//
+// Every core question must now be asked, and every supplied value must survive
+// as the default: the fake answers nothing, so each field keeping its original
+// value proves the pre-fill rather than a re-entered answer.
+func TestRunInteractive_AsksEvenWhenFullySpecified(t *testing.T) {
 	dir := textDirLayout(t)
 	f := &fakePrompter{answers: map[string]string{}}
 	a := &runDataIngestArgs{
@@ -477,11 +495,92 @@ func TestRunInteractive_SkipsProvidedValues(t *testing.T) {
 			Category: "text_classification", Table: "t", Intent: "train", LabelColumn: "label",
 		},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true /*taskSet*/); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
-	if len(f.asked) != 0 {
-		t.Errorf("expected no prompts, but asked: %v", f.asked)
+	for _, want := range []string{
+		"Do you want to ingest training or test data?",
+		"Please name the dataset.",
+		"Where is your data?",
+		"Which task?",
+	} {
+		if !slices.Contains(f.asked, want) {
+			t.Errorf("guided mode must ask %q even when it was supplied; asked: %v", want, f.asked)
+		}
+	}
+	if a.Spec.Intent != "train" || a.Spec.Table != "t" ||
+		a.Spec.Category != "text_classification" || a.LocalPath != dir {
+		t.Errorf("supplied values must survive as prompt defaults, got intent=%q table=%q category=%q path=%q",
+			a.Spec.Intent, a.Spec.Table, a.Spec.Category, a.LocalPath)
+	}
+}
+
+// With nothing supplied, each question must still fall back to the value it
+// always defaulted to. This pins behaviourally what the string-index backstop
+// used to pin textually: moving those defaults out of inline arguments and into
+// variables (so a supplied value can take their place) removed "train",
+// "bucket" and "time" from zz-all-strings.golden.
+func TestRunInteractive_UnsuppliedDefaultsUnchanged(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Please name the dataset.":      "t",
+		"Which task?":                   "time_to_event_prediction",
+		"Which column holds the label?": "churned",
+	}}
+	a := &runDataIngestArgs{LocalPath: dir}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.Spec.Intent != "train" {
+		t.Errorf("Intent = %q, want the unchanged \"train\" fallback", a.Spec.Intent)
+	}
+	if a.Spec.TimeColumn != "time" {
+		t.Errorf("TimeColumn = %q, want the unchanged \"time\" fallback", a.Spec.TimeColumn)
+	}
+}
+
+func TestRunInteractive_LabelPolicyDefaultUnchanged(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Please name the dataset.":      "t",
+		"Which task?":                   "tabular_regression",
+		"Which column holds the label?": "churned",
+	}}
+	a := &runDataIngestArgs{LocalPath: dir}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.Spec.LabelPolicy != "bucket" {
+		t.Errorf("LabelPolicy = %q, want the unchanged \"bucket\" fallback", a.Spec.LabelPolicy)
+	}
+}
+
+// A supplied value must be offered back as the DEFAULT, not silently replaced by
+// the flow's own fallback — the specific regression that would make "always ask"
+// feel like "always retype".
+func TestRunInteractive_SuppliedValuesArePrefilled(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Which column holds the label?": "churned",
+	}}
+	a := &runDataIngestArgs{
+		LocalPath: dir,
+		Spec: push.SpecArgs{
+			Category: "tabular_regression", Table: "prefilled_name", Intent: "test",
+		},
+	}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	// "test" must survive: the Select's own fallback is "train".
+	if a.Spec.Intent != "test" {
+		t.Errorf("Intent = %q, want the supplied \"test\" pre-selected (flow default is \"train\")", a.Spec.Intent)
+	}
+	if a.Spec.Table != "prefilled_name" {
+		t.Errorf("Table = %q, want the supplied name pre-filled", a.Spec.Table)
+	}
+	if a.LocalPath != dir {
+		t.Errorf("LocalPath = %q, want the supplied path pre-filled", a.LocalPath)
 	}
 }
 
@@ -497,7 +596,7 @@ func TestRunInteractive_Keypoint(t *testing.T) {
 		LocalPath: dir,
 		Spec:      push.SpecArgs{Category: "keypoint_detection", Table: "kp_train", Intent: "train"},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if a.Spec.NumberOfKeypoints != 17 {
@@ -520,7 +619,7 @@ func TestRunInteractive_TabularRegression(t *testing.T) {
 		LocalPath: dir,
 		Spec:      push.SpecArgs{Category: "tabular_regression", Table: "reg_train", Intent: "train"},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if a.Spec.LabelPolicy != "passthrough" {
@@ -544,7 +643,7 @@ func TestRunInteractive_Cancel(t *testing.T) {
 		confirm: &no,
 	}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); !errors.Is(err, errInteractiveCancelled) {
+	if err := runInteractive(discardPrinter(), f, a); !errors.Is(err, errInteractiveCancelled) {
 		t.Fatalf("err = %v, want errInteractiveCancelled", err)
 	}
 }
@@ -554,7 +653,7 @@ func TestRunInteractive_Cancel(t *testing.T) {
 func TestRunInteractive_RejectsBadName(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Please name the dataset.": "../bad"}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, true); err == nil {
+	if err := runInteractive(discardPrinter(), f, a); err == nil {
 		t.Fatal("expected an error for an invalid name, got nil")
 	}
 }
@@ -568,7 +667,7 @@ func TestRunInteractive_RejectsEmptyPath(t *testing.T) {
 		"Where is your data?":      "   ",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); err == nil {
+	if err := runInteractive(discardPrinter(), f, a); err == nil {
 		t.Fatal("expected an error for an empty dataset path, got nil")
 	}
 }
@@ -586,7 +685,7 @@ func TestRunInteractive_TrimsPath(t *testing.T) {
 		"Which column holds the label?": "churned",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if a.LocalPath != dir {
@@ -612,7 +711,7 @@ func TestRunInteractive_ShowsExampleHints(t *testing.T) {
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	if err := runInteractive(p, f, a, false); err != nil {
+	if err := runInteractive(p, f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	for _, want := range []string{"~/data/patients.csv", "age:INT"} {

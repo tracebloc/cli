@@ -9,7 +9,8 @@ so the task-specific questions are visible; each core question prints as a
 like resolution or schema) as their own header, the
 supporting line beneath it, and the `?` line shows your answer. The run (shown
 once, for tabular) is the three steps + the final summary as the CLI renders
-them. Passing flags (--as, --task, a path, …) skips the matching questions. The
+them. Values passed as flags (--as, --task, a path, …) pre-fill the matching
+questions rather than skipping them — guided mode always asks. The
 other tasks' extra questions (keypoints, label policy, time column),
 self-supervised text (which skips the label question), and the failure-summary
 wordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams

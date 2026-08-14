@@ -100,7 +100,7 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 	//    validation. Flags already provided win; non-TTY / --no-input
 	//    leaves Prompter nil and skips straight to the flag-only path.
 	if a.Interactive && a.Prompter != nil {
-		if err := runInteractive(a.Printer, a.Prompter, a, a.TaskSet); err != nil {
+		if err := runInteractive(a.Printer, a.Prompter, a); err != nil {
 			if errors.Is(err, errInteractiveCancelled) {
 				// cleanCancel prints the shared note and returns the clean exit.
 				return nil, nil, nil, true, cleanCancel(a.Printer, "nothing was ingested.")
