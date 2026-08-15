@@ -178,17 +178,40 @@ func isInteractiveTTY() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
-// runInteractive fills the gaps in a's core ingest fields by prompting,
-// data-first (RFC-0002 §12.1): intent → name → path → task → task-specific
-// questions → review. It only prompts for what's still missing, so flags
-// the user already passed win. taskSet says whether the task was passed
-// explicitly (via --task or the hidden --category alias); when it wasn't,
-// the family is sniffed from the data the user pointed at (echoed back, or
-// asked plainly when ambiguous) and only that family's tasks are offered.
+// defaultInOptions returns want when it is one of options, otherwise fallback.
+// A survey.Select whose Default is not among its Options aborts on a real
+// terminal ("default value … not found in options"), so any command-line value
+// used to PRE-FILL a Select must be validated against that Select's options
+// first — a typo like --intent training or --label-policy buckets would
+// otherwise crash the prompt survey can't draw. When the supplied value isn't a
+// real option the question is still ASKED; the prompt just opens on the
+// sensible fallback. This is the guard pickTask has always applied, factored out
+// so every supplied-default Select shares one implementation.
+func defaultInOptions(want string, options []string, fallback string) string {
+	for _, o := range options {
+		if o == want {
+			return want
+		}
+	}
+	return fallback
+}
+
+// runInteractive walks a's core ingest fields by prompting, data-first
+// (RFC-0002 §12.1): intent → name → path → task → task-specific questions →
+// review.
+//
+// It asks EVERY question relevant to the chosen task (#509). A value the user
+// passed on the command line pre-fills the answer — Enter accepts it — but never
+// suppresses the question. Which questions are relevant still depends on the
+// task picked at step 4; that is the only gate.
+//
+// When no task was supplied, the family is sniffed from the data the user
+// pointed at (echoed back, or asked plainly when ambiguous) and only that
+// family's tasks are offered. When one WAS supplied it selects the family
+// directly, so the user's own answer is always among the options.
 //
 // Mutates a through the pointer.
-func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bool) error {
-	prompted := false
+func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 
 	// The guided flow is a four-step setup: intent → name → path → task. Each
 	// question prints as its own step header (PromptStep), with any supporting
@@ -206,37 +229,58 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 	// blank sits directly between header and prompt. A result that belongs to an
 	// answer (the sniff echo) attaches to it with no blank.
 
+	// Guided mode ASKS. A value that arrived on the command line becomes the
+	// prompt's DEFAULT — never a reason to skip the question (#509).
+	//
+	// It used to skip: each step was wrapped in `if <value> == ""`. That turned a
+	// path which had merely gone stale into a dead end — the user was sitting at
+	// a prompt, ready to answer, and instead got "no such file or directory" with
+	// no way to correct it. Data moves between runs; a name or a task does not
+	// stop being true, but the flow should not have to reason about which is
+	// which. So: always ask, pre-filled, Enter accepts.
+	//
+	// Only the TASK gate survives, one level down — which questions apply still
+	// depends on the task chosen at step 4 (self-supervised text has no label and
+	// no extras). That gate is about relevance, not about what the user typed.
+	//
+	// Non-interactive is untouched: runInteractive is only reached on a TTY
+	// without --no-input/--output-json, so scripts still take flags silently.
+
 	// Step 1 — intent: what this data is for.
-	if a.Spec.Intent == "" {
+	{
+		opts := []string{"train", "test"}
+		// A supplied --intent pre-fills the prompt, but only when it names a real
+		// option: a typo would otherwise crash survey.Select on a TTY (see
+		// defaultInOptions). Unknown value → fall back to "train" and still ask.
+		def := defaultInOptions(a.Spec.Intent, opts, "train")
 		p.PromptStep(1, 4, "Do you want to ingest training or test data?")
 		p.Newline()
 		ans, err := pr.Select("Do you want to ingest training or test data?", "which split this data is",
-			[]string{"train", "test"}, "train")
+			opts, def)
 		if err != nil {
 			return err
 		}
 		a.Spec.Intent = ans
-		prompted = true
 	}
 
-	// Step 2 — name. No auto-fill; the character rules surface only if the
-	// name is rejected (see ValidateTableName), so the prompt stays clean.
-	if a.Spec.Table == "" {
+	// Step 2 — name. The character rules surface only if the name is rejected
+	// (see ValidateTableName), so the prompt stays clean.
+	{
 		p.PromptStep(2, 4, "Please name the dataset.")
 		p.Newline()
 		ans, err := pr.Input("Please name the dataset.",
-			"letters, digits, and underscores — no hyphens or spaces, use _; start with a letter or underscore  e.g. churn_train", "",
+			"letters, digits, and underscores — no hyphens or spaces, use _; start with a letter or underscore  e.g. churn_train",
+			a.Spec.Table,
 			push.ValidateTableName)
 		if err != nil {
 			return err
 		}
 		a.Spec.Table = ans
-		prompted = true
 	}
 
 	// Step 3 — path. Show what "file or folder" means per modality, then
 	// detect the family from the layout and echo it back.
-	if a.LocalPath == "" {
+	{
 		p.PromptStep(3, 4, "Where is your data?")
 		p.Newline()
 		exTab, exImg, exTxt := datasetPathExamples(runtime.GOOS)
@@ -245,7 +289,8 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		p.Infof("Images    a folder with labels.csv + images/   e.g. %s", exImg)
 		p.Infof("Text      a folder with labels.csv + texts/     e.g. %s", exTxt)
 		p.Newline()
-		ans, err := pr.Input("Where is your data?", fmt.Sprintf("e.g. %s or %s", exTab, exImg), "", validateDatasetPath)
+		ans, err := pr.Input("Where is your data?", fmt.Sprintf("e.g. %s or %s", exTab, exImg),
+			a.LocalPath, validateDatasetPath)
 		if err != nil {
 			return err
 		}
@@ -259,7 +304,6 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		// otherwise become part of the path (#386). validateDatasetPath applies
 		// the same canonicalization, so the re-prompt guard stays consistent.
 		a.LocalPath = dequotePath(ans)
-		prompted = true
 	}
 	// Expand a leading ~ now so the family sniff + label-header preview read
 	// the real path; runDataIngest's own expandHome then no-ops.
@@ -275,33 +319,53 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs, taskSet bo
 		return err
 	}
 
-	// (d) task — family-scoped. An explicit --task wins and skips both the
-	// sniff and the picker (§5.1). Otherwise the family is sniffed from the
-	// layout (and echoed), or asked plainly when the layout is ambiguous,
-	// and then only that family's tasks are offered.
-	if !taskSet {
-		fam, err := resolveFamily(p, pr, a.LocalPath)
-		if err != nil {
-			return err
+	// (d) task — family-scoped, and always asked (#509).
+	//
+	// An explicit --task no longer skips the picker; it selects the family and
+	// becomes the pre-selected option. Taking the family from the SUPPLIED task
+	// rather than the sniff matters: the two can disagree (a tabular task passed
+	// against a folder that sniffs image), and scoping the list to the sniffed
+	// family would leave the user's own answer missing from its own default.
+	// With no task supplied, the family is sniffed from the layout (and echoed),
+	// or asked plainly when the layout is ambiguous — unchanged.
+	{
+		var fam push.Family
+		if spec, ok := push.Lookup(a.Spec.Category); ok {
+			fam = spec.Family
+		} else {
+			f, err := resolveFamily(p, pr, a.LocalPath)
+			if err != nil {
+				return err
+			}
+			fam = f
 		}
-		id, err := pickTask(p, pr, fam)
+		supplied := a.Spec.Category
+		id, err := pickTask(p, pr, fam, supplied)
 		if err != nil {
 			return err
 		}
 		a.Spec.Category = id
-		prompted = true
+		// What the user just walked away from goes with it. A run started as
+		// `--task time_to_event_prediction --time-column t` that picks
+		// tabular_classification here would otherwise carry TimeColumn through:
+		// no prompt asks about it (it is time_to_event_prediction-only), Review
+		// shows it anyway, and the run dies AFTER the confirm blaming a flag the
+		// user just walked away from. Scoped to the CHANGE, so a flag that was
+		// misapplied on the command line survives to be rejected.
+		dropValuesLeftBehindByATaskChange(a, supplied)
 	}
 
 	// (e) task-specific questions, including the label column.
-	cp, err := promptCategorySpecific(p, pr, a)
-	if err != nil {
+	if _, err := promptCategorySpecific(p, pr, a); err != nil {
 		return err
 	}
-	prompted = prompted || cp
 
-	// (f) review + single confirm. Only when we actually prompted something
-	// — an ingest fully specified by flags (on a TTY) isn't nagged.
-	if prompted {
+	// (f) review + single confirm — unconditional now (#509). It used to be
+	// gated on "did we actually prompt anything", so an ingest fully specified
+	// by flags wasn't nagged. Guided mode always prompts now, so that gate can
+	// only ever be true; keeping it would be a condition that reads as a choice
+	// while having none.
+	{
 		renderReview(p, a)
 		a.ReviewShown = true
 		// No header here: Confirm keeps its own label ("Proceed with the
@@ -354,7 +418,7 @@ func resolveFamily(p *ui.Printer, pr prompter, path string) (push.Family, error)
 // task_id", split into Available now and (greyed) Not yet in the CLI —
 // and asks the user to pick one of the available ones. It never shows the
 // flat 15-item wall: only this family's tasks appear (§7).
-func pickTask(p *ui.Printer, pr prompter, fam push.Family) (string, error) {
+func pickTask(p *ui.Printer, pr prompter, fam push.Family, want string) (string, error) {
 	var available, pending []push.CategorySpec
 	for _, s := range push.CategoriesByFamily(fam) {
 		if s.CLISupported {
@@ -406,7 +470,12 @@ func pickTask(p *ui.Printer, pr prompter, fam push.Family) (string, error) {
 	for i, s := range available {
 		opts[i] = s.ID
 	}
-	ans, err := pr.Select("Which task?", "pick the task this data is for", opts, opts[0])
+	// def pre-selects a task the user already named (#509), honoured only when it
+	// is actually in this family's list (defaultInOptions) — survey would
+	// otherwise render a default the user cannot see, and an Enter on it would be
+	// unexplainable.
+	def := defaultInOptions(want, opts, opts[0])
+	ans, err := pr.Select("Which task?", "pick the task this data is for", opts, def)
 	if err != nil {
 		return "", err
 	}
@@ -419,10 +488,11 @@ func pickTask(p *ui.Printer, pr prompter, fam push.Family) (string, error) {
 }
 
 // promptCategorySpecific prompts for the inputs a particular task needs
-// beyond the core fields, filling only the gaps. The label column comes
-// first (it's the one question every non-self-supervised task shares),
-// then the family-specific extras. Returns whether it prompted anything
-// (so the caller knows to show the confirm).
+// beyond the core fields. Like the core steps (#509), each question is always
+// asked with any supplied value pre-filled as the default — never skipped. The
+// label column comes first (the one question every non-self-supervised task
+// shares), then the family-specific extras. Returns whether it prompted anything
+// (retained for the caller; the confirm is unconditional now).
 func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (bool, error) {
 	cat := a.Spec.Category
 	prompted := false
@@ -437,7 +507,12 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 	// (data-ingestors#340) that free-typing "Label" against a "label" header
 	// would cause. Wording is per-task: a class to sort into vs a numeric value
 	// to predict (§8).
-	if !push.SelfSupervisedText(cat) && a.Spec.LabelColumn == "" {
+	//
+	// A supplied --label-column pre-fills the pick (like every other value under
+	// #509) — it no longer SKIPS the question, so a wrong or mistyped column can
+	// be corrected here the same way a stale path can. Only self-supervised text
+	// (no label at all) still bypasses it.
+	if !push.SelfSupervisedText(cat) {
 		question := "Which column holds the label?"
 		desc := "The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned"
 		if push.IsRegressionClass(cat) {
@@ -448,7 +523,7 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 		p.Newline()
 		p.Hintf("%s", desc)
 		p.Newline()
-		ans, err := promptLabelColumn(pr, cat, a.LocalPath, question)
+		ans, err := promptLabelColumn(pr, cat, a.LocalPath, question, a.Spec.LabelColumn)
 		if err != nil {
 			return prompted, err
 		}
@@ -461,13 +536,17 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 	// depends on the task.
 	switch {
 	case push.IsImage(cat):
-		if cat == "keypoint_detection" && a.Spec.NumberOfKeypoints <= 0 {
+		if cat == "keypoint_detection" {
 			p.Section("How many keypoints per sample?")
 			p.Newline()
 			p.Hintf("The number of landmark points each sample is annotated with — dataset-specific.  e.g. 17 for COCO human pose")
 			p.Newline()
+			kpDef := ""
+			if a.Spec.NumberOfKeypoints > 0 {
+				kpDef = strconv.Itoa(a.Spec.NumberOfKeypoints)
+			}
 			ans, err := pr.Input("How many keypoints per sample?",
-				"e.g. 17 for COCO pose", "", validatePositiveInt)
+				"e.g. 17 for COCO pose", kpDef, validatePositiveInt)
 			if err != nil {
 				return prompted, err
 			}
@@ -475,13 +554,13 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			a.Spec.NumberOfKeypoints = n
 			prompted = true
 		}
-		if a.TargetSizeFlag == "" {
+		{
 			p.Section("Image resolution")
 			p.Newline()
 			p.Hintf("The size your images already are, as WxH — tracebloc checks every image matches and never resizes. Press Enter to read it from your first image.  e.g. 224x224")
 			p.Newline()
 			ans, err := pr.Input("Image resolution",
-				"the size your images already are; tracebloc checks it, it never resizes", "",
+				"the size your images already are; tracebloc checks it, it never resizes", a.TargetSizeFlag,
 				validateOptionalTargetSize)
 			if err != nil {
 				return prompted, err
@@ -490,38 +569,46 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			prompted = true
 		}
 	case push.IsTabular(cat):
-		if a.SchemaFlag == "" {
+		{
 			p.Section("Column types")
 			p.Newline()
 			p.Hintf("We infer each column's type from your CSV. Press Enter to accept, or type overrides like age:INT,price:FLOAT.")
 			p.Newline()
-			ans, err := pr.Input("Column types", "e.g. age:INT,price:FLOAT", "", validateOptionalSchema)
+			ans, err := pr.Input("Column types", "e.g. age:INT,price:FLOAT", a.SchemaFlag, validateOptionalSchema)
 			if err != nil {
 				return prompted, err
 			}
 			a.SchemaFlag = strings.TrimSpace(ans)
 			prompted = true
 		}
-		if push.IsRegressionClass(cat) && a.Spec.LabelPolicy == "" {
+		if push.IsRegressionClass(cat) {
 			p.Section("Label policy")
 			p.Newline()
 			p.Hintf("Regression targets are continuous. 'bucket' groups them into ranges before they leave the cluster; 'passthrough' keeps raw values.")
 			p.Newline()
+			opts := []string{"bucket", "passthrough"}
+			// A supplied --label-policy pre-fills only when valid; a typo like
+			// "buckets" would otherwise abort the Select on a TTY (defaultInOptions).
+			lpDef := defaultInOptions(a.Spec.LabelPolicy, opts, "bucket")
 			ans, err := pr.Select("Label policy",
 				"bucket bins the target before it leaves the cluster",
-				[]string{"bucket", "passthrough"}, "bucket")
+				opts, lpDef)
 			if err != nil {
 				return prompted, err
 			}
 			a.Spec.LabelPolicy = ans
 			prompted = true
 		}
-		if cat == "time_to_event_prediction" && a.Spec.TimeColumn == "" {
+		if cat == "time_to_event_prediction" {
 			p.Section("Time column")
 			p.Newline()
 			p.Hintf("The column holding the duration / time-to-event.  e.g. time, tenure_days")
 			p.Newline()
-			ans, err := pr.Input("Time column", "the duration/time column name", "time", nil)
+			tcDef := a.Spec.TimeColumn
+			if tcDef == "" {
+				tcDef = "time"
+			}
+			ans, err := pr.Input("Time column", "the duration/time column name", tcDef, nil)
 			if err != nil {
 				return prompted, err
 			}
@@ -533,17 +620,24 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 }
 
 // promptLabelColumn asks for the label/target column. When the CSV header
-// can be read, it offers those columns as an exact-match SELECT (defaulting
-// to a column literally named "label" if present); otherwise — the header
-// isn't readable yet — it falls back to free text so the flow never stalls.
-func promptLabelColumn(pr prompter, category, root, question string) (string, error) {
+// can be read, it offers those columns as an exact-match SELECT — pre-selecting
+// a supplied --label-column when it names a real header, else a column literally
+// named "label" if present; otherwise — the header isn't readable yet — it falls
+// back to free text pre-filled with the supplied value so the flow never stalls.
+//
+// supplied is guarded through defaultInOptions before it reaches survey.Select:
+// a mistyped --label-column that is not one of the real headers would otherwise
+// abort the prompt on a TTY, the same default-not-in-options crash guarded
+// everywhere else in the guided flow.
+func promptLabelColumn(pr prompter, category, root, question, supplied string) (string, error) {
 	headers, err := push.PreviewLabelHeaders(category, root)
 	if err == nil && len(headers) > 0 {
 		ans, serr := pr.Select(question,
-			"pick the label/target column from your CSV header", headers, defaultLabelChoice(headers))
+			"pick the label/target column from your CSV header", headers,
+			defaultInOptions(supplied, headers, defaultLabelChoice(headers)))
 		return strings.TrimSpace(ans), serr
 	}
-	ans, ierr := pr.Input(question, "the label/target column name", "", nil)
+	ans, ierr := pr.Input(question, "the label/target column name", supplied, nil)
 	return strings.TrimSpace(ans), ierr
 }
 
