@@ -700,7 +700,9 @@ func TestRunInteractive_SuppliedLabelColumnStillAsks(t *testing.T) {
 //
 // Mutation-proof: passing `supplied` straight to pr.Select (dropping the guard)
 // makes the "mistyped" row error under the strict fake; not threading the value
-// at all makes the "valid-supplied" row return the header default instead.
+// at all makes the "valid-supplied" row return the header default instead;
+// dropping canonicalHeader (resolving case) reddens the case-mismatch rows,
+// which resolve to "age" — the first column — exactly as the defect did.
 func TestPromptLabelColumn_SuppliedDefaultPrefillsAndGuards(t *testing.T) {
 	dir := tabularDir(t) // header: age,income,churned  (no column named "label")
 	const cat = "tabular_classification"
@@ -714,6 +716,14 @@ func TestPromptLabelColumn_SuppliedDefaultPrefillsAndGuards(t *testing.T) {
 		{"valid-supplied-is-preselected", "income", "income"},
 		{"empty-supplied-uses-header-default", "", "age"}, // defaultLabelChoice → first header
 		{"mistyped-supplied-falls-back", "incom", "age"},  // guarded, no crash
+
+		// Case-only differences must bind the HEADER's spelling, not fall back.
+		// Before the canonicalHeader resolve these landed on "age": the exact
+		// match failed, and with no column named "label" defaultLabelChoice
+		// returns the first column — which Enter then silently accepts as the
+		// label. That is the whole defect, so these rows are the regression.
+		{"case-mismatch-supplied-resolves", "Income", "income"},
+		{"case-mismatch-uppercase-resolves", "CHURNED", "churned"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

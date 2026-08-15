@@ -625,20 +625,45 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 // named "label" if present; otherwise — the header isn't readable yet — it falls
 // back to free text pre-filled with the supplied value so the flow never stalls.
 //
-// supplied is guarded through defaultInOptions before it reaches survey.Select:
-// a mistyped --label-column that is not one of the real headers would otherwise
-// abort the prompt on a TTY, the same default-not-in-options crash guarded
-// everywhere else in the guided flow.
+// supplied is resolved to the header's own spelling (canonicalHeader) and then
+// guarded through defaultInOptions before it reaches survey.Select: a mistyped
+// --label-column that is not one of the real headers would otherwise abort the
+// prompt on a TTY, the same default-not-in-options crash guarded everywhere
+// else in the guided flow.
 func promptLabelColumn(pr prompter, category, root, question, supplied string) (string, error) {
 	headers, err := push.PreviewLabelHeaders(category, root)
 	if err == nil && len(headers) > 0 {
 		ans, serr := pr.Select(question,
 			"pick the label/target column from your CSV header", headers,
-			defaultInOptions(supplied, headers, defaultLabelChoice(headers)))
+			defaultInOptions(canonicalHeader(supplied, headers), headers, defaultLabelChoice(headers)))
 		return strings.TrimSpace(ans), serr
 	}
 	ans, ierr := pr.Input(question, "the label/target column name", supplied, nil)
 	return strings.TrimSpace(ans), ierr
+}
+
+// canonicalHeader returns the header that matches want case-insensitively, so a
+// --label-column differing from the CSV only in case pre-selects the real column
+// instead of silently falling back to the header default.
+//
+// Why this is needed at all: defaultInOptions matches EXACTLY, and until #505 a
+// supplied --label-column skipped the prompt entirely, so its spelling was kept
+// verbatim and never had to agree with the header. Now that the question is
+// always asked, an unresolved value falls through to defaultLabelChoice — the
+// FIRST column when nothing is named "label" — and Enter accepts that wrong
+// column. Resolving here (rather than loosening defaultInOptions, which also
+// guards --intent and --label-policy against fixed vocabularies) keeps the
+// case-insensitivity where the options are user data.
+//
+// Returns want unchanged when nothing matches, leaving defaultInOptions to apply
+// the fallback: a genuine typo must still be caught, not case-folded into a hit.
+func canonicalHeader(want string, headers []string) string {
+	for _, h := range headers {
+		if strings.EqualFold(h, want) {
+			return h
+		}
+	}
+	return want
 }
 
 // defaultLabelChoice pre-highlights a column literally named "label"
