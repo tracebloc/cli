@@ -3,8 +3,10 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -41,7 +43,17 @@ func (f *fakePrompter) Input(label, _ /*help*/, def string, validate func(string
 	return ans, nil
 }
 
-func (f *fakePrompter) Select(label, _ /*help*/ string, _ []string, def string) (string, error) {
+func (f *fakePrompter) Select(label, _ /*help*/ string, options []string, def string) (string, error) {
+	// Honour survey.Select's real contract: a non-empty Default that is not one
+	// of the Options aborts the prompt on a terminal ("default value … not found
+	// in options"). The original double ignored Options entirely, so a Select
+	// whose pre-filled default came from a mistyped flag stayed green here while
+	// crashing on a real TTY (PR #505). Validating the default in the double is
+	// what connects these tests to that failure — an unguarded supplied default
+	// now reddens instead of passing.
+	if def != "" && !slices.Contains(options, def) {
+		return "", fmt.Errorf("default value %q not found in options %v", def, options)
+	}
 	return f.answer(label, def), nil
 }
 
@@ -110,7 +122,7 @@ func TestRunInteractive_PromptOrder(t *testing.T) {
 		"Which column holds the label?":                "churned",
 	}}
 	a := &runDataIngestArgs{}
-	if err := runInteractive(discardPrinter(), f, a, false /*taskSet*/); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 
@@ -146,7 +158,7 @@ func TestRunInteractive_PathPromptCopyIsFileOrFolder(t *testing.T) {
 		"Which column holds the label?":                "churned",
 	}}
 	a := &runDataIngestArgs{}
-	if err := runInteractive(discardPrinter(), f, a, false /*taskSet*/); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	found := false
@@ -174,7 +186,7 @@ func TestRunInteractive_SniffEchoesFamily(t *testing.T) {
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	if err := runInteractive(p, f, a, false); err != nil {
+	if err := runInteractive(p, f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if !strings.Contains(buf.String(), "Found a CSV table") {
@@ -201,7 +213,7 @@ func TestRunInteractive_SniffIsHintNotLock(t *testing.T) {
 		"Which column holds the label?": "label",
 	}}
 	a := &runDataIngestArgs{LocalPath: empty, Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if !contains(f.asked, "What kind of data is this?") {
@@ -263,9 +275,10 @@ func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 	}
 }
 
-// TestRunInteractive_ExplicitTaskSkipsSniff: an explicit --task wins — no
-// sniff echo, no family question, no task picker.
-func TestRunInteractive_ExplicitTaskSkipsSniff(t *testing.T) {
+// TestRunInteractive_ExplicitTaskStillAsks: an explicit --task no longer skips
+// the picker (#509) — it PRE-SELECTS. It does still settle the family directly,
+// so the sniff is unnecessary and the user's own task is among the options.
+func TestRunInteractive_ExplicitTaskStillAsks(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
 		"Please name the dataset.":      "t",
@@ -277,16 +290,26 @@ func TestRunInteractive_ExplicitTaskSkipsSniff(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	if err := runInteractive(p, f, a, true /*taskSet*/); err != nil {
+	if err := runInteractive(p, f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
+	if !slices.Contains(f.asked, "Which task?") {
+		t.Errorf("the task question must still be asked; asked: %v", f.asked)
+	}
+	// The family came from the supplied task, so the layout sniff is not needed
+	// and its echo must not appear.
 	for _, l := range f.asked {
-		if l == "Which task?" || l == "What kind of data is this?" {
-			t.Errorf("explicit --task must skip the picker/sniff; asked %q", l)
+		if l == "What kind of data is this?" {
+			t.Errorf("a supplied task settles the family; must not ask %q", l)
 		}
 	}
 	if strings.Contains(buf.String(), "Found a CSV table") {
-		t.Errorf("explicit --task must not echo a sniff")
+		t.Errorf("a supplied task must not echo a sniff")
+	}
+	// Unanswered by the fake, so it returns the prompt's default — proving the
+	// supplied task was pre-selected rather than discarded.
+	if a.Spec.Category != "tabular_classification" {
+		t.Errorf("Category = %q, want the supplied task pre-selected", a.Spec.Category)
 	}
 }
 
@@ -301,7 +324,7 @@ func TestPickTask_FamilyScoped(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Which task?": "text_classification"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	id, err := pickTask(p, f, push.FamilyText)
+	id, err := pickTask(p, f, push.FamilyText, "")
 	if err != nil {
 		t.Fatalf("pickTask: %v", err)
 	}
@@ -341,7 +364,7 @@ func TestPickTask_ImageAllAvailable(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Which task?": "image_classification"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	if _, err := pickTask(p, f, push.FamilyImage); err != nil {
+	if _, err := pickTask(p, f, push.FamilyImage, ""); err != nil {
 		t.Fatalf("pickTask: %v", err)
 	}
 	out := buf.String()
@@ -367,7 +390,7 @@ func TestPickTask_TabularGloss(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Which task?": "time_to_event_prediction"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	id, err := pickTask(p, f, push.FamilyTabular)
+	id, err := pickTask(p, f, push.FamilyTabular, "")
 	if err != nil {
 		t.Fatalf("pickTask: %v", err)
 	}
@@ -391,7 +414,7 @@ func TestRunInteractive_LabelSelectFromHeaders(t *testing.T) {
 		"Which column holds the label?": "income",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if a.Spec.LabelColumn != "income" {
@@ -410,7 +433,7 @@ func TestRunInteractive_RegressionLabelWording(t *testing.T) {
 		LocalPath: dir,
 		Spec:      push.SpecArgs{Category: "tabular_regression", Table: "t", Intent: "train"},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true /*taskSet*/); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if !contains(f.asked, "Which column holds the value to predict?") {
@@ -436,7 +459,7 @@ func TestRunInteractive_LabelFreeTextFallback(t *testing.T) {
 		LocalPath: empty,
 		Spec:      push.SpecArgs{Category: "image_classification", Table: "t", Intent: "train"},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if a.Spec.LabelColumn != "my_label" {
@@ -453,7 +476,7 @@ func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 		"Which task?":              "masked_language_modeling",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	for _, l := range f.asked {
@@ -466,9 +489,15 @@ func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 	}
 }
 
-// TestRunInteractive_SkipsProvidedValues: flags already set (and an
-// explicit --task) mean nothing is prompted.
-func TestRunInteractive_SkipsProvidedValues(t *testing.T) {
+// TestRunInteractive_AsksEvenWhenFullySpecified is the inverse of the rule this
+// replaced (#509). Guided mode used to prompt for nothing when every value
+// arrived on the command line — which is what turned a path that had merely gone
+// stale into a dead end, with the user sitting at a prompt that never came.
+//
+// Every core question must now be asked, and every supplied value must survive
+// as the default: the fake answers nothing, so each field keeping its original
+// value proves the pre-fill rather than a re-entered answer.
+func TestRunInteractive_AsksEvenWhenFullySpecified(t *testing.T) {
 	dir := textDirLayout(t)
 	f := &fakePrompter{answers: map[string]string{}}
 	a := &runDataIngestArgs{
@@ -477,11 +506,236 @@ func TestRunInteractive_SkipsProvidedValues(t *testing.T) {
 			Category: "text_classification", Table: "t", Intent: "train", LabelColumn: "label",
 		},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true /*taskSet*/); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
-	if len(f.asked) != 0 {
-		t.Errorf("expected no prompts, but asked: %v", f.asked)
+	for _, want := range []string{
+		"Do you want to ingest training or test data?",
+		"Please name the dataset.",
+		"Where is your data?",
+		"Which task?",
+	} {
+		if !slices.Contains(f.asked, want) {
+			t.Errorf("guided mode must ask %q even when it was supplied; asked: %v", want, f.asked)
+		}
+	}
+	if a.Spec.Intent != "train" || a.Spec.Table != "t" ||
+		a.Spec.Category != "text_classification" || a.LocalPath != dir {
+		t.Errorf("supplied values must survive as prompt defaults, got intent=%q table=%q category=%q path=%q",
+			a.Spec.Intent, a.Spec.Table, a.Spec.Category, a.LocalPath)
+	}
+}
+
+// With nothing supplied, each question must still fall back to the value it
+// always defaulted to. This pins behaviourally what the string-index backstop
+// used to pin textually: moving those defaults out of inline arguments and into
+// variables (so a supplied value can take their place) removed "train",
+// "bucket" and "time" from zz-all-strings.golden.
+func TestRunInteractive_UnsuppliedDefaultsUnchanged(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Please name the dataset.":      "t",
+		"Which task?":                   "time_to_event_prediction",
+		"Which column holds the label?": "churned",
+	}}
+	a := &runDataIngestArgs{LocalPath: dir}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.Spec.Intent != "train" {
+		t.Errorf("Intent = %q, want the unchanged \"train\" fallback", a.Spec.Intent)
+	}
+	if a.Spec.TimeColumn != "time" {
+		t.Errorf("TimeColumn = %q, want the unchanged \"time\" fallback", a.Spec.TimeColumn)
+	}
+}
+
+func TestRunInteractive_LabelPolicyDefaultUnchanged(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Please name the dataset.":      "t",
+		"Which task?":                   "tabular_regression",
+		"Which column holds the label?": "churned",
+	}}
+	a := &runDataIngestArgs{LocalPath: dir}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if a.Spec.LabelPolicy != "bucket" {
+		t.Errorf("LabelPolicy = %q, want the unchanged \"bucket\" fallback", a.Spec.LabelPolicy)
+	}
+}
+
+// A supplied value must be offered back as the DEFAULT, not silently replaced by
+// the flow's own fallback — the specific regression that would make "always ask"
+// feel like "always retype".
+func TestRunInteractive_SuppliedValuesArePrefilled(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Which column holds the label?": "churned",
+	}}
+	a := &runDataIngestArgs{
+		LocalPath: dir,
+		Spec: push.SpecArgs{
+			Category: "tabular_regression", Table: "prefilled_name", Intent: "test",
+		},
+	}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	// "test" must survive: the Select's own fallback is "train".
+	if a.Spec.Intent != "test" {
+		t.Errorf("Intent = %q, want the supplied \"test\" pre-selected (flow default is \"train\")", a.Spec.Intent)
+	}
+	if a.Spec.Table != "prefilled_name" {
+		t.Errorf("Table = %q, want the supplied name pre-filled", a.Spec.Table)
+	}
+	if a.LocalPath != dir {
+		t.Errorf("LocalPath = %q, want the supplied path pre-filled", a.LocalPath)
+	}
+}
+
+// TestDefaultInOptions pins the guard that keeps a command-line value from
+// crashing a survey.Select: a valid value passes through, an empty or unknown
+// one drops to the fallback. Reverting the helper body to `return want` reddens
+// the empty, typo and case-mismatch rows.
+func TestDefaultInOptions(t *testing.T) {
+	opts := []string{"train", "test"}
+	cases := []struct {
+		name, supplied, fallback, want string
+	}{
+		{"valid-supplied-passes-through", "test", "train", "test"},
+		{"first-option-supplied", "train", "train", "train"},
+		{"empty-uses-fallback", "", "train", "train"},
+		{"unknown-typo-uses-fallback", "training", "train", "train"},
+		{"case-mismatch-uses-fallback", "Train", "train", "train"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultInOptions(tc.supplied, opts, tc.fallback); got != tc.want {
+				t.Errorf("defaultInOptions(%q, %v, %q) = %q, want %q",
+					tc.supplied, opts, tc.fallback, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunInteractive_InvalidSuppliedSelectDefaultFallsBack: a mistyped --intent
+// or --label-policy must not crash the guided prompt. survey.Select aborts when
+// its Default is not one of the Options; guided mode pre-fills those Selects with
+// the command-line value, so a typo like --intent training would open a prompt
+// survey refuses to draw (#505, High). The value is guarded (defaultInOptions):
+// an unknown supplied value drops back to the flow's own default, and the
+// question is still ASKED.
+//
+// Mutation-proof: the strict fake Select errors on a default that isn't in its
+// options, so reverting either guard makes runInteractive return that error and
+// this test fails.
+func TestRunInteractive_InvalidSuppliedSelectDefaultFallsBack(t *testing.T) {
+	dir := tabularDir(t)
+	f := &fakePrompter{answers: map[string]string{
+		"Which column holds the value to predict?": "income",
+	}}
+	a := &runDataIngestArgs{
+		LocalPath: dir,
+		Spec: push.SpecArgs{
+			Category:    "tabular_regression",
+			Table:       "reg_train",
+			Intent:      "training", // typo — not train/test
+			LabelPolicy: "buckets",  // typo — not bucket/passthrough
+		},
+	}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("a mistyped supplied Select default must not crash the prompt: %v", err)
+	}
+	// Typo'd values were dropped to the flow's own valid defaults (the fake
+	// returns the prompt default when nothing is scripted for that question).
+	if a.Spec.Intent != "train" {
+		t.Errorf("Intent = %q, want the \"train\" fallback after a typo'd --intent", a.Spec.Intent)
+	}
+	if a.Spec.LabelPolicy != "bucket" {
+		t.Errorf("LabelPolicy = %q, want the \"bucket\" fallback after a typo'd --label-policy", a.Spec.LabelPolicy)
+	}
+}
+
+// TestRunInteractive_SuppliedLabelColumnStillAsks: a supplied --label-column no
+// longer SKIPS the label question (#505, Medium) — it PRE-FILLS it, exactly like
+// a stale path. The old gate (LabelColumn == "") left a user who mistyped the
+// column with no way to correct it at the prompt; now the header-backed picker
+// still opens, so re-answering wins.
+//
+// Mutation-proof: restoring the `&& a.Spec.LabelColumn == ""` gate skips the
+// question — f.asked loses it AND the re-answer no longer takes — so both
+// assertions redden.
+func TestRunInteractive_SuppliedLabelColumnStillAsks(t *testing.T) {
+	dir := tabularDir(t) // header: age,income,churned
+	f := &fakePrompter{answers: map[string]string{
+		// Re-answer the label with a different real column: only reachable if the
+		// question was actually asked rather than skipped by the supplied value.
+		"Which column holds the label?": "churned",
+	}}
+	a := &runDataIngestArgs{
+		LocalPath: dir,
+		Spec: push.SpecArgs{
+			Category: "tabular_classification", Table: "t", Intent: "train",
+			LabelColumn: "income", // supplied — must pre-fill, not skip
+		},
+	}
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	if !contains(f.asked, "Which column holds the label?") {
+		t.Errorf("a supplied --label-column must still ASK the label question; asked=%v", f.asked)
+	}
+	if a.Spec.LabelColumn != "churned" {
+		t.Errorf("LabelColumn = %q, want the re-answered \"churned\" (prompt was live, not skipped)", a.Spec.LabelColumn)
+	}
+}
+
+// TestPromptLabelColumn_SuppliedDefaultPrefillsAndGuards drives the label picker
+// directly: a supplied column that names a real header is pre-selected, while an
+// empty or mistyped one falls back to the header-derived default without crashing
+// the Select. It is the same defaultInOptions guard used for --intent, applied to
+// the column the label question now pre-fills (#505).
+//
+// Mutation-proof: passing `supplied` straight to pr.Select (dropping the guard)
+// makes the "mistyped" row error under the strict fake; not threading the value
+// at all makes the "valid-supplied" row return the header default instead;
+// dropping canonicalHeader (resolving case) reddens the case-mismatch rows,
+// which resolve to "age" — the first column — exactly as the defect did.
+func TestPromptLabelColumn_SuppliedDefaultPrefillsAndGuards(t *testing.T) {
+	dir := tabularDir(t) // header: age,income,churned  (no column named "label")
+	const cat = "tabular_classification"
+	const q = "Which column holds the label?"
+
+	cases := []struct {
+		name, supplied, want string
+	}{
+		// Nothing scripted → the strict fake returns the Select's default, so the
+		// asserted value IS whatever default promptLabelColumn passed in.
+		{"valid-supplied-is-preselected", "income", "income"},
+		{"empty-supplied-uses-header-default", "", "age"}, // defaultLabelChoice → first header
+		{"mistyped-supplied-falls-back", "incom", "age"},  // guarded, no crash
+
+		// Case-only differences must bind the HEADER's spelling, not fall back.
+		// Before the canonicalHeader resolve these landed on "age": the exact
+		// match failed, and with no column named "label" defaultLabelChoice
+		// returns the first column — which Enter then silently accepts as the
+		// label. That is the whole defect, so these rows are the regression.
+		{"case-mismatch-supplied-resolves", "Income", "income"},
+		{"case-mismatch-uppercase-resolves", "CHURNED", "churned"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakePrompter{answers: map[string]string{}}
+			got, err := promptLabelColumn(f, cat, dir, q, tc.supplied)
+			if err != nil {
+				t.Fatalf("promptLabelColumn(supplied=%q) errored (default not guarded into options?): %v", tc.supplied, err)
+			}
+			if got != tc.want {
+				t.Errorf("promptLabelColumn(supplied=%q) = %q, want %q", tc.supplied, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -497,7 +751,7 @@ func TestRunInteractive_Keypoint(t *testing.T) {
 		LocalPath: dir,
 		Spec:      push.SpecArgs{Category: "keypoint_detection", Table: "kp_train", Intent: "train"},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if a.Spec.NumberOfKeypoints != 17 {
@@ -520,7 +774,7 @@ func TestRunInteractive_TabularRegression(t *testing.T) {
 		LocalPath: dir,
 		Spec:      push.SpecArgs{Category: "tabular_regression", Table: "reg_train", Intent: "train"},
 	}
-	if err := runInteractive(discardPrinter(), f, a, true); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if a.Spec.LabelPolicy != "passthrough" {
@@ -544,7 +798,7 @@ func TestRunInteractive_Cancel(t *testing.T) {
 		confirm: &no,
 	}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); !errors.Is(err, errInteractiveCancelled) {
+	if err := runInteractive(discardPrinter(), f, a); !errors.Is(err, errInteractiveCancelled) {
 		t.Fatalf("err = %v, want errInteractiveCancelled", err)
 	}
 }
@@ -554,7 +808,7 @@ func TestRunInteractive_Cancel(t *testing.T) {
 func TestRunInteractive_RejectsBadName(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{"Please name the dataset.": "../bad"}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, true); err == nil {
+	if err := runInteractive(discardPrinter(), f, a); err == nil {
 		t.Fatal("expected an error for an invalid name, got nil")
 	}
 }
@@ -568,7 +822,7 @@ func TestRunInteractive_RejectsEmptyPath(t *testing.T) {
 		"Where is your data?":      "   ",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); err == nil {
+	if err := runInteractive(discardPrinter(), f, a); err == nil {
 		t.Fatal("expected an error for an empty dataset path, got nil")
 	}
 }
@@ -586,7 +840,7 @@ func TestRunInteractive_TrimsPath(t *testing.T) {
 		"Which column holds the label?": "churned",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
-	if err := runInteractive(discardPrinter(), f, a, false); err != nil {
+	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if a.LocalPath != dir {
@@ -612,7 +866,7 @@ func TestRunInteractive_ShowsExampleHints(t *testing.T) {
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	if err := runInteractive(p, f, a, false); err != nil {
+	if err := runInteractive(p, f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	for _, want := range []string{"~/data/patients.csv", "age:INT"} {

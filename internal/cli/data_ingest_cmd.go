@@ -187,7 +187,6 @@ Exit codes:
 			// Dropping --task's old image_classification default means an
 			// unset task now drives the picker (TTY) or a clear error
 			// (non-interactive), never a silent image assumption.
-			taskSet := cmd.Flags().Changed("task") || cmd.Flags().Changed("category")
 			// Record whether --number-of-keypoints was explicitly passed, so
 			// the keypoint set-vs-unset message (#76b) can distinguish an
 			// explicit zero value from an unset flag (both look like the Go
@@ -240,7 +239,6 @@ Exit codes:
 					Printer:        printer,
 					Interactive:    interactive,
 					Prompter:       pr,
-					TaskSet:        taskSet,
 					ChangedFlags:   changedFlags,
 					OutputJSON:     outputJSON,
 					JSONOut:        jsonOut,
@@ -337,15 +335,13 @@ type runDataIngestArgs struct {
 	// the RunE from the persistent --plain flag (see printerFor).
 	Printer *ui.Printer
 
-	// Interactive guided mode (#28). When Interactive is true,
-	// runDataIngest prompts (via Prompter) for any missing core inputs
-	// before validation. TaskSet records whether the task was passed
-	// explicitly (via --task or the hidden --category alias); an unset
-	// task drives the picker rather than assuming a default. Prompter is
-	// nil off a TTY / --no-input.
+	// Interactive guided mode (#28). When Interactive is true, runDataIngest
+	// walks every question relevant to the chosen task (via Prompter) before
+	// validation, pre-filling each from whatever arrived on the command line
+	// (#509). Prompter is nil off a TTY / --no-input, which is what keeps
+	// scripts flag-only.
 	Interactive bool
 	Prompter    prompter
-	TaskSet     bool
 
 	// ReviewShown records whether the guided flow rendered the pre-confirm
 	// Review (it only does when it actually prompted for something). It gates
