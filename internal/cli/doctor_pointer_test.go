@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -76,9 +77,6 @@ func TestDoctor_WrongPointerOnLocalCluster_FindsTheEnvironment(t *testing.T) {
 
 	var out bytes.Buffer
 	err := runClusterDoctor(context.Background(), ui.New(&out, ui.WithColor(false)), "", "", "", false)
-	if err != nil {
-		t.Fatalf("a healthy local environment must not exit non-zero: %v", err)
-	}
 	if strings.Contains(out.String(), "No secure environment") {
 		t.Errorf("must not recommend a reinstall over a healthy install:\n%s", out.String())
 	}
@@ -87,6 +85,46 @@ func TestDoctor_WrongPointerOnLocalCluster_FindsTheEnvironment(t *testing.T) {
 	}
 	if len(*probed) != 2 || (*probed)[0] != "stale-ns" || (*probed)[1] != "lukas-02" {
 		t.Errorf("probe namespaces = %v, want [stale-ns lukas-02] (bound pointer first, then the kubeconfig's own)", *probed)
+	}
+
+	// Bugbot (#515): finding the environment is only HALF the story. The pointer
+	// is still stale, so `data ingest`/`resources`/`seal` keep exiting 4 — doctor
+	// must say so and must not green the machine.
+	if strings.Contains(out.String(), "Everything looks good") {
+		t.Errorf("a stale pointer means data commands still fail — this is not 'ready to run training':\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "stale-ns") {
+		t.Errorf("doctor must name the stale pointer, not just the environment it found:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "client create") {
+		t.Errorf("doctor must name the repoint:\n%s", out.String())
+	}
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code() != 2 {
+		t.Fatalf("a stale pointer is a problem doctor found → want exit 2, got %v", err)
+	}
+}
+
+// The other side of the same coin: with NO stale pointer, a healthy machine
+// still gets its green line and exit 0. Without this, the assertion above could
+// be satisfied by doctor never saying "Everything looks good" at all.
+func TestDoctor_HealthyPointer_StillGreen(t *testing.T) {
+	writeActiveClientConfig(t, "lukas-02", "Lukas") // pointer matches reality
+	okWhoAmI(t)
+	probed := stubDoctorForNamespace(t, "https://127.0.0.1:6550", "lukas-02", "lukas-02")
+
+	var out bytes.Buffer
+	if err := runClusterDoctor(context.Background(), ui.New(&out, ui.WithColor(false)), "", "", "", false); err != nil {
+		t.Fatalf("a healthy machine with a correct pointer must exit 0, got %v", err)
+	}
+	if !strings.Contains(out.String(), "Everything looks good") {
+		t.Errorf("want the green verdict when nothing is stale:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "client create") {
+		t.Errorf("no repoint advice when the pointer is correct:\n%s", out.String())
+	}
+	if len(*probed) != 1 {
+		t.Errorf("probe namespaces = %v, want one (nothing to re-probe)", *probed)
 	}
 }
 

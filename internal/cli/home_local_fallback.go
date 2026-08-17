@@ -1,10 +1,15 @@
 package cli
 
-// Home-screen fallbacks for machines the provisioning pointer never reached
-// (#401). Split from home.go to respect its file budget.
+// The home screen's environment probe, and the fallbacks it leans on when the
+// provisioning pointer can't be trusted — never reached this machine at all
+// (#401) or names a namespace that isn't on the reached cluster (#515). Split
+// from home.go to respect its file budget; realProbeEnv moved here under #515
+// because it is now mostly a decision about WHICH fallback to take, and reads
+// better next to them than next to the renderer.
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/url"
 	"os"
@@ -153,4 +158,89 @@ func tbCmdAliasOurs(dir, exe string) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(string(b)), strings.ToLower(filepath.Clean(exe)))
+}
+
+// realProbeEnv is the bounded cluster probe. It reuses the exact namespace
+// binding + discovery the data/cluster commands use, so the home screen reports
+// the very environment those commands would target. Best-effort throughout: any
+// failure degrades to unreachable/no-release, never an error.
+func realProbeEnv(ctx context.Context) envProbe {
+	ctx, cancel := context.WithTimeout(ctx, homeProbeTimeout)
+	defer cancel()
+
+	// The name for a discovered release is set below; the unreachable / no-release
+	// returns leave it empty and let resolveHomeModel fill the remembered name, so
+	// the "provisioned ⇒ named offline" fallback lives in exactly one place.
+	opts := cluster.KubeconfigOptions{}
+	binding := bindActiveClientNamespace(&opts)
+	// OWNERSHIP GATE: no active-client binding ⇒ nothing was ever provisioned
+	// for this profile, so no release the kubeconfig can reach is honestly
+	// YOURS. Without the binding, discovery would fall back to the kubeconfig's
+	// default namespace and then the cluster-wide scan — either can surface an
+	// UNRELATED client (a shared cluster, a colleague's install), which this
+	// screen would then greet as "your secure environment". The data commands
+	// run that scan behind a visible retarget note and an explicit user action;
+	// a status screen has neither, and §7.5's rule (a miss must never silently
+	// retarget to some other client) applies doubly here. Report no-release —
+	// resolveHomeModel renders the honest no-env screen (or a named offline via
+	// the remembered-name fallback) — and skip the cluster I/O entirely, which
+	// also keeps the common unprovisioned re-entry instant.
+	if !binding.applied {
+		// #401: an empty pointer isn't proof of "no environment" — the Windows
+		// installer never writes it. localEnvFallback adopts a release only on
+		// a LOCAL (loopback/k3d) cluster, so the shared-cluster guarantee above
+		// is preserved; everything else still reads as no-release.
+		return localEnvFallback(ctx)
+	}
+	resolved, err := loadClusterFn(opts)
+	if err != nil {
+		return envProbe{local: localUnreachable}
+	}
+	// Bound every API call so an unreachable API server can't hang the home
+	// screen (mirrors cluster.ClusterID's time-boxed best-effort read).
+	resolved.RestConfig.Timeout = homeProbeTimeout
+	cs, err := newClientsetFn(resolved)
+	if err != nil {
+		return envProbe{local: localUnreachable}
+	}
+
+	release, nsUsed, err := discoverRelease(ctx, nil, cs, resolved.Namespace, binding.allowScan(), false)
+	if err != nil {
+		if errors.Is(err, cluster.ErrNoParentRelease) {
+			// Cluster reachable, but this release isn't in the resolved context.
+			// #515: a WRONG pointer is no more proof of "no environment" than the
+			// empty one #401 covered — the binding above overrode the kubeconfig's
+			// own namespace with a stale/foreign one, so this miss says nothing
+			// about what runs here. Re-ask through the same local-only fallback:
+			// it adopts a release ONLY when the kubeconfig's server is this
+			// machine, so the shared-cluster guarantee is untouched, and every
+			// other outcome is localNoRelease — exactly what this branch returned
+			// before. Provisioned ⇒ resolveHomeModel turns that into a named
+			// "offline".
+			ep := localEnvFallback(ctx)
+			// Mark it: the release the fallback found is not the client the
+			// pointer names, so the heartbeat keyed on that pointer describes
+			// someone else. resolveHomeModel refuses to render Online off this.
+			ep.pointerStale = ep.local != localNoRelease
+			return ep
+		}
+		// A list/RBAC/connect failure: we couldn't confirm what's here. Treat it
+		// as unreachable (→ offline if provisioned, else no-env).
+		return envProbe{local: localUnreachable}
+	}
+
+	ep := envProbe{name: release.ReleaseName}
+	if jobsManagerReady(ctx, cs, nsUsed, release) {
+		ep.local = localLive
+	} else {
+		ep.local = localDegraded
+	}
+	// Compute is only surfaced on the Online line, and only worth reading when the
+	// environment is actually up.
+	if ep.local == localLive {
+		if c, ok := machineCapacity(ctx, cs); ok {
+			ep.compute, ep.hasCompute = c, true
+		}
+	}
+	return ep
 }

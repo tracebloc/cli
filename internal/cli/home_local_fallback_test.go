@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -121,6 +122,65 @@ func TestRealProbeEnv_WrongPointerOnLocalCluster_FallsBack(t *testing.T) {
 	ep := realProbeEnv(context.Background())
 	if ep.local != localLive || ep.name != "tracebloc" {
 		t.Fatalf("=> %+v, want the live local environment despite the stale pointer", ep)
+	}
+	// Bugbot (#515): the release we found is NOT the client the pointer names, so
+	// the heartbeat (looked up by that pointer's id) is about a different machine
+	// and must be barred from greening this one.
+	if !ep.pointerStale {
+		t.Error("a fallback that fired after a pointer MISS must mark the pointer stale")
+	}
+}
+
+// The stale mark must actually change the verdict: local liveness from one
+// client plus a beatOnline from another is an Online nobody earned.
+func TestResolveHomeModel_StalePointerNeverRendersOnline(t *testing.T) {
+	base := func(stale bool) homeModel {
+		return resolveHomeModel(context.Background(), homeDeps{
+			budget:           2 * time.Second,
+			invoked:          func() string { return binTB },
+			tbAvailable:      func() bool { return true },
+			hasResources:     func() bool { return true },
+			signIn:           func() (bool, string, string) { return true, "a@b.io", "Lukas" },
+			rememberedClient: func() (bool, string) { return true, "stale-01" },
+			probeBeat:        func(context.Context) heartbeatState { return beatOnline },
+			probeEnv: func(context.Context) envProbe {
+				return envProbe{local: localLive, name: "tracebloc", pointerStale: stale}
+			},
+		})
+	}
+
+	if m := base(false); m.state != homeOnline {
+		t.Fatalf("control: live + beatOnline + fresh pointer must be Online, got %v", m.state)
+	}
+	m := base(true)
+	if m.state == homeOnline {
+		t.Error("a stale pointer must never render Online — the heartbeat is another client's")
+	}
+	if m.state != homeRunning {
+		t.Errorf("want the honest running state, got %v", m.state)
+	}
+	if m.confirmedNotOnline {
+		t.Error("nor may another client's heartbeat be reported as THIS one being not-online")
+	}
+}
+
+// …and a beatNotOnline off a stale pointer is equally uninformative: it must not
+// harden into "backend reports not online" for a client it isn't about.
+func TestResolveHomeModel_StalePointerNotOnlineIsNotConfirmed(t *testing.T) {
+	m := resolveHomeModel(context.Background(), homeDeps{
+		budget:           2 * time.Second,
+		invoked:          func() string { return binTB },
+		tbAvailable:      func() bool { return true },
+		hasResources:     func() bool { return true },
+		signIn:           func() (bool, string, string) { return true, "a@b.io", "Lukas" },
+		rememberedClient: func() (bool, string) { return true, "stale-01" },
+		probeBeat:        func(context.Context) heartbeatState { return beatNotOnline },
+		probeEnv: func(context.Context) envProbe {
+			return envProbe{local: localLive, name: "tracebloc", pointerStale: true}
+		},
+	})
+	if m.confirmedNotOnline {
+		t.Error("a stale pointer's heartbeat carries no signal in either direction")
 	}
 }
 

@@ -187,10 +187,15 @@ func runClusterDoctor(
 	// The retry is adopted only if it actually finds an environment, so a genuine
 	// no-environment machine keeps the original results (and the --diagnose
 	// bundle keeps describing the namespace the user is configured for).
+	// pointerStale records that the re-probe SUCCEEDED — i.e. this machine has a
+	// healthy environment AND its active-client pointer is wrong. Both halves
+	// have to be said; see the verdict block below for why finding the
+	// environment is not on its own good news.
+	pointerStale := false
 	if binding.applied && reachStateOf(results) == doctor.ReachNoEnv {
 		if ns, ok := localEnvNamespace(cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride}); ok && ns != resolved.Namespace {
 			if retry := doctorRunFn(ctx, cs, doctor.Options{Namespace: ns, ServerURL: resolved.ServerURL}); reachStateOf(retry) != doctor.ReachNoEnv {
-				resolved.Namespace, results = ns, retry
+				resolved.Namespace, results, pointerStale = ns, retry, true
 			}
 		}
 	}
@@ -212,6 +217,16 @@ func runClusterDoctor(
 	// An environment is installed here — name it (nothing prints between this and
 	// "Signed in" above, so the two context lines read as a pair), then roll up.
 	p.Para(fmt.Sprintf("Secure environment %q", envDisplayName(resolved)))
+	if pointerStale {
+		// The environment above is healthy, but nothing else in the CLI will find
+		// it: `data ingest`, `data list`, `resources` and `seal` all bind the
+		// active-client pointer and will keep failing with exit 4 until it is
+		// repointed. Say so here rather than letting the health lines below imply
+		// the machine is usable.
+		p.Warnf("Your active client points at namespace %q, which isn't on this cluster — data commands will keep failing until you repoint.", binding.namespace)
+		p.Hintf("     Point this machine at the environment above: %s client create", launcher())
+		p.Hintf("     (this cluster already runs a client, so it adopts it — no new credential)")
+	}
 	connected, ready = summarizeDoctor(results, tok)
 
 	p.Newline()
@@ -225,6 +240,14 @@ func runClusterDoctor(
 	p.Newline()
 	fail, allGood := doctorVerdict(connected.status, ready.status)
 	switch {
+	case pointerStale:
+		// A problem WAS found — it just isn't in the cluster. Exit 2 (the code
+		// doctor already uses for every actionable finding), never 0 with
+		// "you're ready to run training": the very next `data ingest` exits 4,
+		// and a doctor that greens that is reporting success it hasn't earned
+		// — the class BUGBOT.md flags first. The remedy is already printed
+		// above, so this doesn't also send them to write a support bundle.
+		return &exitError{code: exitChecksFailed, err: nil}
 	case fail:
 		if !diagnose { // they just wrote a bundle — don't send them to write it again
 			p.Hintf("Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())

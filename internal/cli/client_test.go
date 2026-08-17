@@ -1548,30 +1548,91 @@ func TestClientCreate_UnhiddenStillPromptsBeforeMinting(t *testing.T) {
 // cluster anchor (§7.2).
 func TestClientListMarker(t *testing.T) {
 	cases := []struct {
-		name                  string
-		isActive, known, here bool
-		want                  string
+		name     string
+		isActive bool
+		res      residency
+		want     string
 	}{
-		{"anchor unreadable, active → claims only selection", true, false, false, "  (active)"},
-		{"anchor unreadable, other → no claim", false, false, false, ""},
-		{"active and here", true, true, true, "  (active — on this cluster)"},
-		{"active but elsewhere", true, true, false, "  (active — NOT on the cluster your kubeconfig reaches)"},
-		{"here but not selected", false, true, true, "  (on this cluster)"},
-		{"neither", false, true, false, ""},
+		{"residency unknown, active → claims only selection", true, resUnknown, "  (active)"},
+		{"residency unknown, other → no claim", false, resUnknown, ""},
+		{"active and here", true, resHere, "  (active — on this cluster)"},
+		{"active but elsewhere", true, resElsewhere, "  (active — NOT on the cluster your kubeconfig reaches)"},
+		{"here but not selected", false, resHere, "  (on this cluster)"},
+		{"elsewhere and not selected", false, resElsewhere, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := clientListMarker(c.isActive, c.known, c.here); got != c.want {
-				t.Errorf("clientListMarker(%v,%v,%v) = %q, want %q", c.isActive, c.known, c.here, got, c.want)
+			if got := clientListMarker(c.isActive, c.res); got != c.want {
+				t.Errorf("clientListMarker(%v,%v) = %q, want %q", c.isActive, c.res, got, c.want)
 			}
 		})
 	}
-	// The specific claim #515 calls out: an unreadable anchor must never let a
-	// row assert it is here.
+	// The specific claim #515 calls out: unknown residency must never let a row
+	// assert — or deny — that it is here.
 	for _, isActive := range []bool{true, false} {
-		if strings.Contains(clientListMarker(isActive, false, false), "this cluster") {
-			t.Errorf("isActive=%v: an unreadable cluster anchor must claim nothing about location", isActive)
+		if strings.Contains(clientListMarker(isActive, resUnknown), "this cluster") {
+			t.Errorf("isActive=%v: unknown residency must claim nothing about location", isActive)
 		}
+	}
+}
+
+// Bugbot (#515): residency has to stay THREE-valued on both sides of the
+// comparison. An unreadable LOCAL anchor was already handled; a client whose OWN
+// anchor is empty — legacy / not-yet-backfilled, per api.ProvisionedClient —
+// was being forced to "elsewhere", which told the owner of a perfectly local
+// legacy client that it is not on this cluster.
+func TestResidencyOf(t *testing.T) {
+	cases := []struct {
+		name        string
+		hereKnown   bool
+		local, clnt string
+		want        residency
+	}{
+		{"local anchor unreadable", false, "", "uid-A", resUnknown},
+		{"client anchor empty (legacy record)", true, "uid-A", "", resUnknown},
+		{"both unknown", false, "", "", resUnknown},
+		{"anchors match", true, "uid-A", "uid-A", resHere},
+		{"anchors differ", true, "uid-A", "uid-B", resElsewhere},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := residencyOf(c.hereKnown, c.local, c.clnt); got != c.want {
+				t.Errorf("residencyOf(%v,%q,%q) = %v, want %v", c.hereKnown, c.local, c.clnt, got, c.want)
+			}
+		})
+	}
+}
+
+// End to end: a legacy ACTIVE client with no anchor, on a machine whose cluster
+// anchor reads fine, must not be accused of running elsewhere — and must not
+// trigger the repoint hint, which would be advice to fix a non-problem.
+func TestClientList_LegacyClientWithNoAnchorIsNotAccused(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":1,"first_name":"legacy","namespace":"legacy-ns"}]`)) // no cluster_id
+	})
+	stubClusterID(t, "uid-HERE", nil)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Current().ActiveClientID = "1"
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runClientList(context.Background(), ui.New(&out, ui.WithColor(false))); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if strings.Contains(got, "NOT on the cluster") {
+		t.Errorf("a client with no anchor has UNKNOWN residency, not elsewhere:\n%s", got)
+	}
+	if strings.Contains(got, "client create") {
+		t.Errorf("no mismatch is known, so the repoint must not be advised:\n%s", got)
+	}
+	if !strings.Contains(got, "1  (active)") {
+		t.Errorf("want the bare selection marker:\n%s", got)
 	}
 }
 

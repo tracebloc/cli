@@ -777,11 +777,11 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 	mismatch := false
 	for _, c := range clients {
 		isActive := strconv.Itoa(c.ID) == active
-		here := hereKnown && c.ClusterID != "" && c.ClusterID == clusterID
-		if isActive && hereKnown && !here {
+		res := residencyOf(hereKnown, clusterID, c.ClusterID)
+		if isActive && res == resElsewhere {
 			mismatch = true
 		}
-		p.Field(strconv.Itoa(c.ID)+clientListMarker(isActive, hereKnown, here),
+		p.Field(strconv.Itoa(c.ID)+clientListMarker(isActive, res),
 			fmt.Sprintf("%s   state=%s   namespace=%s   location=%s",
 				c.Name, clientStateLabel(c.Status), c.Namespace, c.Location))
 	}
@@ -797,26 +797,53 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 	return nil
 }
 
+// residency answers "does this client run on the cluster the kubeconfig
+// reaches" in THREE values, because two of them are absences and an absence is
+// never a "no" (Bugbot, #515).
+type residency int
+
+const (
+	// resUnknown: we cannot tell. Either the local cluster anchor was
+	// unreadable (no kubeconfig, unreachable API server, RBAC on kube-system),
+	// or the CLIENT carries no anchor — `ProvisionedClient.ClusterID` is empty
+	// on legacy / not-yet-backfilled records (api/client.go), and a record that
+	// never learned where it lives is not a record that lives elsewhere.
+	resUnknown residency = iota
+	resHere
+	resElsewhere
+)
+
+// residencyOf compares the local cluster anchor with a client's, keeping both
+// missing-anchor cases at resUnknown. Collapsing either into "elsewhere" would
+// print "NOT on the cluster your kubeconfig reaches" — and the repoint hint —
+// next to a legacy client that may be running on this very machine.
+func residencyOf(hereKnown bool, localAnchor, clientAnchor string) residency {
+	if !hereKnown || clientAnchor == "" {
+		return resUnknown
+	}
+	if clientAnchor == localAnchor {
+		return resHere
+	}
+	return resElsewhere
+}
+
 // clientListMarker renders one row's suffix in `client list`, keeping SELECTION
-// (this machine's local pointer) and RESIDENCY (does this client run on the
-// cluster the kubeconfig reaches) as two separate facts (#515).
-//
-// hereKnown false means the cluster anchor could not be read — no kubeconfig, an
-// unreachable API server, RBAC on kube-system. That is an absence of evidence,
-// so no row may claim to be here and no row may be denied: the marker degrades
-// to bare "(active)", which says only what the local config actually knows.
-func clientListMarker(isActive, hereKnown, here bool) string {
+// (this machine's local pointer) and RESIDENCY (where the client actually runs)
+// as two separate facts (#515). Under resUnknown the marker degrades to bare
+// "(active)" — which says only what the local config actually knows — and
+// claims nothing about location in either direction.
+func clientListMarker(isActive bool, res residency) string {
 	switch {
-	case !hereKnown:
+	case res == resUnknown:
 		if isActive {
 			return "  (active)"
 		}
 		return ""
-	case isActive && here:
+	case isActive && res == resHere:
 		return "  (active — on this cluster)"
 	case isActive:
 		return "  (active — NOT on the cluster your kubeconfig reaches)"
-	case here:
+	case res == resHere:
 		return "  (on this cluster)"
 	default:
 		return ""
