@@ -532,6 +532,57 @@ func (c *catalogPrompter) Confirm(label string, def bool) (bool, error) {
 	return def, nil
 }
 
+// literalString folds a compile-time-constant string expression to its value.
+//
+// A message written across two source lines —
+//
+//	fmt.Errorf("unknown backend environment %q — valid values are … "+
+//		"set CLIENT_ENV or pass --env", env)
+//
+// — is an *ast.BinaryExpr, not a *ast.BasicLit. The harvest used to type-assert
+// straight to *ast.BasicLit, so it skipped those arguments entirely: not the
+// second half, the WHOLE message. That made this file's own header claim ("the
+// completeness backstop") false for an entire syntactic class of copy, and it
+// passed forever because nothing it could see had gone missing. The env-validation
+// error above was absent from the golden while being plainly user-facing.
+//
+// Only an ALL-literal join folds. An operand that is a variable, a call, or a
+// constant identifier makes the whole expression unfoldable and yields false —
+// deliberately, because emitting the literal half of a part-computed message
+// would put a sentence in the catalog that no user ever sees, and mark it
+// inventoried while the real text drifts. Absent is honest; half is not.
+func literalString(e ast.Expr) (string, bool) {
+	switch n := e.(type) {
+	case *ast.BasicLit:
+		if n.Kind != token.STRING {
+			return "", false
+		}
+		s, err := strconv.Unquote(n.Value)
+		if err != nil {
+			return "", false
+		}
+		return s, true
+	case *ast.ParenExpr:
+		return literalString(n.X)
+	case *ast.BinaryExpr:
+		// ADD only: any other operator on strings is not a concatenation, and
+		// arithmetic on non-strings is filtered by the BasicLit kind check above.
+		if n.Op != token.ADD {
+			return "", false
+		}
+		l, ok := literalString(n.X)
+		if !ok {
+			return "", false
+		}
+		r, ok := literalString(n.Y)
+		if !ok {
+			return "", false
+		}
+		return l + r, true
+	}
+	return "", false
+}
+
 // harvestMessages parses the user-facing packages and returns every string
 // literal that reaches a user: ALL arguments to a Printer method or an error /
 // format constructor (errors.New, fmt.Errorf, fmt.Sprintf), PLUS the string
@@ -593,12 +644,8 @@ func harvestMessages(t *testing.T) []string {
 	seen := map[string]struct{}{}
 	collect := func(prefix string, exprs []ast.Expr) {
 		for _, arg := range exprs {
-			lit, ok := arg.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				continue
-			}
-			s, uerr := strconv.Unquote(lit.Value)
-			if uerr != nil {
+			s, ok := literalString(arg)
+			if !ok {
 				continue
 			}
 			s = strings.TrimSpace(s)
@@ -652,4 +699,67 @@ func harvestMessages(t *testing.T) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestLiteralString pins the fold itself. The inputs are written down here
+// independently of the implementation — never derived from it — so a typo in the
+// matcher cannot also plant the same typo in its own fixture (the "never test a
+// list against itself" rule).
+func TestLiteralString(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string // an expression
+		want string
+		ok   bool
+	}{
+		{"plain literal", `"hello there"`, "hello there", true},
+		{"raw literal", "`raw string`", "raw string", true},
+		{"two-part join", `"first half " + "second half"`, "first half second half", true},
+		{"three-part join", `"a " + "b " + "c"`, "a b c", true},
+		{"join across quote styles", "`raw ` + \"interpreted\"", "raw interpreted", true},
+		{"parenthesised join", `("a " + "b")`, "a b", true},
+		// The load-bearing refusals: a part-computed message must not be emitted
+		// half-harvested, or the catalog would claim to inventory a sentence no
+		// user ever sees.
+		{"literal + identifier", `"prefix " + name`, "", false},
+		{"identifier + literal", `name + " suffix"`, "", false},
+		{"literal + call", `"prefix " + fmt.Sprint(x)`, "", false},
+		{"nested unfoldable operand", `"a " + ("b " + c)`, "", false},
+		{"non-ADD operator", `"a" == "b"`, "", false},
+		{"numeric literal", `42`, "", false},
+		{"numeric addition", `1 + 2`, "", false},
+		{"bare identifier", `msg`, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expr, err := parser.ParseExpr(tc.src)
+			if err != nil {
+				t.Fatalf("ParseExpr(%q): %v", tc.src, err)
+			}
+			got, ok := literalString(expr)
+			if ok != tc.ok {
+				t.Fatalf("literalString(%q) ok = %v, want %v (got %q)", tc.src, ok, tc.ok, got)
+			}
+			if got != tc.want {
+				t.Errorf("literalString(%q) = %q, want %q", tc.src, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHarvestMessages_SeesConcatenatedCopy is the regression pin for the reported
+// defect: a real, plainly user-facing error written as a two-line join was absent
+// from the catalog entirely. Reverting the fold to a bare *ast.BasicLit assertion
+// reddens this.
+func TestHarvestMessages_SeesConcatenatedCopy(t *testing.T) {
+	msgs := harvestMessages(t)
+	// runLogin's env validation (auth.go) — split across source lines, so it was
+	// invisible to an operand-blind scan.
+	const needle = "unknown backend environment"
+	for _, m := range msgs {
+		if strings.Contains(m, needle) {
+			return
+		}
+	}
+	t.Fatalf("harvest is missing the concatenated message %q — the fold is not applied", needle)
 }
