@@ -1470,19 +1470,18 @@ func TestClientStatus_WaitCtrlCIsSilent(t *testing.T) {
 }
 
 func TestClientSubcommandVisibility(t *testing.T) {
-	// `create` and `list` are installer-internal — Hidden so a user isn't invited to
-	// run them (a standalone `tracebloc client create` mints a client the installer
-	// never deploys, i.e. an orphaned phantom, backend#970). `status` stays
-	// user-visible. Hidden != disabled: all remain runnable (the installer still
-	// invokes create/list).
+	// `create` is VISIBLE since #515: it is the supported way to repoint a machine
+	// whose active client went stale, and the §7.3 error now names it — advice
+	// pointing at a hidden command is not advice. `list` stays installer-internal.
+	// `status` stays user-visible. Hidden != disabled: all remain runnable.
 	hidden := map[string]bool{}
 	runnable := map[string]bool{}
 	for _, c := range newClientCmd().Commands() {
 		hidden[c.Name()] = c.Hidden
 		runnable[c.Name()] = c.RunE != nil
 	}
-	if !hidden["create"] {
-		t.Error("client create must be Hidden (installer-internal; standalone mints a phantom)")
+	if hidden["create"] {
+		t.Error("client create must be visible — the #515 repoint advice names it")
 	}
 	if !hidden["list"] {
 		t.Error("client list must stay Hidden")
@@ -1491,7 +1490,248 @@ func TestClientSubcommandVisibility(t *testing.T) {
 		t.Error("client status must stay user-visible")
 	}
 	if !runnable["create"] {
-		t.Error("hidden create must still be runnable (the installer invokes it)")
+		t.Error("create must still be runnable (the installer invokes it)")
+	}
+}
+
+// Unhiding `create` must not reopen backend#970: hiding it was never what
+// stopped a standalone run from minting a phantom — these two guards are, and
+// they have to survive the visibility change. Off a TTY (pr == nil) with no
+// --yes and no --credential-file, a fresh mint is REFUSED; nothing is posted.
+func TestClientCreate_UnhiddenStillRefusesSilentMint(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posted = true
+		}
+		_, _ = w.Write([]byte(`[]`)) // no clients on the account → a mint, not an adopt
+	})
+	signInAs(t, "Lab", "lab@example.com")
+	var out bytes.Buffer
+	err := runClientCreate(context.Background(), ui.New(&out), nil, clientCreateOpts{})
+	if err == nil {
+		t.Fatal("a non-interactive bare `client create` must refuse to mint")
+	}
+	if !strings.Contains(err.Error(), "refusing to provision non-interactively") {
+		t.Errorf("want the pipe refusal, got: %v", err)
+	}
+	if posted {
+		t.Error("nothing may be provisioned by a refused run")
+	}
+}
+
+// The TTY half of the same guard: on a terminal a fresh mint asks first, and a
+// "no" provisions nothing. (The repoint itself never reaches this prompt — an
+// already-registered cluster adopts before it, covered by the adopt tests.)
+func TestClientCreate_UnhiddenStillPromptsBeforeMinting(t *testing.T) {
+	posted := false
+	withClientBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posted = true
+		}
+		_, _ = w.Write([]byte(`[]`))
+	})
+	signInAs(t, "Lab", "lab@example.com")
+	no := false
+	var out bytes.Buffer
+	if err := runClientCreate(context.Background(), ui.New(&out), &fakePrompter{confirm: &no}, clientCreateOpts{}); err != nil {
+		t.Fatalf("declining is a clean exit, got: %v", err)
+	}
+	if posted {
+		t.Error("a declined confirm must provision nothing")
+	}
+}
+
+// #515: `client list` used to label the active pointer "(active — this machine)"
+// without ever checking where that client runs, so a stale pointer read as
+// confirmation. Selection and residency are now two separate facts, keyed on the
+// cluster anchor (§7.2).
+func TestClientListMarker(t *testing.T) {
+	cases := []struct {
+		name     string
+		isActive bool
+		res      residency
+		want     string
+	}{
+		{"residency unknown, active → claims only selection", true, resUnknown, "  (active)"},
+		{"residency unknown, other → no claim", false, resUnknown, ""},
+		{"active and here", true, resHere, "  (active — on this cluster)"},
+		{"active but elsewhere", true, resElsewhere, "  (active — NOT on the cluster your kubeconfig reaches)"},
+		{"here but not selected", false, resHere, "  (on this cluster)"},
+		{"elsewhere and not selected", false, resElsewhere, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := clientListMarker(c.isActive, c.res); got != c.want {
+				t.Errorf("clientListMarker(%v,%v) = %q, want %q", c.isActive, c.res, got, c.want)
+			}
+		})
+	}
+	// The specific claim #515 calls out: unknown residency must never let a row
+	// assert — or deny — that it is here.
+	for _, isActive := range []bool{true, false} {
+		if strings.Contains(clientListMarker(isActive, resUnknown), "this cluster") {
+			t.Errorf("isActive=%v: unknown residency must claim nothing about location", isActive)
+		}
+	}
+}
+
+// Bugbot (#515): residency has to stay THREE-valued on both sides of the
+// comparison. An unreadable LOCAL anchor was already handled; a client whose OWN
+// anchor is empty — legacy / not-yet-backfilled, per api.ProvisionedClient —
+// was being forced to "elsewhere", which told the owner of a perfectly local
+// legacy client that it is not on this cluster.
+func TestResidencyOf(t *testing.T) {
+	cases := []struct {
+		name        string
+		hereKnown   bool
+		local, clnt string
+		want        residency
+	}{
+		{"local anchor unreadable", false, "", "uid-A", resUnknown},
+		{"client anchor empty (legacy record)", true, "uid-A", "", resUnknown},
+		{"both unknown", false, "", "", resUnknown},
+		{"anchors match", true, "uid-A", "uid-A", resHere},
+		{"anchors differ", true, "uid-A", "uid-B", resElsewhere},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := residencyOf(c.hereKnown, c.local, c.clnt); got != c.want {
+				t.Errorf("residencyOf(%v,%q,%q) = %v, want %v", c.hereKnown, c.local, c.clnt, got, c.want)
+			}
+		})
+	}
+}
+
+// End to end: a legacy ACTIVE client with no anchor, on a machine whose cluster
+// anchor reads fine, must not be accused of running elsewhere — and must not
+// trigger the repoint hint, which would be advice to fix a non-problem.
+func TestClientList_LegacyClientWithNoAnchorIsNotAccused(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":1,"first_name":"legacy","namespace":"legacy-ns"}]`)) // no cluster_id
+	})
+	stubClusterID(t, "uid-HERE", nil)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Current().ActiveClientID = "1"
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runClientList(context.Background(), ui.New(&out, ui.WithColor(false))); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if strings.Contains(got, "NOT on the cluster") {
+		t.Errorf("a client with no anchor has UNKNOWN residency, not elsewhere:\n%s", got)
+	}
+	if strings.Contains(got, "client create") {
+		t.Errorf("no mismatch is known, so the repoint must not be advised:\n%s", got)
+	}
+	if !strings.Contains(got, "1  (active)") {
+		t.Errorf("want the bare selection marker:\n%s", got)
+	}
+}
+
+// End-to-end: with the anchor readable, the row that matches the LOCAL cluster
+// is marked as such — even when the pointer names a different one — and the
+// listing names the repoint.
+func TestClientList_MarksTheClientOnThisCluster(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":1,"first_name":"stale","namespace":"stale-ns","cluster_id":"uid-OTHER"},` +
+			`{"id":2,"first_name":"here","namespace":"lukas-02","cluster_id":"uid-HERE"}]`))
+	})
+	stubClusterID(t, "uid-HERE", nil)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Current().ActiveClientID = "1" // the pointer names the client that is NOT here
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runClientList(context.Background(), ui.New(&out, ui.WithColor(false))); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "1  (active — NOT on the cluster your kubeconfig reaches)") {
+		t.Errorf("the stale active pointer must be marked as not here:\n%s", got)
+	}
+	if !strings.Contains(got, "2  (on this cluster)") {
+		t.Errorf("the client that IS here must be marked:\n%s", got)
+	}
+	if !strings.Contains(got, "client create") {
+		t.Errorf("a mismatch must name the repoint:\n%s", got)
+	}
+}
+
+// Bugbot (#515): the repoint hint says "the client that IS there", which is only
+// true if some row is provably here. With the active client elsewhere and NOTHING
+// confirmed on this cluster, `client create` would fall through to the MINT path
+// and produce exactly the phantom backend#970 exists to prevent — so the advice
+// must not be given.
+func TestClientList_MismatchWithNoLocalClient_DoesNotPushCreate(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":1,"first_name":"stale","namespace":"stale-ns","cluster_id":"uid-OTHER"},` +
+			`{"id":2,"first_name":"third","namespace":"third-ns","cluster_id":"uid-THIRD"}]`))
+	})
+	stubClusterID(t, "uid-HERE", nil) // this cluster hosts NEITHER
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Current().ActiveClientID = "1"
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runClientList(context.Background(), ui.New(&out, ui.WithColor(false))); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if strings.Contains(got, "client create") {
+		t.Errorf("no client is confirmed here — advising the repoint would push a MINT:\n%s", got)
+	}
+	if !strings.Contains(got, "no client here is confirmed") {
+		t.Errorf("the mismatch is still real and must be reported, just without a target:\n%s", got)
+	}
+	// The mismatch itself must still be visible on the row.
+	if !strings.Contains(got, "NOT on the cluster your kubeconfig reaches") {
+		t.Errorf("the stale active pointer must still be marked:\n%s", got)
+	}
+}
+
+// The unreadable-anchor path end to end: no cluster reachable ⇒ no row claims a
+// location, and the mismatch hint stays silent (we cannot know there is one).
+func TestClientList_UnreadableAnchorClaimsNoLocation(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) { // stubs readClusterID to an error
+		_, _ = w.Write([]byte(`[{"id":1,"first_name":"stale","namespace":"stale-ns","cluster_id":"uid-OTHER"}]`))
+	})
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Current().ActiveClientID = "1"
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runClientList(context.Background(), ui.New(&out, ui.WithColor(false))); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "1  (active)") {
+		t.Errorf("want the bare selection marker when the anchor is unreadable:\n%s", got)
+	}
+	if strings.Contains(got, "this cluster") || strings.Contains(got, "kubeconfig reaches") {
+		t.Errorf("an unreadable anchor must claim nothing about location:\n%s", got)
 	}
 }
 

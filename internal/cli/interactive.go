@@ -41,23 +41,24 @@ type prompter interface {
 // surveyPrompter is the production prompter, backed by
 // AlecAivazis/survey/v2 against the real terminal.
 //
-// bare drops the question text from the prompt line (survey's Message), for
-// flows where the CLI already prints the question itself as a step header
-// (the guided ingest flow, via PromptStep) — so the prompt reads "? <answer>"
-// with no duplicate question. Confirm always keeps its label (a short y/n with
-// no header of its own).
-type surveyPrompter struct{ bare bool }
-
-func (s surveyPrompter) message(label string) string {
-	if s.bare {
-		return ""
-	}
-	return label
-}
+// label is drawn verbatim as survey's Message, so the prompt line always
+// carries one. Callers choose the register: the flows that have no header of
+// their own (client create, delete, resources set) pass the whole question;
+// the guided ingest flow, which already prints the question as a step header,
+// passes a short noun label with a trailing colon ("Path:", "Task:") so the
+// line reads "? Path: ~/mydata" — context without repeating the question
+// (#504).
+//
+// It used to have a `bare` mode that blanked the Message for the guided flow,
+// leaving a label-less "? " — which, once answers were pre-filled, rendered as
+// "? [~/mydata]": a question mark, a bracket and a path, with no verb. Confirm
+// already refused to go bare for that reason; the objection was never
+// Confirm-specific.
+type surveyPrompter struct{}
 
 func (s surveyPrompter) Input(label, help, def string, validate func(string) error) (string, error) {
 	var ans string
-	q := &survey.Input{Message: s.message(label), Help: help, Default: def}
+	q := &survey.Input{Message: label, Help: help, Default: def}
 	var opts []survey.AskOpt
 	if validate != nil {
 		// survey hands the validator the raw answer as interface{};
@@ -76,7 +77,7 @@ func (s surveyPrompter) Input(label, help, def string, validate func(string) err
 
 func (s surveyPrompter) Select(label, help string, options []string, def string) (string, error) {
 	var ans string
-	q := &survey.Select{Message: s.message(label), Help: help, Options: options, Default: def}
+	q := &survey.Select{Message: label, Help: help, Options: options, Default: def}
 	// Arrow keys only work while the console delivers VK_* key events; see
 	// enableKeyEventInput. Without this, ↓ typed "[B" into the filter on Windows and
 	// the selection never moved (#475).
@@ -88,10 +89,10 @@ func (s surveyPrompter) Select(label, help string, options []string, def string)
 }
 
 func (s surveyPrompter) Confirm(label string, def bool) (bool, error) {
-	// Confirm always keeps its label (never bare): a y/N prompt has no step
-	// header of its own, and the overwrite-replace confirm fires later, during
-	// the cluster phase, with nothing printed before it — a bare "? (y/N)"
-	// there would be a label-less destructive prompt.
+	// Confirm keeps the WHOLE question, not a short label: a y/N prompt has no
+	// step header of its own, and the overwrite-replace confirm fires later,
+	// during the cluster phase, with nothing printed before it — "? Overwrite:
+	// (y/N)" there would name the noun and hide the stakes.
 	ans := def
 	defer enableKeyEventInput()()
 	if err := survey.AskOne(&survey.Confirm{Message: label, Default: def}, &ans); err != nil {
@@ -215,8 +216,12 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 
 	// The guided flow is a four-step setup: intent → name → path → task. Each
 	// question prints as its own step header (PromptStep), with any supporting
-	// line beneath it and an answer-only prompt (the prompter runs bare — see
-	// surveyPrompter). Everything task-dependent comes AFTER the four steps as
+	// line beneath it and a prompt line carrying a SHORT NOUN LABEL — the
+	// shortest noun phrase that names the answer ("Path:", "Task:", "Column
+	// types:"), never the question again (#504). The header asks; the label
+	// says what you are typing into.
+	//
+	// Everything task-dependent comes AFTER the four steps as
 	// unnumbered refinements (Section headers): the label column, and per-task
 	// extras like schema, resolution, keypoints. These aren't numbered because
 	// which ones apply — and whether any apply at all — depends on the task
@@ -225,9 +230,9 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 	//
 	// Spacing is uniform (STYLE.md "Guided-prompt spacing"): the header carries
 	// its own leading blank; then one blank line, the optional supporting text,
-	// one blank line, and the `?` prompt. With no supporting text the single
-	// blank sits directly between header and prompt. A result that belongs to an
-	// answer (the sniff echo) attaches to it with no blank.
+	// one blank line, and the `? <label>:` prompt. With no supporting text the
+	// single blank sits directly between header and prompt. A result that
+	// belongs to an answer (the sniff echo) attaches to it with no blank.
 
 	// Guided mode ASKS. A value that arrived on the command line becomes the
 	// prompt's DEFAULT — never a reason to skip the question (#509).
@@ -255,7 +260,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 		def := defaultInOptions(a.Spec.Intent, opts, "train")
 		p.PromptStep(1, 4, "Do you want to ingest training or test data?")
 		p.Newline()
-		ans, err := pr.Select("Do you want to ingest training or test data?", "which split this data is",
+		ans, err := pr.Select("Split:", "which split this data is",
 			opts, def)
 		if err != nil {
 			return err
@@ -268,7 +273,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 	{
 		p.PromptStep(2, 4, "Please name the dataset.")
 		p.Newline()
-		ans, err := pr.Input("Please name the dataset.",
+		ans, err := pr.Input("Name:",
 			"letters, digits, and underscores — no hyphens or spaces, use _; start with a letter or underscore  e.g. churn_train",
 			a.Spec.Table,
 			push.ValidateTableName)
@@ -289,7 +294,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 		p.Infof("Images    a folder with labels.csv + images/   e.g. %s", exImg)
 		p.Infof("Text      a folder with labels.csv + texts/     e.g. %s", exTxt)
 		p.Newline()
-		ans, err := pr.Input("Where is your data?", fmt.Sprintf("e.g. %s or %s", exTab, exImg),
+		ans, err := pr.Input("Path:", fmt.Sprintf("e.g. %s or %s", exTab, exImg),
 			a.LocalPath, validateDatasetPath)
 		if err != nil {
 			return err
@@ -405,7 +410,7 @@ func resolveFamily(p *ui.Printer, pr prompter, path string) (push.Family, error)
 	p.Hintf("We couldn't tell from the layout — tabular = a CSV table; image = labels.csv + images/; text = labels.csv + texts/.")
 	p.Newline()
 	opts := push.FamilyNouns()
-	ans, err := pr.Select("What kind of data is this?",
+	ans, err := pr.Select("Data type:",
 		"tabular = a CSV table; image = labels.csv + images/; text = labels.csv + texts/",
 		opts, opts[0])
 	if err != nil {
@@ -475,7 +480,7 @@ func pickTask(p *ui.Printer, pr prompter, fam push.Family, want string) (string,
 	// otherwise render a default the user cannot see, and an Enter on it would be
 	// unexplainable.
 	def := defaultInOptions(want, opts, opts[0])
-	ans, err := pr.Select("Which task?", "pick the task this data is for", opts, def)
+	ans, err := pr.Select("Task:", "pick the task this data is for", opts, def)
 	if err != nil {
 		return "", err
 	}
@@ -513,17 +518,20 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 	// be corrected here the same way a stale path can. Only self-supervised text
 	// (no label at all) still bypasses it.
 	if !push.SelfSupervisedText(cat) {
-		question := "Which column holds the label?"
+		// The prompt label tracks the wording: a class to sort into is a "Label",
+		// a numeric target is a "Target". Keeping them distinct is what lets the
+		// two branches be told apart on the prompt line as well as in the header.
+		question, label := "Which column holds the label?", "Label:"
 		desc := "The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned"
 		if push.IsRegressionClass(cat) {
-			question = "Which column holds the value to predict?"
+			question, label = "Which column holds the value to predict?", "Target:"
 			desc = "The number the model learns to predict.  e.g. price, age, days_to_event"
 		}
 		p.Section(question)
 		p.Newline()
 		p.Hintf("%s", desc)
 		p.Newline()
-		ans, err := promptLabelColumn(pr, cat, a.LocalPath, question, a.Spec.LabelColumn)
+		ans, err := promptLabelColumn(pr, cat, a.LocalPath, label, a.Spec.LabelColumn)
 		if err != nil {
 			return prompted, err
 		}
@@ -545,7 +553,7 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			if a.Spec.NumberOfKeypoints > 0 {
 				kpDef = strconv.Itoa(a.Spec.NumberOfKeypoints)
 			}
-			ans, err := pr.Input("How many keypoints per sample?",
+			ans, err := pr.Input("Keypoints:",
 				"e.g. 17 for COCO pose", kpDef, validatePositiveInt)
 			if err != nil {
 				return prompted, err
@@ -559,7 +567,7 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			p.Newline()
 			p.Hintf("The size your images already are, as WxH — tracebloc checks every image matches and never resizes. Press Enter to read it from your first image.  e.g. 224x224")
 			p.Newline()
-			ans, err := pr.Input("Image resolution",
+			ans, err := pr.Input("Resolution:",
 				"the size your images already are; tracebloc checks it, it never resizes", a.TargetSizeFlag,
 				validateOptionalTargetSize)
 			if err != nil {
@@ -574,7 +582,7 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			p.Newline()
 			p.Hintf("We infer each column's type from your CSV. Press Enter to accept, or type overrides like age:INT,price:FLOAT.")
 			p.Newline()
-			ans, err := pr.Input("Column types", "e.g. age:INT,price:FLOAT", a.SchemaFlag, validateOptionalSchema)
+			ans, err := pr.Input("Column types:", "e.g. age:INT,price:FLOAT", a.SchemaFlag, validateOptionalSchema)
 			if err != nil {
 				return prompted, err
 			}
@@ -590,7 +598,7 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			// A supplied --label-policy pre-fills only when valid; a typo like
 			// "buckets" would otherwise abort the Select on a TTY (defaultInOptions).
 			lpDef := defaultInOptions(a.Spec.LabelPolicy, opts, "bucket")
-			ans, err := pr.Select("Label policy",
+			ans, err := pr.Select("Label policy:",
 				"bucket bins the target before it leaves the cluster",
 				opts, lpDef)
 			if err != nil {
@@ -608,7 +616,7 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 			if tcDef == "" {
 				tcDef = "time"
 			}
-			ans, err := pr.Input("Time column", "the duration/time column name", tcDef, nil)
+			ans, err := pr.Input("Time column:", "the duration/time column name", tcDef, nil)
 			if err != nil {
 				return prompted, err
 			}
@@ -625,20 +633,23 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 // named "label" if present; otherwise — the header isn't readable yet — it falls
 // back to free text pre-filled with the supplied value so the flow never stalls.
 //
+// label is the short noun the `?` line carries ("Label:" / "Target:"); the full
+// question is already printed as the Section header by the caller (#504).
+//
 // supplied is resolved to the header's own spelling (canonicalHeader) and then
 // guarded through defaultInOptions before it reaches survey.Select: a mistyped
 // --label-column that is not one of the real headers would otherwise abort the
 // prompt on a TTY, the same default-not-in-options crash guarded everywhere
 // else in the guided flow.
-func promptLabelColumn(pr prompter, category, root, question, supplied string) (string, error) {
+func promptLabelColumn(pr prompter, category, root, label, supplied string) (string, error) {
 	headers, err := push.PreviewLabelHeaders(category, root)
 	if err == nil && len(headers) > 0 {
-		ans, serr := pr.Select(question,
+		ans, serr := pr.Select(label,
 			"pick the label/target column from your CSV header", headers,
 			defaultInOptions(canonicalHeader(supplied, headers), headers, defaultLabelChoice(headers)))
 		return strings.TrimSpace(ans), serr
 	}
-	ans, ierr := pr.Input(question, "the label/target column name", supplied, nil)
+	ans, ierr := pr.Input(label, "the label/target column name", supplied, nil)
 	return strings.TrimSpace(ans), ierr
 }
 

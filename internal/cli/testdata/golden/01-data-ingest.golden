@@ -7,7 +7,8 @@ driven through the real flow for one task in each family (tabular, image, text)
 so the task-specific questions are visible; each core question prints as a
 `Step N of 4 · …` header, the task-specific ones (the label column, and extras
 like resolution or schema) as their own header, the
-supporting line beneath it, and the `?` line shows your answer. The run (shown
+supporting line beneath it, and the `?` line carries a short noun label
+(`Path:`, `Task:`) plus your answer. The run (shown
 once, for tabular) is the three steps + the final summary as the CLI renders
 them. Values passed as flags (--as, --task, a path, …) pre-fill the matching
 questions rather than skipping them — guided mode always asks. The
@@ -25,11 +26,11 @@ $ tb data ingest   # guided · tabular classification
 
   Step 1 of 4 · Do you want to ingest training or test data?
 
-? train
+? Split: train
 
   Step 2 of 4 · Please name the dataset.
 
-? hospital_train
+? Name: hospital_train
 
   Step 3 of 4 · Where is your data?
 
@@ -38,7 +39,7 @@ $ tb data ingest   # guided · tabular classification
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
 
-? ~/data/patients
+? Path: ~/data/patients
   ✔ Found a CSV table — this is tabular data.
 
   Step 4 of 4 · What kind of machine learning task is this data for?
@@ -49,19 +50,19 @@ $ tb data ingest   # guided · tabular classification
     time_series_classification   predict a class for each whole sequence
     time_to_event_prediction     predict how long until an event happens
 
-? tabular_classification
+? Task: tabular_classification
 
   Which column holds the label?
 
   The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
 
-? churned
+? Label: churned
 
   Column types
 
   We infer each column's type from your CSV. Press Enter to accept, or type overrides like age:INT,price:FLOAT.
 
-?
+? Column types:
 
   Review
     name:          hospital_train
@@ -80,11 +81,11 @@ $ tb data ingest   # guided · image classification
 
   Step 1 of 4 · Do you want to ingest training or test data?
 
-? train
+? Split: train
 
   Step 2 of 4 · Please name the dataset.
 
-? xray_train
+? Name: xray_train
 
   Step 3 of 4 · Where is your data?
 
@@ -93,7 +94,7 @@ $ tb data ingest   # guided · image classification
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
 
-? ~/data/xray
+? Path: ~/data/xray
   ✔ Found labels.csv and an images/ folder — this is image data.
 
   Step 4 of 4 · What kind of machine learning task is this data for?
@@ -103,19 +104,19 @@ $ tb data ingest   # guided · image classification
     keypoint_detection      locate landmark points on an image (e.g. pose)
     semantic_segmentation   label every pixel in an image
 
-? image_classification
+? Task: image_classification
 
   Which column holds the label?
 
   The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
 
-? label
+? Label: label
 
   Image resolution
 
   The size your images already are, as WxH — tracebloc checks every image matches and never resizes. Press Enter to read it from your first image.  e.g. 224x224
 
-? 224x224
+? Resolution: 224x224
 
   Review
     name:          xray_train
@@ -134,11 +135,11 @@ $ tb data ingest   # guided · text classification
 
   Step 1 of 4 · Do you want to ingest training or test data?
 
-? train
+? Split: train
 
   Step 2 of 4 · Please name the dataset.
 
-? reviews_train
+? Name: reviews_train
 
   Step 3 of 4 · Where is your data?
 
@@ -147,7 +148,7 @@ $ tb data ingest   # guided · text classification
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
 
-? ~/data/reviews
+? Path: ~/data/reviews
   ✔ Found labels.csv and a texts/ folder — this looks like text data.
 
   Step 4 of 4 · What kind of machine learning task is this data for?
@@ -160,13 +161,13 @@ $ tb data ingest   # guided · text classification
     sentence_pair_classification   label how two texts relate
     embeddings                     learn vector representations from text pairs
 
-? text_classification
+? Task: text_classification
 
   Which column holds the label?
 
   The answer the model learns to produce — for classification, the class.  e.g. diagnosis, churned
 
-? label
+? Label: label
 
   Review
     name:          reviews_train

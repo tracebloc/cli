@@ -22,7 +22,7 @@ flowchart TD
   ACCT --> logout["logout"]
   ACCT --> authst["auth status"]
   ACCT --> clis["client status"]
-  ACCT -.-> clcreate["client create"]:::hidden
+  ACCT --> clcreate["client create — point this machine at its client"]
   ACCT -.-> cllist["client list"]:::hidden
 
   ENVC --> di["data ingest"]
@@ -172,7 +172,7 @@ flowchart TD
 - **not signed in / token 401·403** → `login`
 - **426 upgrade-required** → upgrade the CLI
 - **kubeconfig (exit 3)** → fix `--kubeconfig`/`--context`, then `doctor`
-- **no client / environment (exit 4)** → run the installer (or `--namespace`); triage with `doctor`
+- **no client / environment (exit 4)** → the error now says what IS on the reached cluster before advising (cli#515): one client on a local cluster → `client create` repoints this machine (it adopts, no new credential); a client on a remote/shared cluster → `--namespace <ns>` only; nothing there → run the installer. Triage with `doctor`
 - **no token (exit 5)** → grant RBAC; diagnose with `cluster info` / `doctor`
 - **destination exists (exit 6)** → `--overwrite`, a different `--name`, or `data delete` first
 - **staging partial (exit 7)** → `data delete` then re-ingest
