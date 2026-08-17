@@ -267,6 +267,13 @@ func (b activeClientBinding) explain(ctx context.Context, err error) error {
 	if handle == "" {
 		handle = b.namespace
 	}
+	// errors.New, not %w: the rewrite deliberately REPLACES the discovery error
+	// rather than wrapping it, so the §7.3 guidance is the whole message and the
+	// raw "no release in namespace X" doesn't trail it. That was already true of
+	// the fmt.Errorf this replaced — the exit code (exitNoWorkspace, on the
+	// *exitError above) is the machine-readable contract here, not the chain.
+	// Wrapping would also make the result re-match errors.As(*noParentReleaseError)
+	// and so re-explainable, which nothing wants.
 	return &exitError{code: exitNoWorkspace,
 		err: errors.New(repointMessage(handle, b.namespace, surveyCluster(ctx, npr.probe)))}
 }
