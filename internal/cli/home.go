@@ -30,7 +30,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -155,6 +154,13 @@ type envProbe struct {
 	name       string
 	compute    computeInfo
 	hasCompute bool
+	// pointerStale: the environment above was found by the #515 local fallback
+	// AFTER the active-client pointer missed — so the release we can see running
+	// here is NOT the client the pointer names. The heartbeat is looked up by
+	// that pointer's client id, so it describes a different machine's client and
+	// must never be allowed to green this one (Bugbot: local liveness from one
+	// client + a heartbeat from another is an Online nobody earned).
+	pointerStale bool
 }
 
 // homeDeps are the detection seams. defaultHomeDeps wires the real
@@ -270,7 +276,14 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 	// a release present on a machine that never cached a client. This also keeps
 	// the "provisioned ⇒ named offline" fallback (a degraded probe returns no
 	// name) living in exactly one place.
-	if remembered != "" {
+	//
+	// EXCEPT when the pointer is stale (#515): the remembered name is the handle
+	// of the client the pointer names, and that client is NOT what the fallback
+	// found running here. Applying it would print another machine's handle as the
+	// environment on this one — a wrong label, and one that contradicts doctor's
+	// namespace-based name for the very same state (Bugbot). Fall through to the
+	// probe's own name, which at least describes what is actually running.
+	if remembered != "" && !env.pointerStale {
 		env.name = remembered
 	}
 
@@ -291,11 +304,16 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 		// honest "· running" state, never a green Online — but the model records
 		// WHICH kind of not-Online it is, so the running line can word a
 		// backend-confirmed "not online" differently from a mere couldn't-confirm.
-		if beat == beatOnline {
+		// #515: with a stale pointer the heartbeat is about a DIFFERENT client
+		// than the release running here, so it carries no signal about this one
+		// in either direction — it can neither green it (a colleague's machine
+		// being online is not this one being online) nor red it. Drop to the
+		// honest "running, couldn't confirm" line, which is exactly true.
+		if beat == beatOnline && !env.pointerStale {
 			m.state = homeOnline
 		} else {
 			m.state = homeRunning
-			m.confirmedNotOnline = beat == beatNotOnline
+			m.confirmedNotOnline = beat == beatNotOnline && !env.pointerStale
 		}
 		m.fullMenu = true
 	case localDegraded:
@@ -461,78 +479,6 @@ func realRememberedClient() (provisioned bool, name string) {
 		name = p.ActiveClientID
 	}
 	return p.ActiveClientNamespace != "", name
-}
-
-// realProbeEnv is the bounded cluster probe. It reuses the exact namespace
-// binding + discovery the data/cluster commands use, so the home screen reports
-// the very environment those commands would target. Best-effort throughout: any
-// failure degrades to unreachable/no-release, never an error.
-func realProbeEnv(ctx context.Context) envProbe {
-	ctx, cancel := context.WithTimeout(ctx, homeProbeTimeout)
-	defer cancel()
-
-	// The name for a discovered release is set below; the unreachable / no-release
-	// returns leave it empty and let resolveHomeModel fill the remembered name, so
-	// the "provisioned ⇒ named offline" fallback lives in exactly one place.
-	opts := cluster.KubeconfigOptions{}
-	binding := bindActiveClientNamespace(&opts)
-	// OWNERSHIP GATE: no active-client binding ⇒ nothing was ever provisioned
-	// for this profile, so no release the kubeconfig can reach is honestly
-	// YOURS. Without the binding, discovery would fall back to the kubeconfig's
-	// default namespace and then the cluster-wide scan — either can surface an
-	// UNRELATED client (a shared cluster, a colleague's install), which this
-	// screen would then greet as "your secure environment". The data commands
-	// run that scan behind a visible retarget note and an explicit user action;
-	// a status screen has neither, and §7.5's rule (a miss must never silently
-	// retarget to some other client) applies doubly here. Report no-release —
-	// resolveHomeModel renders the honest no-env screen (or a named offline via
-	// the remembered-name fallback) — and skip the cluster I/O entirely, which
-	// also keeps the common unprovisioned re-entry instant.
-	if !binding.applied {
-		// #401: an empty pointer isn't proof of "no environment" — the Windows
-		// installer never writes it. localEnvFallback adopts a release only on
-		// a LOCAL (loopback/k3d) cluster, so the shared-cluster guarantee above
-		// is preserved; everything else still reads as no-release.
-		return localEnvFallback(ctx)
-	}
-	resolved, err := loadClusterFn(opts)
-	if err != nil {
-		return envProbe{local: localUnreachable}
-	}
-	// Bound every API call so an unreachable API server can't hang the home
-	// screen (mirrors cluster.ClusterID's time-boxed best-effort read).
-	resolved.RestConfig.Timeout = homeProbeTimeout
-	cs, err := newClientsetFn(resolved)
-	if err != nil {
-		return envProbe{local: localUnreachable}
-	}
-
-	release, nsUsed, err := discoverRelease(ctx, nil, cs, resolved.Namespace, binding.allowScan(), false)
-	if err != nil {
-		if errors.Is(err, cluster.ErrNoParentRelease) {
-			// Cluster reachable, but this release isn't in the resolved context.
-			// Provisioned ⇒ resolveHomeModel turns this into a named "offline".
-			return envProbe{local: localNoRelease}
-		}
-		// A list/RBAC/connect failure: we couldn't confirm what's here. Treat it
-		// as unreachable (→ offline if provisioned, else no-env).
-		return envProbe{local: localUnreachable}
-	}
-
-	ep := envProbe{name: release.ReleaseName}
-	if jobsManagerReady(ctx, cs, nsUsed, release) {
-		ep.local = localLive
-	} else {
-		ep.local = localDegraded
-	}
-	// Compute is only surfaced on the Online line, and only worth reading when the
-	// environment is actually up.
-	if ep.local == localLive {
-		if c, ok := machineCapacity(ctx, cs); ok {
-			ep.compute, ep.hasCompute = c, true
-		}
-	}
-	return ep
 }
 
 // realHeartbeat reports tracebloc's view of this machine's client — the honest

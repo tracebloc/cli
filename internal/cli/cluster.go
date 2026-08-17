@@ -164,7 +164,10 @@ func runClusterInfo(
 		// installed on this cluster". A binding miss gets the §7.3
 		// "runs elsewhere" explanation, same as the data commands.
 		if errors.Is(err, cluster.ErrNoParentRelease) {
-			return binding.explain(&exitError{code: exitNoWorkspace, err: &noParentReleaseError{err}})
+			return binding.explain(ctx, &exitError{code: exitNoWorkspace, err: &noParentReleaseError{
+				err:   err,
+				probe: &clusterProbe{cs: cs, serverURL: resolved.ServerURL},
+			}})
 		}
 		return &exitError{code: exitNoWorkspace, err: err}
 	}
