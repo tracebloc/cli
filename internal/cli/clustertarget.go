@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
+	"github.com/tracebloc/cli/internal/installer"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -19,10 +21,35 @@ import (
 // release, an API/RBAC list failure, or an ambiguous multiple-release match.
 // §7.3 uses it to turn an active-client binding miss into a clear "runs on
 // another machine" message; the other failures keep their own diagnostics.
-type noParentReleaseError struct{ err error }
+//
+// probe carries the read-only handles explain needs to say what IS on the
+// reached cluster before advising (#515). It is attached wherever the error is
+// built — both sites already hold a clientset and the resolved server URL — and
+// travels ON the error rather than through the call signature so a caller can
+// never hand explain a clientset for a DIFFERENT cluster than the one that
+// missed. A nil probe (a synthesised error, a resolveClusterTargetFn test
+// double) means "we could not look", and explain then claims nothing.
+type noParentReleaseError struct {
+	err   error
+	probe *clusterProbe
+}
 
 func (e *noParentReleaseError) Error() string { return e.err.Error() }
 func (e *noParentReleaseError) Unwrap() error { return e.err }
+
+// clusterProbe is the pair explain needs to diagnose before advising: a
+// clientset for the cluster the kubeconfig actually reached, and that cluster's
+// server URL (which isLocalServerURL judges).
+type clusterProbe struct {
+	cs        kubernetes.Interface
+	serverURL string
+}
+
+// explainScanTimeout bounds the naming-only cluster scan explain runs on the
+// §7.3 error path. The scan only makes the message better, so it must never
+// make the failure slower than the failure itself: past this, explain falls
+// back to the message it would have printed without looking.
+const explainScanTimeout = 5 * time.Second
 
 // loadClusterFn / newClientsetFn are the kubeconfig-load + clientset-build
 // seams every command that reaches a cluster goes through — resolveClusterTarget
@@ -87,7 +114,10 @@ func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.Kubec
 		// "runs elsewhere" rewrite; an API/RBAC list failure or an
 		// ambiguous multiple-release match keeps its own message.
 		if errors.Is(err, cluster.ErrNoParentRelease) {
-			return nil, &exitError{code: exitNoWorkspace, err: &noParentReleaseError{err}}
+			return nil, &exitError{code: exitNoWorkspace, err: &noParentReleaseError{
+				err:   err,
+				probe: &clusterProbe{cs: cs, serverURL: resolved.ServerURL},
+			}}
 		}
 		return nil, &exitError{code: exitNoWorkspace, err: err}
 	}
@@ -214,7 +244,18 @@ func (b activeClientBinding) allowScan() bool { return !b.applied && !b.explicit
 // came from the active-client binding: the cluster the kubeconfig reaches
 // doesn't host that client. Non-binding errors (and PVC-missing, where the
 // release *was* found) pass through unchanged.
-func (b activeClientBinding) explain(err error) error {
+//
+// DIAGNOSE BEFORE ADVISING (#515). The shipped §7.3 sentence named no way back:
+// it offered --namespace without ever saying WHICH namespace, so a user on a
+// healthy local install had no supported recovery. explain now spends one
+// naming-only cluster scan — the same read discoverRelease already spends
+// purely to write a better message — and says what is actually here.
+//
+// This changes what the CLI SAYS, never what it TARGETS: allowScan() stays
+// false, so a binding miss still never silently retargets to some other
+// machine's client (§7.5). The scan's result reaches the user as text they must
+// act on, which is the whole difference.
+func (b activeClientBinding) explain(ctx context.Context, err error) error {
 	if !b.applied {
 		return err
 	}
@@ -226,8 +267,81 @@ func (b activeClientBinding) explain(err error) error {
 	if handle == "" {
 		handle = b.namespace
 	}
-	return &exitError{code: exitNoWorkspace, err: fmt.Errorf(
-		"active client %q runs on another machine — namespace %q isn't on the cluster your kubeconfig points at; "+
-			"run this command there, or override with --namespace/--context",
-		handle, b.namespace)}
+	return &exitError{code: exitNoWorkspace,
+		err: errors.New(repointMessage(handle, b.namespace, surveyCluster(ctx, npr.probe)))}
+}
+
+// clientSurvey is what explain managed to learn about the reached cluster
+// before advising.
+//
+// looked distinguishes "we scanned and the cluster hosts none" from "we could
+// not scan at all" (no probe on the error, or the cluster-wide list failed —
+// RBAC, a timeout, an unreachable API server). Collapsing the two would let an
+// absence of evidence print as evidence of absence: the CLI would tell a user
+// with a perfectly healthy client that nothing is running here. When looked is
+// false the message says nothing about the cluster's contents at all.
+type clientSurvey struct {
+	looked     bool
+	namespaces []string
+	local      bool // the kubeconfig's server is THIS machine (isLocalServerURL)
+}
+
+// surveyCluster runs cluster.FindClientNamespaces FOR NAMING ONLY — nothing in
+// this path changes the namespace anything targets. A nil probe (synthesised
+// error / test double) or a failed scan both return a survey that looked at
+// nothing, so explain falls back to the message it printed before #515.
+func surveyCluster(ctx context.Context, probe *clusterProbe) clientSurvey {
+	if probe == nil || probe.cs == nil {
+		return clientSurvey{}
+	}
+	ctx, cancel := context.WithTimeout(ctx, explainScanTimeout)
+	defer cancel()
+	found, err := cluster.FindClientNamespaces(ctx, probe.cs)
+	if err != nil {
+		return clientSurvey{}
+	}
+	return clientSurvey{looked: true, namespaces: found, local: isLocalServerURL(probe.serverURL)}
+}
+
+// repointMessage is the §7.3 error text, branched on what surveyCluster found.
+// Pure (no I/O) so every branch is unit-testable as text.
+//
+//   - exactly one client on a LOCAL cluster — a cluster that IS this machine —
+//     name it and offer the repoint. `client create` re-run on a cluster that
+//     already hosts a client adopts it: no prompt, no new credential (§7.2).
+//   - any client on a remote/shared cluster (or several anywhere) — name the
+//     namespaces and offer ONLY --namespace. Never `client create` here: that
+//     is the §7.5 boundary, and on a shared cluster the client we found may well
+//     be a colleague's.
+//   - none, scan clean — say so, and point at the installer, which is then the
+//     correct advice rather than a guess.
+//   - could not look — the pre-#515 sentence, unchanged. We make no claim.
+//
+// Each branch is ONE format literal rather than a concatenation, so the whole
+// sentence lands in the copy catalog (zz-all-strings harvests literal arguments;
+// a `+`-joined message is only ever half-visible there) and can be reviewed as
+// the user reads it.
+func repointMessage(handle, boundNS string, s clientSurvey) string {
+	switch {
+	case !s.looked:
+		return fmt.Sprintf(
+			"active client %q runs on another machine — namespace %q isn't on the cluster your kubeconfig points at; run this command there, or override with --namespace/--context",
+			handle, boundNS)
+	case len(s.namespaces) == 0:
+		return fmt.Sprintf(
+			"active client %q runs on another machine — namespace %q isn't on the cluster your kubeconfig points at; run this command there, or override with --namespace/--context.\n\nNo tracebloc client is running on this cluster either — if this machine should have one, set one up: %s",
+			handle, boundNS, installer.Cmd)
+	case len(s.namespaces) == 1 && s.local:
+		return fmt.Sprintf(
+			"active client %q runs on another machine — namespace %q isn't on the cluster your kubeconfig points at.\n\nA tracebloc client IS running on this machine, in namespace %q.\n  Point this machine at it:  %s client create\n      (this cluster already runs a client, so it adopts it — no new credential)\n  Or target it just this once:  --namespace %s",
+			handle, boundNS, s.namespaces[0], launcher(), s.namespaces[0])
+	case len(s.namespaces) == 1:
+		return fmt.Sprintf(
+			"active client %q runs on another machine — namespace %q isn't on the cluster your kubeconfig points at.\n\nA tracebloc client is running on this cluster, in namespace %q.\n  Target it just this once:  --namespace %s",
+			handle, boundNS, s.namespaces[0], s.namespaces[0])
+	default:
+		return fmt.Sprintf(
+			"active client %q runs on another machine — namespace %q isn't on the cluster your kubeconfig points at.\n\ntracebloc clients are running on this cluster, in namespaces: %s.\n  Target one just this once:  --namespace %s",
+			handle, boundNS, strings.Join(s.namespaces, ", "), s.namespaces[0])
+	}
 }

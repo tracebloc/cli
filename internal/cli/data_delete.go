@@ -175,7 +175,7 @@ undone — re-ingesting the data is the only way back.`)
 	// mid-output blank between the warning and the note (§380).
 	target, err := resolveClusterTargetFn(ctx, a.Printer, opts, binding, true, false)
 	if err != nil {
-		return binding.explain(err)
+		return binding.explain(ctx, err)
 	}
 	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
 
