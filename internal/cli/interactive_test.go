@@ -115,11 +115,11 @@ func textDirLayout(t *testing.T) string {
 func TestRunInteractive_PromptOrder(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Do you want to ingest training or test data?": "test",
-		"Please name the dataset.":                     "churn_train",
-		"Where is your data?":                          dir,
-		"Which task?":                                  "tabular_classification",
-		"Which column holds the label?":                "churned",
+		"Split:": "test",
+		"Name:":  "churn_train",
+		"Path:":  dir,
+		"Task:":  "tabular_classification",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{}
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
@@ -129,11 +129,11 @@ func TestRunInteractive_PromptOrder(t *testing.T) {
 	// The four core questions must appear in data-first order, ahead of the
 	// label question.
 	want := []string{
-		"Do you want to ingest training or test data?",
-		"Please name the dataset.",
-		"Where is your data?",
-		"Which task?",
-		"Which column holds the label?",
+		"Split:",
+		"Name:",
+		"Path:",
+		"Task:",
+		"Label:",
 	}
 	if !orderedSubsequence(f.asked, want) {
 		t.Errorf("prompt order = %v, want subsequence %v", f.asked, want)
@@ -148,30 +148,34 @@ func TestRunInteractive_PromptOrder(t *testing.T) {
 // TestRunInteractive_PathPromptCopyIsFileOrFolder pins the #181 copy
 // restoration: now that the walk accepts a bare .csv, the path prompt says
 // "file or folder" again (softened to folder-only in #180b).
+//
+// The copy is asserted against the PRINTED step, not the prompt label. Since
+// #504 the label is the short noun "Path:", which cannot carry the sentence —
+// checking the label for it would be a check nothing can fail. The supporting
+// line under the Step 3 header is where that copy actually lives.
 func TestRunInteractive_PathPromptCopyIsFileOrFolder(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Do you want to ingest training or test data?": "train",
-		"Please name the dataset.":                     "churn",
-		"Where is your data?":                          dir,
-		"Which task?":                                  "tabular_classification",
-		"Which column holds the label?":                "churned",
+		"Split:": "train",
+		"Name:":  "churn",
+		"Path:":  dir,
+		"Task:":  "tabular_classification",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{}
-	if err := runInteractive(discardPrinter(), f, a); err != nil {
+	var buf bytes.Buffer
+	p := ui.New(&buf, ui.WithColor(false))
+	if err := runInteractive(p, f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
-	found := false
-	for _, label := range f.asked {
-		if label == "Where is your data?" {
-			found = true
-		}
-		if strings.Contains(label, "the folder holding it") {
-			t.Errorf("path prompt still uses the folder-only copy: %q", label)
-		}
-	}
-	if !found {
+	if !contains(f.asked, "Path:") {
 		t.Errorf("path prompt label not asked; got %v", f.asked)
+	}
+	if !strings.Contains(buf.String(), "a file or a folder") {
+		t.Errorf("path step lost the file-or-folder copy (#181):\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "the folder holding it") {
+		t.Errorf("path step still uses the folder-only copy:\n%s", buf.String())
 	}
 }
 
@@ -180,8 +184,8 @@ func TestRunInteractive_PathPromptCopyIsFileOrFolder(t *testing.T) {
 func TestRunInteractive_SniffEchoesFamily(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Which column holds the label?": "churned",
+		"Name:":  "t",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
 	var buf bytes.Buffer
@@ -193,7 +197,7 @@ func TestRunInteractive_SniffEchoesFamily(t *testing.T) {
 		t.Errorf("expected a tabular sniff echo, got:\n%s", buf.String())
 	}
 	for _, l := range f.asked {
-		if l == "What kind of data is this?" {
+		if l == "Data type:" {
 			t.Errorf("a confident sniff must not ask the family question")
 		}
 	}
@@ -207,16 +211,16 @@ func TestRunInteractive_SniffEchoesFamily(t *testing.T) {
 func TestRunInteractive_SniffIsHintNotLock(t *testing.T) {
 	empty := t.TempDir() // no csv, no images/, no texts/ → ambiguous
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"What kind of data is this?":    "image",
-		"Which task?":                   "image_classification",
-		"Which column holds the label?": "label",
+		"Name:":      "t",
+		"Data type:": "image",
+		"Task:":      "image_classification",
+		"Label:":     "label",
 	}}
 	a := &runDataIngestArgs{LocalPath: empty, Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
-	if !contains(f.asked, "What kind of data is this?") {
+	if !contains(f.asked, "Data type:") {
 		t.Errorf("ambiguous layout should ask the family plainly; asked=%v", f.asked)
 	}
 	if a.Spec.Category != "image_classification" {
@@ -244,7 +248,7 @@ func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
-	f := &fakePrompter{answers: map[string]string{"What kind of data is this?": "image"}}
+	f := &fakePrompter{answers: map[string]string{"Data type:": "image"}}
 	fam, err := resolveFamily(p, f, dir)
 	if err != nil {
 		t.Fatalf("resolveFamily: %v", err)
@@ -257,7 +261,7 @@ func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 		if !strings.Contains(buf.String(), "fix it and ingest again") {
 			t.Errorf("resolveFamily must surface the mis-cased rename hint; got:\n%s", buf.String())
 		}
-		if !contains(f.asked, "What kind of data is this?") {
+		if !contains(f.asked, "Data type:") {
 			t.Errorf("hint is advisory — the family question must still be asked; asked=%v", f.asked)
 		}
 	} else {
@@ -269,7 +273,7 @@ func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 		if strings.Contains(buf.String(), "fix it and ingest again") {
 			t.Errorf("no false rename hint when the walk sees the folder; got:\n%s", buf.String())
 		}
-		if contains(f.asked, "What kind of data is this?") {
+		if contains(f.asked, "Data type:") {
 			t.Errorf("a confident sniff must not ask the family question; asked=%v", f.asked)
 		}
 	}
@@ -281,8 +285,8 @@ func TestResolveFamily_SurfacesMiscasedHint(t *testing.T) {
 func TestRunInteractive_ExplicitTaskStillAsks(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Which column holds the label?": "churned",
+		"Name:":  "t",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -293,13 +297,13 @@ func TestRunInteractive_ExplicitTaskStillAsks(t *testing.T) {
 	if err := runInteractive(p, f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
-	if !slices.Contains(f.asked, "Which task?") {
+	if !slices.Contains(f.asked, "Task:") {
 		t.Errorf("the task question must still be asked; asked: %v", f.asked)
 	}
 	// The family came from the supplied task, so the layout sniff is not needed
 	// and its echo must not appear.
 	for _, l := range f.asked {
-		if l == "What kind of data is this?" {
+		if l == "Data type:" {
 			t.Errorf("a supplied task settles the family; must not ask %q", l)
 		}
 	}
@@ -321,7 +325,7 @@ func TestPickTask_FamilyScoped(t *testing.T) {
 	// Text family: all tasks are available now — fill-mask (gloss),
 	// classification, the two structured-pair tasks, and the two seq tasks;
 	// image/tabular tasks must not appear.
-	f := &fakePrompter{answers: map[string]string{"Which task?": "text_classification"}}
+	f := &fakePrompter{answers: map[string]string{"Task:": "text_classification"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
 	id, err := pickTask(p, f, push.FamilyText, "")
@@ -361,7 +365,7 @@ func TestPickTask_FamilyScoped(t *testing.T) {
 // image task is available in the CLI, so the image picker lists them all under
 // "Available now:" with no greyed "Not yet in the CLI" pending section.
 func TestPickTask_ImageAllAvailable(t *testing.T) {
-	f := &fakePrompter{answers: map[string]string{"Which task?": "image_classification"}}
+	f := &fakePrompter{answers: map[string]string{"Task:": "image_classification"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
 	if _, err := pickTask(p, f, push.FamilyImage, ""); err != nil {
@@ -387,7 +391,7 @@ func TestPickTask_ImageAllAvailable(t *testing.T) {
 // TestPickTask_TabularGloss: the tabular picker shows the survival-analysis
 // gloss for time_to_event_prediction and can select it back to its id.
 func TestPickTask_TabularGloss(t *testing.T) {
-	f := &fakePrompter{answers: map[string]string{"Which task?": "time_to_event_prediction"}}
+	f := &fakePrompter{answers: map[string]string{"Task:": "time_to_event_prediction"}}
 	var buf bytes.Buffer
 	p := ui.New(&buf, ui.WithColor(false))
 	id, err := pickTask(p, f, push.FamilyTabular, "")
@@ -409,9 +413,9 @@ func TestRunInteractive_LabelSelectFromHeaders(t *testing.T) {
 	dir := tabularDir(t) // header: age,income,churned
 	// Script an answer that only works if the options were the real headers.
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Which task?":                   "tabular_classification",
-		"Which column holds the label?": "income",
+		"Name:":  "t",
+		"Task:":  "tabular_classification",
+		"Label:": "income",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
@@ -423,24 +427,35 @@ func TestRunInteractive_LabelSelectFromHeaders(t *testing.T) {
 }
 
 // TestRunInteractive_RegressionLabelWording: a regression-class task words
-// the label question as the value to predict, not a class.
+// the label question as the value to predict, not a class — in the HEADER the
+// user reads and in the short prompt label the `?` line carries (#504). Both
+// are asserted: the header carries the sentence, the label carries the noun,
+// and a task that swapped only one of them would be half-relabelled.
 func TestRunInteractive_RegressionLabelWording(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Which column holds the value to predict?": "income",
+		"Target:": "income",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
 		Spec:      push.SpecArgs{Category: "tabular_regression", Table: "t", Intent: "train"},
 	}
-	if err := runInteractive(discardPrinter(), f, a); err != nil {
+	var buf bytes.Buffer
+	p := ui.New(&buf, ui.WithColor(false))
+	if err := runInteractive(p, f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
-	if !contains(f.asked, "Which column holds the value to predict?") {
+	if !contains(f.asked, "Target:") {
 		t.Errorf("regression should ask for the value to predict; asked=%v", f.asked)
 	}
-	if contains(f.asked, "Which column holds the label?") {
-		t.Errorf("regression must not use the class wording")
+	if contains(f.asked, "Label:") {
+		t.Errorf("regression must not use the class label on the prompt line")
+	}
+	if !strings.Contains(buf.String(), "Which column holds the value to predict?") {
+		t.Errorf("regression header must ask for the value to predict:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "Which column holds the label?") {
+		t.Errorf("regression header must not use the class wording:\n%s", buf.String())
 	}
 	if a.Spec.LabelColumn != "income" {
 		t.Errorf("LabelColumn = %q, want income", a.Spec.LabelColumn)
@@ -453,7 +468,7 @@ func TestRunInteractive_RegressionLabelWording(t *testing.T) {
 func TestRunInteractive_LabelFreeTextFallback(t *testing.T) {
 	empty := t.TempDir() // no labels.csv → PreviewLabelHeaders errors
 	f := &fakePrompter{answers: map[string]string{
-		"Which column holds the label?": "my_label",
+		"Label:": "my_label",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: empty,
@@ -472,16 +487,19 @@ func TestRunInteractive_LabelFreeTextFallback(t *testing.T) {
 func TestRunInteractive_MLMSkipsLabel(t *testing.T) {
 	dir := textDirLayout(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.": "mlm_train",
-		"Which task?":              "masked_language_modeling",
+		"Name:": "mlm_train",
+		"Task:": "masked_language_modeling",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
+	// Both label-column spellings — the classification "Label:" and the
+	// regression "Target:" — must be absent. Naming both rather than a prefix
+	// keeps this honest now that the labels are short nouns with no shared stem.
 	for _, l := range f.asked {
-		if strings.HasPrefix(l, "Which column holds") {
-			t.Errorf("masked_language_modeling should not ask for a label column")
+		if l == "Label:" || l == "Target:" {
+			t.Errorf("masked_language_modeling should not ask for a label column, asked %q", l)
 		}
 	}
 	if a.Spec.Category != "masked_language_modeling" {
@@ -510,10 +528,10 @@ func TestRunInteractive_AsksEvenWhenFullySpecified(t *testing.T) {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	for _, want := range []string{
-		"Do you want to ingest training or test data?",
-		"Please name the dataset.",
-		"Where is your data?",
-		"Which task?",
+		"Split:",
+		"Name:",
+		"Path:",
+		"Task:",
 	} {
 		if !slices.Contains(f.asked, want) {
 			t.Errorf("guided mode must ask %q even when it was supplied; asked: %v", want, f.asked)
@@ -534,9 +552,9 @@ func TestRunInteractive_AsksEvenWhenFullySpecified(t *testing.T) {
 func TestRunInteractive_UnsuppliedDefaultsUnchanged(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Which task?":                   "time_to_event_prediction",
-		"Which column holds the label?": "churned",
+		"Name:":  "t",
+		"Task:":  "time_to_event_prediction",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir}
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
@@ -553,9 +571,9 @@ func TestRunInteractive_UnsuppliedDefaultsUnchanged(t *testing.T) {
 func TestRunInteractive_LabelPolicyDefaultUnchanged(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Which task?":                   "tabular_regression",
-		"Which column holds the label?": "churned",
+		"Name:":  "t",
+		"Task:":  "tabular_regression",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir}
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
@@ -572,7 +590,7 @@ func TestRunInteractive_LabelPolicyDefaultUnchanged(t *testing.T) {
 func TestRunInteractive_SuppliedValuesArePrefilled(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Which column holds the label?": "churned",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -634,7 +652,7 @@ func TestDefaultInOptions(t *testing.T) {
 func TestRunInteractive_InvalidSuppliedSelectDefaultFallsBack(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Which column holds the value to predict?": "income",
+		"Target:": "income",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -672,7 +690,7 @@ func TestRunInteractive_SuppliedLabelColumnStillAsks(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{
 		// Re-answer the label with a different real column: only reachable if the
 		// question was actually asked rather than skipped by the supplied value.
-		"Which column holds the label?": "churned",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -684,7 +702,7 @@ func TestRunInteractive_SuppliedLabelColumnStillAsks(t *testing.T) {
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
-	if !contains(f.asked, "Which column holds the label?") {
+	if !contains(f.asked, "Label:") {
 		t.Errorf("a supplied --label-column must still ASK the label question; asked=%v", f.asked)
 	}
 	if a.Spec.LabelColumn != "churned" {
@@ -706,7 +724,7 @@ func TestRunInteractive_SuppliedLabelColumnStillAsks(t *testing.T) {
 func TestPromptLabelColumn_SuppliedDefaultPrefillsAndGuards(t *testing.T) {
 	dir := tabularDir(t) // header: age,income,churned  (no column named "label")
 	const cat = "tabular_classification"
-	const q = "Which column holds the label?"
+	const label = "Label:"
 
 	cases := []struct {
 		name, supplied, want string
@@ -728,7 +746,7 @@ func TestPromptLabelColumn_SuppliedDefaultPrefillsAndGuards(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakePrompter{answers: map[string]string{}}
-			got, err := promptLabelColumn(f, cat, dir, q, tc.supplied)
+			got, err := promptLabelColumn(f, cat, dir, label, tc.supplied)
 			if err != nil {
 				t.Fatalf("promptLabelColumn(supplied=%q) errored (default not guarded into options?): %v", tc.supplied, err)
 			}
@@ -744,8 +762,8 @@ func TestPromptLabelColumn_SuppliedDefaultPrefillsAndGuards(t *testing.T) {
 func TestRunInteractive_Keypoint(t *testing.T) {
 	dir := imageDirLayout(t)
 	f := &fakePrompter{answers: map[string]string{
-		"How many keypoints per sample?": "17",
-		"Which column holds the label?":  "image_label",
+		"Keypoints:": "17",
+		"Label:":     "image_label",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -767,8 +785,8 @@ func TestRunInteractive_Keypoint(t *testing.T) {
 func TestRunInteractive_TabularRegression(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Label policy": "passthrough",
-		"Which column holds the value to predict?": "income",
+		"Label policy:": "passthrough",
+		"Target:":       "income",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -792,8 +810,8 @@ func TestRunInteractive_Cancel(t *testing.T) {
 	no := false
 	f := &fakePrompter{
 		answers: map[string]string{
-			"Please name the dataset.":      "t",
-			"Which column holds the label?": "churned",
+			"Name:":  "t",
+			"Label:": "churned",
 		},
 		confirm: &no,
 	}
@@ -806,7 +824,7 @@ func TestRunInteractive_Cancel(t *testing.T) {
 // TestRunInteractive_RejectsBadName: the name prompt runs
 // push.ValidateTableName, so an unsafe name surfaces as an error.
 func TestRunInteractive_RejectsBadName(t *testing.T) {
-	f := &fakePrompter{answers: map[string]string{"Please name the dataset.": "../bad"}}
+	f := &fakePrompter{answers: map[string]string{"Name:": "../bad"}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a); err == nil {
 		t.Fatal("expected an error for an invalid name, got nil")
@@ -818,8 +836,8 @@ func TestRunInteractive_RejectsBadName(t *testing.T) {
 // directory (empty path → Abs("") → cwd).
 func TestRunInteractive_RejectsEmptyPath(t *testing.T) {
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.": "t",
-		"Where is your data?":      "   ",
+		"Name:": "t",
+		"Path:": "   ",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a); err == nil {
@@ -835,9 +853,9 @@ func TestRunInteractive_RejectsEmptyPath(t *testing.T) {
 func TestRunInteractive_TrimsPath(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Where is your data?":           "  " + dir + "  ",
-		"Which column holds the label?": "churned",
+		"Name:":  "t",
+		"Path:":  "  " + dir + "  ",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
@@ -859,9 +877,9 @@ func TestRunInteractive_TrimsPath(t *testing.T) {
 func TestRunInteractive_ShowsExampleHints(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "churn_train",
-		"Where is your data?":           dir,
-		"Which column holds the label?": "churned",
+		"Name:":  "churn_train",
+		"Path:":  dir,
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{Spec: push.SpecArgs{Intent: "train"}}
 	var buf bytes.Buffer
@@ -873,6 +891,141 @@ func TestRunInteractive_ShowsExampleHints(t *testing.T) {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("interactive output missing hint %q:\n%s", want, buf.String())
 		}
+	}
+}
+
+// labelRecorder is fakePrompter plus the Confirm labels, which fakePrompter
+// deliberately drops (its Confirm needs no key). The #504 guard asserts a
+// property of the confirm label too, so it needs to see it.
+type labelRecorder struct {
+	*fakePrompter
+	confirms []string
+}
+
+func (r *labelRecorder) Confirm(label string, def bool) (bool, error) {
+	r.confirms = append(r.confirms, label)
+	return r.fakePrompter.Confirm(label, def)
+}
+
+// maxGuidedLabel is the length budget that makes "short noun label" testable.
+// The longest label the flow ships is "Column types:" (13); the shortest thing
+// it replaced is "Which task?" (11) — so a cap alone would not catch a
+// regression, which is why noQuestionMark below is asserted alongside it.
+const maxGuidedLabel = 16
+
+// TestRunInteractive_EveryGuidedPromptCarriesAShortLabel is the guard for #504.
+//
+// The guided flow used to hand survey an EMPTY Message (surveyPrompter{bare:
+// true}), so the prompt line rendered as a lone "?" — and once command-line
+// values began pre-filling answers, as "? [~/mydata]": a question mark, a
+// bracket and a path, with no verb. Every guided prompt must now carry a short
+// noun label, which survey draws verbatim.
+//
+// The labels are DERIVED, never restated: the test drives the REAL flow and
+// asserts a property of whatever it asks, so a question added later is covered
+// without editing this test. Nothing is scripted by label either — every answer
+// comes from the pre-filled args — so there is no list here to agree with
+// itself (the pass-a-list-to-check-the-list trap).
+//
+// The scenarios exist to widen what the flow asks: one per family plus the
+// variants that unlock the extra questions (regression → label policy,
+// time-to-event → time column, keypoints → keypoint count + resolution,
+// self-supervised text → no label, ambiguous layout → the data-type question).
+func TestRunInteractive_EveryGuidedPromptCarriesAShortLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		args *runDataIngestArgs
+	}{
+		{"tabular-classification", &runDataIngestArgs{
+			LocalPath: tabularDir(t),
+			Spec: push.SpecArgs{
+				Table: "t", Intent: "train",
+				Category: "tabular_classification", LabelColumn: "churned",
+			}}},
+		{"tabular-regression", &runDataIngestArgs{
+			LocalPath: tabularDir(t),
+			Spec: push.SpecArgs{
+				Table: "t", Intent: "train",
+				Category: "tabular_regression", LabelColumn: "income",
+			}}},
+		{"time-to-event", &runDataIngestArgs{
+			LocalPath: tabularDir(t),
+			Spec: push.SpecArgs{
+				Table: "t", Intent: "train",
+				Category: "time_to_event_prediction", LabelColumn: "churned",
+			}}},
+		{"image-keypoints", &runDataIngestArgs{
+			LocalPath: imageDirLayout(t),
+			Spec: push.SpecArgs{
+				Table: "t", Intent: "train",
+				Category: "keypoint_detection", LabelColumn: "label", NumberOfKeypoints: 17,
+			}}},
+		{"text-classification", &runDataIngestArgs{
+			LocalPath: textDirLayout(t),
+			Spec: push.SpecArgs{
+				Table: "t", Intent: "train",
+				Category: "text_classification", LabelColumn: "label",
+			}}},
+		{"self-supervised-text", &runDataIngestArgs{
+			LocalPath: textDirLayout(t),
+			Spec: push.SpecArgs{
+				Table: "t", Intent: "train", Category: "masked_language_modeling",
+			}}},
+		{"ambiguous-layout-asks-data-type", &runDataIngestArgs{
+			LocalPath: t.TempDir(), // no csv, no images/, no texts/
+			Spec:      push.SpecArgs{Table: "t", Intent: "train"},
+		}},
+	}
+
+	total := 0
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Nothing is scripted: every answer is the prompt's own default,
+			// pre-filled from args. So the recorded labels are the flow's, not
+			// this test's.
+			r := &labelRecorder{fakePrompter: &fakePrompter{answers: map[string]string{}}}
+			if err := runInteractive(discardPrinter(), r, tc.args); err != nil {
+				t.Fatalf("runInteractive: %v", err)
+			}
+			if len(r.asked) == 0 {
+				// Fail closed: zero labels trivially satisfy every property
+				// below, so "nothing was asked" must be a finding, not a pass.
+				t.Fatalf("no prompts recorded — the guard would be vacuous")
+			}
+			// Each property is its own `if`, never a switch: a full question
+			// violates several at once, and a switch would report only the
+			// first — leaving the others never exercised by any mutation and
+			// therefore unproven.
+			for _, l := range r.asked {
+				if strings.TrimSpace(l) == "" {
+					t.Errorf("prompt label is empty — the `?` line would have no verb (#504)")
+				}
+				if !strings.HasSuffix(l, ":") {
+					t.Errorf("prompt label %q must end in ':' so the line reads `? Path: <answer>`", l)
+				}
+				if strings.Contains(l, "?") {
+					t.Errorf("prompt label %q is a question — the header asks, the label names the answer", l)
+				}
+				if n := len([]rune(l)); n > maxGuidedLabel {
+					t.Errorf("prompt label %q is %d runes, over the %d-rune short-label budget",
+						l, n, maxGuidedLabel)
+				}
+			}
+			// The confirm is the deliberate exception: it has no header of its
+			// own, so it carries the WHOLE question (surveyPrompter.Confirm).
+			if len(r.confirms) == 0 {
+				t.Fatalf("the guided flow must end in a confirm; recorded none")
+			}
+			for _, c := range r.confirms {
+				if !strings.Contains(c, "?") {
+					t.Errorf("confirm label %q must be the whole question — a y/N prompt has no header to carry it", c)
+				}
+			}
+			total += len(r.asked)
+		})
+	}
+	if total == 0 {
+		t.Fatal("no guided prompts observed across any scenario")
 	}
 }
 

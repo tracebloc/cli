@@ -55,10 +55,31 @@ flow) use one uniform rhythm so every question reads the same:
 - **A result that belongs to an answer attaches to it with no blank** — e.g. the
   `✔ Found a CSV table …` sniff echo sits directly under the path answer.
 
-So: `header → blank → [supporting text → blank] → ? prompt`. The prompt line is
-answer-only (`? train`); the question lives in the header (the prompter runs
-`bare`), never repeated on the `?` line. Keep it uniform — don't hand-tune the
-spacing of individual questions.
+So: `header → blank → [supporting text → blank] → ? prompt`. Keep it uniform —
+don't hand-tune the spacing of individual questions.
+
+## Guided-prompt labels
+
+The `?` line carries a **short noun label**, not the question: `? Path: ~/mydata`,
+`? Task: tabular_classification`. The question lives in the header and is never
+repeated on the `?` line; the label says what you are typing into.
+
+- The label is the **shortest noun phrase that names the answer**, with a trailing
+  colon — `Split:`, `Name:`, `Path:`, `Task:`, `Data type:`, `Label:` / `Target:`,
+  `Keypoints:`, `Resolution:`, `Column types:`, `Label policy:`, `Time column:`.
+- **A prompt never goes label-less.** The guided flow used to blank survey's
+  `Message` (a `bare` mode), which rendered a lone `?` — and once answers were
+  pre-filled, `? [~/mydata]`: a question mark, a bracket and a path, with no verb
+  (cli#504). `internal/cli/interactive_test.go` asserts the property — non-empty,
+  ends in `:`, no `?`, within a length budget — against whatever the real flow
+  asks, so a new question is covered without editing the test.
+- **A confirm is the exception: it carries the whole question** (`? Proceed with
+  the ingest? (y/N)`). A y/N prompt has no header of its own, and the
+  overwrite-replace confirm fires with nothing printed before it — a noun there
+  would name the object and hide the stakes.
+- Flows with no step headers of their own (`client create`, `delete`,
+  `resources set`) pass the whole question as the label. The register follows the
+  header, not the prompter.
 
 ## Terminology
 
