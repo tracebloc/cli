@@ -73,6 +73,27 @@ Two things make this repo unusual and should shape every finding:
   (`internal/api/client.go`, `nextPath`). Where "empty" and "unknown" are different answers,
   prefer a three-valued return (`internal/cluster/discover.go:302`).
 
+- **"Couldn't confirm" used as "confirmed" — in a BRANCH, not just a return type.** The rule
+  above is about the value a function hands back; this is about the `if` that consumes it, and
+  it is the defect this repo produces most often. cli#515 shipped it three times in one PR,
+  each in a different file, each after the previous one was fixed: a failed cluster scan
+  reported as "no client is running here"; an empty `cluster_id` on a legacy client read as
+  "runs elsewhere" (`ProvisionedClient.ClusterID` is documented empty on not-yet-backfilled
+  records); and `reachStateOf(x) != ReachNoEnv` used to mean "an environment is here", when
+  `ReachState` also has `ReachUnreachable` and `ReachError`. Two concrete shapes to flag:
+  - **A negated comparison against ONE member of a multi-valued enum.** `!= ReachNoEnv`,
+    `!= StatusFail` and friends silently include every member added later. Compare against the
+    member you actually require (`== ReachOK`), and derive the test's input domain from the
+    enum's declared surface — mutation coverage cannot see a vocabulary gap.
+  - **A lenient "not found" default reused where the question is "may I believe this?"**
+    `reachStateOf` returns `ReachOK` for an ABSENT check, which is right for a verdict roll-up
+    and wrong for authorising a claim — hence the separate `reachConfirmedOK`
+    (`internal/cli/doctor.go`). The same default is rarely correct for both.
+
+  The customer-visible cost is never a wrong log line: on #515 each instance ended in advice to
+  run `client create` on a cluster nothing was confirmed on, where it MINTS rather than adopts —
+  i.e. the guidance manufactured the orphaned phantom of `backend#970`.
+
 - **A cross-repo contract change that only lands on one side.** `scripts/.data-ingestors-ref`,
   `scripts/.client-ref` and `scripts/.backend-ref` pin upstream refs deliberately so an
   unrelated upstream commit can't red every open PR. Flag a hand-edit to a generated artifact
