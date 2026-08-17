@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -130,6 +131,128 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	return nil
 }
 
+// pollDisposition is what the poll loop does with a failed PollToken call.
+type pollDisposition int
+
+const (
+	// pollStop — the sign-in cannot succeed. Report it and exit.
+	pollStop pollDisposition = iota
+	// pollAgain — an expected non-answer (not approved yet). Poll again unchanged.
+	pollAgain
+	// pollSlower — the server asked us to back off (RFC 8628 §3.5).
+	pollSlower
+	// pollRetry — an infrastructure failure, not a verdict on the sign-in. Poll
+	// again, but count it: a backend that never answers must say so eventually.
+	pollRetry
+)
+
+// maxPollFailures bounds how many CONSECUTIVE pollRetry outcomes the loop rides
+// out before giving up and naming the last one. At the RFC's 5-second floor
+// that is a minute of unbroken failure — long enough to cross a wifi handover,
+// a DNS blip, or a backend restart; short enough that a genuinely unreachable
+// backend reports itself instead of silently burning the code's whole window.
+// The code's own expiry still bounds the loop; the counter only makes the
+// give-up message honest when the network, not the human, is at fault.
+const maxPollFailures = 12
+
+// classifyPollError decides whether a PollToken failure ends the sign-in or is
+// worth another poll inside the code's remaining window (cli#517).
+//
+// The default used to be "stop", which made one DNS hiccup fatal to an
+// installer run that had already built a cluster. The default is now "retry",
+// so every genuinely terminal state is enumerated HERE rather than being the
+// leftover case — a refusal must never become an infinite loop:
+//
+//   - the four RFC 8628 §3.5 sentinels are terminal or not by the spec;
+//   - a 426 means this CLI is below the server's version floor — polling can't
+//     make it newer;
+//   - an *APIError carries a server VERDICT: 5xx / 408 / 429 are the server or a
+//     proxy failing temporarily, every other status is a refusal we must respect;
+//   - a cancelled context is the operator, not a blip;
+//   - everything left never reached a server verdict at all — DNS, refused
+//     connection, TLS, a truncated read, a body we couldn't decode — and is the
+//     class this function exists to keep alive.
+func classifyPollError(err error) pollDisposition {
+	switch {
+	case errors.Is(err, api.ErrAuthorizationPending):
+		return pollAgain
+	case errors.Is(err, api.ErrSlowDown):
+		return pollSlower
+	case errors.Is(err, api.ErrExpiredToken), errors.Is(err, api.ErrAccessDenied):
+		return pollStop
+	case errors.Is(err, context.Canceled):
+		return pollStop
+	}
+	var ue *api.UpgradeRequiredError
+	if errors.As(err, &ue) {
+		return pollStop
+	}
+	var ae *api.APIError
+	if errors.As(err, &ae) {
+		switch {
+		case ae.StatusCode >= 500,
+			ae.StatusCode == http.StatusRequestTimeout,
+			ae.StatusCode == http.StatusTooManyRequests:
+			return pollRetry
+		default:
+			return pollStop
+		}
+	}
+	return pollRetry
+}
+
+// withSignInAdvice appends the command that starts a fresh sign-in — or leaves
+// the error exactly as it is when the installer is driving us (cli#517).
+// "`tracebloc login`" is right when a human typed it and WRONG under the
+// installer, where a bare login leaves the client mint and the Helm install
+// undone; the installer prints its own, correct next step, and two contradicting
+// instructions are worse than one. The installer announces itself with
+// TRACEBLOC_INSTALLER.
+//
+// The advice is appended by wrapping rather than composed into each message, so
+// every sentence stays a literal argument of an errors.New / fmt.Errorf call —
+// which is what keeps this copy visible to the copy catalog's AST harvest.
+func withSignInAdvice(err error) error {
+	if os.Getenv("TRACEBLOC_INSTALLER") != "" {
+		return err
+	}
+	return fmt.Errorf("%w. Run `tracebloc login` to start a new one", err)
+}
+
+// signInWindow renders the code's advertised lifetime as a clause for the
+// expiry copy, or "" when the server didn't say. Named in the message because
+// without it a ten-minute timeout reads as an instant failure to anyone who
+// stepped away — which is exactly how cli#517 was first reported. Derived from
+// expires_in rather than hardcoded, so the sentence cannot outlive a change to
+// the backend's DEVICE_CODE_TTL.
+func signInWindow(expiresIn int) string {
+	if expiresIn <= 0 {
+		return ""
+	}
+	d := time.Duration(expiresIn) * time.Second
+	human := d.Round(time.Second).String()
+	switch {
+	case d == time.Minute:
+		human = "1 minute"
+	case d%time.Minute == 0:
+		human = fmt.Sprintf("%d minutes", int(d/time.Minute))
+	}
+	return fmt.Sprintf(" — sign-in codes are valid for %s", human)
+}
+
+// terminalSignInError renders the user-facing copy for a poll outcome the loop
+// must stop on. An error we have no bespoke copy for is surfaced verbatim: a
+// vague "sign-in failed" would hide the only diagnostic we have.
+func terminalSignInError(err error, window string) error {
+	switch {
+	case errors.Is(err, api.ErrExpiredToken):
+		return withSignInAdvice(fmt.Errorf("the sign-in code expired%s", window))
+	case errors.Is(err, api.ErrAccessDenied):
+		return withSignInAdvice(errors.New("sign-in was denied in the browser"))
+	}
+	return err
+}
+
 // pollForToken runs the RFC 8628 device-token poll loop behind a live wait
 // spinner, returning the issued token or an *exitError. The spinner is cleared
 // on every return path (deferred Stop), so the caller prints the ✔ / error line
@@ -143,13 +266,18 @@ func pollForToken(ctx context.Context, p *ui.Printer, client *api.Client, dc *ap
 	if dc.ExpiresIn > 0 {
 		deadline = time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
 	}
+	window := signInWindow(dc.ExpiresIn)
 
 	sp := p.Spinner("Waiting for your browser…", "Ctrl-C to cancel")
 	defer sp.Stop()
 
+	// Consecutive infrastructure failures. Reset by any answer from the server —
+	// a blip mid-way through a long wait must not accumulate toward the cap.
+	var failures int
 	for {
 		if !deadline.IsZero() && time.Now().After(deadline) {
-			return "", &exitError{code: exitFailure, err: errors.New("login timed out — re-run `tracebloc login`")}
+			return "", &exitError{code: exitFailure, err: withSignInAdvice(
+				fmt.Errorf("the sign-in code expired before it was approved%s", window))}
 		}
 		select {
 		case <-ctx.Done():
@@ -158,21 +286,35 @@ func pollForToken(ctx context.Context, p *ui.Printer, client *api.Client, dc *ap
 		}
 
 		tok, err := client.PollToken(ctx, dc.DeviceCode)
-		switch {
-		case err == nil:
+		if err == nil {
 			return tok, nil
-		case errors.Is(err, api.ErrAuthorizationPending):
-			// not approved yet — keep polling
-		case errors.Is(err, api.ErrSlowDown):
+		}
+		// Ctrl-C landing DURING the request surfaces as a cancelled context on the
+		// HTTP call, not on the select above — exit quietly there too, rather than
+		// reporting the operator's own interrupt as a sign-in failure.
+		if ctx.Err() != nil {
+			return "", &exitError{code: exitInterrupted}
+		}
+		switch classifyPollError(err) {
+		case pollAgain:
+			failures = 0 // not approved yet — keep polling
+		case pollSlower:
 			// RFC 8628 §3.5: on slow_down the client MUST increase the poll
 			// interval by 5 seconds for this and all subsequent polls.
+			failures = 0
 			interval += 5
-		case errors.Is(err, api.ErrExpiredToken):
-			return "", &exitError{code: exitFailure, err: errors.New("the sign-in code expired — re-run `tracebloc login`")}
-		case errors.Is(err, api.ErrAccessDenied):
-			return "", &exitError{code: exitFailure, err: errors.New("sign-in was denied in the browser")}
-		default:
-			return "", &exitError{code: exitFailure, err: err}
+		case pollRetry:
+			failures++
+			if failures >= maxPollFailures {
+				// One literal, not a concatenation: the copy catalog's AST harvest
+				// only sees whole string literals, so a "+"-joined message is copy
+				// nothing inventories.
+				return "", &exitError{code: exitFailure, err: fmt.Errorf(
+					"couldn't reach the backend to finish signing in — %d attempts failed in a row (check your network / HTTPS_PROXY): %w",
+					failures, err)}
+			}
+		default: // pollStop
+			return "", &exitError{code: exitFailure, err: terminalSignInError(err, window)}
 		}
 	}
 }

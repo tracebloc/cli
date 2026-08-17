@@ -2,6 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -163,6 +167,342 @@ func TestLogin_Denied(t *testing.T) {
 	_, err := runCmd(t, "login")
 	if err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Errorf("want access-denied error, got %v", err)
+	}
+}
+
+// ── cli#517: which poll failures end the sign-in, and which are worth another try ──
+
+// deviceCodeBody is the /device/code reply the poll tests share: a ten-minute
+// window (so the expiry copy has a duration to name) and the RFC's 5s interval.
+const deviceCodeBody = `{"device_code":"dc","user_code":"X","verification_uri":"https://x/activate","expires_in":600,"interval":5}`
+
+// pollBackend serves /device/code + /userinfo/ and hands every /device/token
+// poll to tokenH, which sees the 1-based poll number. Returns a pointer to the
+// live poll count so a test can assert the loop STOPPED (or kept going).
+func pollBackend(t *testing.T, tokenH func(w http.ResponseWriter, poll int)) *int {
+	t.Helper()
+	polls := 0
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/device/code":
+			_, _ = w.Write([]byte(deviceCodeBody))
+		case "/device/token":
+			polls++
+			tokenH(w, polls)
+		case "/userinfo/":
+			_, _ = w.Write([]byte(`{"email":"ds@tracebloc.io"}`))
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+		}
+	})
+	return &polls
+}
+
+// TestClassifyPollError_Table pins the retry classification directly, on the
+// production function the loop calls (never a re-implementation of it). The
+// inputs are written down independently of the matcher: each is the error a
+// specific real-world failure produces, not a value read back off the rule.
+func TestClassifyPollError_Table(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want pollDisposition
+	}{
+		// The RFC 8628 §3.5 sentinels, bare and wrapped — PollToken returns them
+		// bare today, but a future wrapper must not silently reclassify them.
+		{"pending", api.ErrAuthorizationPending, pollAgain},
+		{"pending wrapped", fmt.Errorf("poll: %w", api.ErrAuthorizationPending), pollAgain},
+		{"slow_down", api.ErrSlowDown, pollSlower},
+		{"slow_down wrapped", fmt.Errorf("poll: %w", api.ErrSlowDown), pollSlower},
+		{"expired_token", api.ErrExpiredToken, pollStop},
+		{"expired_token wrapped", fmt.Errorf("poll: %w", api.ErrExpiredToken), pollStop},
+		{"access_denied", api.ErrAccessDenied, pollStop},
+		{"access_denied wrapped", fmt.Errorf("poll: %w", api.ErrAccessDenied), pollStop},
+
+		// A server verdict we must respect: retrying an identical request cannot
+		// change any of these, and looping on one would hang the installer.
+		{"400 unrecognized", &api.APIError{StatusCode: 400, Body: `{"error":"invalid_grant"}`}, pollStop},
+		{"401", &api.APIError{StatusCode: 401}, pollStop},
+		{"403", &api.APIError{StatusCode: 403}, pollStop},
+		{"404 no such endpoint", &api.APIError{StatusCode: 404}, pollStop},
+		{"426 upgrade required", &api.UpgradeRequiredError{MinVersion: "1.2.3"}, pollStop},
+		{"426 wrapped", fmt.Errorf("poll: %w", &api.UpgradeRequiredError{}), pollStop},
+		{"operator cancelled", context.Canceled, pollStop},
+		{"operator cancelled wrapped", fmt.Errorf("POST /device/token: %w", context.Canceled), pollStop},
+
+		// Temporary: the server (or a proxy in front of it) is failing, and the
+		// human at the browser has done nothing wrong.
+		{"500", &api.APIError{StatusCode: 500}, pollRetry},
+		{"502 proxy", &api.APIError{StatusCode: 502}, pollRetry},
+		{"503 deploying", &api.APIError{StatusCode: 503}, pollRetry},
+		{"504 gateway timeout", &api.APIError{StatusCode: 504}, pollRetry},
+		{"408 request timeout", &api.APIError{StatusCode: 408}, pollRetry},
+		{"429 rate limited", &api.APIError{StatusCode: 429}, pollRetry},
+
+		// Never reached a verdict at all — the class cli#517 exists to keep alive.
+		{"dns failure", fmt.Errorf("POST /device/token: %w", &net.OpError{
+			Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "api.tracebloc.io"}}), pollRetry},
+		{"connection refused", fmt.Errorf("POST /device/token: %w",
+			&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}), pollRetry},
+		{"http client timeout", fmt.Errorf("POST /device/token: %w", context.DeadlineExceeded), pollRetry},
+		{"undecodable body", errors.New(`device-token success response missing token (got "<html>")`), pollRetry},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyPollError(tc.err); got != tc.want {
+				t.Errorf("classifyPollError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClassifyPollError_CoversPollTokenVocabulary derives the input domain from
+// the PRODUCER instead of restating it: every error code RFC 8628 §3.5 lets the
+// device-token endpoint return is driven through the real api.PollToken, and the
+// error it actually produces is classified. A code the client stops mapping (or
+// starts mapping differently) shows up here as a changed disposition — which a
+// hand-written list of sentinels could not see.
+func TestClassifyPollError_CoversPollTokenVocabulary(t *testing.T) {
+	want := map[string]pollDisposition{
+		"authorization_pending": pollAgain,
+		"slow_down":             pollSlower,
+		"expired_token":         pollStop,
+		"access_denied":         pollStop,
+		// Not in §3.5's happy vocabulary, but §3.5 defers to RFC 6749 §5.2 for
+		// the rest; those are refusals of the request, not transient conditions.
+		"invalid_request": pollStop,
+		"invalid_grant":   pollStop,
+	}
+	for code, wantDisp := range want {
+		t.Run(code, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"` + code + `"}`))
+			}))
+			t.Cleanup(srv.Close)
+			c := &api.Client{BaseURL: srv.URL, HTTP: srv.Client()}
+			_, err := c.PollToken(context.Background(), "dc")
+			if err == nil {
+				t.Fatalf("PollToken returned no error for %q", code)
+			}
+			if got := classifyPollError(err); got != wantDisp {
+				t.Errorf("%q → %v, want %v (err=%v)", code, got, wantDisp, err)
+			}
+		})
+	}
+}
+
+// TestLogin_TransientFailureRetriesWithinWindow is the headline cli#517 fix: a
+// backend blip mid-poll used to abort the whole sign-in (and with it an
+// installer run that had already built a cluster). It must be ridden out.
+func TestLogin_TransientFailureRetriesWithinWindow(t *testing.T) {
+	polls := pollBackend(t, func(w http.ResponseWriter, poll int) {
+		switch {
+		case poll <= 3: // three 503s in a row — a backend restart
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			_, _ = w.Write([]byte(`{"token":"cat_ok"}`))
+		}
+	})
+	if _, err := runCmd(t, "login"); err != nil {
+		t.Fatalf("a transient backend failure must not abort sign-in, got: %v", err)
+	}
+	if *polls != 4 {
+		t.Errorf("polls = %d, want 4 (three 503s ridden out, then the token)", *polls)
+	}
+	cfg, _ := config.Load()
+	if cfg.Current().Token != "cat_ok" {
+		t.Errorf("stored token = %q, want cat_ok", cfg.Current().Token)
+	}
+}
+
+// TestLogin_TerminalErrorStopsImmediately is the other half of the same
+// contract: making transient errors retryable must NOT turn a refusal into a
+// loop. A 400 the client can't map to a §3.5 sentinel is a refusal — one poll,
+// then out.
+func TestLogin_TerminalErrorStopsImmediately(t *testing.T) {
+	polls := pollBackend(t, func(w http.ResponseWriter, _ int) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	})
+	_, err := runCmd(t, "login")
+	if err == nil {
+		t.Fatal("a refused device code must fail the sign-in")
+	}
+	if *polls != 1 {
+		t.Errorf("polls = %d, want 1 — a refusal must not be retried", *polls)
+	}
+	if !strings.Contains(err.Error(), "invalid_grant") {
+		t.Errorf("the refusal must be surfaced verbatim, got: %v", err)
+	}
+}
+
+// TestLogin_AccessDeniedStopsImmediately: the user said no in the browser.
+// Polling past that would ignore an explicit refusal.
+func TestLogin_AccessDeniedStopsImmediately(t *testing.T) {
+	polls := pollBackend(t, func(w http.ResponseWriter, _ int) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"access_denied"}`))
+	})
+	if _, err := runCmd(t, "login"); err == nil {
+		t.Fatal("a denied sign-in must fail")
+	}
+	if *polls != 1 {
+		t.Errorf("polls = %d, want 1 — an explicit denial must not be retried", *polls)
+	}
+}
+
+// TestLogin_TransientFailuresGiveUpAtTheCap: retrying is bounded. A backend
+// that never answers must report ITSELF as the cause, not burn the code's whole
+// window and then blame the user for being slow.
+func TestLogin_TransientFailuresGiveUpAtTheCap(t *testing.T) {
+	polls := pollBackend(t, func(w http.ResponseWriter, _ int) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	_, err := runCmd(t, "login")
+	if err == nil {
+		t.Fatal("an unreachable backend must eventually fail the sign-in")
+	}
+	// Written down independently of the constant: a cap of 1 would satisfy the
+	// equality below while restoring exactly the cli#517 behaviour this fixes —
+	// one failure, no retry. The loop must ride out at least a few.
+	if *polls < 5 {
+		t.Errorf("polls = %d — a transient failure must be retried several times before giving up", *polls)
+	}
+	if *polls != maxPollFailures {
+		t.Errorf("polls = %d, want %d (the consecutive-failure cap)", *polls, maxPollFailures)
+	}
+	if !strings.Contains(err.Error(), "couldn't reach the backend") {
+		t.Errorf("the give-up message must name the network as the cause, got: %v", err)
+	}
+}
+
+// TestLogin_TransientFailureStreakResets: the cap counts CONSECUTIVE failures.
+// A blip every few polls during a long human-paced wait must not accumulate
+// into a give-up — that would re-introduce cli#517 on a flaky link.
+func TestLogin_TransientFailureStreakResets(t *testing.T) {
+	polls := pollBackend(t, func(w http.ResponseWriter, poll int) {
+		switch {
+		case poll >= 3*maxPollFailures:
+			_, _ = w.Write([]byte(`{"token":"cat_ok"}`))
+		case poll%2 == 0: // every other poll fails — never maxPollFailures in a row
+			w.WriteHeader(http.StatusBadGateway)
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"authorization_pending"}`))
+		}
+	})
+	if _, err := runCmd(t, "login"); err != nil {
+		t.Fatalf("an intermittent failure must not exhaust the cap, got: %v", err)
+	}
+	if *polls != 3*maxPollFailures {
+		t.Errorf("polls = %d, want %d", *polls, 3*maxPollFailures)
+	}
+}
+
+// TestLogin_ExpiredNamesTheWindow (cli#517 §4): "the sign-in code expired" with
+// no duration reads as an instant failure to a user who stepped away. The
+// message must name the window the server advertised.
+func TestLogin_ExpiredNamesTheWindow(t *testing.T) {
+	pollBackend(t, func(w http.ResponseWriter, _ int) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"expired_token"}`))
+	})
+	_, err := runCmd(t, "login")
+	if err == nil {
+		t.Fatal("an expired code must fail the sign-in")
+	}
+	if !strings.Contains(err.Error(), "10 minutes") {
+		t.Errorf("the expiry message must name the 600s window as 10 minutes, got: %v", err)
+	}
+}
+
+// TestSignInWindow renders expires_in as the clause the copy carries. Derived
+// from the server's value, never hardcoded, so it can't outlive a TTL change.
+func TestSignInWindow(t *testing.T) {
+	cases := []struct {
+		expiresIn int
+		want      string
+	}{
+		{600, " — sign-in codes are valid for 10 minutes"},
+		{60, " — sign-in codes are valid for 1 minute"},
+		{300, " — sign-in codes are valid for 5 minutes"},
+		{90, " — sign-in codes are valid for 1m30s"},
+		{0, ""},  // server didn't say — say nothing rather than guess
+		{-1, ""}, // ditto
+	}
+	for _, tc := range cases {
+		if got := signInWindow(tc.expiresIn); got != tc.want {
+			t.Errorf("signInWindow(%d) = %q, want %q", tc.expiresIn, got, tc.want)
+		}
+	}
+}
+
+// TestCopyCatalogSeesTheSignInStrings guards the guard: the copy catalog
+// harvests string LITERALS passed to errors.New / fmt.Errorf / the Printer, so
+// composing a message inside a helper (and handing the helper a variable) drops
+// it silently out of the catalog — the completeness backstop goes on passing
+// while the copy it exists to inventory is invisible. These sentences must stay
+// literal arguments; assembling them here proves they still are.
+func TestCopyCatalogSeesTheSignInStrings(t *testing.T) {
+	catalog := strings.Join(harvestMessages(t), "\n")
+	for _, want := range []string{
+		"the sign-in code expired%s",
+		"the sign-in code expired before it was approved%s",
+		"sign-in was denied in the browser",
+		"%w. Run `tracebloc login` to start a new one",
+		"— sign-in codes are valid for %s", // the harvest trims leading space
+		"couldn't reach the backend to finish signing in",
+	} {
+		if !strings.Contains(catalog, want) {
+			t.Errorf("copy %q is not reachable by the catalog harvest — keep it a literal argument "+
+				"of errors.New/fmt.Errorf, not a variable built inside a helper", want)
+		}
+	}
+}
+
+// TestSignInAdvice_ContradictsNobody (cli#517 §3): standalone, the CLI names the
+// command that starts a fresh sign-in. Under the installer it must NOT — a bare
+// `tracebloc login` there leaves the client mint and the Helm install undone,
+// and the installer prints its own, correct next step a line later.
+func TestSignInAdvice_ContradictsNobody(t *testing.T) {
+	t.Run("standalone names the command", func(t *testing.T) {
+		t.Setenv("TRACEBLOC_INSTALLER", "")
+		err := terminalSignInError(api.ErrExpiredToken, " — sign-in codes are valid for 10 minutes")
+		if !strings.Contains(err.Error(), "tracebloc login") {
+			t.Errorf("a hand-run login should say how to retry, got: %v", err)
+		}
+	})
+	t.Run("under the installer names nothing", func(t *testing.T) {
+		t.Setenv("TRACEBLOC_INSTALLER", "1")
+		err := terminalSignInError(api.ErrExpiredToken, " — sign-in codes are valid for 10 minutes")
+		if strings.Contains(err.Error(), "tracebloc login") {
+			t.Errorf("under the installer `tracebloc login` is wrong advice, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "expired") || !strings.Contains(err.Error(), "10 minutes") {
+			t.Errorf("suppressing the advice must not suppress the FACT, got: %v", err)
+		}
+	})
+}
+
+// TestLogin_InstallerContextSuppressesTheCliAdvice pins the same rule through
+// the command, not just the helper — the env var has to reach the message a
+// user actually sees.
+func TestLogin_InstallerContextSuppressesTheCliAdvice(t *testing.T) {
+	pollBackend(t, func(w http.ResponseWriter, _ int) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"expired_token"}`))
+	})
+	t.Setenv("TRACEBLOC_INSTALLER", "1")
+	_, err := runCmd(t, "login")
+	if err == nil {
+		t.Fatal("an expired code must fail the sign-in")
+	}
+	if strings.Contains(err.Error(), "tracebloc login") {
+		t.Errorf("under the installer the CLI must not tell the user to re-run login, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "10 minutes") {
+		t.Errorf("the window must still be named under the installer, got: %v", err)
 	}
 }
 
