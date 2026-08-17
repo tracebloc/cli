@@ -140,29 +140,29 @@ func TestCopyCatalog(t *testing.T) {
 	imgDir := imageDirLayout(t)
 	txtDir := textDirLayout(t)
 	tabularIngest := driveIngest(tabDir, "~/data/patients", map[string]string{
-		"Do you want to ingest training or test data?": "train",
-		"Please name the dataset.":                     "hospital_train",
-		"Where is your data?":                          tabDir,
-		"Which task?":                                  "tabular_classification",
-		"Which column holds the label?":                "churned",
+		"Split:": "train",
+		"Name:":  "hospital_train",
+		"Path:":  tabDir,
+		"Task:":  "tabular_classification",
+		"Label:": "churned",
 	})
 	imageIngest := driveIngest(imgDir, "~/data/xray", map[string]string{
-		"Do you want to ingest training or test data?": "train",
-		"Please name the dataset.":                     "xray_train",
-		"Where is your data?":                          imgDir,
-		"Which task?":                                  "image_classification",
-		"Which column holds the label?":                "label",
-		"Image resolution":                             "224x224",
+		"Split:":      "train",
+		"Name:":       "xray_train",
+		"Path:":       imgDir,
+		"Task:":       "image_classification",
+		"Label:":      "label",
+		"Resolution:": "224x224",
 	})
 	// Text family: text_classification shows the label question; the picker lists
 	// every text task + blurb. (Self-supervised text — masked/causal LM, seq2seq
 	// — skips the label step; that path is covered by the backstop.)
 	textIngest := driveIngest(txtDir, "~/data/reviews", map[string]string{
-		"Do you want to ingest training or test data?": "train",
-		"Please name the dataset.":                     "reviews_train",
-		"Where is your data?":                          txtDir,
-		"Which task?":                                  "text_classification",
-		"Which column holds the label?":                "label",
+		"Split:": "train",
+		"Name:":  "reviews_train",
+		"Path:":  txtDir,
+		"Task:":  "text_classification",
+		"Label:": "label",
 	})
 	// execIngest renders the run that follows the confirm — the three steps and
 	// the final summary. printLocalSummary + submit.RenderSummary are the REAL
@@ -211,7 +211,7 @@ func TestCopyCatalog(t *testing.T) {
 	}
 	dataIngestFile := doc(
 		"tb data ingest — stage a dataset into your secure environment",
-		"What you see when you run `tb data ingest` with no flags: a short intro, a\nfour-step guided setup (intent, name, path, task) then the task-specific\nquestions, and — after you confirm — the run itself. The setup is\ndriven through the real flow for one task in each family (tabular, image, text)\nso the task-specific questions are visible; each core question prints as a\n`Step N of 4 · …` header, the task-specific ones (the label column, and extras\nlike resolution or schema) as their own header, the\nsupporting line beneath it, and the `?` line shows your answer. The run (shown\nonce, for tabular) is the three steps + the final summary as the CLI renders\nthem. Values passed as flags (--as, --task, a path, …) pre-fill the matching\nquestions rather than skipping them — guided mode always asks. The\nother tasks' extra questions (keypoints, label policy, time column),\nself-supervised text (which skips the label question), and the failure-summary\nwordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams\nthrough (MySQL waits, the 📊 banner, per-validator lines) is the engine's own\nstdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
+		"What you see when you run `tb data ingest` with no flags: a short intro, a\nfour-step guided setup (intent, name, path, task) then the task-specific\nquestions, and — after you confirm — the run itself. The setup is\ndriven through the real flow for one task in each family (tabular, image, text)\nso the task-specific questions are visible; each core question prints as a\n`Step N of 4 · …` header, the task-specific ones (the label column, and extras\nlike resolution or schema) as their own header, the\nsupporting line beneath it, and the `?` line carries a short noun label\n(`Path:`, `Task:`) plus your answer. The run (shown\nonce, for tabular) is the three steps + the final summary as the CLI renders\nthem. Values passed as flags (--as, --task, a path, …) pre-fill the matching\nquestions rather than skipping them — guided mode always asks. The\nother tasks' extra questions (keypoints, label policy, time column),\nself-supervised text (which skips the label question), and the failure-summary\nwordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams\nthrough (MySQL waits, the 📊 banner, per-validator lines) is the engine's own\nstdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
 		[]run{
 			{"tb data ingest   # guided · tabular classification", tabularIngest},
 			{"tb data ingest   # guided · image classification", imageIngest},
@@ -476,8 +476,8 @@ func quoteAll(in []string) []string {
 	return out
 }
 
-// catalogPrompter is the prompter seam's catalog double: it prints each question
-// the way the terminal shows it ("? <question> <answer>") and returns a scripted
+// catalogPrompter is the prompter seam's catalog double: it prints each prompt
+// the way the terminal shows it ("? <label> <answer>") and returns a scripted
 // answer, so driving the REAL runInteractive produces a byte-exact transcript of
 // the guided flow — every prompt, in order. The description line above each
 // question is the real p.PromptHint in runInteractive; only the "? …" line is
@@ -494,32 +494,35 @@ func (c *catalogPrompter) pick(label, def string) string {
 	return def
 }
 
-// answerLine renders the input line the way the bare surveyPrompter does for the
-// guided flow: the question is already printed by the CLI (PromptStep/Section),
-// so the prompt shows only "? <answer>" (or "?" on a blank/accept-default).
-func (c *catalogPrompter) answerLine(ans string) {
+// answerLine renders the input line the way survey does: the icon, the
+// prompter's Message verbatim, then the answer separated by one space. The
+// guided flow's Message is a short noun label ("Path:"), so the catalog shows
+// "? Path: ~/data/patients" — the question itself is already printed by the CLI
+// as a PromptStep/Section header (#504). A blank answer (Enter accepts the
+// default) leaves the label alone on the line rather than a trailing space.
+func (c *catalogPrompter) answerLine(label, ans string) {
 	if ans == "" {
-		fmt.Fprintf(c.w, "?\n")
+		fmt.Fprintf(c.w, "? %s\n", label)
 		return
 	}
-	fmt.Fprintf(c.w, "? %s\n", ans)
+	fmt.Fprintf(c.w, "? %s %s\n", label, ans)
 }
 
 func (c *catalogPrompter) Input(label, _, def string, _ func(string) error) (string, error) {
 	ans := c.pick(label, def)
-	c.answerLine(ans)
+	c.answerLine(label, ans)
 	return ans, nil
 }
 
 func (c *catalogPrompter) Select(label, _ string, _ []string, def string) (string, error) {
 	ans := c.pick(label, def)
-	c.answerLine(ans)
+	c.answerLine(label, ans)
 	return ans, nil
 }
 
-// Confirm keeps its label (never bare — see surveyPrompter.Confirm): a y/N
-// prompt has no header of its own, so survey draws "? <question> <answer>".
-// Mirror that here so the catalog shows the confirm question.
+// Confirm carries the WHOLE question, not a short label (see
+// surveyPrompter.Confirm): a y/N prompt has no header of its own, so survey
+// draws "? <question> <answer>". Mirror that here so the catalog shows it.
 func (c *catalogPrompter) Confirm(label string, def bool) (bool, error) {
 	ans := "No"
 	if def {
