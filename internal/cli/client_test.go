@@ -1670,6 +1670,43 @@ func TestClientList_MarksTheClientOnThisCluster(t *testing.T) {
 	}
 }
 
+// Bugbot (#515): the repoint hint says "the client that IS there", which is only
+// true if some row is provably here. With the active client elsewhere and NOTHING
+// confirmed on this cluster, `client create` would fall through to the MINT path
+// and produce exactly the phantom backend#970 exists to prevent — so the advice
+// must not be given.
+func TestClientList_MismatchWithNoLocalClient_DoesNotPushCreate(t *testing.T) {
+	withClientBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":1,"first_name":"stale","namespace":"stale-ns","cluster_id":"uid-OTHER"},` +
+			`{"id":2,"first_name":"third","namespace":"third-ns","cluster_id":"uid-THIRD"}]`))
+	})
+	stubClusterID(t, "uid-HERE", nil) // this cluster hosts NEITHER
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Current().ActiveClientID = "1"
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runClientList(context.Background(), ui.New(&out, ui.WithColor(false))); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if strings.Contains(got, "client create") {
+		t.Errorf("no client is confirmed here — advising the repoint would push a MINT:\n%s", got)
+	}
+	if !strings.Contains(got, "no client here is confirmed") {
+		t.Errorf("the mismatch is still real and must be reported, just without a target:\n%s", got)
+	}
+	// The mismatch itself must still be visible on the row.
+	if !strings.Contains(got, "NOT on the cluster your kubeconfig reaches") {
+		t.Errorf("the stale active pointer must still be marked:\n%s", got)
+	}
+}
+
 // The unreadable-anchor path end to end: no cluster reachable ⇒ no row claims a
 // location, and the mismatch hint stays silent (we cannot know there is one).
 func TestClientList_UnreadableAnchorClaimsNoLocation(t *testing.T) {

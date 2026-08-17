@@ -162,6 +162,22 @@ func TestResolveHomeModel_StalePointerNeverRendersOnline(t *testing.T) {
 	if m.confirmedNotOnline {
 		t.Error("nor may another client's heartbeat be reported as THIS one being not-online")
 	}
+	// Bugbot (#515): the LABEL is a claim too. "stale-01" is the handle of the
+	// client the pointer names — not what the fallback found running here — so
+	// presenting it as this machine's environment is a wrong name, and one that
+	// contradicts doctor's namespace-based label for the same state.
+	if m.envName == "stale-01" {
+		t.Errorf("a stale pointer's client handle must not label the environment running here, got %q", m.envName)
+	}
+	if m.envName != "tracebloc" {
+		t.Errorf("want the probe's own name for the release that IS here, got %q", m.envName)
+	}
+
+	// Control: with a fresh pointer the remembered handle is still preferred —
+	// otherwise "don't use the remembered name" could pass by never using it.
+	if fresh := base(false); fresh.envName != "stale-01" {
+		t.Errorf("a non-stale pointer must still prefer the remembered client name, got %q", fresh.envName)
+	}
 }
 
 // …and a beatNotOnline off a stale pointer is equally uninformative: it must not

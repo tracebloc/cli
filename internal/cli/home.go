@@ -276,7 +276,14 @@ func resolveHomeModel(ctx context.Context, d homeDeps) homeModel {
 	// a release present on a machine that never cached a client. This also keeps
 	// the "provisioned ⇒ named offline" fallback (a degraded probe returns no
 	// name) living in exactly one place.
-	if remembered != "" {
+	//
+	// EXCEPT when the pointer is stale (#515): the remembered name is the handle
+	// of the client the pointer names, and that client is NOT what the fallback
+	// found running here. Applying it would print another machine's handle as the
+	// environment on this one — a wrong label, and one that contradicts doctor's
+	// namespace-based name for the very same state (Bugbot). Fall through to the
+	// probe's own name, which at least describes what is actually running.
+	if remembered != "" && !env.pointerStale {
 		env.name = remembered
 	}
 

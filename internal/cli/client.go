@@ -774,12 +774,15 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 	// claims nothing about where anything runs.
 	clusterID, cidErr := readClusterID(ctx, cluster.KubeconfigOptions{})
 	hereKnown := cidErr == nil && clusterID != ""
-	mismatch := false
+	activeElsewhere, anyHere := false, false
 	for _, c := range clients {
 		isActive := strconv.Itoa(c.ID) == active
 		res := residencyOf(hereKnown, clusterID, c.ClusterID)
 		if isActive && res == resElsewhere {
-			mismatch = true
+			activeElsewhere = true
+		}
+		if res == resHere {
+			anyHere = true
 		}
 		p.Field(strconv.Itoa(c.ID)+clientListMarker(isActive, res),
 			fmt.Sprintf("%s   state=%s   namespace=%s   location=%s",
@@ -788,11 +791,22 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 	// §7.3: separate "selected" (this machine's local pointer) from "connected"
 	// (the backend's last-heartbeat state) so a stale pointer is visible.
 	p.Hintf("\"active\" is this machine's selected client; state is its last reported status to tracebloc.")
-	if mismatch {
+	switch {
+	case activeElsewhere && anyHere:
 		// The exact state #515 describes, and the one supported way out of it:
 		// re-running create on a cluster that already hosts a client adopts it —
-		// no prompt, no new credential (§7.2).
+		// no prompt, no new credential (§7.2). anyHere is what earns the phrase
+		// "the client that IS there": without a row we KNOW is on this cluster,
+		// `client create` would fall through to the mint path and produce the
+		// phantom backend#970 is about (Bugbot).
 		p.Hintf("Your active client is not on the cluster your kubeconfig reaches. To point this machine at the client that IS there: %s client create", launcher())
+	case activeElsewhere:
+		// The pointer is provably wrong, but no listed client is provably here —
+		// either none is, or the ones that might be carry no anchor to prove it
+		// (resUnknown). Both are "we can't name a target", so name none: send
+		// them to the command whose whole job is to say what's on this cluster
+		// rather than advertise a repoint that may have nothing to adopt.
+		p.Hintf("Your active client is not on the cluster your kubeconfig reaches, and no client here is confirmed. Check your kubeconfig context, then run: %s doctor", launcher())
 	}
 	return nil
 }
