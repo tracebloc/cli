@@ -57,6 +57,7 @@ Usage:
   tracebloc client [command]
 
 Available Commands:
+  create      Point this machine at its tracebloc client — adopts the one already on this cluster
   status      Show whether tracebloc can see this machine's client (online)
 
 Flags:
@@ -69,7 +70,15 @@ Global Flags:
 Use "tracebloc client [command] --help" for more information about a command.
 
 $ tracebloc client create --help
-Provision a tracebloc client for this machine (auto-named; no flags required)
+Point this machine at its tracebloc client.
+
+Keyed on the cluster your kubeconfig reaches: if a tracebloc client already runs
+there, this ADOPTS it — no prompt, no new credential, no duplicate — which is how
+you repoint a machine whose active client went stale. On a cluster that runs no
+client yet it provisions a new one, and asks first.
+
+Provisioning a brand-new machine is normally the installer's job — it calls this
+for you, with no flags.
 
 Usage:
   tracebloc client create [flags]

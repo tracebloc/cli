@@ -58,7 +58,7 @@ func connectIngestTarget(ctx context.Context, a *runDataIngestArgs) (target *clu
 	// mid-output blank between "Connecting…" and the note (§380).
 	target, err = resolveClusterTarget(ctx, a.Printer, opts, binding, true, false)
 	if err != nil {
-		return nil, "", false, binding.explain(err)
+		return nil, "", false, binding.explain(ctx, err)
 	}
 	resolved, cs, release, pvc := target.Resolved, target.Clientset, target.Release, target.PVC
 	// release.IngestorSAName is discovered from the ingestionAuthz ConfigMap by

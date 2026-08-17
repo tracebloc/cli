@@ -39,8 +39,9 @@ var readInClusterClient = cluster.DiscoverInClusterClient
 // The single-machine CLI (RFC-0001 §7.10) owns exactly one client, so there is
 // nothing to *select*: `client use` is withdrawn, and `client list` is hidden
 // (kept callable for the installer's one-client-per-machine pre-flight, off the
-// user-facing surface). `create` provisions this machine's client; offboarding
-// is the top-level `tracebloc delete`.
+// user-facing surface). `create` points this machine at its client — adopting
+// the one already on the cluster, which is the supported repoint (#515) —
+// and offboarding is the top-level `tracebloc delete`.
 func newClientCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "client",
@@ -63,15 +64,31 @@ func newClientCreateCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Provision a tracebloc client for this machine (auto-named; no flags required)",
-		// HIDDEN: provisioning is the installer's job — provision.sh calls this with
-		// zero flags (cli#137). It stays fully callable (including `--help`, so the
-		// installer's capability probe still works), but is kept off the user-facing
-		// surface: a human running `client create` STANDALONE mints a client the
-		// installer never deploys — an orphaned "phantom" (backend#970). Mirrors the
-		// hidden `list`; leaves `tracebloc client` showing only the user-useful `status`.
-		Hidden: true,
-		Args:   cobra.NoArgs,
+		Short: "Point this machine at its tracebloc client — adopts the one already on this cluster",
+		Long: `Point this machine at its tracebloc client.
+
+Keyed on the cluster your kubeconfig reaches: if a tracebloc client already runs
+there, this ADOPTS it — no prompt, no new credential, no duplicate — which is how
+you repoint a machine whose active client went stale. On a cluster that runs no
+client yet it provisions a new one, and asks first.
+
+Provisioning a brand-new machine is normally the installer's job — it calls this
+for you, with no flags.`,
+		// WAS HIDDEN (backend#970), and the reason still stands: a human running
+		// this STANDALONE on a cluster with no client mints one the installer never
+		// deploys — an orphaned "phantom". Hiding it was never what prevented that,
+		// though; the mint-path guards below are, and they are untouched:
+		//   • on a TTY, the review + `Provision this client?` confirm (which a
+		//     re-run on an already-registered cluster never reaches — it adopts
+		//     before the prompt, so the repoint stays zero-friction);
+		//   • off a TTY, a hard refusal without --yes/--credential-file, so a pipe
+		//     or CI can never mint silently.
+		// What hiding DID cost is #515: the §7.3 "your active client runs on another
+		// machine" error had no supported way back, because the one command that
+		// repoints a machine was unlisted. Advice pointing at a hidden command is
+		// not advice, so it is listed now — described by what it does for a user
+		// (adopt/repoint) rather than by the installer's use of it.
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClientCreate(cmd.Context(), printerFor(cmd), clientPrompter(),
 				clientCreateOpts{name: name, location: location, kubeconfigPath: kubeconfigPath, contextOverride: contextOverride, credentialFile: credentialFile, yes: yes})
@@ -747,19 +764,104 @@ func runClientList(ctx context.Context, p *ui.Printer) error {
 	}
 	p.Section("Clients in your account")
 	active := cfg.Current().ActiveClientID
+	// #515: "active" is a LOCAL POINTER, and this listing used to render it as
+	// "(active — this machine)" — a claim about location it never checked. When
+	// the pointer is stale that label sits next to a client provably not on the
+	// cluster this machine reaches, which is the state the whole ticket is about.
+	// Read the cluster anchor (kube-system UID, the §7.2 identity `client create`
+	// keys on) and mark residency separately from selection. A failed read is
+	// three-valued on purpose: unknown is not "elsewhere", so the marker then
+	// claims nothing about where anything runs.
+	clusterID, cidErr := readClusterID(ctx, cluster.KubeconfigOptions{})
+	hereKnown := cidErr == nil && clusterID != ""
+	activeElsewhere, anyHere := false, false
 	for _, c := range clients {
-		marker := ""
-		if strconv.Itoa(c.ID) == active {
-			marker = "  (active — this machine)"
+		isActive := strconv.Itoa(c.ID) == active
+		res := residencyOf(hereKnown, clusterID, c.ClusterID)
+		if isActive && res == resElsewhere {
+			activeElsewhere = true
 		}
-		p.Field(strconv.Itoa(c.ID)+marker,
+		if res == resHere {
+			anyHere = true
+		}
+		p.Field(strconv.Itoa(c.ID)+clientListMarker(isActive, res),
 			fmt.Sprintf("%s   state=%s   namespace=%s   location=%s",
 				c.Name, clientStateLabel(c.Status), c.Namespace, c.Location))
 	}
 	// §7.3: separate "selected" (this machine's local pointer) from "connected"
 	// (the backend's last-heartbeat state) so a stale pointer is visible.
 	p.Hintf("\"active\" is this machine's selected client; state is its last reported status to tracebloc.")
+	switch {
+	case activeElsewhere && anyHere:
+		// The exact state #515 describes, and the one supported way out of it:
+		// re-running create on a cluster that already hosts a client adopts it —
+		// no prompt, no new credential (§7.2). anyHere is what earns the phrase
+		// "the client that IS there": without a row we KNOW is on this cluster,
+		// `client create` would fall through to the mint path and produce the
+		// phantom backend#970 is about (Bugbot).
+		p.Hintf("Your active client is not on the cluster your kubeconfig reaches. To point this machine at the client that IS there: %s client create", launcher())
+	case activeElsewhere:
+		// The pointer is provably wrong, but no listed client is provably here —
+		// either none is, or the ones that might be carry no anchor to prove it
+		// (resUnknown). Both are "we can't name a target", so name none: send
+		// them to the command whose whole job is to say what's on this cluster
+		// rather than advertise a repoint that may have nothing to adopt.
+		p.Hintf("Your active client is not on the cluster your kubeconfig reaches, and no client here is confirmed. Check your kubeconfig context, then run: %s doctor", launcher())
+	}
 	return nil
+}
+
+// residency answers "does this client run on the cluster the kubeconfig
+// reaches" in THREE values, because two of them are absences and an absence is
+// never a "no" (Bugbot, #515).
+type residency int
+
+const (
+	// resUnknown: we cannot tell. Either the local cluster anchor was
+	// unreadable (no kubeconfig, unreachable API server, RBAC on kube-system),
+	// or the CLIENT carries no anchor — `ProvisionedClient.ClusterID` is empty
+	// on legacy / not-yet-backfilled records (api/client.go), and a record that
+	// never learned where it lives is not a record that lives elsewhere.
+	resUnknown residency = iota
+	resHere
+	resElsewhere
+)
+
+// residencyOf compares the local cluster anchor with a client's, keeping both
+// missing-anchor cases at resUnknown. Collapsing either into "elsewhere" would
+// print "NOT on the cluster your kubeconfig reaches" — and the repoint hint —
+// next to a legacy client that may be running on this very machine.
+func residencyOf(hereKnown bool, localAnchor, clientAnchor string) residency {
+	if !hereKnown || clientAnchor == "" {
+		return resUnknown
+	}
+	if clientAnchor == localAnchor {
+		return resHere
+	}
+	return resElsewhere
+}
+
+// clientListMarker renders one row's suffix in `client list`, keeping SELECTION
+// (this machine's local pointer) and RESIDENCY (where the client actually runs)
+// as two separate facts (#515). Under resUnknown the marker degrades to bare
+// "(active)" — which says only what the local config actually knows — and
+// claims nothing about location in either direction.
+func clientListMarker(isActive bool, res residency) string {
+	switch {
+	case res == resUnknown:
+		if isActive {
+			return "  (active)"
+		}
+		return ""
+	case isActive && res == resHere:
+		return "  (active — on this cluster)"
+	case isActive:
+		return "  (active — NOT on the cluster your kubeconfig reaches)"
+	case res == resHere:
+		return "  (on this cluster)"
+	default:
+		return ""
+	}
 }
 
 // setActiveClient points this env's profile at c, caching its namespace and
