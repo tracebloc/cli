@@ -194,7 +194,16 @@ func runClusterDoctor(
 	pointerStale := false
 	if binding.applied && reachStateOf(results) == doctor.ReachNoEnv {
 		if ns, ok := localEnvNamespace(cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride}); ok && ns != resolved.Namespace {
-			if retry := doctorRunFn(ctx, cs, doctor.Options{Namespace: ns, ServerURL: resolved.ServerURL}); reachStateOf(retry) != doctor.ReachNoEnv {
+			// Adopt the re-probe ONLY on a positive confirmation that a client is
+			// there. `!= ReachNoEnv` was wrong (Bugbot): ReachUnreachable and
+			// ReachError also satisfy it, and both mean "we could not tell" — so a
+			// stale pointer plus RBAC or a transient read on the context namespace
+			// would have named an unconfirmed namespace as a secure environment and
+			// told the user this cluster already runs a client, pushing `client
+			// create` into a MINT. Same absence-as-presence collapse surveyCluster
+			// and residencyOf exist to avoid; an unconfirmed re-probe keeps the
+			// original results and the honest no-environment path.
+			if retry := doctorRunFn(ctx, cs, doctor.Options{Namespace: ns, ServerURL: resolved.ServerURL}); reachConfirmedOK(retry) {
 				resolved.Namespace, results, pointerStale = ns, retry, true
 			}
 		}
@@ -578,6 +587,26 @@ func reachStateOf(results []doctor.Result) doctor.ReachState {
 		}
 	}
 	return doctor.ReachOK
+}
+
+// reachConfirmedOK reports whether the "Cluster reachable" check RAN and came
+// back ReachOK — a positive confirmation that a tracebloc client is in the probed
+// namespace.
+//
+// Deliberately not `reachStateOf(results) == ReachOK`: reachStateOf defaults to
+// ReachOK when the check is ABSENT, which is the right lenient default for the
+// main path (an older probe set shouldn't block a verdict) and precisely the
+// wrong one for #515's re-probe, where the whole question is whether we may
+// believe an unproven namespace. Absent, unreachable and errored all answer
+// "we could not tell", and none of them may authorize naming a secure
+// environment or advising `client create`.
+func reachConfirmedOK(results []doctor.Result) bool {
+	for _, r := range results {
+		if r.Name == "Cluster reachable" {
+			return r.Reach == doctor.ReachOK
+		}
+	}
+	return false
 }
 
 // worseStatus returns the more severe of two doctor statuses (Fail > Warn > OK).

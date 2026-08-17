@@ -204,6 +204,92 @@ func TestDoctor_LocalClusterWithNothing_KeepsInstallerAdvice(t *testing.T) {
 	}
 }
 
+// Bugbot (#515): the re-probe used to adopt on anything that wasn't ReachNoEnv,
+// which swept in ReachUnreachable and ReachError — both of which mean "we could
+// not tell". Adopting either would name an unconfirmed namespace as a secure
+// environment and tell the user this cluster already runs a client, pushing
+// `client create` into a MINT on a cluster that may host nothing.
+//
+// The input domain is derived from doctor.ReachState's declared surface rather
+// than hand-picked, plus the ABSENT case (reachStateOf's lenient default is
+// exactly what must not apply here). Only ReachOK may adopt.
+func TestDoctor_ReProbeAdoptsOnlyOnConfirmedReach(t *testing.T) {
+	// Every non-OK member of the enum, and the missing-check case.
+	cases := []struct {
+		name    string
+		results []doctor.Result
+	}{
+		{"unreachable", []doctor.Result{{Name: "Cluster reachable", Status: doctor.StatusFail, Reach: doctor.ReachUnreachable}}},
+		{"error (RBAC/NotFound)", []doctor.Result{{Name: "Cluster reachable", Status: doctor.StatusFail, Reach: doctor.ReachError}}},
+		{"no env", []doctor.Result{{Name: "Cluster reachable", Status: doctor.StatusFail, Reach: doctor.ReachNoEnv}}},
+		{"check absent entirely", []doctor.Result{{Name: "Pod health", Status: doctor.StatusOK}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			writeActiveClientConfig(t, "stale-ns", "Stale")
+			okWhoAmI(t)
+
+			origLoad, origCS, origRun := loadClusterFn, newClientsetFn, doctorRunFn
+			t.Cleanup(func() { loadClusterFn, newClientsetFn, doctorRunFn = origLoad, origCS, origRun })
+			loadClusterFn = func(o cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+				ns := o.Namespace
+				if ns == "" {
+					ns = "unproven-ns"
+				}
+				return &cluster.ResolvedConfig{Namespace: ns, ServerURL: "https://127.0.0.1:6550", RestConfig: &rest.Config{}}, nil
+			}
+			newClientsetFn = func(*cluster.ResolvedConfig) (kubernetes.Interface, error) {
+				return fake.NewSimpleClientset(), nil
+			}
+			doctorRunFn = func(_ context.Context, _ kubernetes.Interface, o doctor.Options) []doctor.Result {
+				if o.Namespace == "stale-ns" { // the bound pointer always misses
+					return []doctor.Result{{Name: "Cluster reachable", Status: doctor.StatusFail, Reach: doctor.ReachNoEnv}}
+				}
+				return c.results // the re-probe's inconclusive answer
+			}
+
+			var out bytes.Buffer
+			err := runClusterDoctor(context.Background(), ui.New(&out, ui.WithColor(false)), "", "", "", false)
+			got := out.String()
+			if strings.Contains(got, "unproven-ns") {
+				t.Errorf("an unconfirmed namespace must never be named as a secure environment:\n%s", got)
+			}
+			if strings.Contains(got, "client create") {
+				t.Errorf("advising the repoint here can push a MINT — the cluster was never confirmed to run a client:\n%s", got)
+			}
+			if !strings.Contains(got, "No secure environment") {
+				t.Errorf("an unconfirmed re-probe must keep the honest no-environment path:\n%s", got)
+			}
+			if err == nil {
+				t.Error("want a non-zero exit when nothing was confirmed")
+			}
+		})
+	}
+}
+
+// reachConfirmedOK is the guard above, tested directly against the whole
+// declared enum so a future ReachState member can't quietly slip through the
+// "could not tell" side. Mutation coverage cannot see a vocabulary gap.
+func TestReachConfirmedOK(t *testing.T) {
+	res := func(r doctor.ReachState) []doctor.Result {
+		return []doctor.Result{{Name: "Cluster reachable", Reach: r}}
+	}
+	if !reachConfirmedOK(res(doctor.ReachOK)) {
+		t.Error("ReachOK is the one positive confirmation")
+	}
+	for _, r := range []doctor.ReachState{doctor.ReachUnreachable, doctor.ReachNoEnv, doctor.ReachError} {
+		if reachConfirmedOK(res(r)) {
+			t.Errorf("Reach %v must not count as confirmed", r)
+		}
+	}
+	if reachConfirmedOK([]doctor.Result{{Name: "Pod health"}}) {
+		t.Error("an ABSENT reachability check is 'could not tell', not OK — reachStateOf's lenient default must not leak in here")
+	}
+	if reachConfirmedOK(nil) {
+		t.Error("no results at all is not a confirmation")
+	}
+}
+
 // localEnvNamespace is the doctor-side half of the #401 carve-out; its three
 // refusals are what stop the re-probe from ever naming someone else's client.
 func TestLocalEnvNamespace(t *testing.T) {
