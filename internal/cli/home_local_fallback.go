@@ -15,10 +15,23 @@ import (
 )
 
 // localEnvFallback answers "is there a secure environment on THIS machine?"
-// when the active-client pointer is empty — the state every pre-#388 Windows
-// install is in permanently, because only `client create` writes the pointer
-// and the Windows installer never ran it. Field case: `doctor` said "Ready to
-// run training" while home said "No secure environment on this machine yet".
+// when the active-client pointer cannot be trusted:
+//
+//   - it is EMPTY (#401) — the state every pre-#388 Windows install is in
+//     permanently, because only `client create` writes the pointer and the
+//     Windows installer never ran it. Field case: `doctor` said "Ready to run
+//     training" while home said "No secure environment on this machine yet".
+//   - it is SET BUT WRONG (#515) — it names a namespace that isn't on the
+//     cluster this kubeconfig reaches (an orphaned record left by a cluster
+//     recreation, a pointer written on another machine). #401 covered only the
+//     empty case, so a wrong pointer went on recommending a reinstall over a
+//     healthy install.
+//
+// Both are the same question, and the answer must not come from the pointer:
+// this reloads the kubeconfig with NO binding applied, so it probes the
+// namespace the kubeconfig itself selects — which is the client's own namespace
+// on any installer-provisioned machine (install-client-helm.sh runs
+// `kubectl config set-context --current --namespace <ns>`).
 //
 // The ownership gate in realProbeEnv exists so a status screen never greets a
 // SHARED cluster's unrelated client as yours (§7.5). This fallback keeps that
@@ -60,6 +73,31 @@ func localEnvFallback(ctx context.Context) envProbe {
 		}
 	}
 	return ep
+}
+
+// localEnvNamespace reports the namespace the KUBECONFIG itself selects, and
+// whether that reading is usable — i.e. the kubeconfig loads and the cluster it
+// reaches is LOCAL (the #401 carve-out: a cluster that is this machine by
+// definition, so whatever tracebloc release runs there is this machine's).
+//
+// It is the doctor-side half of localEnvFallback (#515), for the one caller that
+// already holds a clientset and only needs the namespace to re-probe. Like the
+// fallback it applies NO active-client binding — that pointer is precisely the
+// thing under suspicion — and it never scans: the installer points the
+// kubeconfig context at the client's namespace
+// (install-client-helm.sh: `kubectl config set-context --current --namespace`),
+// so reading it is enough and no cluster-wide list is spent. On a remote or
+// shared cluster it returns false, so the ownership gate holds exactly as it
+// does on the home screen.
+func localEnvNamespace(opts cluster.KubeconfigOptions) (string, bool) {
+	resolved, err := loadClusterFn(opts)
+	if err != nil || resolved == nil {
+		return "", false
+	}
+	if !isLocalServerURL(resolved.ServerURL) || resolved.Namespace == "" {
+		return "", false
+	}
+	return resolved.Namespace, true
 }
 
 // isLocalServerURL reports whether a kubeconfig server URL points at THIS

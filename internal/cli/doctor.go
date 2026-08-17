@@ -156,7 +156,7 @@ func runClusterDoctor(
 	//    problem goes unexplained. (A 401/426 is a hard stop earlier; only the
 	//    soft tokenUnreachable/tokenServerErr states reach here.)
 	opts := cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride, Namespace: nsOverride}
-	bindActiveClientNamespace(&opts)
+	binding := bindActiveClientNamespace(&opts)
 	resolved, err = loadClusterFn(opts)
 	if err != nil {
 		p.Newline()
@@ -175,6 +175,25 @@ func runClusterDoctor(
 	}
 	// 4. Probe the cluster.
 	results = doctorRunFn(ctx, cs, doctor.Options{Namespace: resolved.Namespace, ServerURL: resolved.ServerURL})
+
+	// #515: a namespace we CHOSE for the user can be wrong, and a miss on it is
+	// not evidence that this machine has no environment — yet doctor's only
+	// reading of "no chart here" is "no secure environment on this machine yet",
+	// which then recommends reinstalling over a healthy install. Extend #401's
+	// local fallback to the wrong-pointer case: re-probe the namespace the
+	// KUBECONFIG selects, but only when the binding (not the user) picked the
+	// namespace that missed, and only on a LOCAL cluster — on a remote/shared one
+	// the ownership gate stands and we would risk naming a colleague's client.
+	// The retry is adopted only if it actually finds an environment, so a genuine
+	// no-environment machine keeps the original results (and the --diagnose
+	// bundle keeps describing the namespace the user is configured for).
+	if binding.applied && reachStateOf(results) == doctor.ReachNoEnv {
+		if ns, ok := localEnvNamespace(cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride}); ok && ns != resolved.Namespace {
+			if retry := doctorRunFn(ctx, cs, doctor.Options{Namespace: ns, ServerURL: resolved.ServerURL}); reachStateOf(retry) != doctor.ReachNoEnv {
+				resolved.Namespace, results = ns, retry
+			}
+		}
+	}
 
 	// A reachable cluster with no tracebloc chart installed is the same "no secure
 	// environment here" state as a missing kubeconfig — route it through the same

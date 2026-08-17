@@ -511,8 +511,16 @@ func realProbeEnv(ctx context.Context) envProbe {
 	if err != nil {
 		if errors.Is(err, cluster.ErrNoParentRelease) {
 			// Cluster reachable, but this release isn't in the resolved context.
-			// Provisioned ⇒ resolveHomeModel turns this into a named "offline".
-			return envProbe{local: localNoRelease}
+			// #515: a WRONG pointer is no more proof of "no environment" than the
+			// empty one #401 covered — the binding above overrode the kubeconfig's
+			// own namespace with a stale/foreign one, so this miss says nothing
+			// about what runs here. Re-ask through the same local-only fallback:
+			// it adopts a release ONLY when the kubeconfig's server is this
+			// machine, so the shared-cluster guarantee is untouched, and every
+			// other outcome is localNoRelease — exactly what this branch returned
+			// before. Provisioned ⇒ resolveHomeModel turns that into a named
+			// "offline".
+			return localEnvFallback(ctx)
 		}
 		// A list/RBAC/connect failure: we couldn't confirm what's here. Treat it
 		// as unreachable (→ offline if provisioned, else no-env).

@@ -91,6 +91,65 @@ func TestLocalEnvFallback_NoKubeconfigIsNoRelease(t *testing.T) {
 	}
 }
 
+// #515: the home screen's hole was the mirror of doctor's. Its local-env
+// fallback was reached only when the pointer was EMPTY (`if !binding.applied`),
+// so a pointer that was set but WRONG skipped the #401 fix entirely and the
+// screen said "No secure environment on this machine yet" over a live install.
+func TestRealProbeEnv_WrongPointerOnLocalCluster_FallsBack(t *testing.T) {
+	writeActiveClientConfig(t, "stale-ns", "Stale") // binding APPLIED, and wrong
+	o := fallbackRelease("lukas-02")
+	cs := fake.NewClientset(o[0].(*appsv1.Deployment), o[1].(*corev1.Service))
+
+	origLoad, origCS := loadClusterFn, newClientsetFn
+	t.Cleanup(func() { loadClusterFn, newClientsetFn = origLoad, origCS })
+	// Models cluster.Load: an explicit opts.Namespace wins, otherwise the
+	// context's own namespace — which the installer points at the client's
+	// namespace (install-client-helm.sh `kubectl config set-context --current
+	// --namespace`). So the binding sends the first probe to "stale-ns" and the
+	// unbound fallback reload lands on "lukas-02".
+	loadClusterFn = func(o cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+		ns := o.Namespace
+		if ns == "" {
+			ns = "lukas-02"
+		}
+		return &cluster.ResolvedConfig{
+			Namespace: ns, ServerURL: "https://127.0.0.1:6550", RestConfig: &rest.Config{},
+		}, nil
+	}
+	newClientsetFn = func(*cluster.ResolvedConfig) (kubernetes.Interface, error) { return cs, nil }
+
+	ep := realProbeEnv(context.Background())
+	if ep.local != localLive || ep.name != "tracebloc" {
+		t.Fatalf("=> %+v, want the live local environment despite the stale pointer", ep)
+	}
+}
+
+// …and the ownership gate survives it: the same wrong pointer on a REMOTE
+// cluster stays no-release, so a shared cluster's unrelated client is never
+// greeted as yours (§7.5).
+func TestRealProbeEnv_WrongPointerOnRemoteCluster_StaysGated(t *testing.T) {
+	writeActiveClientConfig(t, "stale-ns", "Stale")
+	o := fallbackRelease("colleague-07")
+	cs := fake.NewClientset(o[0].(*appsv1.Deployment), o[1].(*corev1.Service))
+
+	origLoad, origCS := loadClusterFn, newClientsetFn
+	t.Cleanup(func() { loadClusterFn, newClientsetFn = origLoad, origCS })
+	loadClusterFn = func(o cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+		ns := o.Namespace
+		if ns == "" {
+			ns = "colleague-07"
+		}
+		return &cluster.ResolvedConfig{
+			Namespace: ns, ServerURL: "https://k8s.corp.example:6443", RestConfig: &rest.Config{},
+		}, nil
+	}
+	newClientsetFn = func(*cluster.ResolvedConfig) (kubernetes.Interface, error) { return cs, nil }
+
+	if ep := realProbeEnv(context.Background()); ep.local != localNoRelease || ep.name != "" {
+		t.Fatalf("=> %+v, want localNoRelease (a shared cluster's client is not yours)", ep)
+	}
+}
+
 func TestIsLocalServerURL(t *testing.T) {
 	local := []string{
 		"https://127.0.0.1:6550",
