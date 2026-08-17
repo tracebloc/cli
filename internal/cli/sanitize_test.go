@@ -40,6 +40,11 @@ func TestSanitizeClientName(t *testing.T) {
 		{"unknown escape family, nothing but residue (→ auto-name)", "\x1bNB\x1bNC", ""},
 		{"unknown escape family beside real content is kept", "box\x1bNC", "boxNC"},
 		{"floor counts non-Latin letters as real content", "\x1bNC日本", "NC日本"},
+		// The probe's final-byte run is bounded at two, so an ASCII name after an
+		// unknown escape is kept just like a non-Latin one — keep-vs-reject must
+		// not depend on the script the name is written in (Bugbot,
+		// tracebloc/client#736).
+		{"floor keeps an ASCII name after an unknown escape", "\x1bNChello", "NChello"},
 
 		// Bracketed paste.
 		{"bracketed-paste wrappers", "\x1b[200~hello\x1b[201~", "hello"},

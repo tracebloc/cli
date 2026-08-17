@@ -28,13 +28,20 @@ import (
 var escSequence = regexp.MustCompile("\x1b(?:\\[[0-9;]*|O)[A-Za-z~]")
 
 // escResidue is the post-sanitise floor's *probe*, not a strip: ESC, any run of
-// non-final intermediate bytes, then the whole run of bytes that could be escape
-// final bytes. It is deliberately greedier than escSequence (a `+` on the final
-// class, so it swallows both the 'O' and the 'D' of an unrecognised SS3-shaped
-// pair) because its only job is to answer one question — "is there an
-// alphanumeric here that did NOT come from an escape final byte?" Its output is
-// never returned as a name.
-var escResidue = regexp.MustCompile("\x1b[^A-Za-z0-9~]*[A-Za-z~]+")
+// non-final intermediate bytes, then AT MOST TWO bytes that could be escape final
+// bytes. Its only job is to answer one question — "is there an alphanumeric here
+// that did NOT come from an escape final byte?" — and its output is never
+// returned as a name.
+//
+// Two, not one and not unbounded. One is too few: it leaves the 'D' of an
+// unrecognised SS3-shaped pair behind, and the floor stops firing on exactly the
+// family shape this ticket is about. Unbounded is too many: `\x1bNChello` would
+// have the whole name swallowed and be refused, while `\x1bNC日本` survives —
+// making keep-vs-reject depend on the script the user's name is written in
+// (Bugbot, tracebloc/client#736). Two is the honest bound: an escape final is one
+// byte, an intro plus a final is two, and every keyboard-input escape family
+// (SS2, SS3, the 7-bit C1 forms) fits in that.
+var escResidue = regexp.MustCompile("\x1b[^A-Za-z0-9~]*[A-Za-z~]{1,2}")
 
 // sanitizeClientName strips terminal escape sequences and C0 control characters
 // from a user-supplied client name or location before it becomes the stored
@@ -73,9 +80,10 @@ func sanitizeClientName(s string) string {
 	//    the family beyond CSI ever tested. So: if an ESC SURVIVED step 1, this
 	//    value carries an escape shape we do not recognise, and the printable
 	//    bytes around it are not trustworthy name content. Require at least one
-	//    alphanumeric that did not come from an escape final byte; if there is
-	//    none, the whole value was residue — return "" and let the caller
-	//    auto-name (the same path an omitted --name takes).
+	//    alphanumeric that did not come from an escape final byte (at most two of
+	//    them — see escResidue); if there is none, the whole value was residue —
+	//    return "" and let the caller auto-name (the same path an omitted --name
+	//    takes).
 	//
 	//    Scoped to "an ESC survived" on purpose. It is the narrowest trigger that
 	//    still covers unknown families: a clean name never reaches it, a name with
