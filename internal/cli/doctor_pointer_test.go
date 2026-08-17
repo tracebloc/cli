@@ -93,6 +93,15 @@ func TestDoctor_WrongPointerOnLocalCluster_FindsTheEnvironment(t *testing.T) {
 	if strings.Contains(out.String(), "Everything looks good") {
 		t.Errorf("a stale pointer means data commands still fail — this is not 'ready to run training':\n%s", out.String())
 	}
+	// …and the readiness LINE must carry it too: a green "✔ Ready to run
+	// training" beside a warning that contradicts it is the same unearned
+	// success, just moved up the screen.
+	if strings.Contains(out.String(), "✔ Ready to run training") {
+		t.Errorf("the readiness line must not tick green while the pointer is stale:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Not ready") {
+		t.Errorf("want the readiness line to carry the finding:\n%s", out.String())
+	}
 	if !strings.Contains(out.String(), "stale-ns") {
 		t.Errorf("doctor must name the stale pointer, not just the environment it found:\n%s", out.String())
 	}
@@ -119,6 +128,9 @@ func TestDoctor_HealthyPointer_StillGreen(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Everything looks good") {
 		t.Errorf("want the green verdict when nothing is stale:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "✔ Ready to run training") {
+		t.Errorf("control: the readiness line must still tick green when nothing is stale:\n%s", out.String())
 	}
 	if strings.Contains(out.String(), "client create") {
 		t.Errorf("no repoint advice when the pointer is correct:\n%s", out.String())

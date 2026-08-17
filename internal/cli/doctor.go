@@ -217,17 +217,24 @@ func runClusterDoctor(
 	// An environment is installed here — name it (nothing prints between this and
 	// "Signed in" above, so the two context lines read as a pair), then roll up.
 	p.Para(fmt.Sprintf("Secure environment %q", envDisplayName(resolved)))
-	if pointerStale {
-		// The environment above is healthy, but nothing else in the CLI will find
-		// it: `data ingest`, `data list`, `resources` and `seal` all bind the
-		// active-client pointer and will keep failing with exit 4 until it is
-		// repointed. Say so here rather than letting the health lines below imply
-		// the machine is usable.
-		p.Warnf("Your active client points at namespace %q, which isn't on this cluster — data commands will keep failing until you repoint.", binding.namespace)
-		p.Hintf("     Point this machine at the environment above: %s client create", launcher())
-		p.Hintf("     (this cluster already runs a client, so it adopts it — no new credential)")
-	}
 	connected, ready = summarizeDoctor(results, tok)
+	if pointerStale {
+		// The environment above is healthy — but `data ingest`, `data list`,
+		// `resources` and `seal` all bind the active-client POINTER, and that
+		// still misses, so they keep failing with exit 4. "Ready to run training"
+		// is therefore false no matter how green the cluster checks are. Replace
+		// the readiness line rather than printing a green tick with a warning
+		// beside it that contradicts it — and the replacement carries the remedy,
+		// so the finding and the fix read as one thing. The support bundle
+		// records this line too, which is what triage needs to see.
+		ready = healthLine{
+			status: doctor.StatusFail,
+			text: fmt.Sprintf("Not ready — your active client points at namespace %q, which isn't on this cluster, so data commands will keep failing until you repoint.",
+				binding.namespace),
+			remedy: fmt.Sprintf("Point this machine at the environment above: %s client create  (this cluster already runs a client, so it adopts it — no new credential)",
+				launcher()),
+		}
+	}
 
 	p.Newline()
 	renderHealth(p, connected)
