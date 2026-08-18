@@ -18,6 +18,7 @@ import (
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
+	"github.com/tracebloc/cli/internal/installer"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -162,12 +163,13 @@ func TestBindActiveClientNamespace_NoActiveClient(t *testing.T) {
 }
 
 func TestActiveClientBinding_Explain(t *testing.T) {
-	noRelease := &exitError{code: 4, err: &noParentReleaseError{errors.New("no release")}}
+	noRelease := &exitError{code: 4, err: &noParentReleaseError{err: errors.New("no release")}}
 	pvcMissing := &exitError{code: 4, err: errors.New("shared PVC not bound")}
+	ctx := context.Background()
 
 	// Applied + "no release here" → rewritten to the §7.3 guidance.
 	bound := activeClientBinding{applied: true, name: "gpu-box-01", namespace: "gpu-box-01"}
-	got := bound.explain(noRelease)
+	got := bound.explain(ctx, noRelease)
 	if got == noRelease {
 		t.Fatal("expected a rewritten error")
 	}
@@ -180,13 +182,178 @@ func TestActiveClientBinding_Explain(t *testing.T) {
 	}
 
 	// Applied but a PVC failure (release WAS found) → pass through untouched.
-	if bound.explain(pvcMissing) != pvcMissing {
+	if bound.explain(ctx, pvcMissing) != pvcMissing {
 		t.Error("PVC-missing error should not be rewritten")
 	}
 
 	// Not applied → always pass through.
-	if (activeClientBinding{}).explain(noRelease) != noRelease {
+	if (activeClientBinding{}).explain(ctx, noRelease) != noRelease {
 		t.Error("unbound explain should pass the error through")
+	}
+}
+
+// #515 — the three branches of the §7.3 message, as text. A binding miss used to
+// name --namespace without ever saying WHICH namespace; each branch below is the
+// answer explain now derives from what is actually on the reached cluster.
+//
+// repointMessage is pure, so this pins the exact wording; the surveyCluster
+// tests below pin that the survey fed to it is honest.
+func TestRepointMessage_Branches(t *testing.T) {
+	const handle, boundNS = "gpu-box-01", "gpu-box-01"
+	lead := `active client "gpu-box-01" runs on another machine — namespace "gpu-box-01" isn't on the cluster your kubeconfig points at`
+
+	t.Run("one client on a local cluster offers the repoint", func(t *testing.T) {
+		got := repointMessage(handle, boundNS, clientSurvey{looked: true, namespaces: []string{"lukas-02"}, local: true})
+		for _, want := range []string{
+			lead,
+			`A tracebloc client IS running on this machine, in namespace "lukas-02".`,
+			"client create",
+			"no new credential",
+			"--namespace lukas-02",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("remote cluster never suggests client create", func(t *testing.T) {
+		got := repointMessage(handle, boundNS, clientSurvey{looked: true, namespaces: []string{"colleague-07"}, local: false})
+		if !strings.Contains(got, "colleague-07") || !strings.Contains(got, "--namespace colleague-07") {
+			t.Errorf("remote branch must name the namespace and offer --namespace:\n%s", got)
+		}
+		// The §7.5 boundary: on a shared cluster the client we found may be
+		// someone else's, so the repoint must NOT be advertised.
+		if strings.Contains(got, "client create") {
+			t.Errorf("remote/shared cluster must never suggest `client create`:\n%s", got)
+		}
+	})
+
+	t.Run("several clients name them all and offer only --namespace", func(t *testing.T) {
+		// Local or not: with more than one client here, "point this machine at
+		// it" has no unambiguous "it" — so this stays the --namespace branch even
+		// on a local cluster.
+		for _, local := range []bool{true, false} {
+			got := repointMessage(handle, boundNS, clientSurvey{looked: true, namespaces: []string{"alpha", "beta"}, local: local})
+			if !strings.Contains(got, "alpha, beta") || !strings.Contains(got, "--namespace alpha") {
+				t.Errorf("local=%v: multi branch should list both and offer --namespace:\n%s", local, got)
+			}
+			if strings.Contains(got, "client create") {
+				t.Errorf("local=%v: ambiguous multi-client must not suggest `client create`:\n%s", local, got)
+			}
+		}
+	})
+
+	t.Run("clean scan finding nothing points at the installer", func(t *testing.T) {
+		got := repointMessage(handle, boundNS, clientSurvey{looked: true})
+		for _, want := range []string{
+			lead,
+			"--namespace/--context",
+			"No tracebloc client is running on this cluster either",
+			installer.Cmd,
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("could not look claims nothing", func(t *testing.T) {
+		got := repointMessage(handle, boundNS, clientSurvey{})
+		want := lead + "; run this command there, or override with --namespace/--context"
+		if got != want {
+			t.Errorf("unlooked message must stay the pre-#515 sentence exactly\n got: %q\nwant: %q", got, want)
+		}
+		// An absence of evidence must never print as evidence of absence.
+		if strings.Contains(got, "No tracebloc client is running") {
+			t.Errorf("a failed/absent scan must not claim the cluster is empty:\n%s", got)
+		}
+	})
+}
+
+// surveyCluster is the only thing standing between the message and a false
+// claim, so each way of "we could not look" has to come back as looked=false.
+func TestSurveyCluster_FailsClosed(t *testing.T) {
+	t.Run("nil probe", func(t *testing.T) {
+		if s := surveyCluster(context.Background(), nil); s.looked {
+			t.Errorf("a nil probe must not report as looked: %+v", s)
+		}
+	})
+
+	t.Run("nil clientset", func(t *testing.T) {
+		if s := surveyCluster(context.Background(), &clusterProbe{serverURL: "https://127.0.0.1:6550"}); s.looked {
+			t.Errorf("a probe with no clientset must not report as looked: %+v", s)
+		}
+	})
+
+	t.Run("scan forbidden", func(t *testing.T) {
+		cs := fake.NewSimpleClientset()
+		cs.PrependReactor("list", "deployments", func(ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("forbidden: cannot list deployments at the cluster scope")
+		})
+		s := surveyCluster(context.Background(), &clusterProbe{cs: cs, serverURL: "https://127.0.0.1:6550"})
+		if s.looked {
+			t.Errorf("an RBAC-refused scan must not report as looked: %+v", s)
+		}
+	})
+
+	t.Run("clean empty scan looked and found nothing", func(t *testing.T) {
+		s := surveyCluster(context.Background(), &clusterProbe{cs: fake.NewSimpleClientset(), serverURL: "https://127.0.0.1:6550"})
+		if !s.looked || len(s.namespaces) != 0 {
+			t.Errorf("a clean empty scan is looked-with-nothing: %+v", s)
+		}
+		if !s.local {
+			t.Error("a loopback server URL must survey as local")
+		}
+	})
+
+	t.Run("finds the client and judges locality", func(t *testing.T) {
+		cs := fake.NewSimpleClientset(jmDep("lukas-02"))
+		s := surveyCluster(context.Background(), &clusterProbe{cs: cs, serverURL: "https://k8s.corp.example:6443"})
+		if !s.looked || len(s.namespaces) != 1 || s.namespaces[0] != "lukas-02" {
+			t.Errorf("survey = %+v, want the one namespace", s)
+		}
+		if s.local {
+			t.Error("a corporate API server must not survey as local")
+		}
+	})
+}
+
+// End-to-end through the real resolve path: a binding miss on a LOCAL cluster
+// that hosts the client elsewhere must NAME it — and must still not target it.
+// This is the pairing that matters (§7.5): the namespace appears in the message
+// and nowhere else.
+func TestExplain_BindingMiss_NamesTheLocalClientWithoutRetargeting(t *testing.T) {
+	cs := fake.NewSimpleClientset(jmDep("lukas-02"))
+	origLoad, origCS := loadClusterFn, newClientsetFn
+	t.Cleanup(func() { loadClusterFn, newClientsetFn = origLoad, origCS })
+	loadClusterFn = func(o cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+		return &cluster.ResolvedConfig{
+			Namespace:  o.Namespace,
+			ServerURL:  "https://127.0.0.1:6550",
+			RestConfig: &rest.Config{},
+		}, nil
+	}
+	newClientsetFn = func(*cluster.ResolvedConfig) (kubernetes.Interface, error) { return cs, nil }
+
+	binding := activeClientBinding{applied: true, name: "gpu-box-01", namespace: "stale-ns"}
+	target, err := resolveClusterTarget(context.Background(), nil,
+		cluster.KubeconfigOptions{Namespace: "stale-ns"}, binding, false, false)
+	if err == nil {
+		t.Fatal("a binding miss must still fail — this changes the message, not the target")
+	}
+	if target != nil {
+		t.Fatalf("no target may be resolved from a binding miss, got %+v", target)
+	}
+	got := binding.explain(context.Background(), err)
+	if !strings.Contains(got.Error(), "lukas-02") {
+		t.Errorf("the message must name the client that IS here:\n%s", got)
+	}
+	if !strings.Contains(got.Error(), "client create") {
+		t.Errorf("a single client on a local cluster must be offered the repoint:\n%s", got)
+	}
+	if ExitCodeFromError(got) != 4 {
+		t.Errorf("exit code = %d, want 4", ExitCodeFromError(got))
 	}
 }
 
