@@ -1,0 +1,173 @@
+package cli
+
+// Command-outcome telemetry wiring — backend#1907.
+//
+// One event per invocation, emitted from the single place every command path
+// converges on (main.go, after ExecuteContextC returns). Hooking each handler
+// instead would mean N call sites that each have to remember, and §6.5's
+// "terminal event on every path" would then be true only for the handlers
+// somebody remembered.
+//
+// WHERE THIS STOPS TODAY. The transport is a seam. RFC-BACKEND-1872's Collector
+// gateway was replaced on 17 Aug by an ingest endpoint on the backend
+// (rfcs#28), which is backend#1905 and does not exist yet — so pendingSink
+// returns nil and every event is validated and dropped. That is deliberate:
+// validation runs on every build regardless, so a malformed event fails in CI
+// wherever the binary was built, and connecting #1905 is one function.
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/tracebloc/cli/internal/api"
+	"github.com/tracebloc/cli/internal/config"
+	"github.com/tracebloc/cli/internal/telemetry"
+)
+
+// telemetryOptOutVars disable emission when set. Opt-OUT, per the ticket:
+// telemetry that only the already-convinced enable measures the wrong
+// population, and the population this exists for is people whose install just
+// failed. DO_NOT_TRACK is the cross-vendor spelling; supporting it means a user
+// who has already expressed the preference once does not have to learn ours.
+var telemetryOptOutVars = []string{"TRACEBLOC_NO_TELEMETRY", "DO_NOT_TRACK"}
+
+// telemetryEnabled reports whether this invocation may emit.
+//
+// Anything other than the explicit "off" spellings counts as opting out. The
+// asymmetry is on purpose: a user who typed TRACEBLOC_NO_TELEMETRY=please
+// meant it, and guessing wrong in the other direction sends a record they
+// declined.
+func telemetryEnabled(getenv func(string) string) bool {
+	for _, name := range telemetryOptOutVars {
+		switch strings.ToLower(strings.TrimSpace(getenv(name))) {
+		case "", "0", "false":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// commandPaths enumerates every path the tree can dispatch, DERIVED from the
+// live tree rather than listed here. That is what makes the closed set in
+// telemetry.NewOutcomeRecorder maintain itself: a command added to NewRootCmd is
+// reportable the day it lands, and a value that is not a command in the tree can
+// never be emitted — including one assembled out of user input.
+func commandPaths(root *cobra.Command) []string {
+	var out []string
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		out = append(out, commandPathOf(c))
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(root)
+	return out
+}
+
+// commandPathOf renders one command as the contract's tracebloc.cli.command
+// value: the invocation minus the binary name, "data ingest" (§7.1). The bare
+// root reports its own name rather than an empty string, which normalise would
+// drop as absent — leaving the one invocation shape a first-time user is most
+// likely to produce as the only one with no command on the record.
+func commandPathOf(c *cobra.Command) string {
+	if c == nil {
+		return ""
+	}
+	path := strings.TrimSpace(c.CommandPath())
+	root := c.Root().Name()
+	if path == root || path == "" {
+		return root
+	}
+	return strings.TrimSpace(strings.TrimPrefix(path, root))
+}
+
+// telemetryEnv picks deployment.environment for the records.
+//
+// The signed-in environment wins because it is the backend these records are
+// about; $CLIENT_ENV and the prod default are api.ResolveEnv's existing answer,
+// reused rather than restated. An unrecognised value is not repaired here — the
+// emitter refuses to export under a guessed environment (§3.2), and that
+// refusal belongs in one place.
+func telemetryEnv(signedInEnv string) string {
+	if api.IsKnownEnv(signedInEnv) {
+		return strings.ToLower(signedInEnv)
+	}
+	return api.ResolveEnv("")
+}
+
+// signedInEnv reads the environment the config points at, best-effort. A
+// missing or unreadable config is simply "not signed in".
+func signedInEnv() string {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.CurrentEnv
+}
+
+// processInstanceID is the per-PROCESS id §2 asks for off-cluster.
+//
+// Not the hostname, and not a persisted machine id. Hostnames in this product's
+// field data are overwhelmingly "<firstname>-macbook", which §7.3 forbids
+// outright; a persisted id would be a durable identifier we would then have to
+// answer erasure requests about. A fresh random value per run still separates
+// concurrent runs, which is all service.instance.id is for here.
+func processInstanceID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		// Omitted rather than faked. New() drops an empty instance id, and a
+		// constant stand-in would silently fuse every affected run into one.
+		return ""
+	}
+	return hex.EncodeToString(b)
+}
+
+// pendingSink is the transport seam for backend#1905.
+//
+// nil means validate-and-drop (telemetry.SetSink's documented contract). When
+// the ingest endpoint lands this returns the client that posts to it, and
+// nothing else in this file changes.
+func pendingSink() telemetry.Sink { return nil }
+
+// RecordCommandOutcome emits the single terminal event for this invocation.
+// main.go calls it once, after the command tree has returned and before exit.
+//
+// It never returns an error and never panics: a CLI that died because telemetry
+// was unhappy would be a strictly worse CLI. A malformed event is caught by the
+// tests below, where it is free.
+func RecordCommandOutcome(root, executed *cobra.Command, info BuildInfo, exitCode int, elapsed time.Duration) {
+	_ = recordCommandOutcome(root, executed, info, exitCode, elapsed, os.Getenv, pendingSink())
+}
+
+// recordCommandOutcome is RecordCommandOutcome with its two ambient
+// dependencies passed in, so the tests drive the real thing.
+func recordCommandOutcome(
+	root, executed *cobra.Command,
+	info BuildInfo,
+	exitCode int,
+	elapsed time.Duration,
+	getenv func(string) string,
+	sink telemetry.Sink,
+) error {
+	if !telemetryEnabled(getenv) {
+		return nil
+	}
+	emitter := telemetry.New(telemetryEnv(signedInEnv()), info.Version, processInstanceID())
+	if sink != nil {
+		emitter.SetSink(sink)
+	}
+	recorder := telemetry.NewOutcomeRecorder(emitter, commandPaths(root))
+	return recorder.Record(telemetry.Outcome{
+		Command:  commandPathOf(executed),
+		ExitCode: exitCode,
+		Elapsed:  elapsed,
+	})
+}

@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/tracebloc/cli/internal/cli"
 )
@@ -59,11 +60,23 @@ func main() {
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	executed, err := cli.NewRootCmd(cli.BuildInfo{
+	info := cli.BuildInfo{
 		Version:   version,
 		GitSHA:    gitSHA,
 		BuildDate: buildDate,
-	}).ExecuteContextC(ctx)
+	}
+	root := cli.NewRootCmd(info)
+
+	started := time.Now()
+	executed, err := root.ExecuteContextC(ctx)
+
+	// backend#1907: one command-outcome event per invocation, emitted from the
+	// single point every command path converges on — command name, duration,
+	// exit code, OS/arch, version, error class. No arguments, no paths (see
+	// internal/cli/telemetry.go for why that is structural rather than a rule).
+	// Opt-out via TRACEBLOC_NO_TELEMETRY / DO_NOT_TRACK; best-effort and silent,
+	// so nothing here can change what the customer sees or what we exit with.
+	cli.RecordCommandOutcome(root, executed, info, cli.ExitCodeFromError(err), time.Since(started))
 
 	// F1: after the command runs, a quiet once-a-day nudge if a newer release
 	// exists (best-effort; silent on dev builds, off a terminal, in CI, or with
