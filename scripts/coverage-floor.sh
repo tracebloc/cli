@@ -13,6 +13,12 @@
 # tests. Current (develop, 2026-07-14, ubuntu CI runner): internal/cli 82.9%,
 # internal/submit 80.4%, internal/push 89.0%, internal/cluster 74.6%.
 #
+# internal/telemetry joined the list with backend#1907, when it stopped being
+# an unwired helper and became the thing that decides what leaves a customer's
+# machine. It is the privacy boundary for the CLI, so a rotting test there is
+# not a coverage regression like the others — it is the guard going quiet. It
+# measures 100.0% today; the floor is set at 95 for the usual ratchet headroom.
+#
 # NOTE: internal/cluster measures higher on a dev machine with a real
 # ~/.kube/config (78.5% on macOS) than on the bare CI runner (74.6%) — the
 # kubeconfig-resolution paths only execute where one exists. Floors must be
@@ -30,6 +36,7 @@ internal/cli:80
 internal/submit:78
 internal/push:87
 internal/cluster:73
+internal/telemetry:95
 "
 
 status=0
