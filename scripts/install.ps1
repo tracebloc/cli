@@ -327,6 +327,20 @@ try {
         }
 
         if ($sigDownloaded) {
+            # PRESET 255, exactly as Test-CosignRuns does — and for the same reason,
+            # which this call site was missing (Bugbot, HIGH, cli#528).
+            #
+            # $LASTEXITCODE persists from the PREVIOUS command. Test-CosignRuns runs
+            # `cosign version` immediately before this, so a shim that exits 0 there
+            # and then never sets an exit code on verify-blob leaves $LASTEXITCODE at
+            # 0 — and the `-ne 0` check below reads that stale success as a valid
+            # signature. The installer then prints "cosign signature valid" and
+            # installs a binary nothing verified.
+            #
+            # 255 means "no verdict yet": a verifier that never runs cannot inherit a
+            # pass. Only cosign actually completing can bring it back to 0. That is
+            # the whole guarantee behind RFC-0001 R8, and it was one line away.
+            $global:LASTEXITCODE = 255
             & $cosign verify-blob `
                 --certificate-identity-regexp "https://github.com/$GitHubRepo/.github/workflows/release.yml@refs/tags/v.*" `
                 --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
