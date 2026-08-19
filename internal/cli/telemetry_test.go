@@ -271,10 +271,12 @@ func TestTheOffSpellingsDoNotOptOut(t *testing.T) {
 
 // --- environment ---------------------------------------------------------------
 
-func TestTheEnvironmentIsNeverGuessed(t *testing.T) {
-	// §3.2 — an unrecognised environment must not export under a repaired or
-	// guessed value. `staging` is the classic near miss: it is the git branch
-	// name, and `stg` is the environment value.
+func TestTheEnvironmentLabelMatchesTheBackend(t *testing.T) {
+	// The label is the backend api.BaseURL actually targets: a known env is
+	// itself; anything unrecognised is prod, because BaseURL routes it there.
+	// `staging` is the classic near miss — the git branch name, not the `stg`
+	// environment value — and it resolves to prod (where a client signed into
+	// "staging" really goes), NOT to stg.
 	for _, tc := range []struct {
 		signedIn string
 		want     string
@@ -282,11 +284,8 @@ func TestTheEnvironmentIsNeverGuessed(t *testing.T) {
 		{api.EnvDev, api.EnvDev},
 		{api.EnvStg, api.EnvStg},
 		{"PROD", api.EnvProd},
-		// "staging" is signed-in but unknown: passed through unchanged, NOT
-		// repaired to stg and NOT guessed to prod. New() then disables export.
-		{"staging", "staging"},
-		// Empty is "not signed in": CLIENT_ENV (empty here) then the prod default.
-		{"", api.EnvProd},
+		{"staging", api.EnvProd}, // unknown -> prod, matching api.BaseURL
+		{"", api.EnvProd},        // not signed in, CLIENT_ENV empty -> prod
 	} {
 		t.Run("signed_in_"+tc.signedIn, func(t *testing.T) {
 			t.Setenv("CLIENT_ENV", "")
@@ -297,14 +296,34 @@ func TestTheEnvironmentIsNeverGuessed(t *testing.T) {
 	}
 }
 
-func TestAnUnknownEnvironmentDeliversNothing(t *testing.T) {
-	// The end-to-end consequence: the emitter refuses to export under a value no
-	// query filters on, and the wiring must not have talked it out of that.
+func TestASignedInUnknownEnvIgnoresClientEnv(t *testing.T) {
+	// The bug this pins (Asad, cli#528 review): the client resolves a signed-in
+	// env via sessionEnv, which returns cfg.CurrentEnv VERBATIM and never consults
+	// $CLIENT_ENV — so a config on "banana" talks to prod (api.BaseURL default)
+	// regardless of $CLIENT_ENV. The old code resolved the label through
+	// ResolveEnv, which DOES read $CLIENT_ENV, so it filed the run under "dev"
+	// while every request went to prod. The label must be prod, not dev.
+	t.Setenv("CLIENT_ENV", "dev")
+	if got := telemetryEnv("banana"); got != api.EnvProd {
+		t.Fatalf("telemetryEnv(%q) with CLIENT_ENV=dev = %q, want %q — the label "+
+			"must match the backend the client actually contacts (prod)", "banana", got, api.EnvProd)
+	}
+}
+
+func TestAnUnknownClientEnvIsLabelledProd(t *testing.T) {
+	// The end-to-end consequence: not signed in, CLIENT_ENV=staging. sessionEnv
+	// resolves that through ResolveEnv -> "staging", and api.BaseURL routes it to
+	// prod — so the run genuinely hits prod and its record must be filed under
+	// prod, the population this feature exists for, not withheld.
 	isolateConfig(t)
 	t.Setenv("CLIENT_ENV", "staging")
 	root := NewRootCmd(testBuildInfo())
-	if _, _, ok := captureOutcome(t, root, root, 0, nil); ok {
-		t.Fatal("delivered a record under an unrecognised environment")
+	res, _, ok := captureOutcome(t, root, root, 0, nil)
+	if !ok {
+		t.Fatal("withheld a record for a run that hits prod under an unknown CLIENT_ENV")
+	}
+	if res["deployment.environment"] != api.EnvProd {
+		t.Fatalf("deployment.environment = %q, want %q", res["deployment.environment"], api.EnvProd)
 	}
 }
 
@@ -335,14 +354,14 @@ func TestTheSignedInEnvironmentWins(t *testing.T) {
 	}
 }
 
-func TestASignedInUnknownEnvironmentDeliversNothing(t *testing.T) {
-	// The bug this pins: a run signed into an environment the CLI does not
-	// recognise must not be filed under prod. telemetryEnv used to repair the
-	// unknown value to the prod default, so New() saw a known env and exported.
-	// The signed-in value must reach New() unrepaired so export is refused (§3.2).
+func TestASignedInUnknownEnvironmentIsLabelledProd(t *testing.T) {
+	// A run signed into an environment the CLI does not recognise talks to prod
+	// (sessionEnv hands cfg.CurrentEnv to api.New verbatim, api.BaseURL routes the
+	// unknown value to prod), so its record must be filed under prod — that
+	// failed-install-on-prod run is exactly what this feature exists to capture.
 	dir := t.TempDir()
 	t.Setenv("TRACEBLOC_CONFIG_DIR", dir)
-	t.Setenv("CLIENT_ENV", "") // so a leak would have to come from the config, not the env
+	t.Setenv("CLIENT_ENV", "") // so the label comes from the config, not the env
 	body := `{"version":2,"current_env":"banana","profiles":{"banana":{"token":"x"}}}`
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -354,8 +373,12 @@ func TestASignedInUnknownEnvironmentDeliversNothing(t *testing.T) {
 			"and this fixture (and possibly the reader) is stale", got, "banana")
 	}
 	root := NewRootCmd(testBuildInfo())
-	if _, _, ok := captureOutcome(t, root, root, 0, nil); ok {
-		t.Fatal("delivered a record for a run signed into an unrecognised environment")
+	res, _, ok := captureOutcome(t, root, root, 0, nil)
+	if !ok {
+		t.Fatal("withheld a record for a run signed into an unknown env that hits prod")
+	}
+	if res["deployment.environment"] != api.EnvProd {
+		t.Fatalf("deployment.environment = %q, want %q", res["deployment.environment"], api.EnvProd)
 	}
 }
 

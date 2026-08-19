@@ -91,26 +91,36 @@ func commandPathOf(c *cobra.Command) string {
 
 // telemetryEnv picks deployment.environment for the records.
 //
-// The signed-in environment wins because it is the backend these records are
-// about. When there is no signed-in environment, $CLIENT_ENV and the prod
-// default are api.ResolveEnv's existing answer, reused rather than restated.
+// It labels each record with the backend the client is ACTUALLY talking to,
+// resolved exactly the way api.BaseURL resolves it — because that is the host
+// these records are about. The mapping mirrors BaseURL: a known env is itself; a
+// present-but-unrecognised value is prod, because api.BaseURL routes every
+// unknown value to https://api.tracebloc.io (sessionEnv hands cfg.CurrentEnv to
+// api.New verbatim). So prod is the accurate label for that population, not a
+// guess — and NOT withheld: a misconfigured install that hits prod and fails is
+// exactly the run this feature exists to see.
 //
-// A signed-in value that is present but unrecognised is NOT repaired here: it is
-// passed through unchanged so New() sees an unknown environment and disables
-// export (§3.2 — refusal to export under a guessed environment belongs in one
-// place). Repairing it to the prod default instead would file a run signed into
-// an unknown backend under prod — the exact guess §3.2 forbids.
-func telemetryEnv(signedInEnv string) string {
-	if api.IsKnownEnv(signedInEnv) {
-		return strings.ToLower(signedInEnv)
+// $CLIENT_ENV is consulted only when there is no signed-in env, matching
+// sessionEnv: once cfg.CurrentEnv is set the client ignores $CLIENT_ENV, so
+// resolving a signed-in unknown through $CLIENT_ENV would label the record for a
+// backend the client never contacts (the bug this replaces).
+//
+// NOTE: that api.BaseURL silently routes an unknown env to prod — so an install
+// believing it is on another backend sends its token there — is a real defect,
+// but in client.go, not here; tracked separately. This function must match that
+// behaviour until it changes, not diverge from it.
+func telemetryEnv(env string) string {
+	resolved := env
+	if resolved == "" {
+		// Not signed in: $CLIENT_ENV, then the prod default (as sessionEnv does).
+		resolved = api.ResolveEnv("")
 	}
-	if signedInEnv == "" {
-		// Not signed in: $CLIENT_ENV, then the prod default.
-		return api.ResolveEnv("")
+	if api.IsKnownEnv(resolved) {
+		return strings.ToLower(resolved)
 	}
-	// Signed in to an unrecognised environment: pass it through so the emitter
-	// refuses to export, rather than guessing prod.
-	return signedInEnv
+	// Unrecognised: api.BaseURL sends it to prod, so prod is where these records
+	// belong.
+	return api.EnvProd
 }
 
 // signedInEnv reads the environment the config points at, best-effort. A
