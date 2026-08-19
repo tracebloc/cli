@@ -85,9 +85,8 @@ fi
 _ps1_flat=$(tr '\n' ' ' < "$INSTALLER")
 if printf '%s' "$_ps1_flat" | grep -Eq 'SecurityProtocol[[:space:]]*=[[:space:]]*\[Net\.ServicePointManager\]::SecurityProtocol[[:space:]]*-bor'; then
   bad 'the TLS floor OR-s onto the default SecurityProtocol (SSL3/TLS1.0/1.1 stay advertised)'
-elif grep -q 'SecurityProtocolType\]::Tls12' "$INSTALLER" \
-     && printf '%s' "$_ps1_flat" | grep -Eq 'ServicePointManager\]::SecurityProtocol[[:space:]]*=[[:space:]]*\$'; then
-  ok 'the TLS floor assigns Tls12 (weak protocols dropped)'
+elif printf '%s' "$_ps1_flat" | grep -Eq 'ServicePointManager\]::SecurityProtocol[[:space:]]*=[[:space:]]*\[Net\.SecurityProtocolType\]::Tls12'; then
+  ok 'the TLS floor assigns Tls12 directly (weak protocols dropped)'
 else
   bad 'no assigned TLS 1.2 floor found in the installer'
 fi

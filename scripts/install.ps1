@@ -65,17 +65,16 @@ $AllowUnverified = ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq '1')
 # verifier that authenticates it — neither may negotiate down. PS7+ already
 # defaults higher; setting it is harmless there.
 #
-# ASSIGN, do NOT -bor onto the default: OR-ing Tls12 on LEAVES SSL3/TLS1.0/1.1
-# advertised, so a downgrade stays on the table — the exact thing this floor
-# exists to remove. Set the value to Tls12, and add Tls13 only where the runtime
-# defines it (the enum member is absent on older 5.1 hosts, where naming it
-# throws).
+# ASSIGN Tls12, do NOT -bor onto the default: OR-ing Tls12 on LEAVES SSL3/TLS1.0/1.1
+# advertised, so a downgrade stays on the table — the exact thing this floor exists
+# to remove. Tls12 alone is the floor and is always negotiable on any host that can
+# reach us. We deliberately do NOT also add Tls13: [Enum]::IsDefined is true on
+# .NET 4.8 even where Schannel cannot negotiate 1.3 (Win10 21H1, Server 2019), and
+# assigning it then THROWS — the empty catch would swallow that and leave the floor
+# unset, so a `Tls12 -bor Tls13` attempt can defeat the very floor it decorates
+# (cli#528 Bugbot). 1.2 is secure for these fetches; 1.3 is not worth that risk.
 try {
-    $tlsFloor = [Net.SecurityProtocolType]::Tls12
-    if ([Enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
-        $tlsFloor = $tlsFloor -bor [Net.SecurityProtocolType]::Tls13
-    }
-    [Net.ServicePointManager]::SecurityProtocol = $tlsFloor
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 } catch { }
 
 # ---------------------------------------------------------------------
