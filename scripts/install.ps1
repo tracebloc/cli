@@ -64,9 +64,17 @@ $AllowUnverified = ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq '1')
 # every fetch below carries either the binary we are about to run or the
 # verifier that authenticates it — neither may negotiate down. PS7+ already
 # defaults higher; setting it is harmless there.
+#
+# ASSIGN Tls12, do NOT -bor onto the default: OR-ing Tls12 on LEAVES SSL3/TLS1.0/1.1
+# advertised, so a downgrade stays on the table — the exact thing this floor exists
+# to remove. Tls12 alone is the floor and is always negotiable on any host that can
+# reach us. We deliberately do NOT also add Tls13: [Enum]::IsDefined is true on
+# .NET 4.8 even where Schannel cannot negotiate 1.3 (Win10 21H1, Server 2019), and
+# assigning it then THROWS — the empty catch would swallow that and leave the floor
+# unset, so a `Tls12 -bor Tls13` attempt can defeat the very floor it decorates
+# (cli#528 Bugbot). 1.2 is secure for these fetches; 1.3 is not worth that risk.
 try {
-    [Net.ServicePointManager]::SecurityProtocol =
-        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 } catch { }
 
 # ---------------------------------------------------------------------

@@ -77,7 +77,21 @@ else
   bad 'the cosign bootstrap asks for an asset sigstore does not publish'
 fi
 
-# ── 5. behavioural tier ─────────────────────────────────────────────────────
+# ── 5. the TLS floor is ASSIGNED, not OR-ed onto the default ────────────────
+# `-bor Tls12` onto [Net.ServicePointManager]::SecurityProtocol leaves SSL3/
+# TLS1.0/1.1 advertised, so a fetch can still negotiate down — the exact thing
+# the floor exists to remove (cli#528 Bugbot). The floor must ASSIGN the value.
+# Collapse newlines first: the old form spanned two lines (`= \n <default> -bor`).
+_ps1_flat=$(tr '\n' ' ' < "$INSTALLER")
+if printf '%s' "$_ps1_flat" | grep -Eq 'SecurityProtocol[[:space:]]*=[[:space:]]*\[Net\.ServicePointManager\]::SecurityProtocol[[:space:]]*-bor'; then
+  bad 'the TLS floor OR-s onto the default SecurityProtocol (SSL3/TLS1.0/1.1 stay advertised)'
+elif printf '%s' "$_ps1_flat" | grep -Eq 'ServicePointManager\]::SecurityProtocol[[:space:]]*=[[:space:]]*\[Net\.SecurityProtocolType\]::Tls12'; then
+  ok 'the TLS floor assigns Tls12 directly (weak protocols dropped)'
+else
+  bad 'no assigned TLS 1.2 floor found in the installer'
+fi
+
+# ── 6. behavioural tier ─────────────────────────────────────────────────────
 # pwsh is preinstalled on GitHub-hosted ubuntu runners. If it is missing we
 # cannot tell whether the helpers behave, and "cannot tell" is a finding, not a
 # pass (CLAUDE.md rule 3). Set ALLOW_NO_PWSH=1 to downgrade it on a dev box
