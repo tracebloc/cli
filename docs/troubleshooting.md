@@ -131,6 +131,34 @@ produces that code.
 | `9` | The ingestion Job exited non-zero, completed with row-level failures the summary panel reports, or its outcome couldn't be determined / followed | `data ingest` | `exitIngestFailed` |
 | `130` | You hit Ctrl-C while something was already running — the sign-in wait, `client status --wait`, the seal check, or an installer re-run (128+SIGINT). Ctrl-C at a *question* is `0` instead: nothing had started | `login`, `client status --wait`, `client status --seal`, `upgrade`, `prepare-host` | `exitInterrupted` |
 
+## Usage reporting
+
+The CLI records one outcome event per command so we can see failures like the
+ones on this page without waiting for someone to report them. It is on by
+default and it is a fixed, closed set of fields — there is no free-text field
+in the record at all:
+
+| Field | Example | Where it comes from |
+|---|---|---|
+| command | `data ingest` | the command you ran, looked up in the CLI's own command list. A value that isn't one of those commands is reported as `unregistered` |
+| exit code | `4` | the table above |
+| error class | `no_secure_environment` | derived from that exit code, nothing else |
+| duration | `1520` ms | wall clock |
+| OS / architecture | `darwin` / `arm64` | compiled into the binary |
+| version | `0.10.9` | the release you're running |
+
+**What is never sent:** your arguments, any file or directory path, any dataset
+or file contents, your username, your hostname, your kubeconfig, your tokens.
+Not "filtered out" — the record has nowhere to put them. Each run gets a fresh
+random id, so runs are not linked to each other or to you.
+
+Turn it off with either of:
+
+```bash
+export TRACEBLOC_NO_TELEMETRY=1
+export DO_NOT_TRACK=1
+```
+
 ## Still stuck?
 
 Open an issue at [github.com/tracebloc/cli/issues](https://github.com/tracebloc/cli/issues)

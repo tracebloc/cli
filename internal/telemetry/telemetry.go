@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -85,10 +86,17 @@ var retired = map[string]bool{
 // resourceScope is set once per process by New. A call site may never send one.
 // tracebloc.component is listed even though it is correctly tracebloc.-prefixed:
 // the namespace rule alone would wave it past.
+//
+// os.type and host.arch are here rather than in recordScope because they
+// describe the PROCESS, not the occurrence: they are compile-time constants of
+// this binary and cannot differ between two events from one run. §1.1 also
+// forbids re-inventing them as tracebloc.os / tracebloc.arch — OpenTelemetry
+// already names them, so the contract requires OTel's spelling.
 var resourceScope = map[string]bool{
 	"service.name": true, "service.version": true, "service.instance.id": true,
 	"deployment.environment": true, "tracebloc.component": true,
 	"tracebloc.tenant.id": true,
+	"os.type":             true, "host.arch": true,
 }
 
 // recordScope is the set of OTel names a call site MAY send. event.name is
@@ -127,6 +135,13 @@ func New(env, version, instanceID string) *Emitter {
 		"service.name":        Service,
 		"tracebloc.component": Component,
 		"service.version":     normaliseVersion(version),
+		// backend#1907 asks for OS/arch on every command outcome. They are
+		// read from the Go build's own constants, never from `uname`, a
+		// hostname or an env var: a compile-time constant cannot carry a
+		// customer identifier, and runtime.GOOS/GOARCH are closed sets, so
+		// there is no value here a query cannot filter on.
+		"os.type":   runtime.GOOS,
+		"host.arch": runtime.GOARCH,
 	}}
 	// §1.2 — omitted rather than stamped empty. os.Hostname() returns "" on
 	// error, and an empty service.instance.id is the "sent as empty rather than
