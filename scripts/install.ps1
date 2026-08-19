@@ -64,9 +64,18 @@ $AllowUnverified = ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq '1')
 # every fetch below carries either the binary we are about to run or the
 # verifier that authenticates it — neither may negotiate down. PS7+ already
 # defaults higher; setting it is harmless there.
+#
+# ASSIGN, do NOT -bor onto the default: OR-ing Tls12 on LEAVES SSL3/TLS1.0/1.1
+# advertised, so a downgrade stays on the table — the exact thing this floor
+# exists to remove. Set the value to Tls12, and add Tls13 only where the runtime
+# defines it (the enum member is absent on older 5.1 hosts, where naming it
+# throws).
 try {
-    [Net.ServicePointManager]::SecurityProtocol =
-        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $tlsFloor = [Net.SecurityProtocolType]::Tls12
+    if ([Enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
+        $tlsFloor = $tlsFloor -bor [Net.SecurityProtocolType]::Tls13
+    }
+    [Net.ServicePointManager]::SecurityProtocol = $tlsFloor
 } catch { }
 
 # ---------------------------------------------------------------------
