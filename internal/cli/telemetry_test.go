@@ -282,7 +282,10 @@ func TestTheEnvironmentIsNeverGuessed(t *testing.T) {
 		{api.EnvDev, api.EnvDev},
 		{api.EnvStg, api.EnvStg},
 		{"PROD", api.EnvProd},
-		{"staging", api.EnvProd}, // not repaired to stg — falls back to the default
+		// "staging" is signed-in but unknown: passed through unchanged, NOT
+		// repaired to stg and NOT guessed to prod. New() then disables export.
+		{"staging", "staging"},
+		// Empty is "not signed in": CLIENT_ENV (empty here) then the prod default.
 		{"", api.EnvProd},
 	} {
 		t.Run("signed_in_"+tc.signedIn, func(t *testing.T) {
@@ -329,6 +332,30 @@ func TestTheSignedInEnvironmentWins(t *testing.T) {
 	if res["deployment.environment"] != api.EnvDev {
 		t.Fatalf("deployment.environment = %q, want %q",
 			res["deployment.environment"], api.EnvDev)
+	}
+}
+
+func TestASignedInUnknownEnvironmentDeliversNothing(t *testing.T) {
+	// The bug this pins: a run signed into an environment the CLI does not
+	// recognise must not be filed under prod. telemetryEnv used to repair the
+	// unknown value to the prod default, so New() saw a known env and exported.
+	// The signed-in value must reach New() unrepaired so export is refused (§3.2).
+	dir := t.TempDir()
+	t.Setenv("TRACEBLOC_CONFIG_DIR", dir)
+	t.Setenv("CLIENT_ENV", "") // so a leak would have to come from the config, not the env
+	body := `{"version":2,"current_env":"banana","profiles":{"banana":{"token":"x"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Read it back before asserting: a config layout this fixture no longer
+	// matches must be a finding, not a quiet pass that exercises the empty path.
+	if got := signedInEnv(); got != "banana" {
+		t.Fatalf("signedInEnv() = %q, want %q — the on-disk config layout changed "+
+			"and this fixture (and possibly the reader) is stale", got, "banana")
+	}
+	root := NewRootCmd(testBuildInfo())
+	if _, _, ok := captureOutcome(t, root, root, 0, nil); ok {
+		t.Fatal("delivered a record for a run signed into an unrecognised environment")
 	}
 }
 

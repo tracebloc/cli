@@ -92,15 +92,25 @@ func commandPathOf(c *cobra.Command) string {
 // telemetryEnv picks deployment.environment for the records.
 //
 // The signed-in environment wins because it is the backend these records are
-// about; $CLIENT_ENV and the prod default are api.ResolveEnv's existing answer,
-// reused rather than restated. An unrecognised value is not repaired here — the
-// emitter refuses to export under a guessed environment (§3.2), and that
-// refusal belongs in one place.
+// about. When there is no signed-in environment, $CLIENT_ENV and the prod
+// default are api.ResolveEnv's existing answer, reused rather than restated.
+//
+// A signed-in value that is present but unrecognised is NOT repaired here: it is
+// passed through unchanged so New() sees an unknown environment and disables
+// export (§3.2 — refusal to export under a guessed environment belongs in one
+// place). Repairing it to the prod default instead would file a run signed into
+// an unknown backend under prod — the exact guess §3.2 forbids.
 func telemetryEnv(signedInEnv string) string {
 	if api.IsKnownEnv(signedInEnv) {
 		return strings.ToLower(signedInEnv)
 	}
-	return api.ResolveEnv("")
+	if signedInEnv == "" {
+		// Not signed in: $CLIENT_ENV, then the prod default.
+		return api.ResolveEnv("")
+	}
+	// Signed in to an unrecognised environment: pass it through so the emitter
+	// refuses to export, rather than guessing prod.
+	return signedInEnv
 }
 
 // signedInEnv reads the environment the config points at, best-effort. A
