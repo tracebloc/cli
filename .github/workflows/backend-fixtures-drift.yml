@@ -19,12 +19,24 @@ name: Backend fixtures drift
 # org Actions secret. Until that secret exists the job SKIPS with a warning
 # instead of failing: the gate is inert, not red (same activation model as
 # the public PII gate's denylist secret).
+#
+# THAT ACTIVATION PHASE IS OVER. The secret has existed since 2026-08-05 and
+# this check is being armed as a required context (backend#2212), so the
+# skip-with-a-warning path is now a fail-open: a *required* check that exits 0
+# when it cannot run is worse than an advisory one, because it also looks
+# solved. It now FAILS instead -- see the step below for the three-way split
+# and why a public repo needs an override label rather than a silent pass.
 
 on:
   push:
     branches: [develop, main]
   pull_request:
     branches: [develop, main]
+    # labeled/unlabeled so the skip-fixtures-drift override actually re-runs the
+    # gate. The default types are opened/synchronize/reopened, so without these
+    # applying the label would change nothing until the next push -- exactly the
+    # bug Bugbot caught on version-bump-gate-caller.yml's skip-version-gate.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
@@ -42,13 +54,44 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Three-way, because this repo is PUBLIC and the two reasons the token can
+      # be missing are not the same thing:
+      #
+      #   token present            -> run the check (the normal path)
+      #   absent, fork PR          -> FAIL. GitHub does not expose repo secrets to
+      #                               forks by design, so the check genuinely
+      #                               cannot run. A maintainer verifies the
+      #                               fixtures by hand and applies
+      #                               `skip-fixtures-drift`, which is a permanent
+      #                               artifact on the PR -- the same model as
+      #                               skip-fr-gate. Passing forks silently would
+      #                               fail open on exactly the contributions that
+      #                               warrant the most scrutiny.
+      #   absent, not a fork       -> FAIL. The secret was removed, rotated or
+      #                               expired. That is a misconfiguration, and it
+      #                               used to read as a clean run.
+      #
+      # Every ${{ }} goes through env:, never into the run: body.
       - name: scripts/sync-backend-fixtures.sh --check
         env:
           BACKEND_CONTRACTS_TOKEN: ${{ secrets.BACKEND_CONTRACTS_TOKEN }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork || false }}
+          OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'skip-fixtures-drift') }}
         run: |
-          if [ -z "$BACKEND_CONTRACTS_TOKEN" ]; then
-            echo "::warning::BACKEND_CONTRACTS_TOKEN is not set — skipping the backend fixtures drift check." \
-              "Add a read-only (Contents: read) token for tracebloc/backend as a repo/org Actions secret to activate this gate."
+          set -uo pipefail
+
+          if [ "$OVERRIDE" = "true" ]; then
+            echo "::warning title=Backend fixtures drift OVERRIDDEN::The skip-fixtures-drift label is applied, so this gate did NOT verify internal/api/testdata/*.json against tracebloc/backend. Whoever applied the label is asserting they checked the fixtures by hand. The label stays on the PR as the record."
             exit 0
           fi
-          ./scripts/sync-backend-fixtures.sh --check
+
+          if [ -n "$BACKEND_CONTRACTS_TOKEN" ]; then
+            exec ./scripts/sync-backend-fixtures.sh --check
+          fi
+
+          if [ "$IS_FORK" = "true" ]; then
+            echo "::error title=Backend fixtures drift could not run::This PR is from a fork, and GitHub does not expose BACKEND_CONTRACTS_TOKEN to forks, so the vendored fixtures could not be checked against tracebloc/backend. A maintainer must verify internal/api/testdata/*.json by hand and apply the 'skip-fixtures-drift' label. Refusing to report green on a check that did not run (backend#2212)."
+          else
+            echo "::error title=BACKEND_CONTRACTS_TOKEN is missing::The secret is not readable on this run, so the backend fixtures drift check did not execute. It is expected on develop/main PRs from this repo -- if it was rotated or removed, restore a read-only (Contents: read) token for tracebloc/backend as a repo/org Actions secret. This step used to exit 0 here, which reported a check that never ran as a passing one (backend#2212)."
+          fi
+          exit 1
