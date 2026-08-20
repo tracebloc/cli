@@ -26,10 +26,10 @@ func TestContractIsValid(t *testing.T) {
 	// The embedded contract is decoded by a panicking MustCompile-style helper,
 	// which is right for a compile-time asset but must never reach a release.
 	// This is the test that keeps that promise.
-	if got := ContractVersion(); got < 1 {
-		t.Fatalf("ContractVersion() = %d, want >= 1", got)
-	}
 	c := mustContract()
+	if c.ContractVersion < 1 {
+		t.Fatalf("contract_version = %d, want >= 1", c.ContractVersion)
+	}
 	if len(c.Vectors.SingleNode) == 0 {
 		t.Fatal("the vendored contract carries no single-node vectors — " +
 			"re-vendor it, or the replay below is asserting nothing")
@@ -115,7 +115,7 @@ func TestGoldenVectorsReplay(t *testing.T) {
 			"Either this package's arithmetic drifted, or the contract was "+
 			"re-vendored with different numbers. Both are real changes — do not "+
 			"'fix' this by editing the expectations.",
-			ContractVersion(), strings.Join(failures, "\n  "))
+			mustContract().ContractVersion, strings.Join(failures, "\n  "))
 	}
 }
 

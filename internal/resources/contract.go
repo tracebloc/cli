@@ -97,7 +97,3 @@ var mustContract = sync.OnceValue(func() envelopeContract {
 	}
 	return c
 })
-
-// ContractVersion reports the vendored contract's version, for `doctor` output
-// and for the drift test's error messages.
-func ContractVersion() int { return mustContract().ContractVersion }
