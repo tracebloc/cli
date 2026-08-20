@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,14 +52,26 @@ import (
 // whose cluster cannot hold what it was sized for.
 type VMProbe func(ctx context.Context) (cores int64, memBytes int64, err error)
 
+// machineProbeTimeout bounds the two subprocess probes below, mirroring
+// httpProbeTimeout on the other injectable probe in this package.
+//
+// Bugbot on #541: without it, the remedy for an unreadable VM ("docker info")
+// is the exact command that hangs against a WEDGED daemon — as opposed to a
+// stopped one, which fails fast — so the probe for that case could hang the
+// whole sweep with no verdict and no exit code. The installer's own
+// _docker_answers bounds `docker info` for the same reason.
+const machineProbeTimeout = 8 * time.Second
+
 // HostProbe reports the physical machine's cores and RAM. Injected in tests;
 // nil means hostProbe. Best-effort: the chain drops this level rather than
 // failing when it cannot be read, because the VM is the binding constraint and
 // the host is context.
-type HostProbe func() (cores int64, memBytes int64, err error)
+type HostProbe func(ctx context.Context) (cores int64, memBytes int64, err error)
 
 // dockerVMProbe asks the container runtime how big its VM is.
 func dockerVMProbe(ctx context.Context) (int64, int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, machineProbeTimeout)
+	defer cancel()
 	// #nosec G204 -- argv is compile-time constant: literal "docker" with a
 	// fixed --format template. No user input reaches this command line.
 	out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.NCPU}} {{.MemTotal}}").Output()
@@ -86,12 +99,14 @@ func dockerVMProbe(ctx context.Context) (int64, int64, error) {
 // hostProbe reads physical RAM for the platforms the local install supports.
 // runtime.NumCPU() is the host's logical CPU count on both — the CLI runs on
 // the host, not inside the VM.
-func hostProbe() (int64, int64, error) {
+func hostProbe(ctx context.Context) (int64, int64, error) {
 	cores := int64(runtime.NumCPU())
 	switch runtime.GOOS {
 	case "darwin":
+		ctx, cancel := context.WithTimeout(ctx, machineProbeTimeout)
+		defer cancel()
 		// #nosec G204 -- argv is compile-time constant.
-		out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+		out, err := exec.CommandContext(ctx, "sysctl", "-n", "hw.memsize").Output()
 		if err != nil {
 			return cores, 0, fmt.Errorf("sysctl hw.memsize: %w", err)
 		}
@@ -153,7 +168,7 @@ const overCommitTolerance = 1.05
 
 // checkMachineChain surfaces host -> VM -> node allocatable -> free, and warns
 // when the nodes claim more of the machine than the VM has.
-func checkMachineChain(ctx context.Context, cs kubernetes.Interface, vm VMProbe, host HostProbe) Result {
+func checkMachineChain(ctx context.Context, cs kubernetes.Interface, serverURL string, vm VMProbe, host HostProbe) Result {
 	const name = "Machine capacity"
 
 	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -183,6 +198,24 @@ func checkMachineChain(ctx context.Context, cs kubernetes.Interface, vm VMProbe,
 			Name:   name,
 			Status: StatusUnknown,
 			Detail: "not a local k3d cluster — the host/VM chain applies only to a cluster running on this machine's Docker VM",
+		}
+	}
+
+	// k3d node NAMES are not proof the cluster is on THIS machine (Bugbot on
+	// #541): a kubeconfig pointing at another host's k3d cluster — a LAN
+	// address, an SSH tunnel, a copied config — has the same names while
+	// `docker info` here describes an unrelated VM. Comparing the two is the
+	// same error the EKS guard above refuses, so refuse it too.
+	//
+	// A PRESENT, non-loopback endpoint is the disqualifier. An empty ServerURL
+	// is documented as fine throughout this package, so it falls through and is
+	// measured on the node-name evidence — a missing Option must not silence a
+	// check that has something to go on.
+	if serverURL != "" && !isLoopback(serverURL) {
+		return Result{
+			Name:   name,
+			Status: StatusUnknown,
+			Detail: fmt.Sprintf("the cluster API is at %s, not this machine — the host/VM chain describes the Docker VM the CLI runs on, so it cannot speak for a remote k3d cluster", serverURL),
 		}
 	}
 
@@ -231,7 +264,7 @@ func checkMachineChain(ctx context.Context, cs kubernetes.Interface, vm VMProbe,
 	}
 
 	chain := ""
-	if _, hostMem, herr := host(); herr == nil && hostMem > 0 {
+	if _, hostMem, herr := host(ctx); herr == nil && hostMem > 0 {
 		chain = fmt.Sprintf("host %s → ", gib(hostMem))
 	}
 	chain += fmt.Sprintf("Docker VM %s (%d cpu) → %d node%s claiming %s → %s unrequested",

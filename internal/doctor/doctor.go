@@ -198,7 +198,7 @@ func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 		checkRestartHistory(ctx, cs, ns),
 		checkPVC(ctx, cs, ns),
 		checkNodeFit(ctx, cs, jmEnv),
-		checkMachineChain(ctx, cs, opts.VMProbe, opts.HostProbe),
+		checkMachineChain(ctx, cs, opts.ServerURL, opts.VMProbe, opts.HostProbe),
 		checkImagePull(ctx, cs, ns, release),
 		checkProxy(jmEnv),
 		checkBackendEgress(ctx, jmEnv, opts.HTTPProbe),
