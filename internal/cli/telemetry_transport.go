@@ -286,7 +286,7 @@ func postBatch(ctx context.Context, url, token string, batch []spooledEvent) pos
 // computed api.BaseURL() internally had no seam — its own test posted to
 // PRODUCTION; and one that computed the spool path internally drained another
 // environment's queue into this one's endpoint (Bugbot on #542).
-func deliver(spool, url, token string, ev spooledEvent, now time.Time) {
+func deliver(spool, url, token, env string, ev spooledEvent, now time.Time) {
 	path := spool
 	pending := readSpool(path)
 
@@ -301,11 +301,24 @@ func deliver(spool, url, token string, ev spooledEvent, now time.Time) {
 	batch = append(batch, drained...)
 	batch = append(batch, ev)
 
+	// THE INSTALLER'S RECORDS RIDE ALONG (backend#2217 option b). It produces
+	// contract events and cannot deliver them — it holds a provisioning pair, not
+	// a bearer token — so the CLI, which does hold one, carries them. Filtered to
+	// THIS environment by each record's own `deployment.environment`, because the
+	// installer's spool is not partitioned by env the way ours is.
+	//
+	// Appended AFTER our own, so a full installer spool can never crowd out the
+	// event this invocation just produced.
+	installer := installerRecords(installerSpoolFiles(os.Getenv), env, installerDrainMax)
+	batch = append(batch, installer.events...)
+
 	// No token means not signed in. Spool rather than attempt: the events are
 	// still worth sending after the next login, and a POST with no credential
 	// would spend the budget earning a 401.
 	if token == "" {
 		_ = writeSpool(path, append(pending, ev))
+		// The installer's files are deliberately NOT touched here. Not signed in
+		// means they were never sent, and they are not ours to discard.
 		return
 	}
 
@@ -317,6 +330,11 @@ func deliver(spool, url, token string, ev spooledEvent, now time.Time) {
 		// Both consume the batch. The difference is only whether the server
 		// stored it, and neither is a reason to carry it again.
 		_ = writeSpool(path, pending[len(drained):])
+		// The installer's files are only ever touched on a path that CONSUMED
+		// them. A discard clears them too, for the same reason it clears ours: a
+		// permanently unparseable batch carried forever wedges every later send,
+		// and these records are as unparseable as the rest of it.
+		clearInstallerRecords(installer.remainder)
 	case postRetry:
 		_ = writeSpool(path, append(pending, ev))
 	}
@@ -354,7 +372,7 @@ func pendingSink(env string) telemetry.Sink {
 		return nil
 	}
 	return func(resource map[string]string, record map[string]any) {
-		deliver(spool, url, telemetryToken(env), spooledEvent{
+		deliver(spool, url, telemetryToken(env), env, spooledEvent{
 			Resource:   resource,
 			Attributes: record,
 		}, time.Now())
