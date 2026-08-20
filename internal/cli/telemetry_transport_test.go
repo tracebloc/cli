@@ -331,14 +331,14 @@ func TestPostBatchSendsBearerAndJSON(t *testing.T) {
 // The partition case: the server is unreachable, so the event must be on disk
 // afterwards. This is the behaviour option (c) was chosen for.
 func TestDeliverSpoolsWhenTheServerIsUnreachable(t *testing.T) {
-	path := withTempConfigDir(t)
+	path := withTempConfigDir(t, "prod")
 	// A closed listener's address: connection refused, immediately, and no
 	// request ever leaves the machine.
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := srv.URL + telemetryIngestPath
 	srv.Close()
 
-	deliver(url, "tok", event("run-partition", 3), time.Now())
+	deliver(path, url, "tok", event("run-partition", 3), time.Now())
 
 	got := readSpool(path)
 	if len(got) != 1 {
@@ -350,8 +350,8 @@ func TestDeliverSpoolsWhenTheServerIsUnreachable(t *testing.T) {
 }
 
 func TestDeliverSpoolsWhenNotSignedIn(t *testing.T) {
-	path := withTempConfigDir(t)
-	deliver("http://127.0.0.1:1"+telemetryIngestPath, "", event("run-anon", 0), time.Now())
+	path := withTempConfigDir(t, "prod")
+	deliver(path, "http://127.0.0.1:1"+telemetryIngestPath, "", event("run-anon", 0), time.Now())
 	got := readSpool(path)
 	if len(got) != 1 {
 		t.Fatalf("no token must spool rather than post; got %d records", len(got))
@@ -362,9 +362,9 @@ func TestDeliverSpoolsWhenNotSignedIn(t *testing.T) {
 }
 
 func TestDeliverKeepsTheSpoolBoundedAcrossManyFailures(t *testing.T) {
-	path := withTempConfigDir(t)
+	path := withTempConfigDir(t, "prod")
 	for i := 0; i < telemetrySpoolMax+10; i++ {
-		deliver("http://127.0.0.1:1"+telemetryIngestPath, "", event(fmt.Sprintf("run-%02d", i), i), time.Now())
+		deliver(path, "http://127.0.0.1:1"+telemetryIngestPath, "", event(fmt.Sprintf("run-%02d", i), i), time.Now())
 	}
 	got := readSpool(path)
 	if len(got) != telemetrySpoolMax {
@@ -375,12 +375,13 @@ func TestDeliverKeepsTheSpoolBoundedAcrossManyFailures(t *testing.T) {
 	}
 }
 
-// withTempConfigDir points config.Dir() at a temp dir and returns the spool path.
-func withTempConfigDir(t *testing.T) string {
+// withTempConfigDir points config.Dir() at a temp dir and returns the spool path
+// for `env`.
+func withTempConfigDir(t *testing.T, env string) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("TRACEBLOC_CONFIG_DIR", dir)
-	path, err := telemetrySpoolPath()
+	path, err := telemetrySpoolPath(env)
 	if err != nil {
 		t.Fatalf("telemetrySpoolPath: %v", err)
 	}
@@ -482,5 +483,90 @@ func TestSpoolRoundTripKeepsRealsAsDoubles(t *testing.T) {
 	}
 	if strings.Contains(string(drained), `"intValue":"0"`) {
 		t.Errorf("0.25 was truncated to an integer across the spool: %s", drained)
+	}
+}
+
+// ───────────────────────────────────── the spool must not cross environments
+
+// THE LEAK Bugbot FOUND. A single host-wide spool meant records queued against
+// one backend were drained by the next invocation against ANOTHER — POSTed to its
+// endpoint, with its token, still carrying the first one's
+// `deployment.environment`. Reproduced before fixing: a prod-labelled record
+// arrived at a dev endpoint.
+//
+// Asserts BOTH halves, because either alone is satisfiable by a bug: nothing
+// prod-labelled reaches the dev endpoint, AND the prod spool still holds its
+// record afterwards. A fix that simply discarded the other environment's queue
+// would pass the first assertion.
+func TestTheSpoolDoesNotLeakAcrossEnvironments(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TRACEBLOC_CONFIG_DIR", dir)
+
+	prodSpool, err := telemetrySpoolPath("prod")
+	if err != nil {
+		t.Fatalf("telemetrySpoolPath(prod): %v", err)
+	}
+	devSpool, err := telemetrySpoolPath("dev")
+	if err != nil {
+		t.Fatalf("telemetrySpoolPath(dev): %v", err)
+	}
+	if prodSpool == devSpool {
+		t.Fatalf("prod and dev must not share a spool file; both are %q", prodSpool)
+	}
+
+	prodEvent := spooledEvent{
+		Resource: map[string]string{
+			"service.name":           "cli",
+			"deployment.environment": "prod",
+			"service.instance.id":    "prod-run",
+		},
+		Attributes: map[string]any{"event.name": "cli.command.failed", "error.type": "usage"},
+	}
+	// Unreachable endpoint, so it spools against prod.
+	deliver(prodSpool, "http://127.0.0.1:1"+telemetryIngestPath, "prod-token", prodEvent, time.Now())
+	if got := readSpool(prodSpool); len(got) != 1 {
+		t.Fatalf("setup: the prod event should be spooled; got %d records", len(got))
+	}
+
+	var received string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received = string(body)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	devEvent := spooledEvent{
+		Resource:   map[string]string{"service.name": "cli", "deployment.environment": "dev"},
+		Attributes: map[string]any{"event.name": "cli.command.succeeded"},
+	}
+	deliver(devSpool, srv.URL+telemetryIngestPath, "dev-token", devEvent, time.Now())
+
+	if received == "" {
+		t.Fatal("the dev endpoint received nothing; the dev delivery did not happen")
+	}
+	if strings.Contains(received, `"stringValue":"prod"`) || strings.Contains(received, "prod-run") {
+		t.Errorf("a prod-labelled record was POSTed to the dev endpoint: %s", received)
+	}
+	// The other environment's records must still be WAITING, not discarded.
+	if got := readSpool(prodSpool); len(got) != 1 {
+		t.Errorf("the prod spool should still hold its record after a dev delivery; got %d", len(got))
+	}
+}
+
+func TestSpoolEnvSlugRefusesPathTraversal(t *testing.T) {
+	// Never reachable with the closed dev/stg/prod set — asserted because a path
+	// segment built from a string is a traversal waiting for that set to open.
+	for _, env := range []string{"../../etc", "prod/../dev", "", "  ", "PROD"} {
+		slug := spoolEnvSlug(env)
+		if strings.ContainsAny(slug, "/.\\") {
+			t.Errorf("spoolEnvSlug(%q) = %q, which can escape the telemetry directory", env, slug)
+		}
+		if slug == "" {
+			t.Errorf("spoolEnvSlug(%q) returned empty, which would make the spool a directory", env)
+		}
+	}
+	if got := spoolEnvSlug("PROD"); got != "prod" {
+		t.Errorf("spoolEnvSlug should normalise case; got %q", got)
 	}
 }

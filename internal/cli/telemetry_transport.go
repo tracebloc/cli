@@ -75,12 +75,48 @@ const (
 
 // telemetrySpoolPath is where unsent events wait, under the CLI's own config
 // directory so it honours $TRACEBLOC_CONFIG_DIR like everything else.
-func telemetrySpoolPath() (string, error) {
+//
+// ONE SPOOL PER ENVIRONMENT, and the partition is a correctness requirement
+// rather than tidiness. A single host-wide `pending.jsonl` leaks across
+// invocations: records queued while signed in to prod get drained by the next
+// command — which may be `tracebloc login --env dev` — and POSTed to dev's
+// endpoint with dev's token while still carrying `deployment.environment=prod`.
+// That is the same label-versus-destination mismatch `deliver` takes a resolved
+// URL to prevent, reopened one level up, across invocations instead of inside
+// one. (Bugbot on #542; reproduced — a prod-labelled record arrived at a dev
+// endpoint before this change.)
+//
+// The consequence, stated rather than hidden: records for an environment the
+// operator never uses again are never delivered. That is the right trade — they
+// are capped, and there is usually no token for that environment to deliver them
+// with anyway. Delivering them to the WRONG backend is not a better outcome than
+// not delivering them.
+func telemetrySpoolPath(env string) (string, error) {
 	dir, err := config.Dir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "telemetry", "pending.jsonl"), nil
+	return filepath.Join(dir, "telemetry", "pending-"+spoolEnvSlug(env)+".jsonl"), nil
+}
+
+// spoolEnvSlug reduces env to something safe in a filename.
+//
+// The real values are a closed set (dev/stg/prod), so this never fires in
+// practice — it exists because a path segment built from a string is a path
+// traversal waiting for the day that string stops being closed, and "../.." is a
+// worse bug than an ugly filename. Anything unexpected becomes one bucket rather
+// than being silently dropped: an undeliverable record is still evidence.
+func spoolEnvSlug(env string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(env)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
 }
 
 // readSpool returns every parseable event, oldest first.
@@ -244,15 +280,14 @@ func postBatch(ctx context.Context, url, token string, batch []spooledEvent) pos
 // deliver is the sink body: drain what is pending, add this event, attempt once,
 // and persist whatever did not land.
 //
-// TAKES THE RESOLVED URL, not an env to resolve for itself. Two reasons, and the
-// second is the one that bit: a single resolution point means the record's label
-// and its destination cannot disagree, and a `deliver` that computed
-// api.BaseURL() internally had no seam — its own test posted to PRODUCTION.
-func deliver(url, token string, ev spooledEvent, now time.Time) {
-	path, err := telemetrySpoolPath()
-	if err != nil {
-		return
-	}
+// TAKES THE RESOLVED SPOOL PATH AND URL, not an env to resolve for itself. Three
+// reasons, and the last two each bit once: a single resolution point means the
+// record's label, its spool and its destination cannot disagree; a `deliver` that
+// computed api.BaseURL() internally had no seam — its own test posted to
+// PRODUCTION; and one that computed the spool path internally drained another
+// environment's queue into this one's endpoint (Bugbot on #542).
+func deliver(spool, url, token string, ev spooledEvent, now time.Time) {
+	path := spool
 	pending := readSpool(path)
 
 	// The batch is the OLDEST pending events plus this one. Oldest first so a
@@ -308,9 +343,18 @@ func telemetryToken(env string) string {
 // only when there is nowhere to spool and nothing to post to. Everything else
 // is handled inside deliver, silently.
 func pendingSink(env string) telemetry.Sink {
+	// BOTH derived from the same `env`, once. The record's label comes from the
+	// same value (see RecordCommandOutcome), so label, spool and destination are
+	// three views of one resolution rather than three chances to disagree.
 	url := api.BaseURL(env) + telemetryIngestPath
+	spool, err := telemetrySpoolPath(env)
+	if err != nil {
+		// Nowhere to spool and therefore no safe way to retry. Validate-and-drop
+		// is telemetry.SetSink's documented contract for exactly this.
+		return nil
+	}
 	return func(resource map[string]string, record map[string]any) {
-		deliver(url, telemetryToken(env), spooledEvent{
+		deliver(spool, url, telemetryToken(env), spooledEvent{
 			Resource:   resource,
 			Attributes: record,
 		}, time.Now())
