@@ -48,13 +48,14 @@ for entry in $FLOORS; do
   # whole token); the awk comparison below then errors on that as bare source
   # and exits non-zero — which `if awk` reads as "not below floor", prints a
   # bogus "ok", and turns the ratchet into a silent no-op for that package.
-  if [ "$pkg" = "$entry" ] || ! printf '%s' "$min" | grep -qE '^[0-9]+$'; then
+  if [ "$pkg" = "$entry" ] || ! grep -qE '^[0-9]+$' <<<"$min"; then
     echo "::error::malformed FLOORS entry '$entry' (want 'package:INT') — fix scripts/coverage-floor.sh" >&2
     status=1
     continue
   fi
   line="$(go test -cover "./$pkg/" 2>/dev/null | grep -E 'coverage: [0-9]' || true)"
-  pct="$(printf '%s\n' "$line" | sed -nE 's/.*coverage: ([0-9]+(\.[0-9]+)?)% of statements.*/\1/p' | head -1)"
+  pct="$(sed -nE 's/.*coverage: ([0-9]+(\.[0-9]+)?)% of statements.*/\1/p' <<<"$line")"
+  pct="${pct%%$'\n'*}"
   if [ -z "$pct" ]; then
     echo "::error::could not read coverage for ./$pkg/ (did any test run?)" >&2
     status=1
