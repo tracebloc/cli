@@ -36,7 +36,7 @@
     "pod_vram_limit": null,
     "pue_constant": 1.0,
     "ram": 0.0,
-    "status": 0,
+    "status": 2,
     "tdp_of_cpu": 0.0,
     "tdp_of_gpu": 0.0,
     "username": "PINNED_USERNAME",
