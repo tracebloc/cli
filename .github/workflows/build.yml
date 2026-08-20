@@ -48,8 +48,32 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: shellcheck + dash parse
+        # NO `apt-get` (cli#534). Both tools are already on `ubuntu-latest`:
+        # `shellcheck` is preinstalled -- tracebloc/.github's own `quality / shellcheck`
+        # job, a REQUIRED check in 16 repos, calls `shellcheck --version` with no
+        # install at all -- and `dash` IS Ubuntu's `/bin/sh`, an essential package.
+        #
+        # WHY IT HAD TO GO, and it is not tidiness. This step is the first thing in a
+        # REQUIRED check, and `apt-get` here had no retry and no time bound of its own,
+        # so a slow package mirror consumed the whole 10-minute job budget before any
+        # shell was parsed. Measured on cli#533 -- a workflow-only diff that cannot
+        # touch installer behaviour -- which failed FOUR consecutive times:
+        #
+        #   job 96126585157   Installer (shell)   failure   10m16s
+        #     15:34  shellcheck + dash parse   <- 10 minutes here, then killed
+        #
+        # Nothing after the `apt-get` line ever ran, and the annotation said
+        # `Installer (shell)` exceeded 10m -- pointing whoever reads it at the
+        # installer rather than at package fetching.
+        #
+        # Removing the dependency beats hardening it: a step that installs nothing
+        # cannot stall on a mirror, and no retry/timeout wrapper can say that.
+        #
+        # THIS PR'S OWN RUN IS THE PROOF. If either tool were absent the step fails
+        # loudly on the first line, here, before merge -- which is a better check than
+        # any claim in this comment.
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck dash
+          shellcheck --version | head -2
           shellcheck --shell=sh --severity=error scripts/install.sh
           shellcheck --shell=bash --severity=error scripts/check-style.sh
           shellcheck --shell=bash --severity=error scripts/check-tool-pins.sh
