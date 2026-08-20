@@ -170,6 +170,40 @@ func TestSet_ApplyBuildsHelmArgsAndValues(t *testing.T) {
 	}
 }
 
+// TestSet_StampsUserProvenance: the apply carries RESOURCE_PROVENANCE=user all
+// the way into the values helm is given (backend#2220).
+//
+// The unit test on BuildEnvSpec proves the map is right; this proves the map
+// actually reaches helm. Worth having separately because the failure mode is
+// silent: a marker that never lands looks identical to one that landed, and the
+// consequence only shows up much later, when a ladder re-derives a size the
+// operator had chosen on purpose.
+func TestSet_StampsUserProvenance(t *testing.T) {
+	// Start from an edge the INSTALLER marked — the dangerous case. After a
+	// human `resources set`, the label must flip to user; leaving it as
+	// "installer" would advertise a deliberate choice as ours to overwrite.
+	cs := csWith("8", "32Gi", map[string]string{
+		"RESOURCE_LIMITS":     "cpu=2,memory=8Gi",
+		"RESOURCE_PROVENANCE": "installer",
+	})
+	out, err := runSet(t, cs, nil, setReq{
+		cores: "4", memory: "16", coresSet: true, memSet: true, dryRun: true, yes: true,
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "RESOURCE_PROVENANCE") {
+		t.Errorf("the plan does not mention RESOURCE_PROVENANCE at all:\n%s", out)
+	}
+	if !strings.Contains(out, "user") {
+		t.Errorf("the plan does not stamp the set as a human choice:\n%s", out)
+	}
+	// And the envelope still reflects what was asked for (Decision A).
+	if !strings.Contains(out, "cpu=4,memory=16Gi") {
+		t.Errorf("plan lost the requested ceiling:\n%s", out)
+	}
+}
+
 // TestSet_KeepsUnsetDimension: `set --cores 4` changes CPU only and KEEPS the
 // current 8Gi memory (proven via the dry-run plan's resulting values).
 func TestSet_KeepsUnsetDimension(t *testing.T) {
@@ -206,7 +240,15 @@ func TestSet_MaxUsesWholeMachineMinusOverhead(t *testing.T) {
 // helm upgrade entirely.
 func TestSet_NoOpSkipsApply(t *testing.T) {
 	calls := fakeHelm(t)
-	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=4,memory=16Gi"})
+	// RESOURCE_PROVENANCE=user is what makes this a CLEAN no-op (backend#2220):
+	// restating the ceiling on an edge whose size is already recorded as the
+	// operator's choice leaves nothing at all to persist. Without the marker the
+	// command must fall through and stamp it — covered by
+	// TestSet_SameCeilingStampsProvenance below.
+	cs := csWith("8", "32Gi", map[string]string{
+		"RESOURCE_LIMITS":     "cpu=4,memory=16Gi",
+		"RESOURCE_PROVENANCE": "user",
+	})
 	out, err := runSet(t, cs, nil, setReq{cores: "4", memory: "16", coresSet: true, memSet: true, yes: true})
 	if err != nil {
 		t.Fatalf("no-op: %v", err)
@@ -221,6 +263,57 @@ func TestSet_NoOpSkipsApply(t *testing.T) {
 	}
 }
 
+// TestSet_SameCeilingStampsProvenance: the hole Bugbot found on #539 and
+// saadqbal confirmed — a same-size `resources set` used to return BEFORE
+// BuildEnvSpec, so an installer-sized edge kept RESOURCE_PROVENANCE=installer
+// even though a human had just chosen that size.
+//
+// That is the state BuildEnvSpec's own comment calls the most dangerous the
+// marker can be in: a deliberate choice wearing the one label that invites a
+// future ladder to overwrite it. `resources set` restating the current ceiling
+// IS a human choice, so it must persist.
+func TestSet_SameCeilingStampsProvenance(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		provenance string
+	}{
+		{"installer-sized edge", "installer"},
+		{"pre-marker edge", ""},   // ParseTraining normalises to unknown
+		{"junk marker", "banana"}, // ...as does anything unrecognised
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := fakeHelm(t)
+			env := map[string]string{"RESOURCE_LIMITS": "cpu=4,memory=16Gi"}
+			if tc.provenance != "" {
+				env["RESOURCE_PROVENANCE"] = tc.provenance
+			}
+			cs := csWith("8", "32Gi", env)
+			out, err := runSet(t, cs, nil, setReq{
+				cores: "4", memory: "16", coresSet: true, memSet: true, yes: true,
+			})
+			if err != nil {
+				t.Fatalf("same-ceiling set: %v\n%s", err, out)
+			}
+			upgraded := false
+			for _, c := range *calls {
+				if len(c) >= 3 && c[1] == "upgrade" && c[2] != "--help" {
+					upgraded = true
+				}
+			}
+			if !upgraded {
+				t.Errorf("a stale %q marker must NOT be a clean no-op — the apply is what stamps `user`:\n%s",
+					tc.provenance, out)
+			}
+			if strings.Contains(out, "nothing to change") {
+				t.Errorf("must not claim nothing changed while the marker is being corrected:\n%s", out)
+			}
+			if !strings.Contains(out, "explicit choice") {
+				t.Errorf("the reason for the apply should be stated:\n%s", out)
+			}
+		})
+	}
+}
+
 // TestSet_NoOpEvenWhenCurrentNoLongerFits: restating the ceiling that's already
 // applied must stay a clean no-op success even when the machine has SHRUNK under
 // it (smaller Docker Desktop VM, lost node) — the no-op check runs before the
@@ -228,7 +321,12 @@ func TestSet_NoOpSkipsApply(t *testing.T) {
 // change on the same shrunken machine is still fit-checked.
 func TestSet_NoOpEvenWhenCurrentNoLongerFits(t *testing.T) {
 	// Node 4 CPU / 8 GiB, but the cluster already runs with cpu=8,memory=16Gi.
-	cur := map[string]string{"RESOURCE_LIMITS": "cpu=8,memory=16Gi"}
+	// Marked `user` so this stays the clean-no-op case it is testing; the
+	// stale-marker fall-through has its own test (backend#2220).
+	cur := map[string]string{
+		"RESOURCE_LIMITS":     "cpu=8,memory=16Gi",
+		"RESOURCE_PROVENANCE": "user",
+	}
 
 	t.Run("flags restating the current ceiling", func(t *testing.T) {
 		calls := fakeHelm(t)
@@ -426,7 +524,14 @@ func TestWizard_GPURowOmittedWhenNoGPU(t *testing.T) {
 func TestWizard_LeaveAsIs(t *testing.T) {
 	calls := fakeHelm(t)
 	pr := &fakePrompter{answers: map[string]string{"How much may one training run use?": "Leave it as it is"}}
-	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=4,memory=16Gi"})
+	// Marked `user` so "leave it as it is" is the clean no-op this test is about.
+	// On an edge whose size is NOT yet recorded as the operator's choice, picking
+	// "leave it as it is" does still persist — the marker is being corrected, and
+	// TestSet_SameCeilingStampsProvenance covers that (backend#2220).
+	cs := csWith("8", "32Gi", map[string]string{
+		"RESOURCE_LIMITS":     "cpu=4,memory=16Gi",
+		"RESOURCE_PROVENANCE": "user",
+	})
 	out, err := runSet(t, cs, pr, setReq{})
 	if err != nil {
 		t.Fatalf("wizard leave: %v", err)

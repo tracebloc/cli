@@ -208,7 +208,23 @@ const NoGPUEnvValue = ""
 // always written.
 func BuildEnvSpec(cpu, mem resource.Quantity, gpuName corev1.ResourceName, gpu resource.Quantity, wantGPU bool) map[string]string {
 	spec := fmt.Sprintf("cpu=%s,memory=%s", cpu.String(), mem.String())
-	env := map[string]string{"RESOURCE_REQUESTS": spec, "RESOURCE_LIMITS": spec}
+	env := map[string]string{
+		"RESOURCE_REQUESTS": spec,
+		"RESOURCE_LIMITS":   spec,
+		// backend#2220: `resources set` IS the human choice, so stamp it. This
+		// is not cosmetic bookkeeping — it is the difference between a future
+		// ladder re-deriving an installer-written size and it silently
+		// overruling a deliberate one.
+		//
+		// It must be written unconditionally, and especially when a marker is
+		// already present: an edge the installer stamped `installer` and the
+		// operator then re-sized by hand would otherwise keep saying
+		// `installer`, which is the single most dangerous state the marker can
+		// be in — a human choice wearing a label that invites overwriting.
+		// Omitting the key would not clear it either, for the same
+		// --reset-then-reuse-values reason documented above.
+		"RESOURCE_PROVENANCE": ProvenanceUser,
+	}
 	if wantGPU {
 		g := fmt.Sprintf("%s=%d", gpuName, gpu.Value())
 		env["GPU_LIMITS"], env["GPU_REQUESTS"] = g, g
