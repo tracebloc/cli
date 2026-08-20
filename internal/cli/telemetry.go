@@ -8,12 +8,13 @@ package cli
 // "terminal event on every path" would then be true only for the handlers
 // somebody remembered.
 //
-// WHERE THIS STOPS TODAY. The transport is a seam. RFC-BACKEND-1872's Collector
-// gateway was replaced on 17 Aug by an ingest endpoint on the backend
-// (rfcs#28), which is backend#1905 and does not exist yet — so pendingSink
-// returns nil and every event is validated and dropped. That is deliberate:
-// validation runs on every build regardless, so a malformed event fails in CI
-// wherever the binary was built, and connecting #1905 is one function.
+// WHERE THE TRANSPORT LIVES. RFC-BACKEND-1872's Collector gateway was replaced
+// on 17 Aug by an ingest endpoint on the backend (rfcs#28, backend#1905), which
+// now accepts OTLP/HTTP JSON (backend#2213). Delivery is implemented in
+// telemetry_transport.go and the mapping in telemetry_otlp.go (backend#2217);
+// this file still owns only WHAT is emitted. Validation runs on every build
+// regardless of whether delivery is configured, so a malformed event fails in CI
+// wherever the binary was built.
 
 import (
 	"crypto/rand"
@@ -150,13 +151,6 @@ func processInstanceID() string {
 	return hex.EncodeToString(b)
 }
 
-// pendingSink is the transport seam for backend#1905.
-//
-// nil means validate-and-drop (telemetry.SetSink's documented contract). When
-// the ingest endpoint lands this returns the client that posts to it, and
-// nothing else in this file changes.
-func pendingSink() telemetry.Sink { return nil }
-
 // RecordCommandOutcome emits the single terminal event for this invocation.
 // main.go calls it once, after the command tree has returned and before exit.
 //
@@ -164,7 +158,11 @@ func pendingSink() telemetry.Sink { return nil }
 // was unhappy would be a strictly worse CLI. A malformed event is caught by the
 // tests below, where it is free.
 func RecordCommandOutcome(root, executed *cobra.Command, info BuildInfo, exitCode int, elapsed time.Duration) {
-	_ = recordCommandOutcome(root, executed, info, exitCode, elapsed, os.Getenv, pendingSink())
+	// The sink is built from the SAME resolved env the emitter is labelled with,
+	// not from a second read of the config. Two independent resolutions here is
+	// how a record ends up labelled `stg` and posted to prod.
+	env := telemetryEnv(signedInEnv())
+	_ = recordCommandOutcome(root, executed, info, exitCode, elapsed, os.Getenv, pendingSink(env))
 }
 
 // recordCommandOutcome is RecordCommandOutcome with its two ambient
