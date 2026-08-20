@@ -58,6 +58,24 @@ jobs:
       # be missing are not the same thing:
       #
       #   token present            -> run the check (the normal path)
+      #   absent, Dependabot PR    -> PASS with a ::notice::. Dependabot runs get
+      #                               DEPENDABOT-scoped secrets, never Actions
+      #                               secrets, so the token is empty on them
+      #                               however correctly it is set -- and unlike a
+      #                               fork, head.repo.fork is FALSE, so they would
+      #                               otherwise land in the misconfiguration branch
+      #                               below and block every security bump (Bugbot,
+      #                               averaging-service#367). Safe to defer here:
+      #                               a dependency bump cannot alter
+      #                               internal/api/testdata/*.json, and if it did,
+      #                               internal/api/contracts_test.go replays every
+      #                               fixture through the real decode paths under
+      #                               the REQUIRED `Test` check, with no token.
+      #                               Divergence from the pinned backend ref is
+      #                               re-checked by the push run on develop/main,
+      #                               where Actions secrets are available. Set the
+      #                               token as a Dependabot secret too and this
+      #                               branch stops being reached.
       #   absent, fork PR          -> FAIL. GitHub does not expose repo secrets to
       #                               forks by design, so the check genuinely
       #                               cannot run. A maintainer verifies the
@@ -76,6 +94,8 @@ jobs:
         env:
           BACKEND_CONTRACTS_TOKEN: ${{ secrets.BACKEND_CONTRACTS_TOKEN }}
           IS_FORK: ${{ github.event.pull_request.head.repo.fork || false }}
+          # The PR author, not github.actor: stable across re-runs of the same PR.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'skip-fixtures-drift') }}
         run: |
           set -uo pipefail
@@ -87,6 +107,11 @@ jobs:
 
           if [ -n "$BACKEND_CONTRACTS_TOKEN" ]; then
             exec ./scripts/sync-backend-fixtures.sh --check
+          fi
+
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "::notice title=Backend fixtures drift deferred::Dependabot runs receive Dependabot-scoped secrets, not Actions secrets, so BACKEND_CONTRACTS_TOKEN is empty here by design. A dependency bump cannot alter internal/api/testdata/*.json, and internal/api/contracts_test.go replays every fixture through the real decode paths under the required Test check without needing a token. Drift against the pinned backend ref is re-checked by the push run on develop/main. Set BACKEND_CONTRACTS_TOKEN as a Dependabot secret too for full coverage here."
+            exit 0
           fi
 
           if [ "$IS_FORK" = "true" ]; then
