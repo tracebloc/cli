@@ -80,6 +80,23 @@ type otlpExportLogsServiceRequest struct {
 // values the emitter went out of its way to admit — a silent hole one layer
 // below the check that permits them.
 func anyValue(value any) (otlpAnyValue, bool) {
+	// json.Number FIRST, and the ordering is load-bearing rather than tidy.
+	// json.Number is a NAMED STRING TYPE, so the kind switch below would match
+	// reflect.String and emit `stringValue` — turning an exit code into a string
+	// on the drained path, which is a different wrong answer from the float64 one
+	// this case exists to fix. A value read back from the spool has to be able to
+	// say whether it was an integer, and only this branch can.
+	if num, ok := value.(json.Number); ok {
+		if i, err := num.Int64(); err == nil {
+			s := strconv.FormatInt(i, 10)
+			return otlpAnyValue{IntValue: &s}, true
+		}
+		if f, err := num.Float64(); err == nil {
+			return otlpAnyValue{DoubleValue: &f}, true
+		}
+		// Neither an integer nor a real: not a number this contract can carry.
+		return otlpAnyValue{}, false
+	}
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
 	case reflect.String:

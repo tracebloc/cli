@@ -389,3 +389,98 @@ func withTempConfigDir(t *testing.T) string {
 	}
 	return path
 }
+
+// ─────────────────────────────────────────── the spool must not recode numbers
+
+// THE DEFECT @saqlainsyed007 AND BUGBOT FOUND, as a regression test.
+//
+// `TestIntegersAreEncodedAsStrings` above operates on the in-memory shape and
+// never touches writeSpool/readSpool, so it stayed green while every DRAINED
+// record — the partition-time events the spool exists to preserve — encoded
+// integers as `doubleValue`. The same event went out two ways, and the wrong way
+// on the path the whole design is for.
+//
+// This asserts the two encodings AGREE, rather than asserting the round-trip
+// looks right on its own: a test that only checked the drained payload could be
+// satisfied by both paths being wrong together.
+func TestSpoolRoundTripPreservesIntegerEncoding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "telemetry", "pending.jsonl")
+	ev := event("run-roundtrip", 2)
+
+	direct, err := otlpPayload([]spooledEvent{ev})
+	if err != nil {
+		t.Fatalf("otlpPayload(in-memory): %v", err)
+	}
+	if err := writeSpool(path, []spooledEvent{ev}); err != nil {
+		t.Fatalf("writeSpool: %v", err)
+	}
+	reloaded := readSpool(path)
+	if len(reloaded) != 1 {
+		t.Fatalf("expected 1 spooled event back, got %d", len(reloaded))
+	}
+	drained, err := otlpPayload(reloaded)
+	if err != nil {
+		t.Fatalf("otlpPayload(drained): %v", err)
+	}
+
+	// The in-memory path is the reference. Asserted explicitly so a regression
+	// there cannot make the comparison below pass by both sides breaking.
+	if !strings.Contains(string(direct), `"intValue":"2"`) {
+		t.Fatalf("the in-memory reference no longer encodes ints canonically: %s", direct)
+	}
+	if !strings.Contains(string(drained), `"intValue":"2"`) {
+		t.Errorf("a drained record must encode exit_code as intValue, not doubleValue.\n"+
+			" in-memory: %s\n drained  : %s", direct, drained)
+	}
+	// NOT "no doubleValue anywhere" — the fixture legitimately carries
+	// `sampling_rate: 0.5`, which MUST stay a double. The first draft of this
+	// test asserted the broad thing and failed on correct output, which would
+	// have been a test bug reported as a code bug. Assert per-attribute instead.
+	for _, intAttr := range []string{"tracebloc.cli.exit_code", "tracebloc.cli.duration_ms"} {
+		if !strings.Contains(string(drained), `"key":"`+intAttr+`","value":{"intValue":"`) {
+			t.Errorf("%s is not encoded as intValue on the drained path: %s", intAttr, drained)
+		}
+	}
+
+	// Field by field, so the failure names WHICH attribute drifted rather than
+	// leaving a reader to diff two payloads by eye.
+	directFlat := flatten(t, resourceLogs(t, direct)[0])
+	drainedFlat := flatten(t, resourceLogs(t, drained)[0])
+	for _, key := range []string{
+		"tracebloc.cli.exit_code",
+		"tracebloc.cli.duration_ms",
+		"tracebloc.cli.interactive",
+		"tracebloc.cli.sampling_rate",
+		"event.name",
+		"service.instance.id",
+	} {
+		if directFlat[key] != drainedFlat[key] {
+			t.Errorf("%s changed across the spool: in-memory %#v, drained %#v",
+				key, directFlat[key], drainedFlat[key])
+		}
+	}
+}
+
+// A real (non-integral) number must still come back as a double, or the fix for
+// integers would silently truncate every float the contract allows.
+func TestSpoolRoundTripKeepsRealsAsDoubles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "telemetry", "pending.jsonl")
+	ev := spooledEvent{
+		Resource:   map[string]string{"service.name": "cli"},
+		Attributes: map[string]any{"tracebloc.cli.sampling_rate": 0.25},
+	}
+	if err := writeSpool(path, []spooledEvent{ev}); err != nil {
+		t.Fatalf("writeSpool: %v", err)
+	}
+	drained, err := otlpPayload(readSpool(path))
+	if err != nil {
+		t.Fatalf("otlpPayload: %v", err)
+	}
+	flat := flatten(t, resourceLogs(t, drained)[0])
+	if got := flat["tracebloc.cli.sampling_rate"]; got != 0.25 {
+		t.Errorf("a real must survive the spool as a double; got %#v from %s", got, drained)
+	}
+	if strings.Contains(string(drained), `"intValue":"0"`) {
+		t.Errorf("0.25 was truncated to an integer across the spool: %s", drained)
+	}
+}

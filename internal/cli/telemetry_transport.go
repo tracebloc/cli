@@ -103,7 +103,22 @@ func readSpool(path string) []spooledEvent {
 			continue
 		}
 		var ev spooledEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		// UseNumber, NOT json.Unmarshal — and this is the difference between the
+		// first delivery and every retry sending the same event two ways.
+		//
+		// A plain unmarshal decodes every JSON number into float64, so an
+		// `exit_code` that went out as a canonical `intValue` string on the
+		// in-memory attempt came back as a float and went out as `doubleValue` on
+		// the drained one. Same event, two encodings, and the wrong one on the
+		// path the spool exists for — the partition-time retry. `json.Number`
+		// defers the choice to `anyValue`, which can then still tell an integer
+		// from a real. (@saqlainsyed007 and Bugbot on #542; reproduced before
+		// fixing, and `TestSpoolRoundTripPreservesIntegerEncoding` is the
+		// regression — the pre-existing integer test worked on the in-memory
+		// shape only and stayed green through this.)
+		dec := json.NewDecoder(strings.NewReader(line))
+		dec.UseNumber()
+		if err := dec.Decode(&ev); err != nil {
 			continue
 		}
 		if len(ev.Resource) == 0 && len(ev.Attributes) == 0 {
