@@ -124,7 +124,7 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	// multi-client redirect note is the opening line and self-leads its blank.
 	target, err := resolveClusterTarget(ctx, p, opts, binding, false, true)
 	if err != nil {
-		return binding.explain(err)
+		return binding.explain(ctx, err)
 	}
 	resolved, cs, release := target.Resolved, target.Clientset, target.Release
 

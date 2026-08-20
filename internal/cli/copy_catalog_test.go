@@ -140,29 +140,29 @@ func TestCopyCatalog(t *testing.T) {
 	imgDir := imageDirLayout(t)
 	txtDir := textDirLayout(t)
 	tabularIngest := driveIngest(tabDir, "~/data/patients", map[string]string{
-		"Do you want to ingest training or test data?": "train",
-		"Please name the dataset.":                     "hospital_train",
-		"Where is your data?":                          tabDir,
-		"Which task?":                                  "tabular_classification",
-		"Which column holds the label?":                "churned",
+		"Split:": "train",
+		"Name:":  "hospital_train",
+		"Path:":  tabDir,
+		"Task:":  "tabular_classification",
+		"Label:": "churned",
 	})
 	imageIngest := driveIngest(imgDir, "~/data/xray", map[string]string{
-		"Do you want to ingest training or test data?": "train",
-		"Please name the dataset.":                     "xray_train",
-		"Where is your data?":                          imgDir,
-		"Which task?":                                  "image_classification",
-		"Which column holds the label?":                "label",
-		"Image resolution":                             "224x224",
+		"Split:":      "train",
+		"Name:":       "xray_train",
+		"Path:":       imgDir,
+		"Task:":       "image_classification",
+		"Label:":      "label",
+		"Resolution:": "224x224",
 	})
 	// Text family: text_classification shows the label question; the picker lists
 	// every text task + blurb. (Self-supervised text — masked/causal LM, seq2seq
 	// — skips the label step; that path is covered by the backstop.)
 	textIngest := driveIngest(txtDir, "~/data/reviews", map[string]string{
-		"Do you want to ingest training or test data?": "train",
-		"Please name the dataset.":                     "reviews_train",
-		"Where is your data?":                          txtDir,
-		"Which task?":                                  "text_classification",
-		"Which column holds the label?":                "label",
+		"Split:": "train",
+		"Name:":  "reviews_train",
+		"Path:":  txtDir,
+		"Task:":  "text_classification",
+		"Label:": "label",
 	})
 	// execIngest renders the run that follows the confirm — the three steps and
 	// the final summary. printLocalSummary + submit.RenderSummary are the REAL
@@ -211,7 +211,7 @@ func TestCopyCatalog(t *testing.T) {
 	}
 	dataIngestFile := doc(
 		"tb data ingest — stage a dataset into your secure environment",
-		"What you see when you run `tb data ingest` with no flags: a short intro, a\nfour-step guided setup (intent, name, path, task) then the task-specific\nquestions, and — after you confirm — the run itself. The setup is\ndriven through the real flow for one task in each family (tabular, image, text)\nso the task-specific questions are visible; each core question prints as a\n`Step N of 4 · …` header, the task-specific ones (the label column, and extras\nlike resolution or schema) as their own header, the\nsupporting line beneath it, and the `?` line shows your answer. The run (shown\nonce, for tabular) is the three steps + the final summary as the CLI renders\nthem. Values passed as flags (--as, --task, a path, …) pre-fill the matching\nquestions rather than skipping them — guided mode always asks. The\nother tasks' extra questions (keypoints, label policy, time column),\nself-supervised text (which skips the label question), and the failure-summary\nwordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams\nthrough (MySQL waits, the 📊 banner, per-validator lines) is the engine's own\nstdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
+		"What you see when you run `tb data ingest` with no flags: a short intro, a\nfour-step guided setup (intent, name, path, task) then the task-specific\nquestions, and — after you confirm — the run itself. The setup is\ndriven through the real flow for one task in each family (tabular, image, text)\nso the task-specific questions are visible; each core question prints as a\n`Step N of 4 · …` header, the task-specific ones (the label column, and extras\nlike resolution or schema) as their own header, the\nsupporting line beneath it, and the `?` line carries a short noun label\n(`Path:`, `Task:`) plus your answer. The run (shown\nonce, for tabular) is the three steps + the final summary as the CLI renders\nthem. Values passed as flags (--as, --task, a path, …) pre-fill the matching\nquestions rather than skipping them — guided mode always asks. The\nother tasks' extra questions (keypoints, label policy, time column),\nself-supervised text (which skips the label question), and the failure-summary\nwordings are in zz-all-strings.golden. The raw ingestor stream the CLI streams\nthrough (MySQL waits, the 📊 banner, per-validator lines) is the engine's own\nstdout — not CLI copy — so it isn't shown. (`tb ingest` is a hidden deprecated\nalias; `push` is a deprecated alias of the verb.)",
 		[]run{
 			{"tb data ingest   # guided · tabular classification", tabularIngest},
 			{"tb data ingest   # guided · image classification", imageIngest},
@@ -476,8 +476,8 @@ func quoteAll(in []string) []string {
 	return out
 }
 
-// catalogPrompter is the prompter seam's catalog double: it prints each question
-// the way the terminal shows it ("? <question> <answer>") and returns a scripted
+// catalogPrompter is the prompter seam's catalog double: it prints each prompt
+// the way the terminal shows it ("? <label> <answer>") and returns a scripted
 // answer, so driving the REAL runInteractive produces a byte-exact transcript of
 // the guided flow — every prompt, in order. The description line above each
 // question is the real p.PromptHint in runInteractive; only the "? …" line is
@@ -494,32 +494,35 @@ func (c *catalogPrompter) pick(label, def string) string {
 	return def
 }
 
-// answerLine renders the input line the way the bare surveyPrompter does for the
-// guided flow: the question is already printed by the CLI (PromptStep/Section),
-// so the prompt shows only "? <answer>" (or "?" on a blank/accept-default).
-func (c *catalogPrompter) answerLine(ans string) {
+// answerLine renders the input line the way survey does: the icon, the
+// prompter's Message verbatim, then the answer separated by one space. The
+// guided flow's Message is a short noun label ("Path:"), so the catalog shows
+// "? Path: ~/data/patients" — the question itself is already printed by the CLI
+// as a PromptStep/Section header (#504). A blank answer (Enter accepts the
+// default) leaves the label alone on the line rather than a trailing space.
+func (c *catalogPrompter) answerLine(label, ans string) {
 	if ans == "" {
-		fmt.Fprintf(c.w, "?\n")
+		fmt.Fprintf(c.w, "? %s\n", label)
 		return
 	}
-	fmt.Fprintf(c.w, "? %s\n", ans)
+	fmt.Fprintf(c.w, "? %s %s\n", label, ans)
 }
 
 func (c *catalogPrompter) Input(label, _, def string, _ func(string) error) (string, error) {
 	ans := c.pick(label, def)
-	c.answerLine(ans)
+	c.answerLine(label, ans)
 	return ans, nil
 }
 
 func (c *catalogPrompter) Select(label, _ string, _ []string, def string) (string, error) {
 	ans := c.pick(label, def)
-	c.answerLine(ans)
+	c.answerLine(label, ans)
 	return ans, nil
 }
 
-// Confirm keeps its label (never bare — see surveyPrompter.Confirm): a y/N
-// prompt has no header of its own, so survey draws "? <question> <answer>".
-// Mirror that here so the catalog shows the confirm question.
+// Confirm carries the WHOLE question, not a short label (see
+// surveyPrompter.Confirm): a y/N prompt has no header of its own, so survey
+// draws "? <question> <answer>". Mirror that here so the catalog shows it.
 func (c *catalogPrompter) Confirm(label string, def bool) (bool, error) {
 	ans := "No"
 	if def {
@@ -527,6 +530,57 @@ func (c *catalogPrompter) Confirm(label string, def bool) (bool, error) {
 	}
 	fmt.Fprintf(c.w, "? %s %s\n", label, ans)
 	return def, nil
+}
+
+// literalString folds a compile-time-constant string expression to its value.
+//
+// A message written across two source lines —
+//
+//	fmt.Errorf("unknown backend environment %q — valid values are … "+
+//		"set CLIENT_ENV or pass --env", env)
+//
+// — is an *ast.BinaryExpr, not a *ast.BasicLit. The harvest used to type-assert
+// straight to *ast.BasicLit, so it skipped those arguments entirely: not the
+// second half, the WHOLE message. That made this file's own header claim ("the
+// completeness backstop") false for an entire syntactic class of copy, and it
+// passed forever because nothing it could see had gone missing. The env-validation
+// error above was absent from the golden while being plainly user-facing.
+//
+// Only an ALL-literal join folds. An operand that is a variable, a call, or a
+// constant identifier makes the whole expression unfoldable and yields false —
+// deliberately, because emitting the literal half of a part-computed message
+// would put a sentence in the catalog that no user ever sees, and mark it
+// inventoried while the real text drifts. Absent is honest; half is not.
+func literalString(e ast.Expr) (string, bool) {
+	switch n := e.(type) {
+	case *ast.BasicLit:
+		if n.Kind != token.STRING {
+			return "", false
+		}
+		s, err := strconv.Unquote(n.Value)
+		if err != nil {
+			return "", false
+		}
+		return s, true
+	case *ast.ParenExpr:
+		return literalString(n.X)
+	case *ast.BinaryExpr:
+		// ADD only: any other operator on strings is not a concatenation, and
+		// arithmetic on non-strings is filtered by the BasicLit kind check above.
+		if n.Op != token.ADD {
+			return "", false
+		}
+		l, ok := literalString(n.X)
+		if !ok {
+			return "", false
+		}
+		r, ok := literalString(n.Y)
+		if !ok {
+			return "", false
+		}
+		return l + r, true
+	}
+	return "", false
 }
 
 // harvestMessages parses the user-facing packages and returns every string
@@ -590,12 +644,8 @@ func harvestMessages(t *testing.T) []string {
 	seen := map[string]struct{}{}
 	collect := func(prefix string, exprs []ast.Expr) {
 		for _, arg := range exprs {
-			lit, ok := arg.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				continue
-			}
-			s, uerr := strconv.Unquote(lit.Value)
-			if uerr != nil {
+			s, ok := literalString(arg)
+			if !ok {
 				continue
 			}
 			s = strings.TrimSpace(s)
@@ -649,4 +699,67 @@ func harvestMessages(t *testing.T) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestLiteralString pins the fold itself. The inputs are written down here
+// independently of the implementation — never derived from it — so a typo in the
+// matcher cannot also plant the same typo in its own fixture (the "never test a
+// list against itself" rule).
+func TestLiteralString(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string // an expression
+		want string
+		ok   bool
+	}{
+		{"plain literal", `"hello there"`, "hello there", true},
+		{"raw literal", "`raw string`", "raw string", true},
+		{"two-part join", `"first half " + "second half"`, "first half second half", true},
+		{"three-part join", `"a " + "b " + "c"`, "a b c", true},
+		{"join across quote styles", "`raw ` + \"interpreted\"", "raw interpreted", true},
+		{"parenthesised join", `("a " + "b")`, "a b", true},
+		// The load-bearing refusals: a part-computed message must not be emitted
+		// half-harvested, or the catalog would claim to inventory a sentence no
+		// user ever sees.
+		{"literal + identifier", `"prefix " + name`, "", false},
+		{"identifier + literal", `name + " suffix"`, "", false},
+		{"literal + call", `"prefix " + fmt.Sprint(x)`, "", false},
+		{"nested unfoldable operand", `"a " + ("b " + c)`, "", false},
+		{"non-ADD operator", `"a" == "b"`, "", false},
+		{"numeric literal", `42`, "", false},
+		{"numeric addition", `1 + 2`, "", false},
+		{"bare identifier", `msg`, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expr, err := parser.ParseExpr(tc.src)
+			if err != nil {
+				t.Fatalf("ParseExpr(%q): %v", tc.src, err)
+			}
+			got, ok := literalString(expr)
+			if ok != tc.ok {
+				t.Fatalf("literalString(%q) ok = %v, want %v (got %q)", tc.src, ok, tc.ok, got)
+			}
+			if got != tc.want {
+				t.Errorf("literalString(%q) = %q, want %q", tc.src, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHarvestMessages_SeesConcatenatedCopy is the regression pin for the reported
+// defect: a real, plainly user-facing error written as a two-line join was absent
+// from the catalog entirely. Reverting the fold to a bare *ast.BasicLit assertion
+// reddens this.
+func TestHarvestMessages_SeesConcatenatedCopy(t *testing.T) {
+	msgs := harvestMessages(t)
+	// runLogin's env validation (auth.go) — split across source lines, so it was
+	// invisible to an operand-blind scan.
+	const needle = "unknown backend environment"
+	for _, m := range msgs {
+		if strings.Contains(m, needle) {
+			return
+		}
+	}
+	t.Fatalf("harvest is missing the concatenated message %q — the fold is not applied", needle)
 }

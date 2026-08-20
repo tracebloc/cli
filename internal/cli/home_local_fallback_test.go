@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -88,6 +89,140 @@ func TestLocalEnvFallback_NoKubeconfigIsNoRelease(t *testing.T) {
 	stubFallbackSeams(t, "", nil, errors.New("no kubeconfig"))
 	if ep := localEnvFallback(context.Background()); ep.local != localNoRelease {
 		t.Fatalf("=> %+v, want localNoRelease", ep)
+	}
+}
+
+// #515: the home screen's hole was the mirror of doctor's. Its local-env
+// fallback was reached only when the pointer was EMPTY (`if !binding.applied`),
+// so a pointer that was set but WRONG skipped the #401 fix entirely and the
+// screen said "No secure environment on this machine yet" over a live install.
+func TestRealProbeEnv_WrongPointerOnLocalCluster_FallsBack(t *testing.T) {
+	writeActiveClientConfig(t, "stale-ns", "Stale") // binding APPLIED, and wrong
+	o := fallbackRelease("lukas-02")
+	cs := fake.NewClientset(o[0].(*appsv1.Deployment), o[1].(*corev1.Service))
+
+	origLoad, origCS := loadClusterFn, newClientsetFn
+	t.Cleanup(func() { loadClusterFn, newClientsetFn = origLoad, origCS })
+	// Models cluster.Load: an explicit opts.Namespace wins, otherwise the
+	// context's own namespace — which the installer points at the client's
+	// namespace (install-client-helm.sh `kubectl config set-context --current
+	// --namespace`). So the binding sends the first probe to "stale-ns" and the
+	// unbound fallback reload lands on "lukas-02".
+	loadClusterFn = func(o cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+		ns := o.Namespace
+		if ns == "" {
+			ns = "lukas-02"
+		}
+		return &cluster.ResolvedConfig{
+			Namespace: ns, ServerURL: "https://127.0.0.1:6550", RestConfig: &rest.Config{},
+		}, nil
+	}
+	newClientsetFn = func(*cluster.ResolvedConfig) (kubernetes.Interface, error) { return cs, nil }
+
+	ep := realProbeEnv(context.Background())
+	if ep.local != localLive || ep.name != "tracebloc" {
+		t.Fatalf("=> %+v, want the live local environment despite the stale pointer", ep)
+	}
+	// Bugbot (#515): the release we found is NOT the client the pointer names, so
+	// the heartbeat (looked up by that pointer's id) is about a different machine
+	// and must be barred from greening this one.
+	if !ep.pointerStale {
+		t.Error("a fallback that fired after a pointer MISS must mark the pointer stale")
+	}
+}
+
+// The stale mark must actually change the verdict: local liveness from one
+// client plus a beatOnline from another is an Online nobody earned.
+func TestResolveHomeModel_StalePointerNeverRendersOnline(t *testing.T) {
+	base := func(stale bool) homeModel {
+		return resolveHomeModel(context.Background(), homeDeps{
+			budget:           2 * time.Second,
+			invoked:          func() string { return binTB },
+			tbAvailable:      func() bool { return true },
+			hasResources:     func() bool { return true },
+			signIn:           func() (bool, string, string) { return true, "a@b.io", "Lukas" },
+			rememberedClient: func() (bool, string) { return true, "stale-01" },
+			probeBeat:        func(context.Context) heartbeatState { return beatOnline },
+			probeEnv: func(context.Context) envProbe {
+				return envProbe{local: localLive, name: "tracebloc", pointerStale: stale}
+			},
+		})
+	}
+
+	if m := base(false); m.state != homeOnline {
+		t.Fatalf("control: live + beatOnline + fresh pointer must be Online, got %v", m.state)
+	}
+	m := base(true)
+	if m.state == homeOnline {
+		t.Error("a stale pointer must never render Online — the heartbeat is another client's")
+	}
+	if m.state != homeRunning {
+		t.Errorf("want the honest running state, got %v", m.state)
+	}
+	if m.confirmedNotOnline {
+		t.Error("nor may another client's heartbeat be reported as THIS one being not-online")
+	}
+	// Bugbot (#515): the LABEL is a claim too. "stale-01" is the handle of the
+	// client the pointer names — not what the fallback found running here — so
+	// presenting it as this machine's environment is a wrong name, and one that
+	// contradicts doctor's namespace-based label for the same state.
+	if m.envName == "stale-01" {
+		t.Errorf("a stale pointer's client handle must not label the environment running here, got %q", m.envName)
+	}
+	if m.envName != "tracebloc" {
+		t.Errorf("want the probe's own name for the release that IS here, got %q", m.envName)
+	}
+
+	// Control: with a fresh pointer the remembered handle is still preferred —
+	// otherwise "don't use the remembered name" could pass by never using it.
+	if fresh := base(false); fresh.envName != "stale-01" {
+		t.Errorf("a non-stale pointer must still prefer the remembered client name, got %q", fresh.envName)
+	}
+}
+
+// …and a beatNotOnline off a stale pointer is equally uninformative: it must not
+// harden into "backend reports not online" for a client it isn't about.
+func TestResolveHomeModel_StalePointerNotOnlineIsNotConfirmed(t *testing.T) {
+	m := resolveHomeModel(context.Background(), homeDeps{
+		budget:           2 * time.Second,
+		invoked:          func() string { return binTB },
+		tbAvailable:      func() bool { return true },
+		hasResources:     func() bool { return true },
+		signIn:           func() (bool, string, string) { return true, "a@b.io", "Lukas" },
+		rememberedClient: func() (bool, string) { return true, "stale-01" },
+		probeBeat:        func(context.Context) heartbeatState { return beatNotOnline },
+		probeEnv: func(context.Context) envProbe {
+			return envProbe{local: localLive, name: "tracebloc", pointerStale: true}
+		},
+	})
+	if m.confirmedNotOnline {
+		t.Error("a stale pointer's heartbeat carries no signal in either direction")
+	}
+}
+
+// …and the ownership gate survives it: the same wrong pointer on a REMOTE
+// cluster stays no-release, so a shared cluster's unrelated client is never
+// greeted as yours (§7.5).
+func TestRealProbeEnv_WrongPointerOnRemoteCluster_StaysGated(t *testing.T) {
+	writeActiveClientConfig(t, "stale-ns", "Stale")
+	o := fallbackRelease("colleague-07")
+	cs := fake.NewClientset(o[0].(*appsv1.Deployment), o[1].(*corev1.Service))
+
+	origLoad, origCS := loadClusterFn, newClientsetFn
+	t.Cleanup(func() { loadClusterFn, newClientsetFn = origLoad, origCS })
+	loadClusterFn = func(o cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+		ns := o.Namespace
+		if ns == "" {
+			ns = "colleague-07"
+		}
+		return &cluster.ResolvedConfig{
+			Namespace: ns, ServerURL: "https://k8s.corp.example:6443", RestConfig: &rest.Config{},
+		}, nil
+	}
+	newClientsetFn = func(*cluster.ResolvedConfig) (kubernetes.Interface, error) { return cs, nil }
+
+	if ep := realProbeEnv(context.Background()); ep.local != localNoRelease || ep.name != "" {
+		t.Fatalf("=> %+v, want localNoRelease (a shared cluster's client is not yours)", ep)
 	}
 }
 

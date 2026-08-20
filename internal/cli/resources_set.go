@@ -145,7 +145,7 @@ func runResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, opts clust
 	// and never regresses the #375 double-blank (§380).
 	target, err := resolveClusterTarget(ctx, p, opts, binding, false, true)
 	if err != nil {
-		return binding.explain(err)
+		return binding.explain(ctx, err)
 	}
 	return applyResourcesSet(ctx, p, pr, target, opts, req)
 }

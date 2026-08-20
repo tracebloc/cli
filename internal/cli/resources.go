@@ -92,7 +92,7 @@ func runResourcesShow(ctx context.Context, p *ui.Printer, opts cluster.Kubeconfi
 	// multi-client redirect note self-leads its one leading blank (§380).
 	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true)
 	if err != nil {
-		return binding.explain(err)
+		return binding.explain(ctx, err)
 	}
 	return renderResources(ctx, p, target)
 }

@@ -78,7 +78,7 @@ func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOpt
 	// multi-client redirect note is the opening line and self-leads its blank.
 	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true)
 	if err != nil {
-		return binding.explain(err)
+		return binding.explain(ctx, err)
 	}
 	tt := helm.TestTarget{
 		Release:    target.Release.ReleaseName,

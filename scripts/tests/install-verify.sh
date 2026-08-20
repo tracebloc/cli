@@ -529,6 +529,57 @@ else
 fi
 drop_sandbox
 
+# -- 19. install.ps1 presets LASTEXITCODE before verify-blob -----------------
+# THE WINDOWS HALF OF R8, and until now nothing checked it. $LASTEXITCODE persists
+# from the previous command, so a cosign shim that exits 0 on `version` (which
+# Test-CosignRuns runs immediately before) and then no-ops on verify-blob leaves a
+# stale 0 behind — and the `-ne 0` gate reads that as a valid signature. The
+# installer prints "cosign signature valid" and installs a binary nothing verified
+# (Bugbot, HIGH, cli#528).
+#
+# Test-CosignRuns already presets 255 for exactly this reason. This asserts the
+# same preset guards the call that actually gates the install.
+#
+# A SOURCE ASSERTION, and the limitation is worth stating: install.ps1 has no
+# behavioural coverage at all — there is no pwsh or Pester anywhere in this repo's
+# CI, which is why the gap reached a promotion PR. This closes the specific hole;
+# it does not make the Windows installer tested. Reproduced behaviourally with
+# pwsh before writing it: without the preset the block accepts an unverified
+# binary, with it it refuses.
+PS1="$SELF_DIR/../install.ps1"
+if [ ! -f "$PS1" ]; then
+  bad "install.ps1 not found — cannot assert the verify-blob exit preset"
+else
+  # The preset must appear INSIDE the $sigDownloaded block and BEFORE the
+  # verify-blob invocation. Line numbers, so a preset elsewhere in the file
+  # cannot satisfy it.
+  # The INVOCATION, not the word: the first version grepped for `verify-blob`
+  # and matched the explanatory comment written directly above the call, so the
+  # preset looked out of order and the check failed on correct code. Prose is not
+  # wiring -- anchor on the `& $cosign` invocation itself.
+  vb_line=$(grep -n '& \$cosign verify-blob' "$PS1" | head -1 | cut -d: -f1)
+  # A WHOLE STATEMENT, not a substring (shujaatTracebloc, #529). Two failures in
+  # opposite directions came from matching text rather than code:
+  #   * a COMMENTED-OUT preset satisfied the check -- the gate dead, case 19 green.
+  #     That is the likelier human mutation (commenting it out while debugging the
+  #     installer) and it was the one not covered.
+  #   * hard-coded single spaces meant `$global:LASTEXITCODE=255` -- correct,
+  #     equivalent PowerShell -- turned case 19 RED on a working gate, asserting the
+  #     installer would install unverified.
+  # Anchoring start-to-end with flexible spacing closes both.
+  pre_line=$(awk '/^[[:space:]]*\$global:LASTEXITCODE[[:space:]]*=[[:space:]]*255[[:space:]]*$/ {print NR}' "$PS1" | awk -v v="${vb_line:-0}" '$1 < v {last=$1} END {print last+0}')
+  # `\$` ESCAPED, like the two sibling patterns in this block. In a POSIX BRE a `$`
+  # that is not at the end is undefined; an implementation treating it as an anchor
+  # matches nothing, `blk_line` comes back empty, and case 19 goes red on correct
+  # code with the "would install unverified" message (shujaatTracebloc, #529).
+  blk_line=$(grep -n 'if (\$sigDownloaded)' "$PS1" | head -1 | cut -d: -f1)
+  if [ -n "$vb_line" ] && [ -n "$blk_line" ] && [ "$pre_line" -gt "$blk_line" ] && [ "$pre_line" -lt "$vb_line" ]; then
+    ok "install.ps1: LASTEXITCODE preset guards verify-blob (line $pre_line, before $vb_line)"
+  else
+    bad "install.ps1: no LASTEXITCODE preset between the \$sigDownloaded block (line ${blk_line:-?}) and verify-blob (line ${vb_line:-?}) — a no-op verifier would inherit a stale 0 and install unverified"
+  fi
+fi
+
 echo
 echo "install-verify: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -156,7 +156,7 @@ func runClusterDoctor(
 	//    problem goes unexplained. (A 401/426 is a hard stop earlier; only the
 	//    soft tokenUnreachable/tokenServerErr states reach here.)
 	opts := cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride, Namespace: nsOverride}
-	bindActiveClientNamespace(&opts)
+	binding := bindActiveClientNamespace(&opts)
 	resolved, err = loadClusterFn(opts)
 	if err != nil {
 		p.Newline()
@@ -176,6 +176,39 @@ func runClusterDoctor(
 	// 4. Probe the cluster.
 	results = doctorRunFn(ctx, cs, doctor.Options{Namespace: resolved.Namespace, ServerURL: resolved.ServerURL})
 
+	// #515: a namespace we CHOSE for the user can be wrong, and a miss on it is
+	// not evidence that this machine has no environment — yet doctor's only
+	// reading of "no chart here" is "no secure environment on this machine yet",
+	// which then recommends reinstalling over a healthy install. Extend #401's
+	// local fallback to the wrong-pointer case: re-probe the namespace the
+	// KUBECONFIG selects, but only when the binding (not the user) picked the
+	// namespace that missed, and only on a LOCAL cluster — on a remote/shared one
+	// the ownership gate stands and we would risk naming a colleague's client.
+	// The retry is adopted only if it actually finds an environment, so a genuine
+	// no-environment machine keeps the original results (and the --diagnose
+	// bundle keeps describing the namespace the user is configured for).
+	// pointerStale records that the re-probe SUCCEEDED — i.e. this machine has a
+	// healthy environment AND its active-client pointer is wrong. Both halves
+	// have to be said; see the verdict block below for why finding the
+	// environment is not on its own good news.
+	pointerStale := false
+	if binding.applied && reachStateOf(results) == doctor.ReachNoEnv {
+		if ns, ok := localEnvNamespace(cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride}); ok && ns != resolved.Namespace {
+			// Adopt the re-probe ONLY on a positive confirmation that a client is
+			// there. `!= ReachNoEnv` was wrong (Bugbot): ReachUnreachable and
+			// ReachError also satisfy it, and both mean "we could not tell" — so a
+			// stale pointer plus RBAC or a transient read on the context namespace
+			// would have named an unconfirmed namespace as a secure environment and
+			// told the user this cluster already runs a client, pushing `client
+			// create` into a MINT. Same absence-as-presence collapse surveyCluster
+			// and residencyOf exist to avoid; an unconfirmed re-probe keeps the
+			// original results and the honest no-environment path.
+			if retry := doctorRunFn(ctx, cs, doctor.Options{Namespace: ns, ServerURL: resolved.ServerURL}); reachConfirmedOK(retry) {
+				resolved.Namespace, results, pointerStale = ns, retry, true
+			}
+		}
+	}
+
 	// A reachable cluster with no tracebloc chart installed is the same "no secure
 	// environment here" state as a missing kubeconfig — route it through the same
 	// message (which also surfaces any session fault) rather than naming an
@@ -194,6 +227,23 @@ func runClusterDoctor(
 	// "Signed in" above, so the two context lines read as a pair), then roll up.
 	p.Para(fmt.Sprintf("Secure environment %q", envDisplayName(resolved)))
 	connected, ready = summarizeDoctor(results, tok)
+	if pointerStale {
+		// The environment above is healthy — but `data ingest`, `data list`,
+		// `resources` and `seal` all bind the active-client POINTER, and that
+		// still misses, so they keep failing with exit 4. "Ready to run training"
+		// is therefore false no matter how green the cluster checks are. Replace
+		// the readiness line rather than printing a green tick with a warning
+		// beside it that contradicts it — and the replacement carries the remedy,
+		// so the finding and the fix read as one thing. The support bundle
+		// records this line too, which is what triage needs to see.
+		ready = healthLine{
+			status: doctor.StatusFail,
+			text: fmt.Sprintf("Not ready — your active client points at namespace %q, which isn't on this cluster, so data commands will keep failing until you repoint.",
+				binding.namespace),
+			remedy: fmt.Sprintf("Point this machine at the environment above: %s client create  (this cluster already runs a client, so it adopts it — no new credential)",
+				launcher()),
+		}
+	}
 
 	p.Newline()
 	renderHealth(p, connected)
@@ -206,6 +256,14 @@ func runClusterDoctor(
 	p.Newline()
 	fail, allGood := doctorVerdict(connected.status, ready.status)
 	switch {
+	case pointerStale:
+		// A problem WAS found — it just isn't in the cluster. Exit 2 (the code
+		// doctor already uses for every actionable finding), never 0 with
+		// "you're ready to run training": the very next `data ingest` exits 4,
+		// and a doctor that greens that is reporting success it hasn't earned
+		// — the class BUGBOT.md flags first. The remedy is already printed
+		// above, so this doesn't also send them to write a support bundle.
+		return &exitError{code: exitChecksFailed, err: nil}
 	case fail:
 		if !diagnose { // they just wrote a bundle — don't send them to write it again
 			p.Hintf("Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())
@@ -529,6 +587,26 @@ func reachStateOf(results []doctor.Result) doctor.ReachState {
 		}
 	}
 	return doctor.ReachOK
+}
+
+// reachConfirmedOK reports whether the "Cluster reachable" check RAN and came
+// back ReachOK — a positive confirmation that a tracebloc client is in the probed
+// namespace.
+//
+// Deliberately not `reachStateOf(results) == ReachOK`: reachStateOf defaults to
+// ReachOK when the check is ABSENT, which is the right lenient default for the
+// main path (an older probe set shouldn't block a verdict) and precisely the
+// wrong one for #515's re-probe, where the whole question is whether we may
+// believe an unproven namespace. Absent, unreachable and errored all answer
+// "we could not tell", and none of them may authorize naming a secure
+// environment or advising `client create`.
+func reachConfirmedOK(results []doctor.Result) bool {
+	for _, r := range results {
+		if r.Name == "Cluster reachable" {
+			return r.Reach == doctor.ReachOK
+		}
+	}
+	return false
 }
 
 // worseStatus returns the more severe of two doctor statuses (Fail > Warn > OK).

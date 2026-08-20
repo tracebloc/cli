@@ -16,9 +16,9 @@ import (
 func TestGuided_TaskScopedValuesDoNotSurviveATaskChange(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Which task?":                   "tabular_classification",
-		"Which column holds the label?": "churned",
+		"Name:":  "t",
+		"Task:":  "tabular_classification",
+		"Label:": "churned",
 	}}
 	// A LEGAL starting state: every value here is in scope for the supplied
 	// task. Starting from an illegal one would test the wrong thing — a flag
@@ -56,9 +56,9 @@ func TestGuided_TaskScopedValuesDoNotSurviveATaskChange(t *testing.T) {
 func TestGuided_KeypointsGoWhenTheTaskStopsUsingThem(t *testing.T) {
 	dir := imageDirLayout(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Which task?":                   "image_classification",
-		"Which column holds the label?": "label",
+		"Name:":  "t",
+		"Task:":  "image_classification",
+		"Label:": "label",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath:      dir,
@@ -89,9 +89,9 @@ func TestGuided_KeypointsGoWhenTheTaskStopsUsingThem(t *testing.T) {
 func TestGuided_TaskScopedValuesSurviveWhenTheTaskIsUnchanged(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":                 "t",
-		"Which task?":                              "time_to_event_prediction",
-		"Which column holds the value to predict?": "days",
+		"Name:":   "t",
+		"Task:":   "time_to_event_prediction",
+		"Target:": "days",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -152,9 +152,9 @@ func TestEveryTaskScopedValueRejectsOutOfScopeAndNamesItsFlag(t *testing.T) {
 func TestGuided_AMisappliedFlagIsStillRejectedWhenTheTaskIsKept(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Which task?":                   "tabular_classification",
-		"Which column holds the label?": "churned",
+		"Name:":  "t",
+		"Task:":  "tabular_classification",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -176,9 +176,9 @@ func TestGuided_AMisappliedFlagIsStillRejectedWhenTheTaskIsKept(t *testing.T) {
 func TestGuided_AMisappliedFlagIsStillRejectedWhenNoTaskWasSupplied(t *testing.T) {
 	dir := tabularDir(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Which task?":                   "tabular_classification",
-		"Which column holds the label?": "churned",
+		"Name:":  "t",
+		"Task:":  "tabular_classification",
+		"Label:": "churned",
 	}}
 	a := &runDataIngestArgs{LocalPath: dir, Spec: push.SpecArgs{TimeColumn: "t"}}
 	if err := runInteractive(discardPrinter(), f, a); err != nil {
@@ -203,8 +203,8 @@ func TestGuided_AMisappliedFlagIsStillRejectedWhenNoTaskWasSupplied(t *testing.T
 func TestGuided_AnUnrecognizedTaskIsNotATaskChange(t *testing.T) {
 	dir := textDirLayout(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.": "mlm_train",
-		"Which task?":              "masked_language_modeling",
+		"Name:": "mlm_train",
+		"Task:": "masked_language_modeling",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
@@ -233,9 +233,9 @@ func TestGuided_AnUnrecognizedTaskIsNotATaskChange(t *testing.T) {
 func TestGuided_AFlagInvalidForBothTasksIsStillRejected(t *testing.T) {
 	dir := imageDirLayout(t)
 	f := &fakePrompter{answers: map[string]string{
-		"Please name the dataset.":      "t",
-		"Which task?":                   "image_classification",
-		"Which column holds the label?": "label",
+		"Name:":  "t",
+		"Task:":  "image_classification",
+		"Label:": "label",
 	}}
 	a := &runDataIngestArgs{
 		LocalPath: dir,
