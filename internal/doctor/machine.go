@@ -132,11 +132,23 @@ func hostProbe() (int64, int64, error) {
 // this check calls it a double-count.
 //
 // Not slack for the real bug — that is 2.00x, and anything above ~1.05 is
-// already unambiguous. It exists because node capacity is derived from the
-// container's cgroup limit with a rounding that does not exactly invert: on a
-// node capped at 3 GiB (3221225472 B) kubelet reported 3221225Ki, which is
-// 2.4% ABOVE the limit it came from. A strict `sum > vm` would report that
-// rounding as over-commit on a correctly capped cluster.
+// already unambiguous. It exists because a CORRECTLY capped k3d node reports
+// slightly MORE than its own limit, which was measured:
+//
+//	k3d --servers-memory 3g  ->  cgroup memory.max = 3221225472
+//	k3d's fake /proc/meminfo ->  MemTotal: 3221225 kB
+//	kubelet capacity         ->  3221225Ki  == 3298534400 B, +2.4%
+//
+// k3d caps a node by bind-mounting a synthetic /proc/meminfo into the node
+// container (a "fakeowner" mount) — NOT by the cgroup, which kubelet never
+// reads. It writes MemTotal by dividing the byte limit by 1000 and labelling
+// the result kB, but kB there means 1024 bytes, so the advertised capacity
+// overstates the real limit by 2.4%. A strict `sum > vm` would therefore
+// report correct capping as over-commit.
+//
+// The same measurement is why capping is a CREATE-TIME operation: `docker
+// update --memory` on a running node container moves the cgroup and leaves
+// /proc/meminfo alone, so node capacity does not budge even across a restart.
 const overCommitTolerance = 1.05
 
 // checkMachineChain surfaces host -> VM -> node allocatable -> free, and warns

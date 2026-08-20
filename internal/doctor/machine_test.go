@@ -97,11 +97,12 @@ func TestMachineChain_SingleNodeIsHonest(t *testing.T) {
 }
 
 func TestMachineChain_CappedNodesPassDespiteRounding(t *testing.T) {
-	// MEASURED: a node capped at 3 GiB (3221225472 B) reported capacity
-	// 3221225Ki, which is 2.4% ABOVE the limit it came from. Two of those sum
-	// to 0.79x of this VM, so the invariant holds — but a strict `sum > vm`
-	// would still have to survive that rounding, which is what the tolerance
-	// is for. This is the regression guard for capping correctly.
+	// MEASURED: `k3d --servers-memory 3g` gives cgroup memory.max 3221225472
+	// and a synthetic /proc/meminfo reading "MemTotal: 3221225 kB", so kubelet
+	// reports 3221225Ki — 2.4% ABOVE the limit it came from, because k3d
+	// divides the byte limit by 1000 and labels it kB. Two of those sum to
+	// 0.79x of this VM, so the invariant holds, but a strict `sum > vm` would
+	// have to survive that overstatement. Regression guard for capping right.
 	cs := fake.NewClientset(
 		k3dNode("k3d-cap-server-0", "10", "3221225Ki"),
 		k3dNode("k3d-cap-agent-0", "10", "3221225Ki"),
