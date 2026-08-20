@@ -170,6 +170,40 @@ func TestSet_ApplyBuildsHelmArgsAndValues(t *testing.T) {
 	}
 }
 
+// TestSet_StampsUserProvenance: the apply carries RESOURCE_PROVENANCE=user all
+// the way into the values helm is given (backend#2220).
+//
+// The unit test on BuildEnvSpec proves the map is right; this proves the map
+// actually reaches helm. Worth having separately because the failure mode is
+// silent: a marker that never lands looks identical to one that landed, and the
+// consequence only shows up much later, when a ladder re-derives a size the
+// operator had chosen on purpose.
+func TestSet_StampsUserProvenance(t *testing.T) {
+	// Start from an edge the INSTALLER marked — the dangerous case. After a
+	// human `resources set`, the label must flip to user; leaving it as
+	// "installer" would advertise a deliberate choice as ours to overwrite.
+	cs := csWith("8", "32Gi", map[string]string{
+		"RESOURCE_LIMITS":     "cpu=2,memory=8Gi",
+		"RESOURCE_PROVENANCE": "installer",
+	})
+	out, err := runSet(t, cs, nil, setReq{
+		cores: "4", memory: "16", coresSet: true, memSet: true, dryRun: true, yes: true,
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "RESOURCE_PROVENANCE") {
+		t.Errorf("the plan does not mention RESOURCE_PROVENANCE at all:\n%s", out)
+	}
+	if !strings.Contains(out, "user") {
+		t.Errorf("the plan does not stamp the set as a human choice:\n%s", out)
+	}
+	// And the envelope still reflects what was asked for (Decision A).
+	if !strings.Contains(out, "cpu=4,memory=16Gi") {
+		t.Errorf("plan lost the requested ceiling:\n%s", out)
+	}
+}
+
 // TestSet_KeepsUnsetDimension: `set --cores 4` changes CPU only and KEEPS the
 // current 8Gi memory (proven via the dry-run plan's resulting values).
 func TestSet_KeepsUnsetDimension(t *testing.T) {

@@ -673,6 +673,7 @@ screen. %s/%d are runtime placeholders.
 "service %s/%s has no selector — can't resolve to a Pod for port-forwarding"
 "session:   %s"
 "set -e\nrm -rf %q\nmkdir -p %q\n/bin/tar -xf - -C %q\nif [ -e %q ]; then mv %q %q; fi\nif ! mv %q %q; then\n  if [ -e %q ]; then mv %q %q; fi\n  exit 1\nfi\nrm -rf %q\nfind %q -maxdepth 1 \\( -name %q -o -name %q \\) -mmin +60 -exec rm -rf {} + 2>/dev/null || true"
+"set by"
 "setting up jobs-manager port-forward: %w"
 "sha256[:8]"
 "shared PVC"
