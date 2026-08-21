@@ -276,6 +276,112 @@ func TestWriteSpoolRemovesTheFileWhenEmpty(t *testing.T) {
 	}
 }
 
+// ────────────────────────── the spool must not resurrect a wiped ~/.tracebloc
+//
+// backend#2314. `tracebloc delete` wipes ~/.tracebloc and prints "✔ Removed
+// local tracebloc data and config."; main.go then emits the command-outcome
+// event, whose spool lives INSIDE that tree. Both halves of the fix are asserted
+// here because they cover different user paths — the empty-spool write is what a
+// SUCCESSFUL delivery does (dir came back empty), and the latch is what an
+// undelivered event needs (dir came back holding a record).
+
+// wipedHostState records dir as the offboard's removed tree for one test and
+// clears it afterwards. The clear is belt-and-braces: the recorded path is a
+// per-test TempDir, so it cannot match another test's spool even if it leaked.
+func wipedHostState(t *testing.T, dir string) {
+	t.Helper()
+	markHostStateWiped(dir)
+	t.Cleanup(func() { wipedHostDir.Store("") })
+}
+
+func TestInsideWipedHostDirOnlyMatchesTheTreeThatWasRemoved(t *testing.T) {
+	// A sibling directory sharing a name PREFIX is the case a strings.HasPrefix
+	// check on the raw paths gets wrong: /tmp/a-cfg2 is not inside /tmp/a-cfg.
+	root := t.TempDir()
+	wipedHostState(t, filepath.Join(root, "cfg"))
+
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{filepath.Join(root, "cfg"), true},
+		{filepath.Join(root, "cfg", "telemetry", "pending-prod.jsonl"), true},
+		{filepath.Join(root, "cfg2", "telemetry", "pending-prod.jsonl"), false},
+		{filepath.Join(root, "other", "telemetry", "pending-prod.jsonl"), false},
+	} {
+		if got := insideWipedHostDir(tc.path); got != tc.want {
+			t.Errorf("insideWipedHostDir(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestAnUnrelatedSpoolStillWritesAfterAnOffboard(t *testing.T) {
+	// The scoping that matters in practice: one process offboarded one tree, and
+	// that must not silence telemetry for a path it never touched.
+	wipedHostState(t, filepath.Join(t.TempDir(), "gone"))
+
+	path := filepath.Join(t.TempDir(), "telemetry", "pending.jsonl")
+	if err := writeSpool(path, []spooledEvent{event("run-elsewhere", 0)}); err != nil {
+		t.Fatalf("writeSpool: %v", err)
+	}
+	if got := readSpool(path); len(got) != 1 {
+		t.Errorf("a spool outside the wiped tree must still be written; got %d records", len(got))
+	}
+}
+
+func TestWriteSpoolDoesNotCreateTheDirWhenThereIsNothingToWrite(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "telemetry")
+	path := filepath.Join(dir, "pending.jsonl")
+
+	// The delivered path: the batch landed, so the spool is written EMPTY. It
+	// must not mkdir on its way to removing a file that isn't there — that is
+	// what re-created a just-wiped ~/.tracebloc/telemetry/ for every online
+	// offboard.
+	if err := writeSpool(path, nil); err != nil {
+		t.Fatalf("writeSpool(nil): %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("writing an empty spool created %s; nothing was written, so nothing should be created (stat err = %v)", dir, err)
+	}
+}
+
+func TestAWipedHostStateStopsTheSpoolComingBack(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "telemetry")
+	path := filepath.Join(dir, "pending.jsonl")
+	wipedHostState(t, dir)
+
+	// A REAL event, i.e. the undelivered path — the one the offboard actually
+	// takes, because the wipe took the token with it and deliver then has
+	// nothing to post with.
+	if err := writeSpool(path, []spooledEvent{event("run-after-offboard", 0)}); err != nil {
+		t.Fatalf("writeSpool after a wipe must be a silent no-op, got: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the offboard removed this tree; telemetry re-created %s (stat err = %v)", dir, err)
+	}
+}
+
+// TestOffboardLeavesNothingBehindOnTheNoTokenPath is the end-to-end shape of the
+// CI failure: the exact branch `tracebloc delete` reaches on the way out, run
+// against a config dir the offboard has already removed.
+func TestOffboardLeavesNothingBehindOnTheNoTokenPath(t *testing.T) {
+	path := withTempConfigDir(t, "prod")
+	cfgDir := os.Getenv("TRACEBLOC_CONFIG_DIR")
+
+	// Stand where main.go stands: the offboard has run, the tree is gone, and
+	// the token went with it — so deliver takes its no-token spool branch.
+	if err := os.RemoveAll(cfgDir); err != nil {
+		t.Fatalf("simulate the offboard wipe: %v", err)
+	}
+	wipedHostState(t, cfgDir)
+
+	deliver(path, "http://127.0.0.1:1"+telemetryIngestPath, "", "prod", event("run-offboard", 0), time.Now())
+
+	if _, err := os.Stat(cfgDir); !os.IsNotExist(err) {
+		t.Errorf("`tracebloc delete` promised the tree was removed; the exit-path telemetry write put %s back (stat err = %v)", cfgDir, err)
+	}
+}
+
 // --------------------------------------------------------------- delivery
 
 func TestClassifyStatus(t *testing.T) {
