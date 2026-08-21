@@ -338,7 +338,7 @@ func TestDeliverSpoolsWhenTheServerIsUnreachable(t *testing.T) {
 	url := srv.URL + telemetryIngestPath
 	srv.Close()
 
-	deliver(path, url, "tok", event("run-partition", 3), time.Now())
+	deliver(path, url, "tok", "prod", event("run-partition", 3), time.Now())
 
 	got := readSpool(path)
 	if len(got) != 1 {
@@ -351,7 +351,7 @@ func TestDeliverSpoolsWhenTheServerIsUnreachable(t *testing.T) {
 
 func TestDeliverSpoolsWhenNotSignedIn(t *testing.T) {
 	path := withTempConfigDir(t, "prod")
-	deliver(path, "http://127.0.0.1:1"+telemetryIngestPath, "", event("run-anon", 0), time.Now())
+	deliver(path, "http://127.0.0.1:1"+telemetryIngestPath, "", "prod", event("run-anon", 0), time.Now())
 	got := readSpool(path)
 	if len(got) != 1 {
 		t.Fatalf("no token must spool rather than post; got %d records", len(got))
@@ -364,7 +364,7 @@ func TestDeliverSpoolsWhenNotSignedIn(t *testing.T) {
 func TestDeliverKeepsTheSpoolBoundedAcrossManyFailures(t *testing.T) {
 	path := withTempConfigDir(t, "prod")
 	for i := 0; i < telemetrySpoolMax+10; i++ {
-		deliver(path, "http://127.0.0.1:1"+telemetryIngestPath, "", event(fmt.Sprintf("run-%02d", i), i), time.Now())
+		deliver(path, "http://127.0.0.1:1"+telemetryIngestPath, "", "prod", event(fmt.Sprintf("run-%02d", i), i), time.Now())
 	}
 	got := readSpool(path)
 	if len(got) != telemetrySpoolMax {
@@ -523,7 +523,7 @@ func TestTheSpoolDoesNotLeakAcrossEnvironments(t *testing.T) {
 		Attributes: map[string]any{"event.name": "cli.command.failed", "error.type": "usage"},
 	}
 	// Unreachable endpoint, so it spools against prod.
-	deliver(prodSpool, "http://127.0.0.1:1"+telemetryIngestPath, "prod-token", prodEvent, time.Now())
+	deliver(prodSpool, "http://127.0.0.1:1"+telemetryIngestPath, "prod-token", "prod", prodEvent, time.Now())
 	if got := readSpool(prodSpool); len(got) != 1 {
 		t.Fatalf("setup: the prod event should be spooled; got %d records", len(got))
 	}
@@ -540,7 +540,7 @@ func TestTheSpoolDoesNotLeakAcrossEnvironments(t *testing.T) {
 		Resource:   map[string]string{"service.name": "cli", "deployment.environment": "dev"},
 		Attributes: map[string]any{"event.name": "cli.command.succeeded"},
 	}
-	deliver(devSpool, srv.URL+telemetryIngestPath, "dev-token", devEvent, time.Now())
+	deliver(devSpool, srv.URL+telemetryIngestPath, "dev-token", "dev", devEvent, time.Now())
 
 	if received == "" {
 		t.Fatal("the dev endpoint received nothing; the dev delivery did not happen")
