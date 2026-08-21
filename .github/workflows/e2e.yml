@@ -73,6 +73,13 @@ jobs:
           # broke the copy assertions without touching delete.go. The glob
           # internal/cli/delete*.go deliberately excludes data_delete*.go
           # (`tracebloc data delete` is a different command, unit-tested).
+          #
+          # internal/cli/telemetry*.go is here for the same reason as
+          # internal/ui, and backend#2314 is the proof: the command-outcome
+          # event is emitted from main.go AFTER the offboard returns, and its
+          # spool lives inside the ~/.tracebloc the offboard just deleted — so
+          # a telemetry change re-created the wiped tree and broke the teardown
+          # suite's config-dir assertion without touching delete.go at all.
           filters: |
             e2e:
               - '.github/workflows/e2e.yml'
@@ -82,6 +89,7 @@ jobs:
               - 'cmd/**'
               - 'test/integration/**'
               - 'internal/cli/delete*.go'
+              - 'internal/cli/telemetry*.go'
               - 'internal/nodeboot/**'
               - 'internal/api/**'
               - 'internal/config/**'
