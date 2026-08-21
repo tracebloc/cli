@@ -21,6 +21,10 @@ package cli
 
 import (
 	"errors"
+	"fmt"
+	"go/scanner"
+	"go/token"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -269,99 +273,185 @@ func TestTheRecordIsLabelledWithTheEnvItWasHanded(t *testing.T) {
 
 // --- 3. the guard: no NEW resolution site can appear unnoticed ----------------
 
-// resolutionSites is the closed set of places in internal/cli allowed to answer
-// "which backend?" from ambient state (the config file or $CLIENT_ENV). Everything
-// else must take a resolved env as an argument.
+// resolutionSites is the closed set of files in this MODULE allowed to answer
+// "which backend?" from ambient state (the config file or $CLIENT_ENV).
+// Everything else must take a resolved env as an argument.
 //
 // This is the rule the last three recuts each re-litigated one site at a time. It
 // is here rather than in a reviewer's head because the failure mode is additive:
 // every new site looks locally correct, and only the SECOND one is a bug.
+//
+// Keys are repo-relative because the walk is repo-wide. It used to walk only
+// internal/cli, which left the guard blind in 16 of the 17 packages under
+// internal/ — i.e. blind exactly where a new site is most likely to land, in a
+// package written by someone who never reads internal/cli (Lukas on #551).
 var resolutionSites = map[string]string{
-	// sessionEnv: config current_env, else $CLIENT_ENV, else prod. The one chain.
-	"client.go": "sessionEnv — the single config -> session-env resolution",
+	// The primitive: ResolveEnv is the --env/$CLIENT_ENV/prod chain, and the only
+	// os.Getenv("CLIENT_ENV") in the module.
+	"internal/api/client.go": "api.ResolveEnv — the primitive chain, and the only $CLIENT_ENV read",
 	// The --env FLAG, a different question: the env the human/installer NAMED,
-	// which login persists and `auth status --check` validates against the session.
-	"auth.go": "api.ResolveEnv(envFlag) — the explicit --env flag, validated by IsKnownEnv",
-	// telemetryEnv/signedInEnv read the config, but both delegate the chain to
-	// sessionEnv; they only map the result onto a label.
-	"telemetry.go": "telemetryEnv/signedInEnv — delegate to sessionEnv, map to a label",
+	// which login persists (the one cfg.CurrentEnv WRITE) and `auth status --check`
+	// validates against the session.
+	"internal/cli/auth.go": "api.ResolveEnv(envFlag) — the explicit --env flag, validated by IsKnownEnv",
+	// sessionEnv: config current_env, else $CLIENT_ENV, else prod. The one chain
+	// every session-env consumer in internal/cli resolves through.
+	"internal/cli/client.go": "sessionEnv — the single config -> session-env resolution",
+	// Storage. Profiles are keyed by the RAW stored string, so this layer must not
+	// normalise; it hands the raw value out and sessionEnv normalises it.
+	"internal/config/config.go": "the on-disk current_env field, its accessors, and the v1 migration",
+	// The CLUSTER's CLIENT_ENV, read off the jobs-manager Deployment — a
+	// deliberately different question from this CLI's session env.
+	"internal/doctor/doctor.go": "the cluster's own CLIENT_ENV, for the egress probe's target host",
+	// internal/cli/telemetry.go is deliberately ABSENT, and the staleness check
+	// below is what keeps it that way: telemetryEnv/signedInEnv delegate the whole
+	// chain to sessionEnv and name no needle, so an entry for it would be inert —
+	// a licence to re-admit a raw read in the very file whose double resolution
+	// this PR exists to remove (Bugbot on #551).
 }
 
-func TestNoNewEnvironmentResolutionSiteAppears(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Reading ambient state to answer "which backend?": the config's current_env,
-	// or the $CLIENT_ENV chain. api.BaseURL/IsKnownEnv are pure mappings over an
-	// argument and are deliberately NOT listed — they resolve nothing.
-	needles := []string{"CurrentEnv", "ResolveEnv(", `Getenv("CLIENT_ENV")`}
+// envNeedles are the ways a file reads ambient state to answer "which backend?".
+// api.BaseURL/IsKnownEnv are pure mappings over an argument and are deliberately
+// absent — they resolve nothing.
+//
+// Deliberately BROAD (bare identifiers, and CLIENT_ENV unquoted so it matches
+// help text too): a false positive is a loud line in a diff, a false negative is
+// the bug this guard exists to catch. Fail closed.
+var envNeedles = []string{"CurrentEnv", "ResolveEnv", "CLIENT_ENV"}
 
-	found := 0
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(name)
+func TestNoNewEnvironmentResolutionSiteAppears(t *testing.T) {
+	const root = "../.." // this test's package dir -> the module root
+
+	matched := map[string]string{} // repo-relative path -> the needle that hit
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
-		// Comments discuss these names constantly (they are the whole subject);
-		// only code counts.
-		code := stripGoComments(string(src))
-		for _, n := range needles {
-			if !strings.Contains(code, n) {
-				continue
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", ".claude", ".worktrees", "vendor", "node_modules", "testdata":
+				return fs.SkipDir
 			}
-			found++
-			if why, ok := resolutionSites[name]; !ok {
-				t.Errorf("%s resolves an environment from ambient state (%q), but is not a "+
-					"sanctioned resolution site.\n"+
-					"Take the resolved env as an ARGUMENT instead — the CLI must answer "+
-					"\"which backend?\" once per invocation and thread it. If this really is "+
-					"a new resolution point, add it to resolutionSites with the reason and "+
-					"say how it cannot disagree with sessionEnv.", name, n)
-			} else if why == "" {
-				t.Errorf("%s is allowlisted with no reason", name)
-			}
-			break
+			return nil
 		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		code, err := goCodeTokens(string(src))
+		if err != nil {
+			// "cannot tell" is not "clean": abort rather than read a file whose
+			// tokenisation failed as a string that matches nothing.
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		for _, needle := range envNeedles {
+			if strings.Contains(code, needle) {
+				matched[rel] = needle
+				break
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walking the module: %v", walkErr)
 	}
+
 	// A guard that matches nothing is not a guard: if the needles ever stop
 	// matching (a rename), fail loudly rather than pass vacuously.
-	if found == 0 {
+	if len(matched) == 0 {
 		t.Fatal("the guard matched no files at all — its needles are stale and it is " +
 			"no longer checking anything")
 	}
-	for name := range resolutionSites {
-		if _, err := os.Stat(name); err != nil {
-			t.Errorf("resolutionSites lists %s, which does not exist — stale allowlist", name)
+
+	for rel, needle := range matched {
+		why, ok := resolutionSites[rel]
+		switch {
+		case !ok:
+			t.Errorf("%s resolves an environment from ambient state (%q), but is not a "+
+				"sanctioned resolution site.\n"+
+				"Take the resolved env as an ARGUMENT instead — the CLI must answer "+
+				"\"which backend?\" once per invocation and thread it. If this really is "+
+				"a new resolution point, add it to resolutionSites with the reason and "+
+				"say how it cannot disagree with sessionEnv.", rel, needle)
+		case why == "":
+			t.Errorf("resolutionSites[%q] is allowlisted with no reason", rel)
+		}
+	}
+
+	// THE ALLOWLIST MUST STAY A RECORD, NOT BECOME A LICENCE. Checking only that a
+	// sanctioned file EXISTS is the defect class this whole PR is about: verifying
+	// the form of a thing instead of the property the form exists to guarantee. An
+	// entry whose file no longer resolves anything is inert — it checks nothing,
+	// while silently pre-approving the next raw read in that file.
+	for rel := range resolutionSites {
+		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
+			t.Errorf("resolutionSites lists %s, which does not exist — stale allowlist", rel)
+			continue
+		}
+		if _, ok := matched[rel]; !ok {
+			t.Errorf("stale allowlist entry: %s is sanctioned but no longer resolves an "+
+				"environment from ambient state — remove it from resolutionSites. An inert "+
+				"entry is a licence, not a record: it would silently re-admit a raw read "+
+				"in that file.", rel)
 		}
 	}
 }
 
-// stripGoComments removes // and /* */ comments so the guard reads code, not prose.
-func stripGoComments(src string) string {
+// goCodeTokens renders src as its Go TOKENS, with comments dropped — so the
+// guard reads code, never prose (these names are the subject of half the
+// comments in the package).
+//
+// SCANS GO AS GO, because the hand-rolled comment stripper this replaces was
+// fail-open on string literals, and Lukas demonstrated both holes on #551:
+// the "//" inside a "https://…" literal started a comment that ate the rest of
+// the line (needle included), and a "/*" inside a literal like "/*.json"
+// swallowed every needle below it to the next "*/" or EOF. Seven non-test files
+// in internal/cli already carry an https:// literal, so that was one future line
+// away, not a contrived shape.
+//
+// Literals are KEPT in the output rather than dropped: a needle inside a string
+// then reads as a loud false positive, which is cheap — the opposite direction
+// fails silently, which is the bug.
+//
+// SCOPE OF THE ERROR, stated precisely because the first version of this comment
+// overclaimed it: go/scanner is LEXICAL, not syntactic, so this returns an error
+// only on lexical faults — an unterminated string literal or an unterminated
+// /* comment. `func f( {` scans clean and is reported as normal code. That is the
+// right guarantee rather than a weak one: the faults it does catch are exactly
+// the ones that would desynchronise literal/comment boundaries and hand the
+// needles a misread file, which is the failure this function exists to prevent.
+// A file that tokenises correctly but does not compile still yields correct
+// needles, and `go build` is the check for whether it compiles.
+func goCodeTokens(src string) (string, error) {
+	var fset token.FileSet
+	var sc scanner.Scanner
+	scanErrs := 0
+	f := fset.AddFile("", fset.Base(), len(src))
+	// mode 0: comment tokens are not emitted at all.
+	sc.Init(f, []byte(src), func(token.Position, string) { scanErrs++ }, 0)
 	var b strings.Builder
-	for i := 0; i < len(src); {
-		switch {
-		case strings.HasPrefix(src[i:], "//"):
-			if n := strings.IndexByte(src[i:], '\n'); n >= 0 {
-				i += n
-			} else {
-				i = len(src)
-			}
-		case strings.HasPrefix(src[i:], "/*"):
-			if n := strings.Index(src[i+2:], "*/"); n >= 0 {
-				i += n + 4
-			} else {
-				i = len(src)
-			}
-		default:
-			b.WriteByte(src[i])
-			i++
+	for {
+		_, tok, lit := sc.Scan()
+		if tok == token.EOF {
+			break
 		}
+		if lit != "" {
+			b.WriteString(lit)
+		} else {
+			b.WriteString(tok.String())
+		}
+		b.WriteByte(' ')
 	}
-	return b.String()
+	if scanErrs > 0 {
+		return "", fmt.Errorf("%d scan error(s) — cannot tell what this file reads", scanErrs)
+	}
+	return b.String(), nil
 }

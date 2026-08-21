@@ -116,9 +116,15 @@ func commandPathOf(c *cobra.Command) string {
 func telemetryEnv(env string) string {
 	resolved := env
 	if resolved == "" {
-		// Not signed in: $CLIENT_ENV, then the prod default — resolved BY sessionEnv
-		// over an empty config rather than by a second copy of its fallback, so the
-		// precedence chain lives in exactly one function.
+		// No stored session: $CLIENT_ENV, then the prod default — resolved BY
+		// sessionEnv over an empty config rather than by a second copy of its
+		// fallback, so the precedence chain lives in exactly one function.
+		//
+		// NOT REACHABLE FROM PRODUCTION any more: the only production caller passes
+		// signedInEnv(), which since it delegates to sessionEnv never returns "".
+		// Kept, and not dead, because telemetryEnv is a pure mapping that the tests
+		// call directly with "" — and because a mapping that panics or mislabels on
+		// an empty input would be a worse contract than one that resolves it.
 		resolved = sessionEnv(&config.Config{})
 	}
 	if api.IsKnownEnv(resolved) {
@@ -129,17 +135,25 @@ func telemetryEnv(env string) string {
 	return api.EnvProd
 }
 
-// signedInEnv reads the environment the config points at, best-effort. A
-// missing or unreadable config is simply "not signed in".
+// signedInEnv resolves the environment the config points at, best-effort.
 //
 // Delegates to sessionEnv — the same function authedClient and logout resolve
 // through — so the record's label is derived from the session env by the same
 // code that picks the host the CLI talks to, not by a parallel restatement of
 // the rule that can drift from it.
+//
+// ALWAYS RETURNS A RESOLVED ENV, never "". It used to return "" for a missing or
+// unreadable config, and the old comment called that "not signed in"; delegating
+// to sessionEnv means that case now resolves through $CLIENT_ENV to prod like any
+// other empty config. So "not signed in" no longer names an output — it means
+// "resolved from $CLIENT_ENV/prod rather than from a stored session", and the two
+// are indistinguishable here by design (the label is about the host, not the
+// session). Do NOT write `if signedInEnv() == ""` on the strength of a stale
+// reading of this: it cannot fire.
 func signedInEnv() string {
 	cfg, err := config.Load()
 	if err != nil || cfg == nil {
-		cfg = &config.Config{} // unreadable config == not signed in
+		cfg = &config.Config{} // unreadable == no stored session
 	}
 	return sessionEnv(cfg)
 }
