@@ -98,9 +98,9 @@ func commandPathOf(c *cobra.Command) string {
 // present-but-unrecognised value is prod, because api.BaseURL routes every
 // unknown value to https://api.tracebloc.io (sessionEnv normalises cfg.CurrentEnv
 // but does not validate it, so an unrecognised value reaches api.New intact). So
-// prod is the accurate label for that population, not a
-// guess — and NOT withheld: a misconfigured install that hits prod and fails is
-// exactly the run this feature exists to see.
+// prod is the accurate label for that population, not a guess — and NOT withheld:
+// a misconfigured install that hits prod and fails is exactly the run this
+// feature exists to see.
 //
 // $CLIENT_ENV is consulted only when there is no signed-in env, matching
 // sessionEnv: once cfg.CurrentEnv is set the client ignores $CLIENT_ENV, so
