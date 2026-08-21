@@ -48,8 +48,8 @@ BACKEND_REF="${BACKEND_REF:-${_pinned_ref:-develop}}"
 # The ref is interpolated into an API URL, so validate it before use (same
 # guard as sync-schema.sh): allow only a SHA / branch / tag shape — alnum
 # start, then alnum . _ - / and no ".." component.
-if ! printf '%s' "$BACKEND_REF" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' \
-   || printf '%s' "$BACKEND_REF" | grep -q '\.\.'; then
+if ! grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' <<<"$BACKEND_REF" \
+   || grep -q '\.\.' <<<"$BACKEND_REF"; then
   echo "error: invalid backend ref '$BACKEND_REF' — expected a commit SHA, branch, or tag" >&2
   echo "(set it in scripts/.backend-ref or via BACKEND_REF)" >&2
   exit 2
