@@ -33,7 +33,8 @@ help:
 	@echo "  build       build ./tracebloc"
 	@echo "  install     go install ./cmd/tracebloc"
 	@echo
-	@echo "  individual: vet test lint lint-full fmt fmt-check schema-check"
+	@echo "  individual: vet test lint lint-full fmt fmt-check fmt-selftest"
+	@echo "              schema-check"
 	@echo "              vulncheck deadcode file-budget check-style clean"
 	@echo "              cover cover-integration cover-merge test-integration"
 
@@ -50,7 +51,7 @@ help:
 #   * schema-check   — fetches data-ingestors at the pinned ref.
 #   * deadcode       — another `go run tool@version` fetch.
 .PHONY: check
-check: vet test-fast fmt-check file-budget check-style check-tool-pins
+check: vet test-fast fmt-check fmt-selftest file-budget check-style check-tool-pins
 	@echo "==> check: green (run 'make check-all' for the full CI set)"
 
 # check-all: the full PR gate. `ci` is the original name and stays —
@@ -132,7 +133,7 @@ GOIMPORTS_VERSION   ?= v0.48.0
 # which fails on findings since #430. A green `make ci` must imply a green
 # PR; lint-full's own guard tells you how to install the tool if missing.
 .PHONY: ci
-ci: vet test lint lint-full fmt-check schema-check vulncheck file-budget deadcode check-style check-tool-pins
+ci: vet test lint lint-full fmt-check fmt-selftest schema-check vulncheck file-budget deadcode check-style check-tool-pins
 	@echo "==> ci: all green"
 
 .PHONY: build
@@ -273,6 +274,16 @@ fmt:
 .PHONY: fmt-check
 fmt-check:
 	@GO="$(GO)" GOIMPORTS_VERSION=$(GOIMPORTS_VERSION) ./scripts/format.sh --check
+
+# fmt-selftest: the properties scripts/format.sh must not lose — the formatters
+# are stubbed, so it is hermetic and ~6 s. It exists because the FIRST cut of
+# format.sh shipped a false green: run_formatter `exit`ed from inside a command
+# substitution, which ends only the subshell, so check mode read an empty capture
+# and printed "clean" on a formatter that never ran (caught in review on #550).
+# A comment cannot hold that shut; this can.
+.PHONY: fmt-selftest
+fmt-selftest:
+	@bash scripts/tests/format-verify.sh
 
 .PHONY: schema-check
 schema-check:

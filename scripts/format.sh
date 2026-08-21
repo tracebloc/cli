@@ -73,53 +73,74 @@ if [ ${#files[@]} -eq 0 ]; then
   exit 2
 fi
 
+# The formatter's stdout goes to a FILE and run_formatter RETURNS the status;
+# it never `exit`s and is never called inside `$( )`. That shape is deliberate and
+# it is load-bearing (Bugbot High + @LukasWodka on #550): a function that `exit`s
+# from a command substitution ends only the SUBSHELL, so the caller reads an empty
+# capture, finds no drift, and prints "clean" — exit 0 on a formatter that never
+# ran. Which is precisely the inert-verification failure (backend#1729) this file
+# was written to prevent, so it must not be reintroduced here.
+#
+# scripts/tests/format-verify.sh asserts the propagation with a formatter stubbed
+# to fail; keep that harness green rather than trusting this comment.
+out_file=""
+cleanup() { [ -n "$out_file" ] && rm -f "$out_file"; }
+trap cleanup EXIT
+
+out_file="$(mktemp "${TMPDIR:-/tmp}/format-sh.XXXXXX")" || {
+  echo "format.sh: mktemp failed — refusing to report clean" >&2
+  exit 2
+}
+
 # xargs, not a bare expansion: the list grows with the repo and a single argv has
 # a hard size limit. printf is a builtin, so building the NUL stream is not itself
 # subject to that limit. The list is non-empty (guarded above), so the BSD-vs-GNU
 # "run once with no arguments" difference cannot bite.
-# stderr is deliberately NOT captured. `go run` writes module-download progress
-# there, and folding that into the captured stdout would turn a cold cache into
+#
+# stderr is deliberately NOT redirected. `go run` writes module-download progress
+# there, and folding it into the captured stdout would turn a cold cache into
 # phantom "drift" filenames. Diagnostics go straight to the terminal instead.
-run_formatter() {  # run_formatter <label> <cmd...>
+run_formatter() {  # run_formatter <label> <cmd...>  -> 0 ok, 2 the tool failed
   local label="$1"; shift
-  local out rc
-  out="$(printf '%s\0' "${files[@]}" | xargs -0 "$@")"
+  local rc
+  printf '%s\0' "${files[@]}" | xargs -0 "$@" > "$out_file"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "==> ${label}: FAILED (exit ${rc}) — see the output above" >&2
-    exit 2
+    return 2
   fi
-  printf '%s' "$out"
+  return 0
 }
 
+goimports_cmd=(
+  "$GO" run "golang.org/x/tools/cmd/goimports@${GOIMPORTS_VERSION}"
+  -local "$LOCAL_PREFIX"
+)
+
 if [ "$mode" = "write" ]; then
-  run_formatter "gofmt -s -w" gofmt -s -w >/dev/null
-  run_formatter "goimports -w" \
-    "$GO" run "golang.org/x/tools/cmd/goimports@${GOIMPORTS_VERSION}" \
-    -local "$LOCAL_PREFIX" -w >/dev/null
+  run_formatter "gofmt -s -w" gofmt -s -w || exit 2
+  run_formatter "goimports -w" "${goimports_cmd[@]}" -w || exit 2
   echo "==> fmt: ${#files[@]} tracked Go file(s) formatted"
   exit 0
 fi
 
 fail=0
 
-drift="$(run_formatter "gofmt -s" gofmt -s -l)"
-if [ -n "$drift" ]; then
-  echo "==> gofmt -s needed on:"
-  printf '%s\n' "$drift" | sed 's/^/    /'
-  fail=1
-fi
+report() {  # report <heading> — print the drift file, if any, and set fail
+  if [ -s "$out_file" ]; then
+    echo "==> $1"
+    sed 's/^/    /' "$out_file"
+    fail=1
+  fi
+}
+
+run_formatter "gofmt -s" gofmt -s -l || exit 2
+report "gofmt -s needed on:"
 
 # goimports -local: the stdlib / third-party / our-own import grouping that
 # .golangci.yml's local-prefixes already declares. gofmt does not check grouping.
-drift="$(run_formatter "goimports" \
-  "$GO" run "golang.org/x/tools/cmd/goimports@${GOIMPORTS_VERSION}" \
-  -local "$LOCAL_PREFIX" -l)"
-if [ -n "$drift" ]; then
-  echo "==> goimports (import grouping) needed on:"
-  printf '%s\n' "$drift" | sed 's/^/    /'
-  fail=1
-fi
+run_formatter "goimports" "${goimports_cmd[@]}" -l || exit 2
+report "goimports (import grouping) needed on:"
 
 if [ "$fail" -ne 0 ]; then
   echo "==> run \`make fmt\` to fix"

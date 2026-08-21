@@ -78,10 +78,18 @@ jobs:
           shellcheck --shell=bash --severity=error scripts/check-style.sh
           shellcheck --shell=bash --severity=error scripts/check-tool-pins.sh
           shellcheck --shell=bash --severity=error scripts/format.sh
+          shellcheck --shell=bash --severity=error scripts/tests/format-verify.sh
           dash -n scripts/install.sh
           bash -n scripts/tests/install-verify.sh
           shellcheck --shell=bash --severity=error scripts/tests/install-ps1-verify.sh
           bash -n scripts/tests/install-ps1-verify.sh
+      # format.sh's own fail-closed properties. Formatters are stubbed, so this is
+      # hermetic and needs no Go toolchain — which is why it lives in this job
+      # rather than Lint. It exists because the first cut of format.sh reported
+      # "clean" on a formatter that never ran (#550 review).
+      - name: Formatter-gate harness (fail-closed / tracked-files scope)
+        run: bash scripts/tests/format-verify.sh
+
       - name: Verification harness (mandatory cosign / fail-closed)
         run: bash scripts/tests/install-verify.sh
       # Same property on Windows (backend#2078). pwsh is preinstalled on the
