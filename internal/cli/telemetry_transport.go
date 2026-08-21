@@ -41,6 +41,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tracebloc/cli/internal/api"
@@ -165,6 +166,62 @@ func readSpool(path string) []spooledEvent {
 	return out
 }
 
+// wipedHostDir records the directory THIS process deliberately removed — the
+// `tracebloc delete` offboard on its default (no `--keep-data`) path. Spool
+// writes under it are dropped for the rest of the process: see writeSpool.
+//
+// WHY A LATCH AND NOT A CHECK. main.go emits the command-outcome event AFTER the
+// command tree returns, so the offboard has already deleted ~/.tracebloc by the
+// time telemetry runs — and telemetry's spool lives INSIDE that tree
+// (<config.Dir()>/telemetry/pending-<env>.jsonl). "Does the dir exist?" is the
+// wrong question: it doesn't, and writeSpool's job is to create it. The question
+// is whether its absence is a fresh install (spool away) or a wipe the user just
+// asked for (don't), and only the offboard knows which. So the offboard says so.
+//
+// backend#2314: `tracebloc delete` printed "✔ Removed local tracebloc data and
+// config." and then the exit-path telemetry write re-created the tree behind it —
+// empty when delivery succeeded, and holding an undeliverable event record when
+// it didn't (after the wipe there is no token left to deliver with, so deliver
+// takes its no-token spool branch every time). An explicit wipe that the CLI
+// silently undoes on the way out is a broken promise, and a dropped telemetry
+// record is unambiguously the cheaper loss.
+//
+// IT HOLDS THE WIPED DIRECTORY, NOT JUST A BOOLEAN, and that is about blast
+// radius rather than precision for its own sake. A bare "telemetry is off now"
+// flag is unscoped: it silences every later writeSpool in the process, including
+// one for a path the offboard never touched. It is also permanently sticky in a
+// test binary — `delete`'s own unit tests drive the real offboard, so a boolean
+// latched there stays latched for every test that runs after it, and three
+// unrelated spool tests failed exactly that way while this was being written.
+// Recording the path answers the narrower and more useful question: is THIS
+// spool inside the tree we removed?
+//
+// atomic.Value, not a plain string: the sink runs on the exit path while nothing
+// else should still be writing, but "should" is not a guarantee and the race
+// detector runs in CI.
+var wipedHostDir atomic.Value // string
+
+// markHostStateWiped records the directory this process deliberately removed, so
+// the exit-path telemetry write does not resurrect it. Called by the offboard.
+func markHostStateWiped(dir string) { wipedHostDir.Store(dir) }
+
+// insideWipedHostDir reports whether path lies within a directory this process
+// deliberately removed.
+func insideWipedHostDir(path string) bool {
+	root, _ := wipedHostDir.Load().(string)
+	if root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		// Different volumes, so not inside it.
+		return false
+	}
+	// filepath.Rel returns a ".."-prefixed path for anything outside root, and
+	// no error — so the prefix test, not the error, is what decides this.
+	return rel == "." || !strings.HasPrefix(rel, "..")
+}
+
 // writeSpool replaces the spool with events, keeping the NEWEST
 // telemetrySpoolMax and dropping the oldest past it.
 //
@@ -174,19 +231,30 @@ func readSpool(path string) []spooledEvent {
 // file on the exit path of every command is a new way for telemetry to hang the
 // product, which is the one thing it may not do.
 func writeSpool(path string, events []spooledEvent) error {
+	// The offboard removed the tree this spool lives in. Writing here would
+	// re-create it — see wipedHostDir (backend#2314). Nothing to remove either:
+	// the file went with the directory.
+	if insideWipedHostDir(path) {
+		return nil
+	}
 	if len(events) > telemetrySpoolMax {
 		events = events[len(events)-telemetrySpoolMax:]
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
 	if len(events) == 0 {
+		// Nothing to write, so do NOT create the directory on the way to
+		// deleting a file inside it — the MkdirAll used to run before this
+		// branch, which re-created a wiped ~/.tracebloc/telemetry/ even on the
+		// delivered path, where the spool is being emptied rather than filled
+		// (backend#2314).
 		err := os.Remove(path)
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
 	}
 	tmp, err := os.CreateTemp(dir, "pending-*.jsonl")
 	if err != nil {
