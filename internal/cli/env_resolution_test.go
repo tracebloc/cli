@@ -20,6 +20,7 @@ package cli
 // component decision tracked on backend#2171, not a CLI-local cleanup.
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/tracebloc/cli/internal/api"
+	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/telemetry"
 )
@@ -118,8 +120,21 @@ func TestClusterDoctorProbesTheSessionEnv(t *testing.T) {
 	}
 	t.Cleanup(func() { newAPIClient = orig })
 
-	// doctor exits non-zero here (no cluster, failed probe); the assertion is on
-	// the env it built the client for, which is decided before any of that.
+	// HERMETIC BY CONSTRUCTION, and this matters more than it looks. Past the
+	// session probe, `cluster doctor` loads the real kubeconfig and calls the real
+	// doctor.Run, whose checkBackendEgress probes backendHost("") — i.e. it issues
+	// a live GET to https://api.tracebloc.io/. On a developer machine with a real
+	// k3d cluster that is a genuine production request from a unit test. Failing
+	// loadClusterFn returns right after the session probe, which is everything
+	// this test needs: the env is decided before it.
+	origLoad := loadClusterFn
+	loadClusterFn = func(cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+		return nil, errors.New("no cluster (stubbed: keeps this test off the network)")
+	}
+	t.Cleanup(func() { loadClusterFn = origLoad })
+
+	// doctor exits non-zero here (stubbed no-cluster); the assertion is on the env
+	// it built the client for, which is decided before that.
 	_, _ = runCmd(t, "cluster", "doctor")
 
 	if gotEnv != api.EnvDev {
