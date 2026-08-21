@@ -28,10 +28,34 @@ fail=0
 ok()   { echo "  ok:   $1"; pass=$((pass + 1)); }
 bad()  { echo "  FAIL: $1" >&2; fail=$((fail + 1)); }
 
+# write_stub <path> <seen-file> <mode>   mode: clean | drift | explode
+#
+# The two formatters get INDEPENDENT stubs so each propagation path can be pinned
+# on its own. A single shared stub that fails both only proves "at least one call
+# site still exits", which is or-coverage masquerading as per-formatter coverage
+# (@LukasWodka on #550, who mutation-proved it: swallowing ONLY the gofmt call
+# site left the suite green, because the goimports one still carried the script to
+# a non-zero exit). One call-site shape being wrong is how the original bug
+# arrived, so that is the case that has to redden.
+write_stub() {
+  local path="$1" seen="$2" mode="$3"
+  cat > "$path" <<STUB
+#!/usr/bin/env bash
+# Record the argv, so which files reached a formatter is checkable.
+for a in "\$@"; do case "\$a" in *.go) echo "\$a" >> "${seen}" ;; esac; done
+case "${mode}" in
+  clean)   exit 0 ;;
+  drift)   for a in "\$@"; do case "\$a" in *.go) echo "\$a" ;; esac; done; exit 0 ;;
+  explode) echo "stub: simulated formatter failure" >&2; exit 3 ;;
+esac
+STUB
+  chmod +x "$path"
+}
+
 # A throwaway git repo with one tracked + one UNTRACKED misformatted .go file.
-# $1 = stub behaviour: "clean" | "drift" | "explode"
+# $1 = behaviour: clean | drift | explode | explode-gofmt | explode-goimports
 make_fixture() {
-  local behaviour="$1" dir
+  local behaviour="$1" dir gofmt_mode goimports_mode
   dir="$(mktemp -d "${TMPDIR:-/tmp}/fmtverify.XXXXXX")" || exit 2
   mkdir -p "$dir/scripts" "$dir/bin" "$dir/.claude/worktrees/session/internal"
   cp "$FORMAT_SH" "$dir/scripts/format.sh"
@@ -48,20 +72,19 @@ make_fixture() {
   # Untracked, and deliberately misformatted: the thing that must never be seen.
   printf 'package p\nfunc  Untracked(){}\n' > "$dir/.claude/worktrees/session/internal/scratch.go"
 
-  # gofmt stub. Records the argv it was handed so scoping is checkable, then
-  # behaves as asked. `go` is stubbed too, so the goimports path never runs
-  # `go run` — same stub serves both via the trailing file arguments.
-  cat > "$dir/bin/gofmt" <<STUB
-#!/usr/bin/env bash
-for a in "\$@"; do case "\$a" in *.go) echo "\$a" >> "$dir/seen.txt" ;; esac; done
-case "$behaviour" in
-  clean)   exit 0 ;;
-  drift)   for a in "\$@"; do case "\$a" in *.go) echo "\$a" ;; esac; done; exit 0 ;;
-  explode) echo "stub: simulated formatter failure" >&2; exit 3 ;;
-esac
-STUB
-  cp "$dir/bin/gofmt" "$dir/bin/go"
-  chmod +x "$dir/bin/gofmt" "$dir/bin/go"
+  case "$behaviour" in
+    clean)              gofmt_mode=clean;   goimports_mode=clean   ;;
+    drift)              gofmt_mode=drift;   goimports_mode=drift   ;;
+    explode)            gofmt_mode=explode; goimports_mode=explode ;;
+    explode-gofmt)      gofmt_mode=explode; goimports_mode=clean   ;;
+    explode-goimports)  gofmt_mode=clean;   goimports_mode=explode ;;
+    *) echo "make_fixture: unknown behaviour '$behaviour'" >&2; exit 2 ;;
+  esac
+
+  # `gofmt` is called bare; the goimports path goes through $GO, so stubbing `go`
+  # means `go run` never fetches or builds anything.
+  write_stub "$dir/bin/gofmt" "$dir/seen.txt" "$gofmt_mode"
+  write_stub "$dir/bin/go"    "$dir/seen.txt" "$goimports_mode"
   echo "$dir"
 }
 
@@ -97,6 +120,23 @@ else
   bad "a failing formatter exited 0 in write mode"
 fi
 rm -rf "$dir"
+
+# 1b. EACH propagation path, pinned on its own. With both formatters failing, one
+# surviving `|| exit 2` is enough to carry the script to non-zero — so the case
+# above cannot tell WHICH path works. These can: exactly one formatter fails, so
+# only that call site can produce the non-zero exit.
+for which in gofmt goimports; do
+  dir="$(make_fixture "explode-${which}")"
+  run_case "$dir" --check; rc=$CASE_RC
+  if [ "$rc" -eq 0 ]; then
+    bad "a failing ${which} alone exited 0 — that call site swallows failures"
+  elif printf '%s' "$CASE_OUT" | grep -q "clean"; then
+    bad "a failing ${which} alone printed 'clean' (rc=$rc)"
+  else
+    ok "a failing ${which} ALONE fails check mode (rc=$rc)"
+  fi
+  rm -rf "$dir"
+done
 
 # 2. Scoping: the untracked misformatted file must never reach a formatter.
 dir="$(make_fixture clean)"
