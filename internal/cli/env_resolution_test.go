@@ -318,9 +318,33 @@ var resolutionSites = map[string]string{
 // the bug this guard exists to catch. Fail closed.
 var envNeedles = []string{"CurrentEnv", "ResolveEnv", "CLIENT_ENV"}
 
+// matchesAnyNeedle is THE matcher, called from both directions — the detection
+// sweep and the allowlist audit. One function on purpose: two copies of "does
+// this file resolve an env?" is the same shape as the two copies of "which env?"
+// that this PR exists to remove, and it would let detection and allowlisting
+// drift apart exactly where nobody looks.
+func matchesAnyNeedle(code string) (string, bool) {
+	for _, needle := range envNeedles {
+		if strings.Contains(code, needle) {
+			return needle, true
+		}
+	}
+	return "", false
+}
+
+// envCodeOf tokenises one file, or reports why it could not.
+func envCodeOf(path string) (string, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return goCodeTokens(string(src))
+}
+
 func TestNoNewEnvironmentResolutionSiteAppears(t *testing.T) {
 	const root = "../.." // this test's package dir -> the module root
 
+	// --- detection: what actually resolves an env, module-wide ---------------
 	matched := map[string]string{} // repo-relative path -> the needle that hit
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -337,11 +361,7 @@ func TestNoNewEnvironmentResolutionSiteAppears(t *testing.T) {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			return nil
 		}
-		src, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		code, err := goCodeTokens(string(src))
+		code, err := envCodeOf(path)
 		if err != nil {
 			// "cannot tell" is not "clean": abort rather than read a file whose
 			// tokenisation failed as a string that matches nothing.
@@ -351,12 +371,8 @@ func TestNoNewEnvironmentResolutionSiteAppears(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		rel = filepath.ToSlash(rel)
-		for _, needle := range envNeedles {
-			if strings.Contains(code, needle) {
-				matched[rel] = needle
-				break
-			}
+		if needle, ok := matchesAnyNeedle(code); ok {
+			matched[filepath.ToSlash(rel)] = needle
 		}
 		return nil
 	})
@@ -364,44 +380,53 @@ func TestNoNewEnvironmentResolutionSiteAppears(t *testing.T) {
 		t.Fatalf("walking the module: %v", walkErr)
 	}
 
-	// A guard that matches nothing is not a guard: if the needles ever stop
-	// matching (a rename), fail loudly rather than pass vacuously.
-	if len(matched) == 0 {
-		t.Fatal("the guard matched no files at all — its needles are stale and it is " +
-			"no longer checking anything")
-	}
-
+	// --- every match must be sanctioned --------------------------------------
 	for rel, needle := range matched {
-		why, ok := resolutionSites[rel]
-		switch {
-		case !ok:
+		if _, ok := resolutionSites[rel]; !ok {
 			t.Errorf("%s resolves an environment from ambient state (%q), but is not a "+
 				"sanctioned resolution site.\n"+
 				"Take the resolved env as an ARGUMENT instead — the CLI must answer "+
 				"\"which backend?\" once per invocation and thread it. If this really is "+
 				"a new resolution point, add it to resolutionSites with the reason and "+
 				"say how it cannot disagree with sessionEnv.", rel, needle)
-		case why == "":
-			t.Errorf("resolutionSites[%q] is allowlisted with no reason", rel)
 		}
 	}
 
-	// THE ALLOWLIST MUST STAY A RECORD, NOT BECOME A LICENCE. Checking only that a
-	// sanctioned file EXISTS is the defect class this whole PR is about: verifying
+	// --- and every sanctioned entry must still EARN its place ----------------
+	//
+	// THE ALLOWLIST MUST STAY A RECORD, NOT BECOME A LICENCE. Asking only whether a
+	// sanctioned file EXISTS is the defect class this whole PR is about: checking
 	// the form of a thing instead of the property the form exists to guarantee. An
-	// entry whose file no longer resolves anything is inert — it checks nothing,
-	// while silently pre-approving the next raw read in that file.
-	for rel := range resolutionSites {
+	// entry whose file no longer resolves anything is inert — it verifies nothing,
+	// while silently pre-approving the next ambient read in that file. My own
+	// consolidation did exactly that to the telemetry.go entry (Bugbot on #551),
+	// in the one file whose double resolution this PR removes.
+	//
+	// Per ENTRY rather than per suite, so the failure names the entry to delete.
+	// This also subsumes the "needles went stale" backstop: rename a needle and
+	// every entry goes inert at once, which is loud and specific rather than a
+	// single global counter hitting zero.
+	for rel, why := range resolutionSites {
 		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
-			t.Errorf("resolutionSites lists %s, which does not exist — stale allowlist", rel)
+			t.Errorf("resolutionSites lists %s, which cannot be read — stale allowlist", rel)
 			continue
 		}
-		if _, ok := matched[rel]; !ok {
-			t.Errorf("stale allowlist entry: %s is sanctioned but no longer resolves an "+
-				"environment from ambient state — remove it from resolutionSites. An inert "+
-				"entry is a licence, not a record: it would silently re-admit a raw read "+
-				"in that file.", rel)
+		if why == "" {
+			t.Errorf("resolutionSites[%q] is allowlisted with no reason", rel)
 		}
+		if _, ok := matched[rel]; !ok {
+			t.Errorf("%s is allowlisted as a resolution site but resolves nothing any more "+
+				"— drop the entry, or the guard silently permits the next ambient read "+
+				"here.", rel)
+		}
+	}
+
+	// The one thing the per-entry loop cannot see: an EMPTY allowlist makes it
+	// vacuous, and a needle rename plus an empty allowlist would then pass in
+	// silence. Anchor both.
+	if len(resolutionSites) == 0 || len(matched) == 0 {
+		t.Fatalf("the guard checked nothing: %d sanctioned entries, %d files matched",
+			len(resolutionSites), len(matched))
 	}
 }
 
