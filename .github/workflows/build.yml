@@ -77,6 +77,7 @@ jobs:
           shellcheck --shell=sh --severity=error scripts/install.sh
           shellcheck --shell=bash --severity=error scripts/check-style.sh
           shellcheck --shell=bash --severity=error scripts/check-tool-pins.sh
+          shellcheck --shell=bash --severity=error scripts/format.sh
           dash -n scripts/install.sh
           bash -n scripts/tests/install-verify.sh
           shellcheck --shell=bash --severity=error scripts/tests/install-ps1-verify.sh
@@ -152,29 +153,18 @@ jobs:
           go install github.com/kisielk/errcheck@v1.20.0
           errcheck ./...
 
-      - name: gofmt -s
-        run: |
-          drift="$(gofmt -s -l .)"
-          if [ -n "$drift" ]; then
-            echo "::error::gofmt -s drift in:"
-            echo "$drift" | sed 's/^/    /'
-            echo "::error::run \`make fmt\` to fix"
-            exit 1
-          fi
-
-      # goimports -local: enforce the stdlib / third-party / our-own import
-      # grouping that .golangci.yml's local-prefixes already declares. gofmt
-      # doesn't check grouping, so drift accumulated silently until now.
-      - name: goimports -local
-        run: |
-          go install golang.org/x/tools/cmd/goimports@v0.48.0
-          drift="$(goimports -local github.com/tracebloc/cli -l .)"
-          if [ -n "$drift" ]; then
-            echo "::error::goimports (import grouping) drift in:"
-            echo "$drift" | sed 's/^/    /'
-            echo "::error::run \`make fmt\` to fix"
-            exit 1
-          fi
+      # gofmt -s (simplification) + goimports -local (the stdlib / third-party /
+      # our-own import grouping that .golangci.yml's local-prefixes declares;
+      # gofmt does not check grouping).
+      #
+      # `make fmt-check`, not an inline copy: both formatters now scope to
+      # `git ls-files '*.go'` instead of `.` (cli#549), and a second inline copy
+      # of that scope here is how local and CI start disagreeing about which
+      # files are gated. It also drops the restated goimports pin — the version
+      # is declared once, by GOIMPORTS_VERSION in the Makefile, which is what
+      # check-tool-pins.sh now enforces for this tool too.
+      - name: gofmt -s + goimports -local
+        run: make fmt-check
 
       - name: ineffassign
         run: |

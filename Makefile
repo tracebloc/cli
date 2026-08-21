@@ -256,29 +256,23 @@ vulncheck:
 lint-full:
 	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run
 
+# fmt / fmt-check: gofmt -s (simplification) + goimports -local (import
+# grouping: stdlib / third-party / our own — matches .golangci.yml's
+# local-prefixes).
+#
+# Both scope to `git ls-files '*.go'` rather than `.` (cli#549). `.` is the whole
+# working TREE, so an untracked scratch directory holding Go files — a nested git
+# worktree, a vendored copy, a build sandbox — failed `make check` while every
+# tracked file was clean, and `make fmt` then rewrote content the repo does not
+# track. build.yml's Lint job calls these same targets, so the file set has one
+# definition; see scripts/format.sh for the fail-closed cases.
 .PHONY: fmt
 fmt:
-	gofmt -s -w .
-	$(GO) run golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION) -local github.com/tracebloc/cli -w .
+	@GO="$(GO)" GOIMPORTS_VERSION=$(GOIMPORTS_VERSION) ./scripts/format.sh --write
 
-# fmt-check: gofmt -s (simplification) + goimports -local (import grouping:
-# stdlib / third-party / our own — matches .golangci.yml's local-prefixes).
 .PHONY: fmt-check
 fmt-check:
-	@diff="$$(gofmt -s -l . 2>/dev/null)"; \
-	if [ -n "$$diff" ]; then \
-	  echo "==> gofmt -s needed on:"; \
-	  echo "$$diff" | sed 's/^/    /'; \
-	  echo "==> run \`make fmt\` to fix"; \
-	  exit 1; \
-	fi
-	@drift="$$($(GO) run golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION) -local github.com/tracebloc/cli -l .)"; \
-	if [ -n "$$drift" ]; then \
-	  echo "==> goimports (import grouping) needed on:"; \
-	  echo "$$drift" | sed 's/^/    /'; \
-	  echo "==> run \`make fmt\` to fix"; \
-	  exit 1; \
-	fi
+	@GO="$(GO)" GOIMPORTS_VERSION=$(GOIMPORTS_VERSION) ./scripts/format.sh --check
 
 .PHONY: schema-check
 schema-check:
