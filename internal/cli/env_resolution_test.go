@@ -179,6 +179,28 @@ func TestAuthCheckStillRejectsARealEnvMismatch(t *testing.T) {
 	}
 }
 
+// TestAuthStatusShowsTheEnvTheClientWillUse: `auth status` printed the raw
+// stored env as its "backend" field, so the human-facing answer to "which
+// backend am I on?" could differ from the one --check computes and the one
+// authedClient dials — two answers to the same question, in the same file.
+func TestAuthStatusShowsTheEnvTheClientWillUse(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	t.Setenv("CLIENT_ENV", "")
+	if err := (&config.Config{CurrentEnv: " Dev ", Profiles: map[string]*config.Profile{
+		" Dev ": {Token: "tok", Email: "ds@co"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runCmd(t, "auth", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, api.EnvDev) || strings.Contains(out, " Dev ") {
+		t.Fatalf("auth status reported the stored env verbatim, not the resolved one.\n"+
+			"want the %q the client actually dials, got:\n%s", api.EnvDev, out)
+	}
+}
+
 // TestTheRecordIsLabelledWithTheEnvItWasHanded is the #540 finding.
 //
 // RecordCommandOutcome resolves the env once and derives BOTH the record's label

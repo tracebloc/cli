@@ -411,7 +411,13 @@ func newAuthStatusCmd() *cobra.Command {
 			prof := cfg.Current()
 			p.Section("tracebloc auth")
 			p.Field("status", "signed in")
-			p.Field("backend", cfg.CurrentEnv)
+			// sessionEnv, not the raw stored string: this line is the human-facing
+			// answer to "which backend am I on?", and it must be the same answer
+			// --check computes and the same one authedClient dials. Printing the
+			// stored value let `auth status` say `Dev` while every request went to
+			// dev — a status command that disagrees with the client is worse than
+			// no status command.
+			p.Field("backend", sessionEnv(cfg))
 			if prof.Email != "" {
 				p.Field("account", prof.Email)
 			}
@@ -469,8 +475,8 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 		}
 		return &exitError{code: exitFailure}
 	}
-	// Signed in AND CurrentEnv == target: probe it. authedClient() builds the client
-	// for sessionEnv (== CurrentEnv == target) with the stored token — reuse it and
+	// Signed in AND the resolved session env == target: probe it. authedClient()
+	// builds the client for sessionEnv (== the value just compared) with the stored token — reuse it and
 	// discard its message (the exit code is the contract here).
 	client, _, err := authedClient()
 	if err != nil {
