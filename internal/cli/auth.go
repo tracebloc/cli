@@ -442,7 +442,7 @@ func newAuthStatusCmd() *cobra.Command {
 // (IsSilentError) so main() prints nothing.
 //
 // The target env is resolved exactly like `login` (--env, then $CLIENT_ENV, then
-// prod), and must match the signed-in CurrentEnv — otherwise the probe would OK a
+// prod), and must match the signed-in env as sessionEnv resolves it — otherwise the probe would OK a
 // stale session for the wrong backend and the installer would skip the very
 // `login` that switches env, provisioning into the wrong account (RFC-0001 §10).
 func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
@@ -454,10 +454,15 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 		return &exitError{code: exitFailure}
 	}
 	target := api.ResolveEnv(envFlag)
-	if !cfg.SignedIn() || cfg.CurrentEnv != target {
+	// Compare the RESOLVED session env, not the raw cfg.CurrentEnv: target comes
+	// out of api.ResolveEnv already normalised, so comparing it against the stored
+	// string made this the one place a `"current_env": "Dev"` config failed a probe
+	// for the session it is actually signed in to.
+	signedIn := sessionEnv(cfg)
+	if !cfg.SignedIn() || signedIn != target {
 		if p.Verbose() {
-			if cfg.SignedIn() && cfg.CurrentEnv != target {
-				p.Hintf("Signed in to %q, but this run targets %q — run `tracebloc login`.", cfg.CurrentEnv, target)
+			if cfg.SignedIn() && signedIn != target {
+				p.Hintf("Signed in to %q, but this run targets %q — run `tracebloc login`.", signedIn, target)
 			} else {
 				p.Hintf("Not signed in. Run `tracebloc login`.")
 			}
