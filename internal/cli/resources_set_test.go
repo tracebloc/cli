@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -39,6 +40,44 @@ func fakeHelm(t *testing.T) *[][]string {
 	}
 	t.Cleanup(func() { helm.Runner = orig })
 	return &calls
+}
+
+// fakeHelmValues is fakeHelm plus the CONTENTS of the `-f` values file, read
+// while the upgrade is in flight (helm.Upgrade writes and closes it before
+// shelling Runner, and removes it after) — so it is only readable from inside
+// the double.
+//
+// Needed because the existing provenance assertions all go through --dry-run,
+// and --dry-run skips the confirmation gate. Proving that a marker lands on a
+// path whose bug WAS the gate therefore has to use the real apply path
+// (backend#2220).
+func fakeHelmValues(t *testing.T) (*[][]string, *string) {
+	t.Helper()
+	var values string
+	calls := fakeHelm(t)
+	inner := helm.Runner
+	helm.Runner = func(ctx context.Context, name string, args ...string) (string, error) {
+		for i, a := range args {
+			if a == "-f" && i+1 < len(args) {
+				if b, err := os.ReadFile(args[i+1]); err == nil {
+					values = string(b)
+				}
+			}
+		}
+		return inner(ctx, name, args...)
+	}
+	return calls, &values
+}
+
+// helmUpgraded reports whether a real `helm upgrade` (not the `--help` capability
+// probe) was shelled.
+func helmUpgraded(calls [][]string) bool {
+	for _, c := range calls {
+		if len(c) >= 3 && c[1] == "upgrade" && c[2] != "--help" {
+			return true
+		}
+	}
+	return false
 }
 
 // runSet drives applyResourcesSet against a fake cluster + prompter, returning the
@@ -312,6 +351,137 @@ func TestSet_SameCeilingStampsProvenance(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSet_SameCeilingNeedsNoYes: a same-ceiling restatement must NOT require
+// --yes. This is the script-facing half of backend#2220 that #539 broke — and
+// the half its tests missed, because every same-ceiling case there passed
+// `yes: true`, which is exactly the flag under dispute.
+//
+// #539 made any non-`user` marker stale, which sent the unchanged-ceiling path
+// into the confirmation gate for the first time. Off a terminal that gate does
+// not ask, it returns exit 1 — so `resources set --cores 4 --memory 16`
+// restating the current ceiling flipped from the documented exit-0 no-op ("0
+// applied (or nothing to change)" in the command's own help; the `no change →
+// exit 0` edge in docs/cli-navigation.md, which bypasses CONF entirely) to a
+// hard failure. Nearly every installed edge reads `installer` or `unknown`, so
+// the blast radius was the installed base, and the callers that restate a size
+// without --yes are scripts — the bootstrap and the end-to-end journey — which
+// no interactive test exercises. (cli#546)
+//
+// The assertions are deliberately paired: exit 0 AND the apply still happening.
+// Either one alone is satisfiable by the wrong fix — reverting the staleness
+// treatment would give exit 0 with no re-stamp, and #539 as merged gives the
+// re-stamp only to callers who pass --yes.
+func TestSet_SameCeilingNeedsNoYes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		provenance string
+	}{
+		{"installer-sized edge", "installer"},
+		{"pre-marker edge", ""},
+		{"junk marker", "banana"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, values := fakeHelmValues(t)
+			env := map[string]string{"RESOURCE_LIMITS": "cpu=4,memory=16Gi"}
+			if tc.provenance != "" {
+				env["RESOURCE_PROVENANCE"] = tc.provenance
+			}
+			cs := csWith("8", "32Gi", env)
+			// pr == nil is a non-TTY script; no `yes` field is set.
+			out, err := runSet(t, cs, nil, setReq{
+				cores: "4", memory: "16", coresSet: true, memSet: true,
+			})
+			if err != nil {
+				t.Fatalf("restating the current ceiling must not need --yes, got: %v\n%s", err, out)
+			}
+			if !helmUpgraded(*calls) {
+				t.Errorf("the re-stamp must still happen without --yes — otherwise the fix\n"+
+					"just reverted backend#2220 for every script:\n%s", out)
+			}
+			// And the marker that lands is `user`, read off the values file helm
+			// was actually handed rather than inferred from the prose.
+			if !strings.Contains(*values, "RESOURCE_PROVENANCE") ||
+				!strings.Contains(*values, "user") {
+				t.Errorf("values handed to helm do not stamp RESOURCE_PROVENANCE=user:\n%s", *values)
+			}
+			// The numbers are untouched: this is a bookkeeping write, not a resize.
+			if !strings.Contains(*values, "cpu=4,memory=16Gi") {
+				t.Errorf("a bookkeeping write must not move the ceiling:\n%s", *values)
+			}
+		})
+	}
+
+	// A GPU-less machine whose cluster still carries the chart-default
+	// GPU_REQUESTS reaches the same fall-through for the same reason (#241), and
+	// was broken by the same missing clause. Scripts must be able to clear it.
+	t.Run("phantom GPU cleanup needs no --yes", func(t *testing.T) {
+		calls, values := fakeHelmValues(t)
+		cs := csWith("8", "32Gi", map[string]string{
+			"RESOURCE_LIMITS":     "cpu=4,memory=16Gi",
+			"GPU_REQUESTS":        "nvidia.com/gpu=1",
+			"RESOURCE_PROVENANCE": "user", // isolate the phantom GPU as the only reason
+		}) // no GPU on the node
+		out, err := runSet(t, cs, nil, setReq{
+			cores: "4", memory: "16", coresSet: true, memSet: true,
+		})
+		if err != nil {
+			t.Fatalf("clearing a phantom GPU must not need --yes, got: %v\n%s", err, out)
+		}
+		if !helmUpgraded(*calls) {
+			t.Errorf("the phantom-GPU cleanup must still apply without --yes:\n%s", out)
+		}
+		if !strings.Contains(*values, "GPU_REQUESTS") {
+			t.Errorf("values must carry the explicit-empty GPU override:\n%s", *values)
+		}
+	})
+
+	// The gate is skipped because the CEILING is unchanged — not because the
+	// prompter is absent. An operator who would decline still gets the
+	// bookkeeping write, because there was never a budget question to decline.
+	// (fakePrompter.Confirm returning false is the only observable proof the
+	// gate was not entered: entering it would cleanCancel and shell no helm.)
+	t.Run("not even asked on a terminal", func(t *testing.T) {
+		calls := fakeHelm(t)
+		pr := &fakePrompter{confirm: boolPtr(false)}
+		cs := csWith("8", "32Gi", map[string]string{
+			"RESOURCE_LIMITS":     "cpu=4,memory=16Gi",
+			"RESOURCE_PROVENANCE": "installer",
+		})
+		out, err := runSet(t, cs, pr, setReq{
+			cores: "4", memory: "16", coresSet: true, memSet: true,
+		})
+		if err != nil {
+			t.Fatalf("same-ceiling set on a terminal: %v\n%s", err, out)
+		}
+		if !helmUpgraded(*calls) {
+			t.Errorf("a declining prompter proves the confirm gate was entered; it must\n"+
+				"be skipped when the ceiling is unchanged:\n%s", out)
+		}
+		if strings.Contains(out, "nothing was changed") {
+			t.Errorf("there was no budget question to decline:\n%s", out)
+		}
+	})
+
+	// The narrow-fix guard: a REAL change off a terminal still refuses without
+	// --yes, so the clause above cannot have disarmed the gate wholesale.
+	// TestSet_OffTTYWithFlagsNeedsYes covers the same contract from the other
+	// side; this keeps the pair adjacent to the fix it bounds.
+	t.Run("a real change still needs --yes", func(t *testing.T) {
+		calls := fakeHelm(t)
+		cs := csWith("8", "32Gi", map[string]string{
+			"RESOURCE_LIMITS":     "cpu=4,memory=16Gi",
+			"RESOURCE_PROVENANCE": "installer",
+		})
+		_, err := runSet(t, cs, nil, setReq{cores: "6", coresSet: true})
+		if got := exitCode(t, err); got != 1 {
+			t.Fatalf("a changed ceiling off a terminal must still exit 1, got %d (%v)", got, err)
+		}
+		if helmUpgraded(*calls) {
+			t.Error("an unconfirmed CHANGE must mutate nothing")
+		}
+	})
 }
 
 // TestSet_NoOpEvenWhenCurrentNoLongerFits: restating the ceiling that's already
