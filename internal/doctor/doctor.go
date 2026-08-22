@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/resources"
 )
@@ -506,18 +507,25 @@ func checkBackendEgress(ctx context.Context, env map[string]string, probe func(c
 // backendHost maps CLIENT_ENV to the backend API host, mirroring the edge
 // runtime's own mapping (controller.py). Unset/unknown defaults to prod, the
 // chart's CLIENT_ENV default.
+//
+// DERIVED FROM api.BaseURL, not restated. The env→host mapping used to be a
+// second copy of BaseURL's switch living in this package, which is how the two
+// drift: the same three hosts written down twice, with nothing that fails when
+// only one of them is edited. api.BaseURL already lower-cases, so TrimSpace is
+// the only normalisation this adds — a CLIENT_ENV read off a container spec can
+// carry surrounding whitespace that a --env flag cannot.
+//
+// The input is the CLUSTER's CLIENT_ENV (read off the jobs-manager Deployment),
+// not this CLI's session env — a deliberately different question, which is why
+// this takes a string rather than calling into the session resolution.
 func backendHost(clientEnv string) string {
-	// Normalize like the API client (api.ResolveEnv/BaseURL lower-case), so a
-	// non-lowercase CLIENT_ENV on the edge box doesn't fall through to prod and
-	// make the doctor probe the wrong backend.
-	switch strings.ToLower(strings.TrimSpace(clientEnv)) {
-	case "dev":
-		return "dev-api.tracebloc.io"
-	case "stg":
-		return "stg-api.tracebloc.io"
-	default:
+	u, err := url.Parse(api.BaseURL(strings.TrimSpace(clientEnv)))
+	if err != nil || u.Host == "" {
+		// Unreachable for BaseURL's closed set of return values; the prod default
+		// keeps this total rather than returning an empty host into a probe URL.
 		return "api.tracebloc.io"
 	}
+	return u.Host
 }
 
 // checkRequestsProxy verifies the requests-proxy deployment is present and

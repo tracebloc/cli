@@ -138,7 +138,7 @@ flowchart TD
 
   FIT{"fits the machine? (+ floors)"}
   FIT -->|no| re2b(["exit 2 — too big / too small<br/>(macOS: raise Docker Desktop)"]):::fail
-  FIT -->|"no change"| re0n(["exit 0 — nothing to change"]):::ok
+  FIT -->|"no change"| re0n(["exit 0 — nothing to change<br/>(may still re-stamp provenance / clear a<br/>phantom GPU — never asks to confirm)"]):::ok
   FIT -->|ok| CONF{"confirm? (--yes skips)"}
   CONF -->|"declined / non-TTY, no --yes"| re0c(["exit 0 declined / exit 1 non-TTY"]):::fail
   CONF -->|yes| PIN{"chart version pinned?"}

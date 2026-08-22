@@ -32,6 +32,10 @@ cd "$(dirname "$0")/.." || exit 2
 # Add a row when a tool moves to a `make` target that CI calls.
 TOOLS=(
   "GOVULNCHECK_VERSION:golang.org/x/vuln/cmd/govulncheck"
+  # cli#549: the Lint job's two inline formatter steps became `make fmt-check`,
+  # so build.yml no longer holds its own goimports version. This row is what
+  # keeps that true on the next bump.
+  "GOIMPORTS_VERSION:golang.org/x/tools/cmd/goimports"
 )
 
 fail=0

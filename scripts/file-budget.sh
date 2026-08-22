@@ -34,7 +34,7 @@ for entry in $BUDGETS; do
   # A malformed entry (no ":max", or a non-integer ceiling) must fail
   # loudly, not slip through as a silent no-op for that file — same guard,
   # same reason as coverage-floor.sh.
-  if [ "$path" = "$entry" ] || ! printf '%s' "$max" | grep -qE '^[0-9]+$'; then
+  if [ "$path" = "$entry" ] || ! grep -qE '^[0-9]+$' <<<"$max"; then
     echo "::error::malformed BUDGETS entry '$entry' (want 'path:INT') — fix scripts/file-budget.sh" >&2
     status=1
     continue
