@@ -408,19 +408,36 @@ func deliver(spool, url, token, env string, ev spooledEvent, now time.Time) {
 	}
 }
 
-// telemetryToken reads the bearer token for env, best-effort.
+// telemetryToken reads the bearer token for the CURRENT SESSION, best-effort.
 //
 // Read at delivery time rather than at startup so a command that signs in can
 // deliver its own outcome event.
-func telemetryToken(env string) string {
+//
+// TAKES NO env, AND THAT IS THE FIX (tracebloc/cli#552). It used to take the
+// telemetry label and look the profile up by it — but profiles are keyed on the
+// RAW cfg.CurrentEnv, while the label has been through telemetryEnv, which
+// lower-cases, trims (via sessionEnv) and remaps anything unrecognised onto
+// prod. Whenever those disagreed the lookup did not miss loudly: Profile()
+// CREATED an empty profile and returned no token, so delivery took the
+// no-token spool path forever while authedClient — reading cfg.Current(), the
+// raw key — kept working. The CLI looked signed in and healthy, and outcomes
+// simply never arrived.
+//
+// The parameter was the whole defect: two keys for one concept. Removing it
+// makes them impossible to disagree, rather than making them agree today.
+//
+// The token still goes to the right host. api.BaseURL routes an unrecognised
+// env to prod exactly as telemetryEnv does, so the destination the label picks
+// is the destination this session's client already uses. (That BaseURL routes
+// unknown envs to prod at all is a real defect, tracked across three components
+// on backend#2171 — see telemetryEnv's note. It is not this ticket's to change,
+// and this fix deliberately does not diverge from that behaviour.)
+func telemetryToken() string {
 	cfg, err := config.Load()
 	if err != nil || cfg == nil {
 		return ""
 	}
-	if p := cfg.Profile(env); p != nil {
-		return p.Token
-	}
-	return ""
+	return cfg.CurrentToken()
 }
 
 // pendingSink is the transport for backend#2217.
@@ -440,7 +457,7 @@ func pendingSink(env string) telemetry.Sink {
 		return nil
 	}
 	return func(resource map[string]string, record map[string]any) {
-		deliver(spool, url, telemetryToken(env), env, spooledEvent{
+		deliver(spool, url, telemetryToken(), env, spooledEvent{
 			Resource:   resource,
 			Attributes: record,
 		}, time.Now())

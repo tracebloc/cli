@@ -676,3 +676,121 @@ func TestSpoolEnvSlugRefusesPathTraversal(t *testing.T) {
 		t.Errorf("spoolEnvSlug should normalise case; got %q", got)
 	}
 }
+
+// ───────────────────────────────────────── the token lookup and the profile key
+
+// THE DEFECT BUGBOT FOUND ON #540, as a regression test — tracebloc/cli#552.
+//
+// telemetryToken used to take the telemetry LABEL and look the profile up by it.
+// Profiles are keyed on the RAW cfg.CurrentEnv; the label has been through
+// telemetryEnv, which lower-cases and trims (via sessionEnv) and remaps anything
+// unrecognised onto prod. Whenever those disagreed, Profile() CREATED an empty
+// profile and returned no token — so delivery took the no-token spool path for
+// the rest of time while authedClient, reading the raw key, kept working. No
+// error, no retry, no warning: outcomes just stopped arriving.
+//
+// There was no test for telemetryToken at all, which is why this reached a
+// promotion.
+
+// sessionKeyedAs writes a config.json whose CurrentEnv and profile key are
+// exactly `raw` — no normalisation — because the whole point is what happens
+// when the raw key and the derived label differ.
+//
+// Named apart from doctor_test.go's signedInConfig, which hardcodes dev: this
+// one exists to control the raw key precisely.
+func sessionKeyedAs(t *testing.T, raw, token string) {
+	t.Helper()
+	dir := os.Getenv("TRACEBLOC_CONFIG_DIR")
+	if dir == "" {
+		t.Fatal("sessionKeyedAs needs TRACEBLOC_CONFIG_DIR set (use withTempConfigDir)")
+	}
+	body, err := json.Marshal(map[string]any{
+		"version":     2,
+		"current_env": raw,
+		"profiles":    map[string]any{raw: map[string]any{"token": token}},
+	})
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), body, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func TestTelemetryTokenFindsTheSessionTokenWhateverTheLabel(t *testing.T) {
+	// Each raw value differs from telemetryEnv(sessionEnv(...)) of it, which is
+	// precisely when the old two-key lookup missed. The `want` column records
+	// what the label resolves to, so the divergence is visible in the table
+	// rather than asserted implicitly.
+	cases := []struct{ raw, label string }{
+		{"acme", "prod"}, // unrecognised → remapped to prod by telemetryEnv
+		{"STG", "stg"},   // sessionEnv lower-cases
+		{" dev ", "dev"}, // sessionEnv trims
+		{"Dev", "dev"},   // migrateV1 stores a v1 env verbatim
+		{"prod", "prod"}, // the control: raw == label, worked before and must still
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			withTempConfigDir(t, "prod")
+			sessionKeyedAs(t, tc.raw, "sess-"+tc.label)
+
+			// Pin the divergence itself, so this test still means something if
+			// telemetryEnv's mapping changes: if these ever match, the case is no
+			// longer exercising two keys and should be re-chosen.
+			if got := telemetryEnv(signedInEnv()); got != tc.label {
+				t.Fatalf("telemetryEnv(signedInEnv()) = %q, want %q — the fixture no longer exercises a divergent label", got, tc.label)
+			}
+			if got := telemetryToken(); got != "sess-"+tc.label {
+				t.Errorf("telemetryToken() = %q, want %q — a session keyed %q must be found however the label resolves", got, "sess-"+tc.label, tc.raw)
+			}
+		})
+	}
+}
+
+func TestTelemetryTokenIsEmptyWhenThereIsGenuinelyNoToken(t *testing.T) {
+	// Criterion 5: the no-token spool path must still be reachable. A fix that
+	// returned something for an unauthenticated CLI would post anonymous events
+	// and 401 forever.
+	withTempConfigDir(t, "prod")
+	if got := telemetryToken(); got != "" {
+		t.Errorf("no config at all: telemetryToken() = %q, want empty", got)
+	}
+	sessionKeyedAs(t, "prod", "")
+	if got := telemetryToken(); got != "" {
+		t.Errorf("profile with no token: telemetryToken() = %q, want empty", got)
+	}
+}
+
+// The composed behaviour the ticket asks for: a signed-in CLI whose label was
+// remapped must POST, not spool. The two halves are the real ones — the real
+// telemetryToken over a real on-disk config, and the real deliver — with only
+// the URL substituted, because api.BaseURL has no test seam and would otherwise
+// send this at production.
+func TestARemappedSessionPostsRatherThanSpooling(t *testing.T) {
+	spool := withTempConfigDir(t, "prod")
+	sessionKeyedAs(t, "acme", "sess-acme") // unknown env → label remaps to prod
+
+	var gotAuth string
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	env := telemetryEnv(signedInEnv())
+	deliver(spool, srv.URL+telemetryIngestPath, telemetryToken(), env, event("run-remapped", 0), time.Now())
+
+	if posts != 1 {
+		t.Fatalf("a signed-in session must POST, got %d requests — this is the spool path, i.e. the bug", posts)
+	}
+	// Asserting the VALUE, not merely that a header was sent: the whole defect
+	// was an empty token reaching the wire as a silent no-op.
+	if gotAuth != "Bearer sess-acme" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer sess-acme")
+	}
+	if got := readSpool(spool); len(got) != 0 {
+		t.Errorf("a delivered event must leave nothing spooled; got %d", len(got))
+	}
+}
