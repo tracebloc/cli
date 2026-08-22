@@ -411,7 +411,13 @@ func newAuthStatusCmd() *cobra.Command {
 			prof := cfg.Current()
 			p.Section("tracebloc auth")
 			p.Field("status", "signed in")
-			p.Field("backend", cfg.CurrentEnv)
+			// sessionEnv, not the raw stored string: this line is the human-facing
+			// answer to "which backend am I on?", and it must be the same answer
+			// --check computes and the same one authedClient dials. Printing the
+			// stored value let `auth status` say `Dev` while every request went to
+			// dev — a status command that disagrees with the client is worse than
+			// no status command.
+			p.Field("backend", sessionEnv(cfg))
 			if prof.Email != "" {
 				p.Field("account", prof.Email)
 			}
@@ -442,7 +448,7 @@ func newAuthStatusCmd() *cobra.Command {
 // (IsSilentError) so main() prints nothing.
 //
 // The target env is resolved exactly like `login` (--env, then $CLIENT_ENV, then
-// prod), and must match the signed-in CurrentEnv — otherwise the probe would OK a
+// prod), and must match the signed-in env as sessionEnv resolves it — otherwise the probe would OK a
 // stale session for the wrong backend and the installer would skip the very
 // `login` that switches env, provisioning into the wrong account (RFC-0001 §10).
 func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
@@ -454,18 +460,23 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 		return &exitError{code: exitFailure}
 	}
 	target := api.ResolveEnv(envFlag)
-	if !cfg.SignedIn() || cfg.CurrentEnv != target {
+	// Compare the RESOLVED session env, not the raw cfg.CurrentEnv: target comes
+	// out of api.ResolveEnv already normalised, so comparing it against the stored
+	// string made this the one place a `"current_env": "Dev"` config failed a probe
+	// for the session it is actually signed in to.
+	signedIn := sessionEnv(cfg)
+	if !cfg.SignedIn() || signedIn != target {
 		if p.Verbose() {
-			if cfg.SignedIn() && cfg.CurrentEnv != target {
-				p.Hintf("Signed in to %q, but this run targets %q — run `tracebloc login`.", cfg.CurrentEnv, target)
+			if cfg.SignedIn() && signedIn != target {
+				p.Hintf("Signed in to %q, but this run targets %q — run `tracebloc login`.", signedIn, target)
 			} else {
 				p.Hintf("Not signed in. Run `tracebloc login`.")
 			}
 		}
 		return &exitError{code: exitFailure}
 	}
-	// Signed in AND CurrentEnv == target: probe it. authedClient() builds the client
-	// for sessionEnv (== CurrentEnv == target) with the stored token — reuse it and
+	// Signed in AND the resolved session env == target: probe it. authedClient()
+	// builds the client for sessionEnv (== the value just compared) with the stored token — reuse it and
 	// discard its message (the exit code is the contract here).
 	client, _, err := authedClient()
 	if err != nil {

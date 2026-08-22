@@ -27,24 +27,34 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// overheadCPUMilli / overheadMemBytes are tracebloc's fixed platform reservation
-// — the single documented constant the design calls for (~1 core / 3 GiB). It is
-// used ONLY as the fit-check safety margin (see FitsNode / MaxRunCores /
-// MaxRunGiB); it is never subtracted from the per-run ceiling the user sets.
-const (
-	overheadCPUMilli = 1000           // ~1 CPU core
-	overheadMemBytes = 3 * (1 << 30)  // 3 GiB
-	minRunCPUMilli   = 1000           // per-run floor: ~1 core
-	minRunMemBytes   = 2 * (1 << 30)  // per-run floor: 2 GiB
-	gib              = int64(1) << 30 // bytes per GiB
-)
+// The platform reservation and the per-run floors. These used to be four
+// literals typed out here, and again in client/scripts/lib/install-client-helm.sh,
+// and again in client/scripts/install-k8s.ps1 — three copies of the same policy,
+// none derived from the others (backend#2220). They now come from the contract
+// vendored in contract.go, whose arithmetic lives in client-runtime's
+// node_sizing.envelope_from_allocatable.
+//
+// Functions, not vars, for the same reason Overhead() is a function: a package
+// var here would be mutable from anywhere in the process, and the whole point is
+// that exactly one place decides these numbers.
+//
+// Semantics are UNCHANGED. The overhead is still used ONLY as the fit-check
+// safety margin (FitsNode / MaxRunCores / MaxRunGiB) and is still never
+// subtracted from the per-run ceiling the user sets — cli#143 Decision A. What
+// went away is the duplicate definition, not the design.
+func overheadCPUMilli() int64 { return mustContract().Overhead.CPUMilli }
+func overheadMemBytes() int64 { return mustContract().Overhead.MemoryBytes }
+func minRunCPUMilli() int64   { return mustContract().Floor.CPUMilli }
+func minRunMemBytes() int64   { return mustContract().Floor.MemoryBytes }
+
+const gib = int64(1) << 30 // bytes per GiB
 
 // Overhead returns tracebloc's fixed platform reservation as quantities. Kept a
 // function (not exported vars) so callers can't mutate the shared value — a
 // resource.Quantity's Add mutates its receiver.
 func Overhead() (cpu, mem resource.Quantity) {
-	return *resource.NewMilliQuantity(overheadCPUMilli, resource.DecimalSI),
-		*resource.NewQuantity(overheadMemBytes, resource.BinarySI)
+	return *resource.NewMilliQuantity(overheadCPUMilli(), resource.DecimalSI),
+		*resource.NewQuantity(overheadMemBytes(), resource.BinarySI)
 }
 
 // DeriveTraining turns a chosen per-run ceiling into the Training spec written to
@@ -129,8 +139,8 @@ func FitsNode(node Machine, cpu, mem resource.Quantity, gpuName corev1.ResourceN
 // the overhead on this node: floor(nodeCPU - overheadCPU). Never negative. This is
 // the bound the wizard clamps the "cores" prompt to, so over-asking is impossible.
 func MaxRunCores(node Machine) int {
-	milli := node.CPU.MilliValue() - overheadCPUMilli
-	if milli < minRunCPUMilli {
+	milli := node.CPU.MilliValue() - overheadCPUMilli()
+	if milli < minRunCPUMilli() {
 		return 0
 	}
 	return int(milli / 1000)
@@ -139,8 +149,8 @@ func MaxRunCores(node Machine) int {
 // MaxRunGiB is the largest whole-GiB per-run memory ceiling that still leaves room
 // for the overhead: floor(nodeMem - overheadMem), in GiB. Never negative.
 func MaxRunGiB(node Machine) int {
-	b := node.Mem.Value() - overheadMemBytes
-	if b < minRunMemBytes {
+	b := node.Mem.Value() - overheadMemBytes()
+	if b < minRunMemBytes() {
 		return 0
 	}
 	return int(b / gib)
@@ -162,8 +172,8 @@ func MachineGPU(m Machine) (name corev1.ResourceName, count int64, ok bool) {
 
 // BelowCoreFloor / BelowMemFloor enforce the per-run minimum (~1 core / 2 GiB):
 // a run smaller than this can't hold a training job and is almost always a typo.
-func BelowCoreFloor(cpu resource.Quantity) bool { return cpu.MilliValue() < minRunCPUMilli }
-func BelowMemFloor(mem resource.Quantity) bool  { return mem.Value() < minRunMemBytes }
+func BelowCoreFloor(cpu resource.Quantity) bool { return cpu.MilliValue() < minRunCPUMilli() }
+func BelowMemFloor(mem resource.Quantity) bool  { return mem.Value() < minRunMemBytes() }
 
 // CoreFloorText / MemFloorText are the floor values as user-facing strings, for error messages.
 func CoreFloorText() string { return "1 core" }
@@ -198,7 +208,23 @@ const NoGPUEnvValue = ""
 // always written.
 func BuildEnvSpec(cpu, mem resource.Quantity, gpuName corev1.ResourceName, gpu resource.Quantity, wantGPU bool) map[string]string {
 	spec := fmt.Sprintf("cpu=%s,memory=%s", cpu.String(), mem.String())
-	env := map[string]string{"RESOURCE_REQUESTS": spec, "RESOURCE_LIMITS": spec}
+	env := map[string]string{
+		"RESOURCE_REQUESTS": spec,
+		"RESOURCE_LIMITS":   spec,
+		// backend#2220: `resources set` IS the human choice, so stamp it. This
+		// is not cosmetic bookkeeping — it is the difference between a future
+		// ladder re-deriving an installer-written size and it silently
+		// overruling a deliberate one.
+		//
+		// It must be written unconditionally, and especially when a marker is
+		// already present: an edge the installer stamped `installer` and the
+		// operator then re-sized by hand would otherwise keep saying
+		// `installer`, which is the single most dangerous state the marker can
+		// be in — a human choice wearing a label that invites overwriting.
+		// Omitting the key would not clear it either, for the same
+		// --reset-then-reuse-values reason documented above.
+		"RESOURCE_PROVENANCE": ProvenanceUser,
+	}
 	if wantGPU {
 		g := fmt.Sprintf("%s=%d", gpuName, gpu.Value())
 		env["GPU_LIMITS"], env["GPU_REQUESTS"] = g, g

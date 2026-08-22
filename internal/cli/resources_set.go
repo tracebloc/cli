@@ -238,19 +238,42 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 	//     there is nothing for the fit-check to protect. Sizing an actual CHANGE
 	//     is still validated below, before anything mutates.
 	ceilingUnchanged := sameCeiling(desired, current)
-	if ceilingUnchanged && !phantomGPU {
+	// backend#2220: an unchanged ceiling is still a HUMAN CHOICE the moment the
+	// operator runs this command, so it must not exit before BuildEnvSpec stamps
+	// RESOURCE_PROVENANCE=user. BuildEnvSpec writes the marker unconditionally
+	// within itself, but this early return could skip it entirely — so an
+	// installer-sized edge whose operator ran `resources set --max`, or passed
+	// flags restating the current ceiling, kept `installer`. That is the state
+	// BuildEnvSpec's own comment calls the most dangerous the marker can be in:
+	// a deliberate choice wearing the one label that invites a future ladder to
+	// overwrite it. Caught by Bugbot and confirmed in review on #539.
+	//
+	// `unknown` counts as stale too: a pre-marker edge whose operator restates
+	// the ceiling has now made that size explicit, and recording it as such is
+	// the honest answer. The cost is one extra apply per edge, exactly once —
+	// the second run sees `user` and is a clean no-op again.
+	staleProvenance := current.Provenance != resources.ProvenanceUser
+	if ceilingUnchanged && !phantomGPU && !staleProvenance {
 		p.Newline()
 		p.Successf("Each training run already uses up to %s — nothing to change.", perRunSize(desired))
 		return nil
 	}
-	if ceilingUnchanged { // phantomGPU == true here
-		// CPU/memory budget is unchanged, but this GPU-less machine's cluster
-		// still requests a GPU (a stale chart default). Don't treat it as a
-		// clean no-op — fall through to persist so BuildEnvSpec's explicit-empty
-		// GPU override lands and clears it; otherwise runs stay unschedulable /
-		// fall back to CPU while the heartbeat keeps advertising a GPU.
+	if ceilingUnchanged {
+		// Same shape as the phantom-GPU case, and for the same reason: the budget
+		// is unchanged but something else still needs persisting, so this is not
+		// a clean no-op. Both conditions can hold at once, so both report.
 		p.Newline()
-		p.Infof("Your CPU and memory budget is unchanged — but this machine has no GPU while the cluster still requests one, so I'll clear that stale GPU setting so runs can schedule.")
+		if phantomGPU {
+			// CPU/memory budget is unchanged, but this GPU-less machine's cluster
+			// still requests a GPU (a stale chart default). Don't treat it as a
+			// clean no-op — fall through to persist so BuildEnvSpec's explicit-empty
+			// GPU override lands and clears it; otherwise runs stay unschedulable /
+			// fall back to CPU while the heartbeat keeps advertising a GPU.
+			p.Infof("Your CPU and memory budget is unchanged — but this machine has no GPU while the cluster still requests one, so I'll clear that stale GPU setting so runs can schedule.")
+		}
+		if staleProvenance {
+			p.Infof("Your CPU and memory budget is unchanged — recording it as your explicit choice so it is never resized automatically.")
+		}
 	}
 
 	// (5) Validate + fit-check — ONLY when the ceiling actually CHANGES. An
@@ -268,7 +291,27 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 
 	// (6) Confirm (unless --yes or --dry-run). One gate for both the flag and
 	//     wizard paths; --dry-run mutates nothing so it never needs confirming.
-	if !req.yes && !req.dryRun {
+	//
+	//     ceilingUnchanged skips it too, and that is the load-bearing clause:
+	//     the gate guards the CEILING, and an unchanged ceiling has nothing to
+	//     ask about. "Let each training run use up to 4 CPU · 16 GiB?" when the
+	//     answer is already 4 CPU · 16 GiB is a question with one honest answer,
+	//     and off a terminal the gate does not ask at all — it returns exit 1.
+	//
+	//     cli#546: #539's staleness treatment (backend#2220) sent the unchanged
+	//     ceiling down here for the first time, so `set --cores 4 --memory 16`
+	//     restating the CURRENT ceiling without --yes turned from the documented
+	//     exit-0 no-op ("Exit codes: 0 applied (or nothing to change)" above, and
+	//     the `no change → exit 0` edge in docs/cli-navigation.md that bypasses
+	//     CONF entirely) into exit 1. Nearly every installed edge reads
+	//     `installer` or `unknown`, so that was the whole installed base, not an
+	//     edge case — and the callers that restate a size are scripts (the
+	//     bootstrap, the end-to-end journey), none of which pass --yes for what
+	//     the docs promise is a no-op. The phantom-GPU fall-through (#241) had
+	//     the same shape and is fixed by the same clause: both are bookkeeping
+	//     writes, already announced by the Infof lines above, not budget changes
+	//     an operator needs to sanction.
+	if !req.yes && !req.dryRun && !ceilingUnchanged {
 		if pr == nil {
 			return &exitError{code: exitFailure, err: fmt.Errorf(
 				"refusing to change the ceiling without confirmation: pass --yes, or run on a terminal")}

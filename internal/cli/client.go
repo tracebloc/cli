@@ -143,12 +143,26 @@ func clientPrompter() prompter {
 }
 
 // sessionEnv resolves the backend env for the signed-in session: the env saved
-// at login, falling back (legacy / empty config) to $CLIENT_ENV then prod. Shared
-// by authedClient and logout so every authenticated call — including the revoke
-// on sign-out — talks to the host the token was actually issued for.
+// at login, falling back (legacy / empty config) to $CLIENT_ENV then prod.
+//
+// THE ONLY PLACE THAT DERIVES A SESSION ENV FROM A CONFIG. Every caller that
+// wants "which backend is this signed-in session on?" — authedClient, logout's
+// revoke, `cluster doctor`, `auth status --check`, the telemetry label — goes
+// through here, so the answer cannot differ by caller. Reading cfg.CurrentEnv
+// directly is the bug this function exists to prevent: it silently drops the
+// $CLIENT_ENV fallback, and it skips the normalisation below.
+//
+// The result is normalised (trimmed, lower-cased) to match api.ResolveEnv, which
+// lower-cases both its explicit argument and $CLIENT_ENV. Returning cfg.CurrentEnv
+// verbatim made this the one env-resolving function in the CLI whose output was
+// not normalised: harmless where the value only reaches api.BaseURL (which
+// lower-cases again), but a false negative anywhere the value is COMPARED — a
+// config carrying `"current_env": "Dev"` (migrateV1 stores a v1 `env` verbatim,
+// and the file is hand-written in fixtures) failed `auth status --check --env dev`
+// against a session that works perfectly.
 func sessionEnv(cfg *config.Config) string {
-	if cfg.CurrentEnv != "" {
-		return cfg.CurrentEnv
+	if e := strings.ToLower(strings.TrimSpace(cfg.CurrentEnv)); e != "" {
+		return e
 	}
 	return api.ResolveEnv("")
 }

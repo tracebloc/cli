@@ -154,6 +154,11 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 		} else {
 			p.Field("resource env", "(unset — using chart default "+resources.DefaultTraining+")")
 		}
+		// backend#2220: who chose the ceiling above. Verbose-only — it answers a
+		// support question ("did someone set this, or did we?"), not one an
+		// operator needs on every run, and the default view should not grow a
+		// line for bookkeeping that never changes the numbers.
+		p.Field("set by", provenanceLine(train.Provenance))
 		if nodeErr == nil && len(machine.GPU) == 0 {
 			p.Field("gpu", "none detected")
 		}
@@ -168,6 +173,24 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 	}
 	p.Hintf("Do you want to change the allocation? Run `%s resources set` (guided walkthrough on a terminal).", cmd)
 	return nil
+}
+
+// provenanceLine renders RESOURCE_PROVENANCE for humans (backend#2220).
+//
+// "unknown" gets an explanation rather than the bare word, because the bare word
+// invites the wrong conclusion. It does not mean something is broken: it means
+// the value predates the marker, and an installer-written size and a deliberate
+// `resources set` are indistinguishable once the value differs from the historic
+// default. That is why it is treated as a human choice and left alone.
+func provenanceLine(provenance string) string {
+	switch provenance {
+	case resources.ProvenanceUser:
+		return "explicitly set (tracebloc resources set)"
+	case resources.ProvenanceInstaller:
+		return "sized to this machine at install time"
+	default:
+		return "unknown — predates provenance tracking, treated as an explicit choice"
+	}
 }
 
 // machineLine renders the machine-capacity value: "8 CPU · 32 GiB" (+ " · 1 GPU"
