@@ -547,8 +547,12 @@ func TestRun_HealthyCluster(t *testing.T) {
 		HTTPProbe: func(context.Context, string) error { return nil },
 	})
 
-	if len(results) != 9 {
-		t.Fatalf("want 9 checks, got %d", len(results))
+	// 10 since backend#2221 added "Machine capacity". These nodes are not
+	// k3d-named, so that check reports StatusUnknown — which the rollup ignores,
+	// so the healthy verdict below is unaffected. That is the intended
+	// behaviour on a non-local cluster, not an accident of the fixture.
+	if len(results) != 10 {
+		t.Fatalf("want 10 checks, got %d", len(results))
 	}
 	if w := worstStatus(results); w != StatusOK {
 		for _, r := range results {
