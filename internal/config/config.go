@@ -84,6 +84,29 @@ func (c *Config) Current() *Profile {
 	return c.Profile(c.CurrentEnv)
 }
 
+// CurrentToken returns the stored token for the current env, or "" when there
+// is none.
+//
+// READS WITHOUT CREATING, unlike Current()/Profile(). Profile() stores an empty
+// profile for a missing key — correct for the write paths it was built for
+// (sign-in mutates the returned pointer then Saves), and wrong for a lookup:
+// a read that records its own miss makes the second call look like a hit.
+//
+// KEYED ON THE RAW CurrentEnv, which is how Profiles is keyed — the same key
+// SignedIn() and Current() use. Anything that has been through sessionEnv or
+// telemetryEnv has been lower-cased, trimmed, or remapped, and is NOT this key
+// (tracebloc/cli#552).
+func (c *Config) CurrentToken() string {
+	if c == nil || c.CurrentEnv == "" {
+		return ""
+	}
+	p := c.Profiles[c.CurrentEnv]
+	if p == nil {
+		return ""
+	}
+	return p.Token
+}
+
 // SignedIn reports whether the current env has a stored token.
 func (c *Config) SignedIn() bool {
 	if c.CurrentEnv == "" {
