@@ -1,0 +1,147 @@
+name: Envelope contract drift (cross-repo)
+
+# internal/resources/envelope_contract.json is VENDORED from
+# tracebloc/client-runtime (backend#2220, RFC-BACKEND-664 §P0). client-runtime
+# owns the training-envelope arithmetic
+# (node_sizing.envelope_from_allocatable); this repo, the bash installer and its
+# PowerShell twin are readers of it. Before that consolidation the same policy
+# was typed out in all three, none derived from the others — and they disagreed:
+# set.go ranked candidate nodes (cpu, memory) while the bash installer ranked
+# them (memory, cpu), so on a cluster of 8c/16Gi + 4c/32Gi `resources set` and
+# the installer anchored on DIFFERENT nodes.
+#
+# Unlike the installers, Go needs no generator: the contract is embedded verbatim
+# with go:embed, so the vendored artifact is byte-identical to upstream and this
+# gate is a plain diff. internal/resources/contract_test.go replays the
+# contract's golden vectors through MaxRunCores/MaxRunGiB on every PR; this job
+# is the other half — it catches the contract itself going stale.
+#
+# Pin, don't float (scripts/.client-runtime-ref), exactly as this repo already
+# does for tracebloc/client and tracebloc/data-ingestors: an unrelated upstream
+# commit must not redden every open CLI PR, and the weekly run catches a pin gone
+# stale enough to matter.
+#
+# FAIL-CLOSED. client-runtime is private, so this needs a token GITHUB_TOKEN
+# cannot provide; when it cannot read upstream the job FAILS rather than warning
+# and exiting 0. A check that never executed must not report as a passing one —
+# the activation-phase fail-open cli#536 had to remove from the backend-fixtures
+# gate for exactly this reason.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # weekly Monday, offset from chart-drift (05:00)
+  workflow_dispatch:
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - "internal/resources/**"
+      - "scripts/.client-runtime-ref"
+      - ".github/workflows/envelope-contract-drift.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  envelope-contract:
+    timeout-minutes: 10
+    name: Envelope contract gate (pinned client-runtime ref)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this CLI ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: cli
+
+      - name: Resolve the pinned client-runtime ref
+        id: pin
+        # First non-comment, non-blank line of scripts/.client-runtime-ref — the
+        # same convention .client-ref and .data-ingestors-ref use. Shape is
+        # validated (SHA/branch/tag characters only, no "..") before it reaches
+        # the checkout action.
+        run: |
+          ref="$(grep -vE '^[[:space:]]*(#|$)' cli/scripts/.client-runtime-ref | head -1 | tr -d '[:space:]')"
+          if [ -z "$ref" ]; then
+            echo "::error file=scripts/.client-runtime-ref::no ref found — the first non-comment line must be a commit SHA"
+            exit 1
+          fi
+          if ! printf '%s' "$ref" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || printf '%s' "$ref" | grep -q '\.\.'; then
+            echo "::error file=scripts/.client-runtime-ref::invalid ref shape: $ref"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Mint a read-only installation token for client-runtime
+        id: token
+        # Least privilege per the backend#2157 sweep: named `repositories`, not
+        # owner-wide, and contents:read only — this job reads two files.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: client-runtime
+          permission-contents: read
+
+      - name: Checkout tracebloc/client-runtime @ pinned ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tracebloc/client-runtime
+          ref: ${{ steps.pin.outputs.ref }}
+          token: ${{ steps.token.outputs.token }}
+          path: client-runtime
+          persist-credentials: false
+
+      - name: The vendored contract matches upstream, byte for byte
+        env:
+          PINNED_REF: ${{ steps.pin.outputs.ref }}
+        run: |
+          upstream="client-runtime/envelope_contract.json"
+          vendored="cli/internal/resources/envelope_contract.json"
+          if [ ! -f "$upstream" ]; then
+            echo "::error::$upstream is missing at $PINNED_REF — has the contract moved or been renamed?"
+            exit 1
+          fi
+          if ! diff -u "$vendored" "$upstream"; then
+            echo "::error file=internal/resources/envelope_contract.json::the vendored envelope contract has drifted from tracebloc/client-runtime@$PINNED_REF"
+            echo ""
+            echo "To adopt the upstream change:"
+            echo "  1. cp <client-runtime>/envelope_contract.json internal/resources/"
+            echo "  2. update the SHA in scripts/.client-runtime-ref"
+            echo "  3. go test ./internal/resources/...   # the golden vectors WILL have moved"
+            echo ""
+            echo "If the overhead or the floors moved, that is a FLEET envelope change"
+            echo "(backend#2167, RFC-BACKEND-664 L0) — not a re-vendor. Say so on the PR."
+            exit 1
+          fi
+          echo "vendored contract matches client-runtime@$PINNED_REF"
+
+      - name: Upstream's own goldens are not stale against its own arithmetic
+        # A vendored contract can match upstream byte-for-byte while UPSTREAM's
+        # vectors have gone stale against upstream's code — in which case we are
+        # faithfully mirroring a lie. Re-derive them from client-runtime's own
+        # generator and require no diff. Pure-python, no cluster, no deps.
+        run: |
+          cd client-runtime
+          if [ ! -f scripts/gen_envelope_vectors.py ]; then
+            echo "::error::client-runtime@${{ steps.pin.outputs.ref }} has no scripts/gen_envelope_vectors.py — the contract's provenance cannot be verified"
+            exit 1
+          fi
+          python3 scripts/gen_envelope_vectors.py
+          if ! git diff --exit-code -- envelope_contract.json; then
+            echo "::error::client-runtime@${{ steps.pin.outputs.ref }} carries goldens that its own generator does not reproduce."
+            echo "The pinned ref is not self-consistent — fix it upstream, then re-vendor and re-pin here."
+            exit 1
+          fi
+          echo "upstream goldens reproduce from upstream code"
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cli/go.mod
+          cache: true
+          cache-dependency-path: cli/go.sum
+
+      - name: The CLI still agrees with the contract it vendored
+        run: |
+          cd cli
+          go test ./internal/resources/... -run 'Contract|Golden|DecisionA|Overhead|FloorText' -v

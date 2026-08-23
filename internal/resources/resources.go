@@ -56,6 +56,37 @@ type Training struct {
 	GPUName corev1.ResourceName
 	GPU     resource.Quantity
 	HasGPU  bool
+
+	// Provenance is WHO chose the ceiling above (backend#2220): ProvenanceUser,
+	// ProvenanceInstaller, or ProvenanceUnknown. It never affects the numbers.
+	//
+	// Anything unrecognised — including a release that predates the key —
+	// normalises to ProvenanceUnknown, which callers MUST treat as a human
+	// choice. Guessing "installer" for an unattributable value would risk
+	// overruling an operator who had deliberately set a size, and that risk is
+	// the entire reason the marker exists.
+	Provenance string
+}
+
+// Who chose the training envelope. Mirrors env.RESOURCE_PROVENANCE in the
+// tracebloc chart (client 1.9.49+); the installer writes the first two, this
+// CLI writes ProvenanceUser, and ProvenanceUnknown covers everything else.
+const (
+	ProvenanceInstaller = "installer"
+	ProvenanceUser      = "user"
+	ProvenanceUnknown   = "unknown"
+)
+
+// NormalizeProvenance maps a raw env value onto the three known states.
+// Unrecognised input — empty, junk, a future value this binary predates — is
+// ProvenanceUnknown, never a guess.
+func NormalizeProvenance(raw string) string {
+	switch raw {
+	case ProvenanceInstaller, ProvenanceUser:
+		return raw
+	default:
+		return ProvenanceUnknown
+	}
 }
 
 // MachineCapacity reports the machine headline ("equipped with …") as the
@@ -87,7 +118,12 @@ func ParseTraining(env map[string]string) Training {
 		// chart injects this exact value when the operator set no override.
 		cpu, mem, ok = parseCPUMem(DefaultTraining)
 	}
-	t := Training{CPU: cpu, Mem: mem, HasCPUMem: ok}
+	t := Training{
+		CPU:        cpu,
+		Mem:        mem,
+		HasCPUMem:  ok,
+		Provenance: NormalizeProvenance(env["RESOURCE_PROVENANCE"]),
+	}
 
 	gpuName, gpuQty, gpuOK := parseGPU(firstNonEmpty(env["GPU_LIMITS"], env["GPU_REQUESTS"]))
 	if gpuOK {

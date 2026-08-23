@@ -1,0 +1,12 @@
+# Pinned tracebloc/client-runtime commit that
+# internal/resources/envelope_contract.json is vendored from (backend#2220).
+#
+# Pin, don't float — the same rule scripts/.client-ref and
+# scripts/.data-ingestors-ref follow: an unrelated client-runtime commit must
+# not redden every open CLI PR. The weekly run catches a pin gone stale.
+#
+# To adopt an upstream contract change:
+#   1. cp <client-runtime>/envelope_contract.json internal/resources/
+#   2. update the SHA below
+#   3. go test ./internal/resources/... — the golden vectors WILL have moved
+6293d15f7025d06bc85886df93456e62767a8d45

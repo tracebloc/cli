@@ -49,8 +49,13 @@ func captureOutcome(
 		delivered++
 	})
 	getenv := func(k string) string { return env[k] }
+	// Resolve the env the way RecordCommandOutcome does and hand the SAME value
+	// to the recorder, so these tests exercise the production path end to end
+	// (config -> label) now that recordCommandOutcome no longer resolves for
+	// itself. TestTheRecordIsLabelledWithTheEnvItWasHanded pins the threading.
 	if err := recordCommandOutcome(
-		root, executed, testBuildInfo(), exitCode, 1500*time.Millisecond, getenv, sink,
+		root, executed, testBuildInfo(), exitCode, 1500*time.Millisecond, getenv,
+		telemetryEnv(signedInEnv()), sink,
 	); err != nil {
 		t.Fatalf("recordCommandOutcome: %v", err)
 	}
@@ -298,8 +303,8 @@ func TestTheEnvironmentLabelMatchesTheBackend(t *testing.T) {
 
 func TestASignedInUnknownEnvIgnoresClientEnv(t *testing.T) {
 	// The bug this pins (Asad, cli#528 review): the client resolves a signed-in
-	// env via sessionEnv, which returns cfg.CurrentEnv VERBATIM and never consults
-	// $CLIENT_ENV — so a config on "banana" talks to prod (api.BaseURL default)
+	// env via sessionEnv, which normalises cfg.CurrentEnv but never falls back to
+	// $CLIENT_ENV while it is set — so a config on "banana" talks to prod (api.BaseURL default)
 	// regardless of $CLIENT_ENV. The old code resolved the label through
 	// ResolveEnv, which DOES read $CLIENT_ENV, so it filed the run under "dev"
 	// while every request went to prod. The label must be prod, not dev.
@@ -356,8 +361,9 @@ func TestTheSignedInEnvironmentWins(t *testing.T) {
 
 func TestASignedInUnknownEnvironmentIsLabelledProd(t *testing.T) {
 	// A run signed into an environment the CLI does not recognise talks to prod
-	// (sessionEnv hands cfg.CurrentEnv to api.New verbatim, api.BaseURL routes the
-	// unknown value to prod), so its record must be filed under prod — that
+	// (sessionEnv normalises but does not validate cfg.CurrentEnv, so the unknown
+	// value reaches api.New and api.BaseURL routes it to prod), so its record must
+	// be filed under prod — that
 	// failed-install-on-prod run is exactly what this feature exists to capture.
 	dir := t.TempDir()
 	t.Setenv("TRACEBLOC_CONFIG_DIR", dir)

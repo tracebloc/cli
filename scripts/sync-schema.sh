@@ -54,8 +54,8 @@ DATA_INGESTORS_REF="${DATA_INGESTORS_REF:-${_pinned_ref:-master}}"
 # traversal ("../..") or extra segments into the raw.githubusercontent path.
 # Allow only a SHA / branch / tag shape: alnum start, then alnum . _ - / and
 # no ".." component.
-if ! printf '%s' "$DATA_INGESTORS_REF" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' \
-   || printf '%s' "$DATA_INGESTORS_REF" | grep -q '\.\.'; then
+if ! grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' <<<"$DATA_INGESTORS_REF" \
+   || grep -q '\.\.' <<<"$DATA_INGESTORS_REF"; then
   echo "error: invalid data-ingestors ref '$DATA_INGESTORS_REF' — expected a commit SHA, branch, or tag" >&2
   echo "(set it in scripts/.data-ingestors-ref or via DATA_INGESTORS_REF)" >&2
   exit 2

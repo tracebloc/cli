@@ -1,0 +1,507 @@
+{
+  "contract_version": 1,
+  "issue": "tracebloc/backend#2220",
+  "rfc": "RFC-BACKEND-664 \u00a7P0",
+  "source_of_truth": "client-runtime/node_sizing.py::envelope_from_allocatable",
+  "regenerate_with": "python3 scripts/gen_envelope_vectors.py",
+  "description": [
+    "The one definition of 'how much of this machine may a single training run",
+    "have'. Before this file the question was answered independently by the bash",
+    "installer, its PowerShell twin, the Go CLI, and a fourth 0.75-fraction",
+    "policy in node_sizing.py itself \u2014 four implementations, none derived from",
+    "the others, two of which disagreed by construction.",
+    "",
+    "The installer speaks bash, its twin speaks PowerShell and the CLI speaks",
+    "Go, so no consumer can call the Python. Each therefore vendors this file",
+    "and replays the golden vectors below through its own reader, in its own",
+    "test suite, drift-gated against this repo at a pinned ref. Mutate the",
+    "arithmetic without regenerating the vectors and this repo reddens at once;",
+    "regenerate them and every consumer's gate reddens. That is the ticket's",
+    "definition of done."
+  ],
+  "overhead": {
+    "cpu_millicores": 1000,
+    "memory_bytes": 3221225472,
+    "why": [
+      "Reserved for the platform \u2014 kubelet, the k3s server, jobs-manager, the",
+      "requests proxy, MySQL \u2014 so a run sized to the ceiling still leaves the",
+      "cluster able to schedule and report it. 1 CPU / 3 GiB is what every live",
+      "producer already subtracts; keeping it identical is what makes this",
+      "ticket a no-op on installed edges rather than a fleet envelope change."
+    ]
+  },
+  "floor": {
+    "cpu_millicores": 1000,
+    "memory_bytes": 2147483648,
+    "why": [
+      "Below this a training run is not worth scheduling, so a machine that",
+      "cannot clear it after overhead is reported NON-VIABLE. It is not a clamp:",
+      "clamping up is how the 4 GiB WSL2 machine ends up asked to host an 8 GiB",
+      "pod that stays Pending forever."
+    ]
+  },
+  "fallback_literal": {
+    "cpu": "2",
+    "memory": "8Gi",
+    "why": [
+      "The historical fixed envelope, still hardcoded in six physical places",
+      "across three repos (_TRAINING_DEFAULT, the ps1's two inline copies, the",
+      "chart template's two, DEFAULT_JOB_RESOURCES). Recorded here so those",
+      "become readers too. NOTE it is LARGER than the floor: handing it to a",
+      "non-viable machine is the sub-8GiB bug, not a safe default."
+    ]
+  },
+  "anchors": {
+    "largest": {
+      "question": "What is the largest run this machine could host?",
+      "rule": "the single schedulable node maximising (cpu_millicores, memory_bytes) lexicographically",
+      "used_by": [
+        "client installer \u2014 sizing the value it writes",
+        "cli resources set \u2014 clamping the wizard prompt and the fit check"
+      ],
+      "why": [
+        "A pod's resources all come from ONE node, so this question is",
+        "single-node by nature and must never sum across the cluster.",
+        "The tie-break is itself a consolidation: bash ranked nodes (memory,",
+        "cpu) and cli's nodeLarger ranked them (cpu, memory), so on a cluster of",
+        "8c/16Gi + 4c/32Gi the two anchored on different nodes. Nobody chose",
+        "that; it fell out of two independent implementations."
+      ]
+    },
+    "every": {
+      "question": "What envelope fits on EVERY schedulable node?",
+      "rule": "minimum cpu_millicores and minimum memory_bytes, taken independently",
+      "used_by": [
+        "client-runtime derive path (DERIVE_JOB_ENVELOPE, off by default)"
+      ],
+      "why": [
+        "An envelope sized to the biggest node cannot schedule on the smallest.",
+        "Independent minima are deliberately conservative \u2014 a heterogeneous",
+        "cluster with a small system nodepool degrades toward the floor rather",
+        "than risking an unschedulable pod."
+      ]
+    }
+  },
+  "rendering": {
+    "Gi": "cpu=<whole cores>,memory=<whole GiB>Gi \u2014 installer + CLI surface",
+    "Mi": "cpu=<whole cores>,memory=<whole MiB>Mi \u2014 jobs-manager pod spec",
+    "rounding": "always floor; a ceiling that rounds up is not a ceiling"
+  },
+  "skipped_nodes": [
+    "spec.unschedulable (cordoned)",
+    "allocatable cpu or memory unparseable"
+  ],
+  "vectors": {
+    "single_node": [
+      {
+        "label": "field-8c-32gi",
+        "allocatable_cpu": "8",
+        "allocatable_memory": "32Gi",
+        "expected": {
+          "cpu_millicores": 7000,
+          "memory_bytes": 31138512896,
+          "viable": true,
+          "render_gi": {
+            "cpu": "7",
+            "memory": "29Gi"
+          },
+          "render_mi": {
+            "cpu": "7",
+            "memory": "29696Mi"
+          }
+        }
+      },
+      {
+        "label": "field-16c-64gi",
+        "allocatable_cpu": "16",
+        "allocatable_memory": "64Gi",
+        "expected": {
+          "cpu_millicores": 15000,
+          "memory_bytes": 65498251264,
+          "viable": true,
+          "render_gi": {
+            "cpu": "15",
+            "memory": "61Gi"
+          },
+          "render_mi": {
+            "cpu": "15",
+            "memory": "62464Mi"
+          }
+        }
+      },
+      {
+        "label": "field-4c-16gi",
+        "allocatable_cpu": "4",
+        "allocatable_memory": "16Gi",
+        "expected": {
+          "cpu_millicores": 3000,
+          "memory_bytes": 13958643712,
+          "viable": true,
+          "render_gi": {
+            "cpu": "3",
+            "memory": "13Gi"
+          },
+          "render_mi": {
+            "cpu": "3",
+            "memory": "13312Mi"
+          }
+        }
+      },
+      {
+        "label": "k8s-millicores-and-mi",
+        "allocatable_cpu": "15500m",
+        "allocatable_memory": "63928Mi",
+        "expected": {
+          "cpu_millicores": 14000,
+          "memory_bytes": 63812141056,
+          "viable": true,
+          "render_gi": {
+            "cpu": "14",
+            "memory": "59Gi"
+          },
+          "render_mi": {
+            "cpu": "14",
+            "memory": "60856Mi"
+          }
+        }
+      },
+      {
+        "label": "k8s-raw-bytes",
+        "allocatable_cpu": "8",
+        "allocatable_memory": "33285996544",
+        "expected": {
+          "cpu_millicores": 7000,
+          "memory_bytes": 30064771072,
+          "viable": true,
+          "render_gi": {
+            "cpu": "7",
+            "memory": "28Gi"
+          },
+          "render_mi": {
+            "cpu": "7",
+            "memory": "28672Mi"
+          }
+        }
+      },
+      {
+        "label": "laptop-2c-8gi",
+        "allocatable_cpu": "2",
+        "allocatable_memory": "8Gi",
+        "expected": {
+          "cpu_millicores": 1000,
+          "memory_bytes": 5368709120,
+          "viable": true,
+          "render_gi": {
+            "cpu": "1",
+            "memory": "5Gi"
+          },
+          "render_mi": {
+            "cpu": "1",
+            "memory": "5120Mi"
+          }
+        }
+      },
+      {
+        "label": "exact-floor",
+        "allocatable_cpu": "2",
+        "allocatable_memory": "5Gi",
+        "expected": {
+          "cpu_millicores": 1000,
+          "memory_bytes": 2147483648,
+          "viable": true,
+          "render_gi": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "render_mi": {
+            "cpu": "1",
+            "memory": "2048Mi"
+          }
+        }
+      },
+      {
+        "label": "one-byte-under-mem-floor",
+        "allocatable_cpu": "2",
+        "allocatable_memory": "5368709119",
+        "expected": {
+          "cpu_millicores": 1000,
+          "memory_bytes": 2147483647,
+          "viable": false,
+          "render_gi": {
+            "cpu": "1",
+            "memory": "1Gi"
+          },
+          "render_mi": {
+            "cpu": "1",
+            "memory": "2047Mi"
+          }
+        }
+      },
+      {
+        "label": "one-milli-under-cpu-floor",
+        "allocatable_cpu": "1999m",
+        "allocatable_memory": "8Gi",
+        "expected": {
+          "cpu_millicores": 0,
+          "memory_bytes": 5368709120,
+          "viable": false,
+          "render_gi": {
+            "cpu": "0",
+            "memory": "5Gi"
+          },
+          "render_mi": {
+            "cpu": "0",
+            "memory": "5120Mi"
+          }
+        }
+      },
+      {
+        "label": "wsl2-too-small-4gi",
+        "allocatable_cpu": "4",
+        "allocatable_memory": "4Gi",
+        "expected": {
+          "cpu_millicores": 3000,
+          "memory_bytes": 1073741824,
+          "viable": false,
+          "render_gi": {
+            "cpu": "3",
+            "memory": "1Gi"
+          },
+          "render_mi": {
+            "cpu": "3",
+            "memory": "1024Mi"
+          }
+        }
+      },
+      {
+        "label": "absurdly-small",
+        "allocatable_cpu": "500m",
+        "allocatable_memory": "512Mi",
+        "expected": {
+          "cpu_millicores": 0,
+          "memory_bytes": 0,
+          "viable": false,
+          "render_gi": {
+            "cpu": "0",
+            "memory": "0Gi"
+          },
+          "render_mi": {
+            "cpu": "0",
+            "memory": "0Mi"
+          }
+        }
+      },
+      {
+        "label": "unparseable-cpu",
+        "allocatable_cpu": "eight",
+        "allocatable_memory": "8Gi",
+        "expected": null
+      },
+      {
+        "label": "unparseable-memory",
+        "allocatable_cpu": "8",
+        "allocatable_memory": "lots",
+        "expected": null
+      }
+    ],
+    "multi_node": [
+      {
+        "label": "heterogeneous-incomparable",
+        "nodes": [
+          {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          {
+            "cpu": "4",
+            "memory": "32Gi"
+          }
+        ],
+        "anchored": {
+          "largest": {
+            "allocatable_cpu_millicores": 8000,
+            "allocatable_memory_bytes": 17179869184,
+            "expected": {
+              "cpu_millicores": 7000,
+              "memory_bytes": 13958643712,
+              "viable": true,
+              "render_gi": {
+                "cpu": "7",
+                "memory": "13Gi"
+              },
+              "render_mi": {
+                "cpu": "7",
+                "memory": "13312Mi"
+              }
+            }
+          },
+          "every": {
+            "allocatable_cpu_millicores": 4000,
+            "allocatable_memory_bytes": 17179869184,
+            "expected": {
+              "cpu_millicores": 3000,
+              "memory_bytes": 13958643712,
+              "viable": true,
+              "render_gi": {
+                "cpu": "3",
+                "memory": "13Gi"
+              },
+              "render_mi": {
+                "cpu": "3",
+                "memory": "13312Mi"
+              }
+            }
+          }
+        }
+      },
+      {
+        "label": "server-plus-small-agent",
+        "nodes": [
+          {
+            "cpu": "16",
+            "memory": "64Gi"
+          },
+          {
+            "cpu": "2",
+            "memory": "8Gi"
+          }
+        ],
+        "anchored": {
+          "largest": {
+            "allocatable_cpu_millicores": 16000,
+            "allocatable_memory_bytes": 68719476736,
+            "expected": {
+              "cpu_millicores": 15000,
+              "memory_bytes": 65498251264,
+              "viable": true,
+              "render_gi": {
+                "cpu": "15",
+                "memory": "61Gi"
+              },
+              "render_mi": {
+                "cpu": "15",
+                "memory": "62464Mi"
+              }
+            }
+          },
+          "every": {
+            "allocatable_cpu_millicores": 2000,
+            "allocatable_memory_bytes": 8589934592,
+            "expected": {
+              "cpu_millicores": 1000,
+              "memory_bytes": 5368709120,
+              "viable": true,
+              "render_gi": {
+                "cpu": "1",
+                "memory": "5Gi"
+              },
+              "render_mi": {
+                "cpu": "1",
+                "memory": "5120Mi"
+              }
+            }
+          }
+        }
+      },
+      {
+        "label": "identical-pair",
+        "nodes": [
+          {
+            "cpu": "8",
+            "memory": "32Gi"
+          },
+          {
+            "cpu": "8",
+            "memory": "32Gi"
+          }
+        ],
+        "anchored": {
+          "largest": {
+            "allocatable_cpu_millicores": 8000,
+            "allocatable_memory_bytes": 34359738368,
+            "expected": {
+              "cpu_millicores": 7000,
+              "memory_bytes": 31138512896,
+              "viable": true,
+              "render_gi": {
+                "cpu": "7",
+                "memory": "29Gi"
+              },
+              "render_mi": {
+                "cpu": "7",
+                "memory": "29696Mi"
+              }
+            }
+          },
+          "every": {
+            "allocatable_cpu_millicores": 8000,
+            "allocatable_memory_bytes": 34359738368,
+            "expected": {
+              "cpu_millicores": 7000,
+              "memory_bytes": 31138512896,
+              "viable": true,
+              "render_gi": {
+                "cpu": "7",
+                "memory": "29Gi"
+              },
+              "render_mi": {
+                "cpu": "7",
+                "memory": "29696Mi"
+              }
+            }
+          }
+        }
+      },
+      {
+        "label": "one-cordoned-out",
+        "nodes": [
+          {
+            "cpu": "16",
+            "memory": "64Gi",
+            "unschedulable": true
+          },
+          {
+            "cpu": "4",
+            "memory": "16Gi"
+          }
+        ],
+        "anchored": {
+          "largest": {
+            "allocatable_cpu_millicores": 4000,
+            "allocatable_memory_bytes": 17179869184,
+            "expected": {
+              "cpu_millicores": 3000,
+              "memory_bytes": 13958643712,
+              "viable": true,
+              "render_gi": {
+                "cpu": "3",
+                "memory": "13Gi"
+              },
+              "render_mi": {
+                "cpu": "3",
+                "memory": "13312Mi"
+              }
+            }
+          },
+          "every": {
+            "allocatable_cpu_millicores": 4000,
+            "allocatable_memory_bytes": 17179869184,
+            "expected": {
+              "cpu_millicores": 3000,
+              "memory_bytes": 13958643712,
+              "viable": true,
+              "render_gi": {
+                "cpu": "3",
+                "memory": "13Gi"
+              },
+              "render_mi": {
+                "cpu": "3",
+                "memory": "13312Mi"
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}
