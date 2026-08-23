@@ -56,6 +56,31 @@ const (
 // on the resource map rather than the record's own attributes.
 const resourceEnvironment = "deployment.environment"
 
+// installerFallbackDirVars names every environment variable an installer twin may
+// pick its pre-log fallback directory from, in the order the twins try them.
+//
+// TRANSCRIBED FROM THE PRODUCERS, and the residual is stated rather than hidden:
+// they live in `tracebloc/client`, so nothing in this repo's CI can prove this
+// list still agrees with them. Keeping them in step is a review rule until the
+// two repos share a fixture.
+//
+//	scripts/lib/telemetry.sh  _telemetry_fallback_dir
+//	    $TMPDIR -> $HOME -> /tmp
+//	scripts/lib/telemetry.ps1 Get-TelemetryFallbackSpool
+//	    $USERPROFILE -> $HOME -> [IO.Path]::GetTempPath(), i.e. $TMP / $TEMP
+//
+// THE WINDOWS HALF WAS MISSING, and that was the whole defect (backend#2377).
+// Windows does not set `TMPDIR` and usually does not set `HOME` — `USERPROFILE`
+// is its home variable — so the search reduced to `/tmp`, a path that does not
+// exist there. Every Windows pre-log install failure was written and never
+// collected, which is exactly the class the fallback exists for: `validate_config`
+// and `early_data_dir_guard` run before there is a log or a data dir, so the
+// fallback file is their only record.
+//
+// The glob is unaffected: `tracebloc-telemetry-*` already matches the twin's
+// `tracebloc-telemetry-<id>.jsonl` as well as bash's suffix-less mktemp name.
+var installerFallbackDirVars = []string{"TMPDIR", "HOME", "USERPROFILE", "TEMP", "TMP"}
+
 // installerSpoolFiles returns every file that may hold installer records.
 //
 // Ordered predictable-first so a run with both delivers the data-dir spool before
@@ -77,18 +102,29 @@ func installerSpoolFiles(getenv func(string) string) []string {
 		out = append(out, filepath.Join(base, "telemetry", "pending.jsonl"))
 	}
 
-	// 2. The pre-log fallback files. `_telemetry_fallback_dir` picks $TMPDIR, else
-	//    $HOME, else /tmp — and disqualifies $TMPDIR when the installer is running
-	//    from inside it. From here we cannot tell which it chose, so all three are
-	//    candidates; a glob that matches nothing costs one syscall.
+	// 2. The pre-log fallback files. Each twin picks ONE directory out of its own
+	//    chain (installerFallbackDirVars records both chains), and bash also
+	//    disqualifies $TMPDIR when the installer is running from inside it. From
+	//    here we cannot tell which it chose, so every candidate is searched; a
+	//    glob that matches nothing costs one syscall.
+	candidates := make([]string, 0, len(installerFallbackDirVars)+1)
+	for _, name := range installerFallbackDirVars {
+		candidates = append(candidates, strings.TrimSpace(getenv(name)))
+	}
+	// bash's last resort, which is a literal rather than a variable.
+	candidates = append(candidates, "/tmp")
+
 	seen := map[string]bool{}
-	for _, dir := range []string{
-		strings.TrimSpace(getenv("TMPDIR")),
-		strings.TrimSpace(getenv("HOME")),
-		"/tmp",
-	} {
-		dir = strings.TrimRight(dir, "/")
-		if dir == "" || seen[dir] {
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		// Clean, not TrimRight("/"): it normalises a trailing separator on BOTH
+		// platforms, so `C:\Users\me\` and `C:\Users\me` dedupe as one directory.
+		// Two names for one directory would forward the same install outcome
+		// twice in a single batch.
+		dir = filepath.Clean(dir)
+		if seen[dir] {
 			continue
 		}
 		seen[dir] = true
