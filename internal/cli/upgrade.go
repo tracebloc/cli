@@ -93,8 +93,13 @@ func newUpgradeCmd() *cobra.Command {
 		Use: upgradeCmdName,
 		// Suppress the post-command update nudge/cache-write: this process just
 		// swapped its own binary and is stale by design (see SkipUpdateNudge).
-		Annotations: map[string]string{skipUpdateNudgeAnnotation: "true"},
-		Short:       "Update tracebloc to the latest release",
+		Annotations: map[string]string{
+			skipUpdateNudgeAnnotation: "true",
+			// Re-runs the installer fetched from GitHub releases: local host plus
+			// GitHub, no tracebloc service.
+			runtimeClassAnnotation: classLocalHost,
+		},
+		Short: "Update tracebloc to the latest release",
 		Long: `Updates tracebloc to the latest release by re-running the official
 installer. It verifies signatures (cosign) and replaces the CLI; on Linux/macOS
 it also upgrades your secure environment's services to match, so the CLI and the

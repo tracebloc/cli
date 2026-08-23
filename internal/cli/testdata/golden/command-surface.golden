@@ -1,0 +1,39 @@
+# The tracebloc CLI command surface — GENERATED, do not edit by hand.
+# Derived from the live cobra tree (NewRootCmd) by TestCommandSurfaceGolden.
+# Regenerate: TB_UPDATE_GOLDEN=1 go test ./internal/cli/ -run TestCommandSurfaceGolden
+#
+# Classes (RFC-BACKEND-2363 D2): a = binary only | a-prime = local host + GitHub |
+# b = backend + auth | b+c = backend and cluster | c = cluster only |
+# group = dispatch node (bare, it only prints help).
+#
+# class    shape  visibility  path   (aliases)   [--flag escalations]
+a        group  visible     tracebloc
+group    group  visible     tracebloc auth
+a        leaf   visible     tracebloc auth status   [--check=b]
+group    group  visible     tracebloc client
+b+c      leaf   visible     tracebloc client create
+b        leaf   hidden      tracebloc client list   (ls)
+b        leaf   visible     tracebloc client status   [--seal=b+c]
+group    group  visible     tracebloc cluster
+b+c      leaf   hidden      tracebloc cluster doctor
+c        leaf   visible     tracebloc cluster info
+group    group  visible     tracebloc data   (dataset)
+c        leaf   visible     tracebloc data delete   (rm)
+c        leaf   visible     tracebloc data ingest   (push)
+c        leaf   visible     tracebloc data list
+a        leaf   visible     tracebloc data validate
+b+c      leaf   visible     tracebloc delete
+b+c      leaf   visible     tracebloc doctor
+group    group  hidden      tracebloc ingest
+a        leaf   hidden      tracebloc ingest validate
+b        leaf   visible     tracebloc login
+b        leaf   visible     tracebloc logout
+a-prime  leaf   visible     tracebloc prepare-host
+c        group  visible     tracebloc resources
+c        leaf   visible     tracebloc resources set
+a-prime  leaf   visible     tracebloc upgrade
+a        leaf   visible     tracebloc version
+#
+# totals (derived)
+# commands=26 leaves=19 visible-leaves=16 invocable=21
+# by class: a=5 a-prime=2 b=4 b+c=4 c=6 group=5

@@ -24,9 +24,10 @@ import (
 // scripts continue to work.
 func newDataCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "data",
-		Aliases: []string{"dataset"},
-		Short:   "Manage the datasets in your secure environment",
+		Use:         "data",
+		Aliases:     []string{"dataset"},
+		Annotations: runtimeClassFor(classDispatchOnly),
+		Short:       "Manage the datasets in your secure environment",
 		Long: `Commands for ingesting and managing the datasets your secure environment holds —
 the data models train on. It stays on your infrastructure.
 

@@ -93,7 +93,9 @@ func newDataIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ingest <dataset>",
 		Aliases: []string{"push"},
-		Short:   "Ingest a local dataset into your secure environment",
+		// Staging runs against the cluster's storage; no backend call of its own.
+		Annotations: runtimeClassFor(classCluster),
+		Short:       "Ingest a local dataset into your secure environment",
 		// The task COUNT and the text-family subdir names are derived from the
 		// registry / vendored layout contract (push.SupportedCategoryIDs +
 		// push.TextSidecarDir) rather than hardcoded, so the help can't drift
