@@ -19,9 +19,10 @@ import (
 // the old path keep working; help and docs point at the new one.
 func newIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "ingest",
-		Short:  "Deprecated alias for `tracebloc data validate`",
-		Hidden: true,
+		Use:         "ingest",
+		Annotations: runtimeClassFor(classDispatchOnly),
+		Short:       "Deprecated alias for `tracebloc data validate`",
+		Hidden:      true,
 		// A bare path here is almost always someone meaning `data ingest`
 		// (the home screen advertises it) — redirect instead of dumping a
 		// confusing deprecation usage block.
@@ -51,8 +52,10 @@ func newIngestCmd() *cobra.Command {
 // internal/schema/validate.go for the formatting contract.
 func newIngestValidateCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "validate <path>",
-		Short: "Validate an ingest.yaml against the embedded v1 schema, locally",
+		Use: "validate <path>",
+		// Local file against the embedded schema — no network at all.
+		Annotations: runtimeClassFor(classBinaryOnly),
+		Short:       "Validate an ingest.yaml against the embedded v1 schema, locally",
 		Long: `Reads <path>, parses it as YAML, and validates it against the bundled
 ingest.v1.json schema (synced from tracebloc/data-ingestors). Prints
 violations in the same JSON-pointer-prefixed format the cluster's

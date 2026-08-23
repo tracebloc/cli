@@ -53,9 +53,10 @@ func newDataDeleteCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:     "delete <table>",
-		Aliases: []string{"rm"},
-		Short:   "Delete an ingested dataset's in-cluster artifacts (table + PVC files)",
+		Use:         "delete <table>",
+		Annotations: runtimeClassFor(classCluster),
+		Aliases:     []string{"rm"},
+		Short:       "Delete an ingested dataset's in-cluster artifacts (table + PVC files)",
 		Long: `Removes the in-cluster artifacts a previous ` + "`data ingest`" + ` created
 for a table: the MySQL table in ` + push.IngestionDatabase + ` and the dataset's
 directories on the shared PVC. Destructive and not undoable.

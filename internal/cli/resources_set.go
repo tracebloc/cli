@@ -54,8 +54,9 @@ func newResourcesSetCmd() *cobra.Command {
 	)
 
 	setCmd := &cobra.Command{
-		Use:   "set [max]",
-		Short: "Raise how much of this machine tracebloc may use",
+		Use:         "set [max]",
+		Annotations: runtimeClassFor(classCluster),
+		Short:       "Raise how much of this machine tracebloc may use",
 		Long: `Raise the per-training-run ceiling — how much of this machine a single
 training run may use.
 

@@ -49,8 +49,9 @@ func newDataListCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List datasets ingested in the cluster, with size / records / format",
+		Use:         "list",
+		Annotations: runtimeClassFor(classCluster),
+		Short:       "List datasets ingested in the cluster, with size / records / format",
 		Long: `Lists the datasets ingested into your client — the tables in ` + push.IngestionDatabase + `
 on the cluster — grouped by modality, with each dataset's split (train/test),
 record count, size, format, and when it was ingested.

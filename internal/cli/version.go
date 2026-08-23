@@ -24,9 +24,10 @@ func newVersionCmd(info BuildInfo) *cobra.Command {
 	var outputJSON bool
 
 	cmd := &cobra.Command{
-		Use:   "version",
-		Short: "Print the tracebloc CLI version, git SHA, and build date",
-		Args:  cobra.NoArgs,
+		Use:         "version",
+		Annotations: runtimeClassFor(classBinaryOnly),
+		Short:       "Print the tracebloc CLI version, git SHA, and build date",
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			payload := versionPayload{
 				Version:   info.Version,

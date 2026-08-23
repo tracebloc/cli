@@ -44,8 +44,9 @@ var readInClusterClient = cluster.DiscoverInClusterClient
 // and offboarding is the top-level `tracebloc delete`.
 func newClientCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "client",
-		Short: "Provision this machine's tracebloc client",
+		Use:         "client",
+		Annotations: runtimeClassFor(classDispatchOnly),
+		Short:       "Provision this machine's tracebloc client",
 		Long: `Provision a tracebloc client for this machine. Requires sign-in first
 (` + "`tracebloc login`" + `). To remove tracebloc from this machine, use
 ` + "`tracebloc delete`" + `.`,
@@ -63,8 +64,9 @@ func newClientCreateCmd() *cobra.Command {
 	var name, location, kubeconfigPath, contextOverride, credentialFile string
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "create",
-		Short: "Point this machine at its tracebloc client — adopts the one already on this cluster",
+		Use:         "create",
+		Annotations: runtimeClassFor(classBackendCluster),
+		Short:       "Point this machine at its tracebloc client — adopts the one already on this cluster",
 		Long: `Point this machine at its tracebloc client.
 
 Keyed on the cluster your kubeconfig reaches: if a tracebloc client already runs
@@ -122,11 +124,12 @@ type clientCreateOpts struct {
 // shells out to `client list`. Keep it callable, off the user-facing surface.
 func newClientListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "list",
-		Aliases: []string{"ls"},
-		Short:   "List the clients in your account",
-		Hidden:  true,
-		Args:    cobra.NoArgs,
+		Use:         "list",
+		Annotations: runtimeClassFor(classBackend),
+		Aliases:     []string{"ls"},
+		Short:       "List the clients in your account",
+		Hidden:      true,
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClientList(cmd.Context(), printerFor(cmd))
 		},

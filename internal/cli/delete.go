@@ -74,8 +74,13 @@ func newDeleteCmd() *cobra.Command {
 		// resurrect the just-wiped data dir. The annotation (not a name match) means
 		// `data delete` is unaffected — only this top-level command opts in
 		// (Bugbot #397, #404). See SkipUpdateNudge.
-		Annotations: map[string]string{skipUpdateNudgeAnnotation: "true"},
-		Short:       "Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)",
+		Annotations: map[string]string{
+			skipUpdateNudgeAnnotation: "true",
+			// Offboarding revokes the machine credential (backend) AND tears the
+			// cluster down — both, or it leaves half a machine behind.
+			runtimeClassAnnotation: classBackendCluster,
+		},
+		Short: "Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)",
 		Long: `Removes tracebloc from this machine: revokes the machine credential,
 uninstalls the Helm release, deletes the local cluster, reclaims the tracebloc
 container images, and clears local state — then removes the CLI itself.
