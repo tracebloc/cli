@@ -600,6 +600,7 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		}
 	}
 	gpuName, gpuReq, gpuRequested := parseGPU(env["GPU_REQUESTS"])
+	diskReq, diskRequested := parseDisk(env["RESOURCE_REQUESTS"])
 
 	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -612,6 +613,9 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	}
 
 	req := fmt.Sprintf("cpu=%s, memory=%s", cpuReq.String(), memReq.String())
+	if diskRequested {
+		req += fmt.Sprintf(", ephemeral-storage=%s", diskReq.String())
+	}
 	if gpuRequested {
 		req += fmt.Sprintf(", %s=%s", gpuName, gpuReq.String())
 	}
@@ -624,6 +628,11 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	// tie-break, EXACTLY like resources.nodeLarger, so the advertised ceiling
 	// always matches what `resources set max` will actually apply (Bugbot).
 	var bestCPU, bestMem resource.Quantity
+	// Largest ephemeral-storage seen on a Ready node, tracked SEPARATELY from
+	// the CPU-major "best node" above: it is reported for visibility, not used
+	// to pick a node, so it must not perturb the drift nudge's tie-break.
+	var bestDisk resource.Quantity
+	var sawDisk bool
 	for i := range nodes.Items {
 		n := nodes.Items[i]
 		if !nodeReady(n) {
@@ -635,7 +644,25 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			bestCPU = *alloc.Cpu()
 			bestMem = *alloc.Memory()
 		}
+		if d, present := alloc[corev1.ResourceEphemeralStorage]; present {
+			sawDisk = true
+			if d.Cmp(bestDisk) > 0 {
+				bestDisk = d
+			}
+		}
 		nodeCPUMem := alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0
+		// Disk joins cpu+memory as a WHOLE-NODE condition. A pod gets every
+		// resource it requests from ONE node, so this must be AND-ed into the
+		// same per-node verdict and never OR-ed across nodes (Bugbot on PR #91
+		// made exactly that point about GPU). A node that does not report
+		// ephemeral-storage is not failed on it -- an unreadable field must not
+		// be turned into "no node fits".
+		if diskRequested {
+			if d, present := alloc[corev1.ResourceEphemeralStorage]; present &&
+				d.Cmp(diskReq) < 0 {
+				nodeCPUMem = false
+			}
+		}
 		nodeGPU := !gpuRequested
 		if gpuRequested {
 			if q, present := alloc[gpuName]; present && q.Cmp(gpuReq) >= 0 {
@@ -667,6 +694,13 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		}
 	default:
 		detail := fmt.Sprintf("a Ready node can schedule a training job (%s)", req)
+		// backend#2223: report disk even when nothing requested it. Before this,
+		// doctor measured no disk AT ALL -- and an ephemeral-storage eviction
+		// was once reported to a user as "CPU Overload" (backend#2053), so the
+		// dimension being invisible here has already cost a misdiagnosis.
+		if sawDisk {
+			detail += fmt.Sprintf(" — largest node offers ephemeral-storage=%s", bestDisk.String())
+		}
 		// Drift nudge (#400 / backend#1236): the install-time auto-size goes
 		// stale when a machine GROWS. When the configured budget uses no more
 		// than half of what this machine could give one run (largest node −
@@ -759,6 +793,32 @@ func parseCPUMem(spec string) (cpu, mem resource.Quantity, ok bool) {
 		return resource.Quantity{}, resource.Quantity{}, false
 	}
 	return cpu, mem, true
+}
+
+// parseDisk extracts an ephemeral-storage request from a RESOURCE_REQUESTS spec.
+//
+// OPTIONAL, deliberately — shaped like parseGPU rather than parseCPUMem.
+// backend#2223 widened the chart grammar to admit ephemeral-storage, but the
+// installer does not write it and most edges will not carry it, so a missing
+// disk request must leave node-fit behaving exactly as before rather than
+// becoming a can't-read Warn.
+//
+// LIMIT OF WHAT doctor CAN SEE, stated because it is not obvious: this reads
+// the jobs-manager Deployment's env, which is the DECLARED envelope. Since
+// client-runtime#380, jobs-manager also applies a built-in ephemeral-storage
+// default that never appears in that env — so an undeclared disk request is
+// unknown here, not zero. Hence the node's own capacity is surfaced regardless
+// (below), so disk is at least visible even when nothing declares it.
+func parseDisk(spec string) (qty resource.Quantity, requested bool) {
+	v, present := parseResourceSpec(spec)["ephemeral-storage"]
+	if !present {
+		return resource.Quantity{}, false
+	}
+	q, err := resource.ParseQuantity(v)
+	if err != nil || q.IsZero() {
+		return resource.Quantity{}, false
+	}
+	return q, true
 }
 
 // parseGPU extracts the GPU resource name + quantity from a GPU_REQUESTS spec
