@@ -377,6 +377,7 @@ screen. %s/%d are runtime placeholders.
 "Tore down %q on this machine, but some cleanup above didn't complete and the server-side revoke didn't complete — the credential may still be live on tracebloc (revoke it from the dashboard). Finish the flagged steps by hand."
 "Tore down %q on this machine. The server-side revoke didn't complete, so the credential may still be live on tracebloc — revoke it from the dashboard if needed (the orphan reaper sweeps it otherwise)."
 "Training results can't reach tracebloc — experiments will stall."
+"Training will run, but doctor found a problem — the ⚠ above says how to fix it."
 "Try again shortly; if it persists, email support@tracebloc.io with `%s doctor --diagnose`."
 "Type %q to offboard this machine"
 "Uninstalled tracebloc."

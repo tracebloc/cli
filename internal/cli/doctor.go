@@ -259,7 +259,7 @@ func runClusterDoctor(
 
 	// 6. Verdict + exit code (0 healthy/partial, 2 a problem).
 	p.Newline()
-	fail, allGood := doctorVerdict(connected.status, ready.status)
+	verdict := doctorVerdict(connected.status, ready.status)
 	switch {
 	case pointerStale:
 		// A problem WAS found — it just isn't in the cluster. Exit 2 (the code
@@ -269,13 +269,19 @@ func runClusterDoctor(
 		// — the class BUGBOT.md flags first. The remedy is already printed
 		// above, so this doesn't also send them to write a support bundle.
 		return &exitError{code: exitChecksFailed, err: nil}
-	case fail:
+	case verdict == doctor.StatusFail:
 		if !diagnose { // they just wrote a bundle — don't send them to write it again
 			p.Hintf("Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())
 		}
 		return &exitError{code: exitChecksFailed, err: nil}
-	case allGood:
+	case verdict == doctor.StatusOK:
 		p.Successf("Everything looks good — you're ready to run training.")
+	case verdict == doctor.StatusWarn:
+		// A ⚠ readiness printed a real problem (with its remedy) one line up.
+		// This must NOT fall through to the "No problems found, but some checks
+		// couldn't finish" line: a problem WAS found and every check DID finish
+		// — both halves would be false (Bugbot). Training still runs → exit 0.
+		p.Warnf("Training will run, but doctor found a problem — the ⚠ above says how to fix it.")
 	default:
 		// Connected and nothing failed, but a check couldn't complete (e.g. pod
 		// health unreadable — RBAC → ready is StatusUnknown). Don't overclaim
@@ -661,16 +667,33 @@ func worseStatus(a, b doctor.Status) doctor.Status {
 	return doctor.StatusOK
 }
 
-// doctorVerdict decides the closing line from the two rolled-up health lines:
-// fail (a real problem → exit 2), or allGood (BOTH genuinely OK → "everything
-// looks good"). The key subtlety: allGood requires both to be StatusOK, NOT
-// merely "not Fail" — a readiness we couldn't determine (StatusUnknown, e.g. a
-// pod-list RBAC failure) must not be reported as good, even though worseStatus
-// treats Unknown as non-worsening (Bugbot). When neither holds, the caller
-// reports a partial "couldn't finish some checks" result (still exit 0).
-func doctorVerdict(connected, ready doctor.Status) (fail, allGood bool) {
-	if worseStatus(connected, ready) == doctor.StatusFail {
-		return true, false
+// doctorVerdict decides the closing line from the two rolled-up health lines.
+// It is four-valued because the closing copy has four honest things to say:
+//
+//	StatusFail    → a real problem, exit 2
+//	StatusOK      → BOTH genuinely OK → "everything looks good"
+//	StatusWarn    → a problem WAS found and printed one line up, but training
+//	                still runs → exit 0, and the closing line must own the
+//	                problem, not claim none was found (Bugbot on #541: the old
+//	                two-valued verdict lumped Warn in with Unknown, printing
+//	                "No problems found, but some checks couldn't finish" —
+//	                both halves false for an over-committed machine)
+//	StatusUnknown → nothing failed but a check couldn't complete → the partial
+//	                "couldn't finish some checks" line (still exit 0)
+//
+// The key subtlety survives from the two-valued version: OK requires both to
+// be StatusOK, NOT merely "not Fail" — a readiness we couldn't determine
+// (StatusUnknown, e.g. a pod-list RBAC failure) must not be reported as good,
+// even though worseStatus treats Unknown as non-worsening (Bugbot).
+func doctorVerdict(connected, ready doctor.Status) doctor.Status {
+	switch {
+	case worseStatus(connected, ready) == doctor.StatusFail:
+		return doctor.StatusFail
+	case connected == doctor.StatusOK && ready == doctor.StatusOK:
+		return doctor.StatusOK
+	case worseStatus(connected, ready) == doctor.StatusWarn:
+		return doctor.StatusWarn
+	default:
+		return doctor.StatusUnknown
 	}
-	return false, connected == doctor.StatusOK && ready == doctor.StatusOK
 }

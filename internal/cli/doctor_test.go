@@ -286,12 +286,16 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 		// Warn must NOT become a hard failure: training does start here, so the
 		// command still exits 0 — it just cannot claim everything looks good.
-		fail, allGood := doctorVerdict(c.status, r.status)
-		if fail {
+		// And the closing line must own the problem: StatusWarn, not the
+		// StatusUnknown "couldn't finish some checks" partial, which would say
+		// no problem was found right under the ⚠ that reported one (Bugbot).
+		switch v := doctorVerdict(c.status, r.status); v {
+		case doctor.StatusFail:
 			t.Error("an over-committed machine must not fail the command — training does run")
-		}
-		if allGood {
+		case doctor.StatusOK:
 			t.Error(`"everything looks good" must not survive an over-committed machine`)
+		case doctor.StatusUnknown:
+			t.Error(`the closing line must not claim "no problems found" — a problem was just printed`)
 		}
 	})
 
@@ -502,25 +506,26 @@ func TestDoctorVerdict(t *testing.T) {
 	cases := []struct {
 		name             string
 		connected, ready doctor.Status
-		wantFail         bool
-		wantAllGood      bool
+		want             doctor.Status
 	}{
-		{"both OK → everything good", ok, ok, false, true},
-		{"ready Fail → problem", ok, fail, true, false},
-		{"connected Fail → problem", fail, ok, true, false},
+		{"both OK → everything good", ok, ok, ok},
+		{"ready Fail → problem", ok, fail, fail},
+		{"connected Fail → problem", fail, ok, fail},
 		// The Bugbot case: connected but readiness couldn't be checked (RBAC →
 		// Unknown). Not a hard failure, but NOT "everything looks good".
-		{"connected + ready can't-check → neither", ok, unknown, false, false},
+		{"connected + ready can't-check → partial", ok, unknown, unknown},
 		// Not-connected already Fails via connected, regardless of ready=Unknown.
-		{"disconnected + ready unknown → problem", fail, unknown, true, false},
-		{"a warn that isn't Fail → not everything-good", ok, warn, false, false},
+		{"disconnected + ready unknown → problem", fail, unknown, fail},
+		// The second Bugbot case (#541): a Warn is a FOUND problem, so the
+		// closing line must be the warn one — never the Unknown partial, whose
+		// copy claims no problem was found and that checks couldn't finish.
+		{"a warn that isn't Fail → warn, not partial", ok, warn, warn},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotFail, gotAllGood := doctorVerdict(tc.connected, tc.ready)
-			if gotFail != tc.wantFail || gotAllGood != tc.wantAllGood {
-				t.Errorf("doctorVerdict(%v,%v) = fail=%v allGood=%v, want fail=%v allGood=%v",
-					tc.connected, tc.ready, gotFail, gotAllGood, tc.wantFail, tc.wantAllGood)
+			if got := doctorVerdict(tc.connected, tc.ready); got != tc.want {
+				t.Errorf("doctorVerdict(%v,%v) = %v, want %v",
+					tc.connected, tc.ready, got, tc.want)
 			}
 		})
 	}
