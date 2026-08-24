@@ -259,7 +259,7 @@ func runClusterDoctor(
 
 	// 6. Verdict + exit code (0 healthy/partial, 2 a problem).
 	p.Newline()
-	fail, allGood := doctorVerdict(connected.status, ready.status)
+	verdict := doctorVerdict(connected.status, ready.status)
 	switch {
 	case pointerStale:
 		// A problem WAS found — it just isn't in the cluster. Exit 2 (the code
@@ -269,13 +269,19 @@ func runClusterDoctor(
 		// — the class BUGBOT.md flags first. The remedy is already printed
 		// above, so this doesn't also send them to write a support bundle.
 		return &exitError{code: exitChecksFailed, err: nil}
-	case fail:
+	case verdict == doctor.StatusFail:
 		if !diagnose { // they just wrote a bundle — don't send them to write it again
 			p.Hintf("Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())
 		}
 		return &exitError{code: exitChecksFailed, err: nil}
-	case allGood:
+	case verdict == doctor.StatusOK:
 		p.Successf("Everything looks good — you're ready to run training.")
+	case verdict == doctor.StatusWarn:
+		// A ⚠ readiness printed a real problem (with its remedy) one line up.
+		// This must NOT fall through to the "No problems found, but some checks
+		// couldn't finish" line: a problem WAS found and every check DID finish
+		// — both halves would be false (Bugbot). Training still runs → exit 0.
+		p.Warnf("Training will run, but doctor found a problem — the ⚠ above says how to fix it.")
 	default:
 		// Connected and nothing failed, but a check couldn't complete (e.g. pod
 		// health unreadable — RBAC → ready is StatusUnknown). Don't overclaim
@@ -467,6 +473,32 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — not enough free compute to start a training.",
 			computeRemedy(runtime.GOOS)}
+	case by["Machine capacity"].Status == doctor.StatusWarn:
+		// backend#2221 (Bugbot on #541). checkMachineChain warns when the
+		// environment claims more memory than the machine actually has -- the
+		// uncapped-k3d double-count. This case has to exist, because the shape of
+		// that bug is "every individual check looks fine": Node capacity truthfully
+		// says a node can fit the job, so without this the rollup printed
+		// "Ready to run training" plus "Everything looks good" and exited 0, and the
+		// warning was only visible under --verbose. Reporting success we have not
+		// earned is worse than not checking at all.
+		//
+		// Warn, not Fail: training genuinely does start here, so failing the command
+		// would be its own lie (and would break every existing 2-node edge's exit
+		// code). Warn keeps the exit at 0 while doctorVerdict withholds
+		// "everything looks good" -- which is exactly the honest verdict.
+		//
+		// The remedy is REWORDED rather than passing through the granular
+		// check's own Remedy, which is otherwise the obvious move (@LukasWodka
+		// on #541). That text names `k3d --servers-memory/--agents-memory`, and
+		// these two rolled-up lines are the one place in doctor that is
+		// deliberately free of Kubernetes vocabulary -- renderDoctorDetails is
+		// documented as "the only place Kubernetes vocabulary appears". So the
+		// durable fix is named in plain terms here and the flag-level detail
+		// stays one --verbose away, where the granular Remedy already says it.
+		ready = healthLine{doctor.StatusWarn,
+			"Ready to run training — but your environment thinks this machine is bigger than it is.",
+			fmt.Sprintf("It reports more memory than the machine really has, so two trainings that each look like they fit can together run it out of memory and take the environment down. Run one training at a time; to fix it for good, recreate the environment as a single-node one. `%s doctor --verbose` shows the numbers and the exact flags.", launcher())}
 	default:
 		ready = healthLine{doctor.StatusOK, "Ready to run training", ""}
 	}
@@ -481,6 +513,15 @@ func renderHealth(p *ui.Printer, h healthLine) {
 		p.Successf("%s", h.text)
 	case doctor.StatusUnknown:
 		p.Infof("%s", h.text)
+	case doctor.StatusWarn:
+		// A qualified yes: the thing works, but not cleanly. Rendering it through
+		// the Fail branch below would read as "Not ready" for an environment that
+		// does run training (backend#2221), and a false alarm spends the same
+		// credibility as a false green.
+		p.Warnf("%s", h.text)
+		if h.remedy != "" {
+			p.Hintf("     %s", h.remedy)
+		}
 	default:
 		p.Errorf("%s", h.text)
 		if h.remedy != "" {
@@ -626,16 +667,33 @@ func worseStatus(a, b doctor.Status) doctor.Status {
 	return doctor.StatusOK
 }
 
-// doctorVerdict decides the closing line from the two rolled-up health lines:
-// fail (a real problem → exit 2), or allGood (BOTH genuinely OK → "everything
-// looks good"). The key subtlety: allGood requires both to be StatusOK, NOT
-// merely "not Fail" — a readiness we couldn't determine (StatusUnknown, e.g. a
-// pod-list RBAC failure) must not be reported as good, even though worseStatus
-// treats Unknown as non-worsening (Bugbot). When neither holds, the caller
-// reports a partial "couldn't finish some checks" result (still exit 0).
-func doctorVerdict(connected, ready doctor.Status) (fail, allGood bool) {
-	if worseStatus(connected, ready) == doctor.StatusFail {
-		return true, false
+// doctorVerdict decides the closing line from the two rolled-up health lines.
+// It is four-valued because the closing copy has four honest things to say:
+//
+//	StatusFail    → a real problem, exit 2
+//	StatusOK      → BOTH genuinely OK → "everything looks good"
+//	StatusWarn    → a problem WAS found and printed one line up, but training
+//	                still runs → exit 0, and the closing line must own the
+//	                problem, not claim none was found (Bugbot on #541: the old
+//	                two-valued verdict lumped Warn in with Unknown, printing
+//	                "No problems found, but some checks couldn't finish" —
+//	                both halves false for an over-committed machine)
+//	StatusUnknown → nothing failed but a check couldn't complete → the partial
+//	                "couldn't finish some checks" line (still exit 0)
+//
+// The key subtlety survives from the two-valued version: OK requires both to
+// be StatusOK, NOT merely "not Fail" — a readiness we couldn't determine
+// (StatusUnknown, e.g. a pod-list RBAC failure) must not be reported as good,
+// even though worseStatus treats Unknown as non-worsening (Bugbot).
+func doctorVerdict(connected, ready doctor.Status) doctor.Status {
+	switch {
+	case worseStatus(connected, ready) == doctor.StatusFail:
+		return doctor.StatusFail
+	case connected == doctor.StatusOK && ready == doctor.StatusOK:
+		return doctor.StatusOK
+	case worseStatus(connected, ready) == doctor.StatusWarn:
+		return doctor.StatusWarn
+	default:
+		return doctor.StatusUnknown
 	}
-	return false, connected == doctor.StatusOK && ready == doctor.StatusOK
 }

@@ -225,6 +225,11 @@ func TestSummarizeDoctor(t *testing.T) {
 		res("Pod health", doctor.StatusOK),
 		res("Dataset volume (PVC)", doctor.StatusOK),
 		res("Node capacity", doctor.StatusOK),
+		// Present in the fixture because Run() emits it (backend#2221). Without
+		// it every "all healthy" case below silently described a shorter check
+		// list than doctor actually produces, and `withDetail` -- which only
+		// mutates entries that already exist -- could not reach it.
+		res("Machine capacity", doctor.StatusOK),
 	}
 	with := func(base []doctor.Result, name string, s doctor.Status) []doctor.Result {
 		out := make([]doctor.Result, len(base))
@@ -253,6 +258,53 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 		if c.text != "Connected to tracebloc" || r.text != "Ready to run training" {
 			t.Errorf("unexpected healthy text: %q / %q", c.text, r.text)
+		}
+	})
+
+	// Bugbot on #541 (High): checkMachineChain returns StatusWarn for the
+	// uncapped-k3d double-count that backend#2221 exists to surface, but the
+	// rollup never read "Machine capacity" — so on a machine where Node capacity
+	// is OK (the exact case the ticket describes) the default output printed
+	// "✔ Ready to run training" + "Everything looks good" and exited 0, with the
+	// 2x warning visible only under --verbose. A success the command has not
+	// earned is worse than no check at all.
+	t.Run("over-committed machine → ready Warn, not a green ✔", func(t *testing.T) {
+		results := withDetail(allOK, "Machine capacity", doctor.StatusWarn,
+			"Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has")
+		c, r := summarizeDoctor(results, tokenOK)
+		if c.status != doctor.StatusOK {
+			t.Errorf("connected should stay OK, got %v", c.status)
+		}
+		if r.status != doctor.StatusWarn {
+			t.Fatalf("ready should be Warn on an over-committed machine, got %v (%q)", r.status, r.text)
+		}
+		if r.text == "Ready to run training" {
+			t.Error("ready must not read as an unqualified green")
+		}
+		if r.remedy == "" {
+			t.Error("a warn must carry a remedy")
+		}
+		// Warn must NOT become a hard failure: training does start here, so the
+		// command still exits 0 — it just cannot claim everything looks good.
+		// And the closing line must own the problem: StatusWarn, not the
+		// StatusUnknown "couldn't finish some checks" partial, which would say
+		// no problem was found right under the ⚠ that reported one (Bugbot).
+		switch v := doctorVerdict(c.status, r.status); v {
+		case doctor.StatusFail:
+			t.Error("an over-committed machine must not fail the command — training does run")
+		case doctor.StatusOK:
+			t.Error(`"everything looks good" must not survive an over-committed machine`)
+		case doctor.StatusUnknown:
+			t.Error(`the closing line must not claim "no problems found" — a problem was just printed`)
+		}
+	})
+
+	t.Run("machine capacity unknown → ready stays OK (no alarm)", func(t *testing.T) {
+		// StatusUnknown carries no signal (non-k3d cluster, unreadable VM), so it
+		// must not degrade the verdict either way.
+		_, r := summarizeDoctor(with(allOK, "Machine capacity", doctor.StatusUnknown), tokenOK)
+		if r.status != doctor.StatusOK {
+			t.Fatalf("an unknown machine-capacity must not move the verdict, got %v", r.status)
 		}
 	})
 
@@ -454,25 +506,26 @@ func TestDoctorVerdict(t *testing.T) {
 	cases := []struct {
 		name             string
 		connected, ready doctor.Status
-		wantFail         bool
-		wantAllGood      bool
+		want             doctor.Status
 	}{
-		{"both OK → everything good", ok, ok, false, true},
-		{"ready Fail → problem", ok, fail, true, false},
-		{"connected Fail → problem", fail, ok, true, false},
+		{"both OK → everything good", ok, ok, ok},
+		{"ready Fail → problem", ok, fail, fail},
+		{"connected Fail → problem", fail, ok, fail},
 		// The Bugbot case: connected but readiness couldn't be checked (RBAC →
 		// Unknown). Not a hard failure, but NOT "everything looks good".
-		{"connected + ready can't-check → neither", ok, unknown, false, false},
+		{"connected + ready can't-check → partial", ok, unknown, unknown},
 		// Not-connected already Fails via connected, regardless of ready=Unknown.
-		{"disconnected + ready unknown → problem", fail, unknown, true, false},
-		{"a warn that isn't Fail → not everything-good", ok, warn, false, false},
+		{"disconnected + ready unknown → problem", fail, unknown, fail},
+		// The second Bugbot case (#541): a Warn is a FOUND problem, so the
+		// closing line must be the warn one — never the Unknown partial, whose
+		// copy claims no problem was found and that checks couldn't finish.
+		{"a warn that isn't Fail → warn, not partial", ok, warn, warn},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotFail, gotAllGood := doctorVerdict(tc.connected, tc.ready)
-			if gotFail != tc.wantFail || gotAllGood != tc.wantAllGood {
-				t.Errorf("doctorVerdict(%v,%v) = fail=%v allGood=%v, want fail=%v allGood=%v",
-					tc.connected, tc.ready, gotFail, gotAllGood, tc.wantFail, tc.wantAllGood)
+			if got := doctorVerdict(tc.connected, tc.ready); got != tc.want {
+				t.Errorf("doctorVerdict(%v,%v) = %v, want %v",
+					tc.connected, tc.ready, got, tc.want)
 			}
 		})
 	}
