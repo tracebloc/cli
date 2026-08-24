@@ -148,3 +148,58 @@ func TestSave_ErrorBranches(t *testing.T) {
 		}
 	})
 }
+
+// CurrentToken must READ, never record its own miss — tracebloc/cli#552.
+//
+// Profile() creating an absent profile is correct for the write paths it exists
+// for (sign-in mutates the returned pointer, then Saves). As a LOOKUP it is a
+// trap: the miss is stored, so the second call finds a profile and looks like a
+// hit. Both halves are asserted here, because the distinction between the two
+// accessors IS the fix.
+func TestCurrentTokenReadsWithoutCreatingAProfile(t *testing.T) {
+	c := &Config{CurrentEnv: "dev"}
+	if tok := c.CurrentToken(); tok != "" {
+		t.Fatalf("no profile should mean no token, got %q", tok)
+	}
+	if len(c.Profiles) != 0 {
+		t.Fatalf("CurrentToken must not create a profile; Profiles = %v", c.Profiles)
+	}
+
+	// The contrast, so a future refactor cannot quietly route CurrentToken
+	// through Profile() and still pass the assertion above.
+	c2 := &Config{CurrentEnv: "dev"}
+	_ = c2.Profile("dev")
+	if len(c2.Profiles) != 1 {
+		t.Fatalf("Profile() is documented to create; it did not, so this test no longer pins the difference")
+	}
+}
+
+func TestCurrentTokenIsKeyedOnTheRawCurrentEnv(t *testing.T) {
+	// The keys Profiles is really keyed on are whatever sign-in stored — NOT a
+	// normalised or remapped form. SignedIn() and Current() both read it raw,
+	// and CurrentToken must agree with them or callers disagree about whether
+	// the same config is signed in.
+	for _, raw := range []string{"dev", "STG", " dev ", "acme"} {
+		c := &Config{CurrentEnv: raw, Profiles: map[string]*Profile{raw: {Token: "t-" + raw}}}
+		if got := c.CurrentToken(); got != "t-"+raw {
+			t.Errorf("CurrentEnv %q: CurrentToken = %q, want %q", raw, got, "t-"+raw)
+		}
+		if !c.SignedIn() {
+			t.Errorf("CurrentEnv %q: SignedIn disagrees with CurrentToken", raw)
+		}
+	}
+}
+
+func TestCurrentTokenIsEmptyWhenThereIsGenuinelyNoToken(t *testing.T) {
+	cases := map[string]*Config{
+		"no current env":   {Profiles: map[string]*Profile{"dev": {Token: "t"}}},
+		"no profiles map":  {CurrentEnv: "dev"},
+		"profile no token": {CurrentEnv: "dev", Profiles: map[string]*Profile{"dev": {}}},
+		"nil config":       nil,
+	}
+	for name, c := range cases {
+		if got := c.CurrentToken(); got != "" {
+			t.Errorf("%s: want empty, got %q", name, got)
+		}
+	}
+}

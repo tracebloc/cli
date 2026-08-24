@@ -74,8 +74,13 @@ func newDeleteCmd() *cobra.Command {
 		// resurrect the just-wiped data dir. The annotation (not a name match) means
 		// `data delete` is unaffected — only this top-level command opts in
 		// (Bugbot #397, #404). See SkipUpdateNudge.
-		Annotations: map[string]string{skipUpdateNudgeAnnotation: "true"},
-		Short:       "Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)",
+		Annotations: map[string]string{
+			skipUpdateNudgeAnnotation: "true",
+			// Offboarding revokes the machine credential (backend) AND tears the
+			// cluster down — both, or it leaves half a machine behind.
+			runtimeClassAnnotation: classBackendCluster,
+		},
+		Short: "Offboard this machine from tracebloc (revoke, uninstall, reclaim disk)",
 		Long: `Removes tracebloc from this machine: revokes the machine credential,
 uninstalls the Helm release, deletes the local cluster, reclaims the tracebloc
 container images, and clears local state — then removes the CLI itself.
@@ -331,11 +336,19 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	if o.keepData {
 		p.Infof("Kept local data and config (~/.tracebloc); cleared the active-client pointer — --keep-data.")
 	} else {
-		if derr := removeHostDataDir(); derr != nil {
+		if removed, derr := removeHostDataDir(); derr != nil {
 			degraded = true
 			p.Warnf("Couldn't remove local data (%v) — cleared the active-client pointer; "+
 				"remove the data by hand: rm -rf %s", derr, hostDataDirDisplay())
 		} else {
+			// The tree is gone and verified gone. Record it BEFORE printing the
+			// success line, so nothing later in this process can put it back and
+			// make that line false — specifically main.go's command-outcome
+			// telemetry, which runs after this command returns and whose spool
+			// lives inside the directory just removed (backend#2314). Only on
+			// the success branch: a failed removal leaves the tree in place, and
+			// a spool written into a tree that still exists is correct.
+			markHostStateWiped(removed)
 			p.Successf("Removed local tracebloc data and config.")
 		}
 	}
@@ -398,24 +411,29 @@ func renderOffboardSummary(p *ui.Printer, name string, keepData bool) {
 // $TRACEBLOC_CONFIG_DIR when set — the same resolution config.Dir uses). It goes
 // through the config package so a test's temp override is honored and the real
 // ~/.tracebloc is never touched in tests.
-func removeHostDataDir() error {
+//
+// Returns the directory it removed, so the caller can tell the telemetry spool
+// not to re-create it on the way out (backend#2314). The path is returned rather
+// than re-resolved by the caller because config.Dir() is resolved here, and two
+// resolutions of the same thing is how they come to disagree.
+func removeHostDataDir() (string, error) {
 	dir, err := config.Dir()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := osRemoveAll(dir); err != nil {
-		return err
+		return "", err
 	}
 	// Verify the directory is actually gone before the caller prints "✔ Removed".
 	// A nil RemoveAll is not proof the tree is absent — a racing writer, a mount,
 	// or a masked partial failure can leave it present — and claiming a clean wipe
 	// we didn't achieve is exactly the offboard-hygiene gap RFC-0003 flags.
 	if _, statErr := osStat(dir); statErr == nil {
-		return fmt.Errorf("%s still present after removal", dir)
+		return "", fmt.Errorf("%s still present after removal", dir)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("verifying removal of %s: %w", dir, statErr)
+		return "", fmt.Errorf("verifying removal of %s: %w", dir, statErr)
 	}
-	return nil
+	return dir, nil
 }
 
 // hostDataDirDisplay is the data dir for a user-facing hint; falls back to the

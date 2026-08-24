@@ -54,8 +54,9 @@ func newResourcesSetCmd() *cobra.Command {
 	)
 
 	setCmd := &cobra.Command{
-		Use:   "set [max]",
-		Short: "Raise how much of this machine tracebloc may use",
+		Use:         "set [max]",
+		Annotations: runtimeClassFor(classCluster),
+		Short:       "Raise how much of this machine tracebloc may use",
 		Long: `Raise the per-training-run ceiling — how much of this machine a single
 training run may use.
 
@@ -291,7 +292,27 @@ func applyResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, target *
 
 	// (6) Confirm (unless --yes or --dry-run). One gate for both the flag and
 	//     wizard paths; --dry-run mutates nothing so it never needs confirming.
-	if !req.yes && !req.dryRun {
+	//
+	//     ceilingUnchanged skips it too, and that is the load-bearing clause:
+	//     the gate guards the CEILING, and an unchanged ceiling has nothing to
+	//     ask about. "Let each training run use up to 4 CPU · 16 GiB?" when the
+	//     answer is already 4 CPU · 16 GiB is a question with one honest answer,
+	//     and off a terminal the gate does not ask at all — it returns exit 1.
+	//
+	//     cli#546: #539's staleness treatment (backend#2220) sent the unchanged
+	//     ceiling down here for the first time, so `set --cores 4 --memory 16`
+	//     restating the CURRENT ceiling without --yes turned from the documented
+	//     exit-0 no-op ("Exit codes: 0 applied (or nothing to change)" above, and
+	//     the `no change → exit 0` edge in docs/cli-navigation.md that bypasses
+	//     CONF entirely) into exit 1. Nearly every installed edge reads
+	//     `installer` or `unknown`, so that was the whole installed base, not an
+	//     edge case — and the callers that restate a size are scripts (the
+	//     bootstrap, the end-to-end journey), none of which pass --yes for what
+	//     the docs promise is a no-op. The phantom-GPU fall-through (#241) had
+	//     the same shape and is fixed by the same clause: both are bookkeeping
+	//     writes, already announced by the Infof lines above, not budget changes
+	//     an operator needs to sanction.
+	if !req.yes && !req.dryRun && !ceilingUnchanged {
 		if pr == nil {
 			return &exitError{code: exitFailure, err: fmt.Errorf(
 				"refusing to change the ceiling without confirmation: pass --yes, or run on a terminal")}

@@ -114,8 +114,11 @@ func prepareHostUnsupportedOnOS(goos string) bool { return goos == "windows" }
 // with no root at all.
 func newPrepareHostCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "prepare-host [researcher-username]",
-		Short: "Prepare this machine so a non-admin user can install tracebloc (run once, as an administrator)",
+		Use: "prepare-host [researcher-username]",
+		// Delegates to the installer downloaded from GitHub releases: local host
+		// plus GitHub, no tracebloc service.
+		Annotations: runtimeClassFor(classLocalHost),
+		Short:       "Prepare this machine so a non-admin user can install tracebloc (run once, as an administrator)",
 		Long: `Prepares a host that a non-admin user can't install on directly.
 
 Run this ONCE, as an administrator, on a machine where the person who will use

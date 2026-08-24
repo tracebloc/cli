@@ -125,6 +125,15 @@ Two things make this repo unusual and should shape every finding:
   pinned standalone binaries — `errcheck`, `gofmt -s`, `goimports`, `ineffassign`, `misspell`,
   `staticcheck`, plus `deadcode-check.sh`, `file-budget.sh`, `check-style.sh`. Don't infer
   coverage from that file.
+- **The two formatters run via `make fmt-check`, not inline in the workflow** (cli#549), and
+  they scope to `git ls-files '*.go'` rather than `.`. Both are deliberate: `.` walked untracked
+  scratch directories, and one definition of the file set is what stops local and CI
+  disagreeing. `scripts/format.sh` fails closed (exit 2) outside a work tree or on an empty file
+  list — do not "simplify" either guard away. `run_formatter` returns a status and
+  writes to a temp file rather than being captured in `$( )`: a function that
+  `exit`s inside a command substitution ends only the subshell, and the first cut
+  of this script shipped exactly that false green. `make fmt-selftest`
+  (`scripts/tests/format-verify.sh`) is the guard; it fails on the old shape.
 - **`staticcheck` runs `-checks all,-ST1005` deliberately** — do not flag error-string
   capitalisation or punctuation. It is a tracked, intentional exclusion (cli#279).
 - `internal/submit/client.go:78` — `InsecureSkipVerify` is intentional for cluster-internal

@@ -25,8 +25,10 @@ func newClientStatusCmd() *cobra.Command {
 	var timeout time.Duration
 	var kubeconfigPath, contextOverride, nsOverride string
 	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show whether tracebloc can see this machine's client (online)",
+		Use: "status",
+		// The status read is backend-only; --seal additionally inspects the cluster.
+		Annotations: runtimeClassForWith(classBackend, "seal="+classBackendCluster),
+		Short:       "Show whether tracebloc can see this machine's client (online)",
 		Long: `Report tracebloc's view of this machine's active client — online, offline,
 or pending. With --wait, poll until tracebloc reports it online (exit 0) or the
 timeout elapses (non-zero), to confirm the client connected after setup.

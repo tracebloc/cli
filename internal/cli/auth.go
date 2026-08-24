@@ -24,8 +24,9 @@ import (
 func newLoginCmd() *cobra.Command {
 	var envFlag string
 	cmd := &cobra.Command{
-		Use:   "login",
-		Short: "Sign in to tracebloc in your browser (device flow)",
+		Use:         "login",
+		Annotations: runtimeClassFor(classBackend),
+		Short:       "Sign in to tracebloc in your browser (device flow)",
 		Long: `Sign in to tracebloc. The CLI prints a URL + short code; open the URL
 on any device (your laptop or phone), sign in the way you already do
 (password, Google, or GitHub), and approve the code. The CLI stores a
@@ -323,9 +324,11 @@ func pollForToken(ctx context.Context, p *ui.Printer, client *api.Client, dc *ap
 // (so a copied/leaked credential stops working) and clears it locally.
 func newLogoutCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "logout",
-		Short: "Sign out (revoke the token server-side and clear it locally)",
-		Args:  cobra.NoArgs,
+		Use: "logout",
+		// Not (a): the token is revoked server-side, not just dropped locally.
+		Annotations: runtimeClassFor(classBackend),
+		Short:       "Sign out (revoke the token server-side and clear it locally)",
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			p := printerFor(cmd)
 			cfg, err := config.Load()
@@ -376,8 +379,9 @@ func newLogoutCmd() *cobra.Command {
 // newAuthCmd is the `tracebloc auth` parent; today it carries `auth status`.
 func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "auth",
-		Short: "Inspect tracebloc authentication state",
+		Use:         "auth",
+		Annotations: runtimeClassFor(classDispatchOnly),
+		Short:       "Inspect tracebloc authentication state",
 		// Bare `tracebloc auth` prints help; a mistyped subcommand errors with a
 		// suggestion instead of silently exiting 0 (#75).
 		RunE:                       runGroup,
@@ -392,9 +396,11 @@ func newAuthStatusCmd() *cobra.Command {
 	var check bool
 	var envFlag string
 	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show whether you're signed in, and to which backend",
-		Args:  cobra.NoArgs,
+		Use: "status",
+		// Reads local config; only --check dials the backend.
+		Annotations: runtimeClassForWith(classBinaryOnly, "check="+classBackend),
+		Short:       "Show whether you're signed in, and to which backend",
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if check {
 				return runAuthCheck(cmd.Context(), printerFor(cmd), envFlag)
@@ -411,7 +417,13 @@ func newAuthStatusCmd() *cobra.Command {
 			prof := cfg.Current()
 			p.Section("tracebloc auth")
 			p.Field("status", "signed in")
-			p.Field("backend", cfg.CurrentEnv)
+			// sessionEnv, not the raw stored string: this line is the human-facing
+			// answer to "which backend am I on?", and it must be the same answer
+			// --check computes and the same one authedClient dials. Printing the
+			// stored value let `auth status` say `Dev` while every request went to
+			// dev — a status command that disagrees with the client is worse than
+			// no status command.
+			p.Field("backend", sessionEnv(cfg))
 			if prof.Email != "" {
 				p.Field("account", prof.Email)
 			}
@@ -442,7 +454,7 @@ func newAuthStatusCmd() *cobra.Command {
 // (IsSilentError) so main() prints nothing.
 //
 // The target env is resolved exactly like `login` (--env, then $CLIENT_ENV, then
-// prod), and must match the signed-in CurrentEnv — otherwise the probe would OK a
+// prod), and must match the signed-in env as sessionEnv resolves it — otherwise the probe would OK a
 // stale session for the wrong backend and the installer would skip the very
 // `login` that switches env, provisioning into the wrong account (RFC-0001 §10).
 func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
@@ -454,18 +466,23 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 		return &exitError{code: exitFailure}
 	}
 	target := api.ResolveEnv(envFlag)
-	if !cfg.SignedIn() || cfg.CurrentEnv != target {
+	// Compare the RESOLVED session env, not the raw cfg.CurrentEnv: target comes
+	// out of api.ResolveEnv already normalised, so comparing it against the stored
+	// string made this the one place a `"current_env": "Dev"` config failed a probe
+	// for the session it is actually signed in to.
+	signedIn := sessionEnv(cfg)
+	if !cfg.SignedIn() || signedIn != target {
 		if p.Verbose() {
-			if cfg.SignedIn() && cfg.CurrentEnv != target {
-				p.Hintf("Signed in to %q, but this run targets %q — run `tracebloc login`.", cfg.CurrentEnv, target)
+			if cfg.SignedIn() && signedIn != target {
+				p.Hintf("Signed in to %q, but this run targets %q — run `tracebloc login`.", signedIn, target)
 			} else {
 				p.Hintf("Not signed in. Run `tracebloc login`.")
 			}
 		}
 		return &exitError{code: exitFailure}
 	}
-	// Signed in AND CurrentEnv == target: probe it. authedClient() builds the client
-	// for sessionEnv (== CurrentEnv == target) with the stored token — reuse it and
+	// Signed in AND the resolved session env == target: probe it. authedClient()
+	// builds the client for sessionEnv (== the value just compared) with the stored token — reuse it and
 	// discard its message (the exit code is the contract here).
 	client, _, err := authedClient()
 	if err != nil {
