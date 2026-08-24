@@ -467,6 +467,23 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — not enough free compute to start a training.",
 			computeRemedy(runtime.GOOS)}
+	case by["Machine capacity"].Status == doctor.StatusWarn:
+		// backend#2221 (Bugbot on #541). checkMachineChain warns when the
+		// environment claims more memory than the machine actually has -- the
+		// uncapped-k3d double-count. This case has to exist, because the shape of
+		// that bug is "every individual check looks fine": Node capacity truthfully
+		// says a node can fit the job, so without this the rollup printed
+		// "Ready to run training" plus "Everything looks good" and exited 0, and the
+		// warning was only visible under --verbose. Reporting success we have not
+		// earned is worse than not checking at all.
+		//
+		// Warn, not Fail: training genuinely does start here, so failing the command
+		// would be its own lie (and would break every existing 2-node edge's exit
+		// code). Warn keeps the exit at 0 while doctorVerdict withholds
+		// "everything looks good" -- which is exactly the honest verdict.
+		ready = healthLine{doctor.StatusWarn,
+			"Ready to run training — but your environment thinks this machine is bigger than it is.",
+			fmt.Sprintf("It reports more memory than the machine really has, so two trainings that each look like they fit can together run it out of memory and take the environment down. Run one at a time, and see `%s doctor --verbose` for the numbers.", launcher())}
 	default:
 		ready = healthLine{doctor.StatusOK, "Ready to run training", ""}
 	}
@@ -481,6 +498,15 @@ func renderHealth(p *ui.Printer, h healthLine) {
 		p.Successf("%s", h.text)
 	case doctor.StatusUnknown:
 		p.Infof("%s", h.text)
+	case doctor.StatusWarn:
+		// A qualified yes: the thing works, but not cleanly. Rendering it through
+		// the Fail branch below would read as "Not ready" for an environment that
+		// does run training (backend#2221), and a false alarm spends the same
+		// credibility as a false green.
+		p.Warnf("%s", h.text)
+		if h.remedy != "" {
+			p.Hintf("     %s", h.remedy)
+		}
 	default:
 		p.Errorf("%s", h.text)
 		if h.remedy != "" {

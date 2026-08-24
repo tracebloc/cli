@@ -256,6 +256,56 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	// Bugbot on #541 (High): checkMachineChain returns StatusWarn for the
+	// uncapped-k3d double-count that backend#2221 exists to surface, but the
+	// rollup never read "Machine capacity" — so on a machine where Node capacity
+	// is OK (the exact case the ticket describes) the default output printed
+	// "✔ Ready to run training" + "Everything looks good" and exited 0, with the
+	// 2x warning visible only under --verbose. A success the command has not
+	// earned is worse than no check at all.
+	t.Run("over-committed machine → ready Warn, not a green ✔", func(t *testing.T) {
+		results := append([]doctor.Result{}, allOK...)
+		results = append(results, doctor.Result{
+			Name:   "Machine capacity",
+			Status: doctor.StatusWarn,
+			Detail: "Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has",
+			Remedy: "Run a single-node environment, or cap the nodes.",
+		})
+		c, r := summarizeDoctor(results, tokenOK)
+		if c.status != doctor.StatusOK {
+			t.Errorf("connected should stay OK, got %v", c.status)
+		}
+		if r.status != doctor.StatusWarn {
+			t.Fatalf("ready should be Warn on an over-committed machine, got %v (%q)", r.status, r.text)
+		}
+		if r.text == "Ready to run training" {
+			t.Error("ready must not read as an unqualified green")
+		}
+		if r.remedy == "" {
+			t.Error("a warn must carry a remedy")
+		}
+		// Warn must NOT become a hard failure: training does start here, so the
+		// command still exits 0 — it just cannot claim everything looks good.
+		fail, allGood := doctorVerdict(c.status, r.status)
+		if fail {
+			t.Error("an over-committed machine must not fail the command — training does run")
+		}
+		if allGood {
+			t.Error(`"everything looks good" must not survive an over-committed machine`)
+		}
+	})
+
+	t.Run("machine capacity unknown → ready stays OK (no alarm)", func(t *testing.T) {
+		// StatusUnknown carries no signal (non-k3d cluster, unreadable VM), so it
+		// must not degrade the verdict either way.
+		results := append([]doctor.Result{}, allOK...)
+		results = append(results, doctor.Result{Name: "Machine capacity", Status: doctor.StatusUnknown})
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusOK {
+			t.Fatalf("an unknown machine-capacity must not move the verdict, got %v", r.status)
+		}
+	})
+
 	t.Run("unreachable → connected Fail, ready can't-check", func(t *testing.T) {
 		c, r := summarizeDoctor(with(allOK, "Cluster reachable", doctor.StatusFail), tokenOK)
 		if c.status != doctor.StatusFail {
