@@ -481,9 +481,18 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		// would be its own lie (and would break every existing 2-node edge's exit
 		// code). Warn keeps the exit at 0 while doctorVerdict withholds
 		// "everything looks good" -- which is exactly the honest verdict.
+		//
+		// The remedy is REWORDED rather than passing through the granular
+		// check's own Remedy, which is otherwise the obvious move (@LukasWodka
+		// on #541). That text names `k3d --servers-memory/--agents-memory`, and
+		// these two rolled-up lines are the one place in doctor that is
+		// deliberately free of Kubernetes vocabulary -- renderDoctorDetails is
+		// documented as "the only place Kubernetes vocabulary appears". So the
+		// durable fix is named in plain terms here and the flag-level detail
+		// stays one --verbose away, where the granular Remedy already says it.
 		ready = healthLine{doctor.StatusWarn,
 			"Ready to run training — but your environment thinks this machine is bigger than it is.",
-			fmt.Sprintf("It reports more memory than the machine really has, so two trainings that each look like they fit can together run it out of memory and take the environment down. Run one at a time, and see `%s doctor --verbose` for the numbers.", launcher())}
+			fmt.Sprintf("It reports more memory than the machine really has, so two trainings that each look like they fit can together run it out of memory and take the environment down. Run one training at a time; to fix it for good, recreate the environment as a single-node one. `%s doctor --verbose` shows the numbers and the exact flags.", launcher())}
 	default:
 		ready = healthLine{doctor.StatusOK, "Ready to run training", ""}
 	}

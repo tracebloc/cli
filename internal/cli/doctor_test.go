@@ -225,6 +225,11 @@ func TestSummarizeDoctor(t *testing.T) {
 		res("Pod health", doctor.StatusOK),
 		res("Dataset volume (PVC)", doctor.StatusOK),
 		res("Node capacity", doctor.StatusOK),
+		// Present in the fixture because Run() emits it (backend#2221). Without
+		// it every "all healthy" case below silently described a shorter check
+		// list than doctor actually produces, and `withDetail` -- which only
+		// mutates entries that already exist -- could not reach it.
+		res("Machine capacity", doctor.StatusOK),
 	}
 	with := func(base []doctor.Result, name string, s doctor.Status) []doctor.Result {
 		out := make([]doctor.Result, len(base))
@@ -264,13 +269,8 @@ func TestSummarizeDoctor(t *testing.T) {
 	// 2x warning visible only under --verbose. A success the command has not
 	// earned is worse than no check at all.
 	t.Run("over-committed machine → ready Warn, not a green ✔", func(t *testing.T) {
-		results := append([]doctor.Result{}, allOK...)
-		results = append(results, doctor.Result{
-			Name:   "Machine capacity",
-			Status: doctor.StatusWarn,
-			Detail: "Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has",
-			Remedy: "Run a single-node environment, or cap the nodes.",
-		})
+		results := withDetail(allOK, "Machine capacity", doctor.StatusWarn,
+			"Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has")
 		c, r := summarizeDoctor(results, tokenOK)
 		if c.status != doctor.StatusOK {
 			t.Errorf("connected should stay OK, got %v", c.status)
@@ -298,9 +298,7 @@ func TestSummarizeDoctor(t *testing.T) {
 	t.Run("machine capacity unknown → ready stays OK (no alarm)", func(t *testing.T) {
 		// StatusUnknown carries no signal (non-k3d cluster, unreadable VM), so it
 		// must not degrade the verdict either way.
-		results := append([]doctor.Result{}, allOK...)
-		results = append(results, doctor.Result{Name: "Machine capacity", Status: doctor.StatusUnknown})
-		_, r := summarizeDoctor(results, tokenOK)
+		_, r := summarizeDoctor(with(allOK, "Machine capacity", doctor.StatusUnknown), tokenOK)
 		if r.status != doctor.StatusOK {
 			t.Fatalf("an unknown machine-capacity must not move the verdict, got %v", r.status)
 		}
