@@ -743,3 +743,103 @@ func TestCheckImagePull(t *testing.T) {
 		}
 	})
 }
+
+// nodeWithDisk is `node` plus an ephemeral-storage allocatable. Separate helper
+// rather than another variadic on `node`: that one already overloads its tail
+// for GPU, and a second overload there would make every call site ambiguous.
+func nodeWithDisk(name, cpu, mem, disk string) *corev1.Node {
+	n := node(name, cpu, mem)
+	n.Status.Allocatable[corev1.ResourceEphemeralStorage] = resource.MustParse(disk)
+	return n
+}
+
+func TestParseDisk(t *testing.T) {
+	qty, req := parseDisk("cpu=2,memory=8Gi,ephemeral-storage=20Gi")
+	if !req || qty.String() != "20Gi" {
+		t.Fatalf("parseDisk => %q %v, want 20Gi true", qty.String(), req)
+	}
+	// OPTIONAL, not required: the installer does not write a disk request, so
+	// its absence must read as "not requested" and leave node-fit unchanged —
+	// never as a can't-read Warn the way a missing cpu/memory does.
+	if _, req := parseDisk("cpu=2,memory=8Gi"); req {
+		t.Fatalf("absent ephemeral-storage should be !requested")
+	}
+	if _, req := parseDisk("ephemeral-storage=0"); req {
+		t.Fatalf("zero should be !requested")
+	}
+	if _, req := parseDisk("ephemeral-storage=notaquantity"); req {
+		t.Fatalf("unparseable should be !requested")
+	}
+}
+
+func TestCheckNodeFitDisk(t *testing.T) {
+	withDisk := map[string]string{
+		"RESOURCE_REQUESTS": "cpu=2,memory=8Gi,ephemeral-storage=20Gi",
+	}
+	noDisk := map[string]string{"RESOURCE_REQUESTS": "cpu=2,memory=8Gi"}
+
+	t.Run("disk fits -> ok", func(t *testing.T) {
+		cs := fake.NewClientset(nodeWithDisk("n1", "4", "16Gi", "40Gi"))
+		if r := checkNodeFit(bg(), cs, withDisk); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok", r.Status, r.Detail)
+		}
+	})
+
+	t.Run("disk too small -> fail even though cpu+mem fit", func(t *testing.T) {
+		// backend#2223. Before disk was a dimension here, this reported OK and
+		// the run then died on an ephemeral-storage eviction — which is how
+		// backend#2053 came to be reported to a user as "CPU Overload".
+		cs := fake.NewClientset(nodeWithDisk("n1", "4", "16Gi", "5Gi"))
+		r := checkNodeFit(bg(), cs, withDisk)
+		if r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail", r.Status, r.Detail)
+		}
+		if !strings.Contains(r.Detail, "ephemeral-storage=20Gi") {
+			t.Fatalf("the requirement should name the disk request, got %q", r.Detail)
+		}
+	})
+
+	t.Run("cpu+mem and disk on different nodes -> fail, not ok", func(t *testing.T) {
+		// The Bugbot #91 whole-node rule, applied to the third dimension: a pod
+		// gets every resource from ONE node, so these must never be OR-ed.
+		cs := fake.NewClientset(
+			nodeWithDisk("big", "4", "16Gi", "5Gi"),   // cpu/mem fit, disk small
+			nodeWithDisk("disky", "1", "1Gi", "80Gi"), // disk fits, too small
+		)
+		if r := checkNodeFit(bg(), cs, withDisk); r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail (no single node fits all three)", r.Status, r.Detail)
+		}
+	})
+
+	t.Run("a node not reporting disk is not failed on it", func(t *testing.T) {
+		// An unreadable field must not become "no node fits" — that would tell
+		// the user to resize a machine on the strength of a value we could not
+		// read. Same fail-open direction the rest of doctor takes.
+		cs := fake.NewClientset(node("n1", "4", "16Gi")) // no ephemeral-storage
+		if r := checkNodeFit(bg(), cs, withDisk); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok", r.Status, r.Detail)
+		}
+	})
+
+	t.Run("disk is reported even when nothing requested it", func(t *testing.T) {
+		// The ticket's actual complaint: "CLI doctor measures no disk at all."
+		// Visibility must not depend on someone having declared a request.
+		cs := fake.NewClientset(nodeWithDisk("n1", "4", "16Gi", "40Gi"))
+		r := checkNodeFit(bg(), cs, noDisk)
+		if r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok", r.Status, r.Detail)
+		}
+		if !strings.Contains(r.Detail, "ephemeral-storage=40Gi") {
+			t.Fatalf("disk should be surfaced even when undeclared, got %q", r.Detail)
+		}
+	})
+
+	t.Run("no disk anywhere -> detail stays as it was", func(t *testing.T) {
+		// Existing single-dimension edges must not gain a dangling clause.
+		cs := fake.NewClientset(node("n1", "4", "16Gi"))
+		r := checkNodeFit(bg(), cs, noDisk)
+		if strings.Contains(r.Detail, "ephemeral-storage") {
+			t.Fatalf("no disk anywhere should mention none, got %q", r.Detail)
+		}
+	})
+}
