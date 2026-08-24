@@ -275,12 +275,16 @@ func TestCopyCatalog(t *testing.T) {
 		renderHealth(p, connected)
 		renderHealth(p, ready)
 		p.Newline()
-		fail, allGood := doctorVerdict(connected.status, ready.status)
-		switch {
-		case fail:
+		switch doctorVerdict(connected.status, ready.status) {
+		case doctor.StatusFail:
 			p.Hintf("Still stuck? Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())
-		case allGood:
+		case doctor.StatusOK:
 			p.Successf("Everything looks good — you're ready to run training.")
+		case doctor.StatusWarn:
+			// Not rendered in a scene: every Warn readiness carries a launcher-
+			// bearing remedy, and only launcher-free rollups are catalogued here.
+			// The closing line itself is drift-guarded by zz-all-strings.golden.
+			p.Warnf("Training will run, but doctor found a problem — the ⚠ above says how to fix it.")
 		default:
 			p.Infof("No problems found, but some checks couldn't finish — re-run with --verbose for detail.")
 		}

@@ -138,6 +138,13 @@ type Options struct {
 	// HTTPProbe reports whether a URL is reachable from where the CLI runs.
 	// nil => httpProbe (proxy-aware, short timeout). Injected in tests.
 	HTTPProbe func(ctx context.Context, url string) error
+
+	// VMProbe reports the container runtime's VM size, and HostProbe the
+	// physical machine's. nil => dockerVMProbe / hostProbe. Both injected in
+	// tests so the four-level chain is exercisable without Docker
+	// (backend#2221).
+	VMProbe   VMProbe
+	HostProbe HostProbe
 }
 
 // Run executes every check in display order and returns their results. It
@@ -147,6 +154,12 @@ type Options struct {
 func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 	if opts.HTTPProbe == nil {
 		opts.HTTPProbe = httpProbe
+	}
+	if opts.VMProbe == nil {
+		opts.VMProbe = dockerVMProbe
+	}
+	if opts.HostProbe == nil {
+		opts.HostProbe = hostProbe
 	}
 	ns := opts.Namespace
 
@@ -169,6 +182,7 @@ func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 			unknownCheck("Restart history"),
 			unknownCheck("Dataset volume (PVC)"),
 			unknownCheck("Node capacity"),
+			unknownCheck("Machine capacity"),
 			unknownCheck("Image pull secret"),
 			unknownCheck("Proxy configuration"),
 			checkBackendEgress(ctx, nil, opts.HTTPProbe),
@@ -185,6 +199,7 @@ func Run(ctx context.Context, cs kubernetes.Interface, opts Options) []Result {
 		checkRestartHistory(ctx, cs, ns),
 		checkPVC(ctx, cs, ns),
 		checkNodeFit(ctx, cs, jmEnv),
+		checkMachineChain(ctx, cs, opts.ServerURL, opts.VMProbe, opts.HostProbe),
 		checkImagePull(ctx, cs, ns, release),
 		checkProxy(jmEnv),
 		checkBackendEgress(ctx, jmEnv, opts.HTTPProbe),
