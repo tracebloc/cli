@@ -50,10 +50,19 @@ import (
 )
 
 const (
-	// telemetryIngestPath is the ingest boundary's versioned path
-	// (backend/metaApi/urls.py). Versioned because a spooled payload written by
-	// an old CLI can arrive after the backend has moved on.
-	telemetryIngestPath = "/telemetry/v1/records/"
+	// telemetryIngestPath is the HOST ingest boundary's versioned path
+	// (backend/metaApi/urls.py, name="host-telemetry-ingest"). Versioned because
+	// a spooled payload written by an old CLI can arrive after the backend has
+	// moved on.
+	//
+	// NOT "/telemetry/v1/records/", AND THAT WAS THE BUG (backend#2385). That
+	// path is the EDGE boundary: backend#1905 gates it on `IsAuthenticatedEdge`,
+	// and this CLI sends a human's `ClientAccessToken`, so every POST it ever
+	// made was refused 403 by construction — 16 in prod in the seven days to
+	// 2026-08-23. No re-login helps; a data scientist cannot become an edge. The
+	// backend now serves host producers at this second path, with a permission
+	// that accepts the credential we actually hold.
+	telemetryIngestPath = "/telemetry/v1/host/records/"
 
 	// telemetryBudget bounds the WHOLE telemetry step — drain included — not
 	// each attempt. #2217 sets ~1s per command.
@@ -296,15 +305,39 @@ const (
 // bad batch would be re-sent by every future command, forever, and would push
 // out good records at the cap. A permanent refusal must consume the batch.
 //
-// 401/403 retry rather than discard because they are a CREDENTIAL state, not a
-// payload verdict — an expired token is refreshed by the next `tracebloc login`,
-// and the records are still worth sending after it. 408/429 are explicitly
-// transient. Everything 5xx is transient by definition.
+// THE QUESTION IS NOT "IS THIS 4xx?" BUT "CAN A LATER RUN GO DIFFERENTLY?", and
+// backend#2385 moved two answers because the destination changed:
+//
+//   - 403 DISCARDS now. It used to retry, on the reasoning that a 4xx-auth is a
+//     credential state rather than a payload verdict. At the host route it is
+//     neither: `IsAuthenticatedHostTelemetryProducer` refuses a request that
+//     carries no client credential — which a signed-in CLI always has — and the
+//     endpoint's other 403 says the user resolves to no tenant, which needs an
+//     operator to attach an account, not a retry. Both are verdicts on THIS
+//     principal, and re-posting reproduces them exactly, per invocation, until
+//     the batch ages out at the spool cap. That is the wedge #2385 measured.
+//
+//   - 404 RETRIES now. It used to discard as a plain 4xx. On a VERSIONED path
+//     that is a DEPLOYMENT state, not a verdict: a CLI released ahead of the
+//     backend that serves this route gets 404 until the promotion lands, and
+//     discarding would destroy precisely the records the endpoint accepts a day
+//     later. The cost of being wrong the other way is bounded and small — a
+//     permanently wrong path costs one request per invocation and at most
+//     telemetrySpoolMax records, which is the same shape as an unreachable host.
+//
+// 401 still retries: an expired token is refreshed by the next `tracebloc
+// login`, and the records are still worth sending after it. 408/429 are
+// explicitly transient. Everything 5xx is transient by definition — including
+// the endpoint's own 503 for an expired credential.
 func classifyStatus(code int) postOutcome {
 	switch {
 	case code >= 200 && code < 300:
 		return postDelivered
-	case code == http.StatusUnauthorized, code == http.StatusForbidden,
+	case code == http.StatusForbidden:
+		return postDiscard
+	case code == http.StatusNotFound:
+		return postRetry
+	case code == http.StatusUnauthorized,
 		code == http.StatusRequestTimeout, code == http.StatusTooManyRequests:
 		return postRetry
 	case code >= 400 && code < 500:

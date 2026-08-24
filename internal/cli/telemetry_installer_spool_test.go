@@ -128,6 +128,113 @@ func TestInstallerSpoolFilesDoesNotDuplicateOneDirectory(t *testing.T) {
 	}
 }
 
+// TestInstallerSpoolFilesFindsTheFallbackOnEveryHomeVariable pins backend#2377.
+//
+// THE NAMES BELOW ARE WRITTEN DOWN INDEPENDENTLY of installerFallbackDirVars, on
+// purpose. A test that iterates the production list and feeds it back in is
+// self-consistent and therefore blind: mistype `USERPROFILE` there and the test
+// plants the same typo, finds the file, and goes green while Windows stays
+// undrainable. These five literals come from the two producers
+// (`client/scripts/lib/telemetry.sh` `_telemetry_fallback_dir` and
+// `client/scripts/lib/telemetry.ps1` `Get-TelemetryFallbackSpool`), read there
+// and copied here, so a drift between the list and the world is a failing test
+// rather than agreement with itself.
+//
+// The Windows three are the regression: before #2377 the search was TMPDIR/HOME
+// //tmp, and Windows sets neither of the first two.
+func TestInstallerSpoolFilesFindsTheFallbackOnEveryHomeVariable(t *testing.T) {
+	for _, envVar := range []string{"TMPDIR", "HOME", "USERPROFILE", "TEMP", "TMP"} {
+		t.Run(envVar, func(t *testing.T) {
+			dir := t.TempDir()
+			// The ps1 twin's exact spelling, suffix included — the bash twin's
+			// mktemp name has no suffix, and the glob must cover both.
+			spool := filepath.Join(dir, "tracebloc-telemetry-3f9c1a.jsonl")
+			writeInstallerSpool(t, spool, installerEvent("prod", "win-run", 1))
+
+			// ONLY this variable is set. Nothing else may stand in for it, which
+			// is what makes the assertion about this variable and not about the
+			// environment as a whole.
+			getenv := func(k string) string {
+				if k == envVar {
+					return dir
+				}
+				return ""
+			}
+
+			var found bool
+			for _, f := range installerSpoolFiles(getenv) {
+				if f == spool {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("a fallback spool reachable only through $%s was not found; "+
+					"an install failure written before the log exists is undeliverable",
+					envVar)
+			}
+		})
+	}
+}
+
+// TestInstallerFallbackDirVarsAreAllSearched is the totality half: every name the
+// production list DECLARES must actually be read by installerSpoolFiles.
+//
+// It cannot see a name that is missing from the list — that is what the test
+// above is for — but it does catch the opposite failure, a name added to the
+// vocabulary and never wired into the loop, which would look like coverage while
+// searching nothing.
+func TestInstallerFallbackDirVarsAreAllSearched(t *testing.T) {
+	if len(installerFallbackDirVars) == 0 {
+		t.Fatal("installerFallbackDirVars is empty; the loop below would assert nothing")
+	}
+	for _, envVar := range installerFallbackDirVars {
+		dir := t.TempDir()
+		spool := filepath.Join(dir, "tracebloc-telemetry-Qq7")
+		writeInstallerSpool(t, spool, installerEvent("prod", "a", 1))
+		getenv := func(k string) string {
+			if k == envVar {
+				return dir
+			}
+			return ""
+		}
+		var found bool
+		for _, f := range installerSpoolFiles(getenv) {
+			if f == spool {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("$%s is declared in installerFallbackDirVars but is never searched", envVar)
+		}
+	}
+}
+
+// A trailing separator must not turn one directory into two candidates. The
+// pre-#2377 code trimmed only "/", so this also guards the filepath.Clean that
+// replaced it.
+func TestInstallerSpoolFilesDedupesATrailingSeparator(t *testing.T) {
+	dir := t.TempDir()
+	writeInstallerSpool(t, filepath.Join(dir, "tracebloc-telemetry-Ss2"), installerEvent("prod", "a", 1))
+	getenv := func(k string) string {
+		switch k {
+		case "USERPROFILE":
+			return dir
+		case "TEMP":
+			return dir + string(filepath.Separator)
+		}
+		return ""
+	}
+	count := 0
+	for _, f := range installerSpoolFiles(getenv) {
+		if strings.Contains(f, "tracebloc-telemetry-Ss2") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("the same fallback file appears %d times; one install outcome would be sent twice", count)
+	}
+}
+
 // ─────────────────────────────────────────────── filtering by environment
 
 func TestInstallerRecordsOnlyTakesThisEnvironment(t *testing.T) {

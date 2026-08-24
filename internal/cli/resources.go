@@ -32,8 +32,9 @@ func newResourcesCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "resources",
-		Short: "Show how much of this machine tracebloc may use",
+		Use:         "resources",
+		Annotations: runtimeClassFor(classCluster),
+		Short:       "Show how much of this machine tracebloc may use",
 		Long: `Shows, in plain terms, how much of this machine tracebloc may use:
 
   • Your secure environment — the CPU and memory it can schedule
