@@ -24,8 +24,9 @@ import (
 // parent in later phases.
 func newClusterCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "cluster",
-		Short: "Inspect the cluster the CLI is currently targeting",
+		Use:         "cluster",
+		Annotations: runtimeClassFor(classDispatchOnly),
+		Short:       "Inspect the cluster the CLI is currently targeting",
 		Long: `Commands for inspecting the Kubernetes cluster the CLI is
 configured to talk to.
 
@@ -70,8 +71,9 @@ func newClusterInfoCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "info",
-		Short: "Show the cluster, namespace, client install, and ingestor token state",
+		Use:         "info",
+		Annotations: runtimeClassFor(classCluster),
+		Short:       "Show the cluster, namespace, client install, and ingestor token state",
 		Long: `Discovers the tracebloc client installed in the configured
 cluster + namespace and prints:
 

@@ -40,9 +40,10 @@ func newDoctorCmd(hidden bool) *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:    "doctor",
-		Hidden: hidden,
-		Short:  "Check your secure environment is connected and ready to run training",
+		Use:         "doctor",
+		Annotations: runtimeClassFor(classBackendCluster),
+		Hidden:      hidden,
+		Short:       "Check your secure environment is connected and ready to run training",
 		Long: `Checks, in plain terms, whether your secure environment is connected to
 tracebloc and ready to run training — and if something's wrong, exactly what to
 do about it.

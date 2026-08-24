@@ -385,12 +385,16 @@ func TestOffboardLeavesNothingBehindOnTheNoTokenPath(t *testing.T) {
 // --------------------------------------------------------------- delivery
 
 func TestClassifyStatus(t *testing.T) {
+	// The question each row answers is "can a later run go differently?", not
+	// "is this a 4xx". See classifyStatus for why 403 and 404 sit where they do
+	// since backend#2385 — they are the two rows that moved, and they moved in
+	// opposite directions.
 	cases := map[int]postOutcome{
 		200: postDelivered, 202: postDelivered,
 		400: postDiscard, // a permanently unparseable batch must not wedge the spool
-		404: postDiscard,
-		401: postRetry, // credential state, not a payload verdict
-		403: postRetry,
+		403: postDiscard, // a verdict on THIS principal; every retry reproduces it
+		404: postRetry,   // a versioned path the backend has not deployed YET
+		401: postRetry,   // credential state — the next `tracebloc login` fixes it
 		408: postRetry,
 		429: postRetry,
 		500: postRetry, 502: postRetry, 503: postRetry,
@@ -399,6 +403,31 @@ func TestClassifyStatus(t *testing.T) {
 		if got := classifyStatus(code); got != want {
 			t.Errorf("classifyStatus(%d) = %v, want %v", code, got, want)
 		}
+	}
+}
+
+// TestTelemetryIngestPathIsTheHostDoor pins the ONE string this repo cannot
+// derive.
+//
+// The path lives in another repository (backend, metaApi/urls.py, the route
+// named "host-telemetry-ingest"), so there is no symbol to read and a literal is
+// unavoidable. TestPostBatchSendsBearerAndJSON already asserts the request goes
+// to telemetryIngestPath — but that compares the constant with itself and would
+// stay green if the constant were changed to anything at all, including back to
+// the edge route that 403s every host producer. This is the assertion that
+// would not.
+//
+// If the backend ever moves or re-versions the host route, this test is the
+// thing that must be updated, deliberately, in a commit that says so.
+func TestTelemetryIngestPathIsTheHostDoor(t *testing.T) {
+	const hostDoor = "/telemetry/v1/host/records/"
+	const edgeDoor = "/telemetry/v1/records/"
+
+	if telemetryIngestPath != hostDoor {
+		t.Errorf("telemetryIngestPath = %q, want the host door %q", telemetryIngestPath, hostDoor)
+	}
+	if telemetryIngestPath == edgeDoor {
+		t.Error("telemetryIngestPath is the EDGE door; it gates on IsAuthenticatedEdge, so every CLI POST is a permanent 403 (backend#2385)")
 	}
 }
 
@@ -478,6 +507,51 @@ func TestDeliverKeepsTheSpoolBoundedAcrossManyFailures(t *testing.T) {
 	}
 	if id := got[len(got)-1].Resource["service.instance.id"]; id != "run-59" {
 		t.Errorf("the most recent failure must be retained, got %q", id)
+	}
+}
+
+// TestDeliverActsOnTheVerdictItGets wires classifyStatus to what happens on
+// disk.
+//
+// TestClassifyStatus above tests the mapping in isolation, which is a statement
+// about a switch and not about the spool. These two run the real deliver path
+// against a real server and read the file back — so a mapping that is right and
+// a `deliver` that ignores it cannot both pass, and the two rows backend#2385
+// moved are checked where the consequence actually lands.
+func TestDeliverActsOnTheVerdictItGets(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		wantSpool  int
+		wantReason string
+	}{
+		{
+			name:       "403 is permanent, so the batch is consumed",
+			status:     http.StatusForbidden,
+			wantSpool:  0,
+			wantReason: "a verdict on this principal reproduces on every retry; carrying it wedges every later send",
+		},
+		{
+			name:       "404 is a deploy state, so the batch is kept",
+			status:     http.StatusNotFound,
+			wantSpool:  1,
+			wantReason: "a CLI released ahead of the backend route must not destroy what that route will accept",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := withTempConfigDir(t, "prod")
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			deliver(path, srv.URL+telemetryIngestPath, "tok", "prod", event("run-verdict", 0), time.Now())
+
+			if got := readSpool(path); len(got) != tc.wantSpool {
+				t.Errorf("after %d the spool holds %d record(s), want %d — %s",
+					tc.status, len(got), tc.wantSpool, tc.wantReason)
+			}
+		})
 	}
 }
 

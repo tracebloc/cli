@@ -24,8 +24,9 @@ import (
 func newLoginCmd() *cobra.Command {
 	var envFlag string
 	cmd := &cobra.Command{
-		Use:   "login",
-		Short: "Sign in to tracebloc in your browser (device flow)",
+		Use:         "login",
+		Annotations: runtimeClassFor(classBackend),
+		Short:       "Sign in to tracebloc in your browser (device flow)",
 		Long: `Sign in to tracebloc. The CLI prints a URL + short code; open the URL
 on any device (your laptop or phone), sign in the way you already do
 (password, Google, or GitHub), and approve the code. The CLI stores a
@@ -323,9 +324,11 @@ func pollForToken(ctx context.Context, p *ui.Printer, client *api.Client, dc *ap
 // (so a copied/leaked credential stops working) and clears it locally.
 func newLogoutCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "logout",
-		Short: "Sign out (revoke the token server-side and clear it locally)",
-		Args:  cobra.NoArgs,
+		Use: "logout",
+		// Not (a): the token is revoked server-side, not just dropped locally.
+		Annotations: runtimeClassFor(classBackend),
+		Short:       "Sign out (revoke the token server-side and clear it locally)",
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			p := printerFor(cmd)
 			cfg, err := config.Load()
@@ -376,8 +379,9 @@ func newLogoutCmd() *cobra.Command {
 // newAuthCmd is the `tracebloc auth` parent; today it carries `auth status`.
 func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "auth",
-		Short: "Inspect tracebloc authentication state",
+		Use:         "auth",
+		Annotations: runtimeClassFor(classDispatchOnly),
+		Short:       "Inspect tracebloc authentication state",
 		// Bare `tracebloc auth` prints help; a mistyped subcommand errors with a
 		// suggestion instead of silently exiting 0 (#75).
 		RunE:                       runGroup,
@@ -392,9 +396,11 @@ func newAuthStatusCmd() *cobra.Command {
 	var check bool
 	var envFlag string
 	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show whether you're signed in, and to which backend",
-		Args:  cobra.NoArgs,
+		Use: "status",
+		// Reads local config; only --check dials the backend.
+		Annotations: runtimeClassForWith(classBinaryOnly, "check="+classBackend),
+		Short:       "Show whether you're signed in, and to which backend",
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if check {
 				return runAuthCheck(cmd.Context(), printerFor(cmd), envFlag)

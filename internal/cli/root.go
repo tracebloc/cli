@@ -42,8 +42,12 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 	api.SetUserAgent(info.Version)
 
 	root := &cobra.Command{
-		Use:   "tracebloc",
-		Short: "tracebloc — connect this machine to tracebloc and manage its data",
+		Use: "tracebloc",
+		// Bare `tracebloc` renders the home screen. Its environment probes are
+		// best-effort and time-bounded (home.go) and it never errors, so what it
+		// NEEDS is the binary — nothing more.
+		Annotations: runtimeClassFor(classBinaryOnly),
+		Short:       "tracebloc — connect this machine to tracebloc and manage its data",
 		Long: `The tracebloc CLI connects machines to tracebloc as clients and
 manages the datasets that models train on. Your data stays on your
 infrastructure — models from other collaborators come to it, once you
