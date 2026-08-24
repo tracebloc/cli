@@ -79,6 +79,10 @@ jobs:
           shellcheck --shell=bash --severity=error scripts/check-tool-pins.sh
           shellcheck --shell=bash --severity=error scripts/format.sh
           shellcheck --shell=bash --severity=error scripts/tests/format-verify.sh
+          shellcheck --shell=bash --severity=error scripts/cosign-retry.sh
+          shellcheck --shell=bash --severity=error scripts/tests/cosign-retry-verify.sh
+          bash -n scripts/cosign-retry.sh
+          bash -n scripts/tests/cosign-retry-verify.sh
           dash -n scripts/install.sh
           bash -n scripts/tests/install-verify.sh
           shellcheck --shell=bash --severity=error scripts/tests/install-ps1-verify.sh
@@ -92,6 +96,13 @@ jobs:
 
       - name: Verification harness (mandatory cosign / fail-closed)
         run: bash scripts/tests/install-verify.sh
+      # release.yml's cosign call is bounded, retries only transient sigstore
+      # failures, and fails closed on a zero exit with no signature
+      # (backend#2379). cosign is stubbed by a PATH shim, so this is hermetic
+      # and needs no network — which is why it sits in this job rather than
+      # Release, where it could only be exercised by cutting a tag.
+      - name: Cosign retry harness (bounded / classified / fail-closed)
+        run: bash scripts/tests/cosign-retry-verify.sh
       # Same property on Windows (backend#2078). pwsh is preinstalled on the
       # ubuntu runner image; the harness FAILS rather than skips if it isn't,
       # since "cannot tell" is not evidence that verification is mandatory.
