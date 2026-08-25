@@ -602,6 +602,45 @@ func TestLogout_RevokesAgainstSessionEnv(t *testing.T) {
 	}
 }
 
+// TestLogout_UnknownEnvSkipsRevoke is the backend#2171 fail-closed contract for
+// logout: a session whose current_env is unrecognised must still clear local state
+// (logout's primary job), but must NOT build a client and revoke the token — that
+// would send the credential to api.BaseURL's prod fallback, the very leak the fix
+// prevents. The user is signed out locally and pointed at the dashboard.
+func TestLogout_UnknownEnvSkipsRevoke(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	t.Setenv("CLIENT_ENV", "")
+	if err := (&config.Config{CurrentEnv: "staging", Profiles: map[string]*config.Profile{
+		"staging": {Token: "x", Email: "e@co", ActiveClientID: "7"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var built []string
+	orig := newAPIClient
+	newAPIClient = func(env string) *api.Client {
+		built = append(built, env)
+		return &api.Client{BaseURL: api.BaseURL(env)}
+	}
+	t.Cleanup(func() { newAPIClient = orig })
+
+	out, err := runCmd(t, "logout")
+	if err != nil {
+		t.Fatalf("logout must succeed for an unknown env (local clear is its primary job): %v", err)
+	}
+	if len(built) != 0 {
+		t.Errorf("logout built a client for %v — an unknown env must never be revoked "+
+			"against (it resolves to prod, sending the token there): backend#2171", built)
+	}
+	cfg, _ := config.Load()
+	if cfg.SignedIn() || cfg.Current().ActiveClientID != "" {
+		t.Errorf("local state must still be cleared for an unknown env: %+v", cfg)
+	}
+	if !strings.Contains(out, "Signed out locally") {
+		t.Errorf("want the 'Signed out locally' hint naming the skipped revoke, got:\n%s", out)
+	}
+}
+
 func TestAuthStatus_SignedIn(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{

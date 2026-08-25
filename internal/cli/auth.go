@@ -341,12 +341,14 @@ func newLogoutCmd() *cobra.Command {
 			}
 
 			// Capture what the server-side revoke needs BEFORE clearing local
-			// state. Resolve the env the same way authedClient does (current env,
-			// else $CLIENT_ENV, else prod) so revoke hits the host the token was
-			// issued for, not a hardcoded prod.
+			// state. Resolve the env the same way authedClient does, and REJECT an
+			// unrecognised one: revoke must hit the host the token was issued for,
+			// and a bad current_env resolving to prod would send the token there —
+			// exactly the backend#2171 leak. envErr is handled after the local
+			// clear (below), so a misconfigured session still signs out cleanly.
 			prof := cfg.Current()
 			token := prof.Token
-			env := sessionEnv(cfg)
+			env, envErr := knownSessionEnv(cfg)
 
 			// Clear and persist local state FIRST — it's logout's primary job and
 			// the always-safe step. Saving before the network call means a failed
@@ -358,6 +360,15 @@ func newLogoutCmd() *cobra.Command {
 			*prof = config.Profile{}
 			if err := cfg.Save(); err != nil {
 				return &exitError{code: exitFailure, err: err}
+			}
+
+			// If the saved session targeted an unrecognised backend, we don't know
+			// where the token was issued — so we must NOT revoke it against prod
+			// (api.BaseURL's fallback). The local session is already cleared, so the
+			// user is logged out; point them at the dashboard for the server-side revoke.
+			if envErr != nil {
+				p.Hintf("Signed out locally. Couldn't revoke the token server-side: %v. Revoke from the dashboard if this was a shared machine.", envErr)
+				return nil
 			}
 
 			// Then revoke the token server-side so a copied/leaked credential stops
@@ -423,7 +434,15 @@ func newAuthStatusCmd() *cobra.Command {
 			// stored value let `auth status` say `Dev` while every request went to
 			// dev — a status command that disagrees with the client is worse than
 			// no status command.
-			p.Field("backend", sessionEnv(cfg))
+			env := sessionEnv(cfg)
+			p.Field("backend", env)
+			// Coherence with the backend#2171 fail-closed gate: if that env is not one
+			// the client can route (a typo'd / renamed / stale current_env), every
+			// authenticated command now errors rather than silently targeting prod — so
+			// flag the broken session here instead of presenting it as healthy.
+			if !api.IsKnownEnv(env) {
+				p.Hintf("This session targets an unrecognised backend — run `tracebloc login` to sign in again.")
+			}
 			if prof.Email != "" {
 				p.Field("account", prof.Email)
 			}
