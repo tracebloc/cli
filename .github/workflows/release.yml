@@ -165,6 +165,19 @@ jobs:
           ls -lh "dist/$BIN_NAME"
 
       - name: Sign binary with cosign (keyless)
+        # Via scripts/cosign-retry.sh, NOT a bare `cosign` (backend#2379).
+        # sign-blob is a call to a third-party CDN with no local alternative,
+        # and on 2026-08-23 a single sigstore TUF reset on this one leg left
+        # v0.10.10-rc.2 a git tag with no Release and no assets for 6h04m —
+        # because `publish` below is (correctly) gated on ALL eight legs.
+        #
+        # The retry is deliberately HERE, on the one network call, and not a
+        # job-level re-run: re-running redoes seven good legs and widens the
+        # very window this closes. The `needs: release` gate on `publish` is
+        # NOT the bug and must stay — a release missing darwin/arm64 is worse
+        # than no release — so the wrapper fails closed: bounded attempts,
+        # transient-only retries, and a zero exit with no .sig still fails.
+        # Properties pinned by scripts/tests/cosign-retry-verify.sh.
         env:
           # Required for keyless signing in GHA. The id-token: write
           # permission above grants the workflow an OIDC token Sigstore
@@ -173,7 +186,7 @@ jobs:
         run: |
           BIN_NAME="tracebloc-${{ steps.version.outputs.tag }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
           cd dist
-          cosign sign-blob \
+          "$GITHUB_WORKSPACE/scripts/cosign-retry.sh" sign-blob \
             --output-certificate "$BIN_NAME.cert" \
             --output-signature "$BIN_NAME.sig" \
             "$BIN_NAME"

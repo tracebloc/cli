@@ -149,6 +149,49 @@ func TestClusterDoctorProbesTheSessionEnv(t *testing.T) {
 	}
 }
 
+// TestClusterDoctorFailsClosedOnUnknownEnv is the backend#2171 fail-closed
+// contract for `cluster doctor`: a session whose current_env is unrecognised must
+// NOT build a client and probe with the stored token — that dials api.BaseURL's
+// prod fallback. doctor hard-stops with the re-login remedy instead, and never
+// reaches the probe.
+func TestClusterDoctorFailsClosedOnUnknownEnv(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	t.Setenv("CLIENT_ENV", "")
+	if err := (&config.Config{CurrentEnv: "staging", Profiles: map[string]*config.Profile{
+		"staging": {Token: "tok", Email: "ds@co"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var built []string
+	orig := newAPIClient
+	newAPIClient = func(env string) *api.Client {
+		built = append(built, env)
+		return &api.Client{HTTP: &http.Client{Timeout: time.Millisecond}}
+	}
+	t.Cleanup(func() { newAPIClient = orig })
+
+	// Belt-and-braces: keep the test off the network even if the fail-closed return
+	// ever regresses to fall through to the cluster load (which probes prod live).
+	origLoad := loadClusterFn
+	loadClusterFn = func(cluster.KubeconfigOptions) (*cluster.ResolvedConfig, error) {
+		return nil, errors.New("no cluster (stubbed: keeps this test off the network)")
+	}
+	t.Cleanup(func() { loadClusterFn = origLoad })
+
+	out, err := runCmd(t, "cluster", "doctor")
+	if ExitCodeFromError(err) == 0 {
+		t.Fatalf("cluster doctor must fail closed on an unknown env, got exit 0:\n%s", out)
+	}
+	if len(built) != 0 {
+		t.Errorf("cluster doctor built a client for %v — an unknown env must never reach "+
+			"the probe (it resolves to prod, sending the token there): backend#2171", built)
+	}
+	if !strings.Contains(out, "unrecognised backend") {
+		t.Errorf("want the unrecognised-backend message, got:\n%s", out)
+	}
+}
+
 // TestAuthCheckComparesTheResolvedEnv: `auth status --check` compared the raw
 // cfg.CurrentEnv against api.ResolveEnv's already-normalised target, so a config
 // carrying a non-normalised env failed the probe for the very session it is
@@ -268,6 +311,105 @@ func TestTheRecordIsLabelledWithTheEnvItWasHanded(t *testing.T) {
 		t.Fatalf("deployment.environment = %q, want %q — the emitter must be labelled "+
 			"with the env it was handed (the one the sink was built from), not with a "+
 			"second read of the config", got, api.EnvStg)
+	}
+}
+
+// --- the token boundary fails closed on an unrecognised env (backend#2171) ----
+
+// TestAuthedClientRejectsAnUnknownSessionEnv is the backend#2171 fix: a config
+// whose current_env is a typo / renamed / stale value must NOT resolve to prod and
+// carry the stored token there. api.BaseURL maps every unknown env to
+// https://api.tracebloc.io, so before the knownSessionEnv gate authedClient built
+// a client for that prod URL and attached the token — sending the credential to
+// production while the user believed another backend.
+func TestAuthedClientRejectsAnUnknownSessionEnv(t *testing.T) {
+	const badEnv = "staging" // the real-world footgun: "staging", not "stg"
+
+	// Anchor the premise the fix defends against: this env WOULD route to prod. If
+	// api.BaseURL ever stops defaulting unknowns to prod, this test still holds, but
+	// the failure it guards would have changed shape — so assert the mapping here.
+	if got := api.BaseURL(badEnv); got != "https://api.tracebloc.io" {
+		t.Fatalf("premise broken: api.BaseURL(%q) = %q, want the prod URL — this test "+
+			"guards that authedClient never lets an unknown env reach that mapping", badEnv, got)
+	}
+
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	t.Setenv("CLIENT_ENV", "")
+	if err := (&config.Config{CurrentEnv: badEnv, Profiles: map[string]*config.Profile{
+		badEnv: {Token: "tok", Email: "ds@co"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A token-bearing client must never be BUILT for an unknown env — building it is
+	// precisely what attaches the token to a prod BaseURL. Record every env
+	// newAPIClient is asked for; the fix must leave this empty.
+	var built []string
+	orig := newAPIClient
+	newAPIClient = func(env string) *api.Client {
+		built = append(built, env)
+		return &api.Client{BaseURL: api.BaseURL(env)}
+	}
+	t.Cleanup(func() { newAPIClient = orig })
+
+	client, _, err := authedClient()
+	if err == nil {
+		t.Fatalf("authedClient() returned no error for current_env=%q — it must fail "+
+			"closed rather than target prod (backend#2171)", badEnv)
+	}
+	if client != nil {
+		t.Errorf("authedClient() returned a non-nil client (BaseURL %q) on the failure "+
+			"path — no token-bearing client may be built for an unknown env", client.BaseURL)
+	}
+	if !strings.Contains(err.Error(), badEnv) {
+		t.Errorf("error %q does not name the bad env %q — the message must tell the user "+
+			"which env is unrecognised", err, badEnv)
+	}
+	if len(built) != 0 {
+		t.Errorf("newAPIClient was called for %v — an unknown env must never reach the "+
+			"client, and thus never reach api.BaseURL's prod fallback", built)
+	}
+}
+
+// TestKnownSessionEnvGatesUnknownButKeepsKnown pins the gate directly: known envs
+// (including the case/whitespace variants sessionEnv normalises) pass through, and
+// only unrecognised values are rejected. An EMPTY config resolves to the prod
+// DEFAULT — a known env — so a legacy/empty session still works: the bug is a
+// present-but-wrong env, not the absence of one.
+func TestKnownSessionEnvGatesUnknownButKeepsKnown(t *testing.T) {
+	t.Setenv("CLIENT_ENV", "")
+	for _, tc := range []struct {
+		stored  string
+		wantEnv string
+		wantErr bool
+	}{
+		{"dev", api.EnvDev, false},
+		{"Dev", api.EnvDev, false},   // normalised (case)
+		{" stg ", api.EnvStg, false}, // normalised (whitespace)
+		{"prod", api.EnvProd, false},
+		{"", api.EnvProd, false}, // empty -> prod default, a known env
+		{"staging", "", true},    // the footgun: "staging" != "stg"
+		{"banana", "", true},
+	} {
+		t.Run(tc.stored, func(t *testing.T) {
+			got, err := knownSessionEnv(&config.Config{CurrentEnv: tc.stored})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("knownSessionEnv(%q) = %q, nil — want an error, since an "+
+						"unknown env must not resolve to prod", tc.stored, got)
+				}
+				if want := strings.ToLower(strings.TrimSpace(tc.stored)); !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q must name the bad env %q", err, want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("knownSessionEnv(%q) errored: %v — a known env must pass", tc.stored, err)
+			}
+			if got != tc.wantEnv {
+				t.Fatalf("knownSessionEnv(%q) = %q, want %q", tc.stored, got, tc.wantEnv)
+			}
+		})
 	}
 }
 

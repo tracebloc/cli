@@ -5,13 +5,17 @@ import (
 	"context"
 	"errors"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/helm"
+	"github.com/tracebloc/cli/internal/resources"
 	"github.com/tracebloc/cli/internal/ui"
 )
 
@@ -1057,4 +1061,145 @@ func TestSet_MultiClientRedirectOpensWithSingleBlank(t *testing.T) {
 	if strings.HasPrefix(out, "\n\n") {
 		t.Errorf("multi-client set opens with a DOUBLE blank line: %q", head)
 	}
+}
+
+// TestWizard_NeverOffersMoreThanTheMachineCanHonour is backend#2221's fourth
+// scope item — "never offer a ladder rung the VM cannot honour" — asserted as an
+// INVARIANT rather than as the two examples that covered it.
+//
+// Why a swept test and not a third example. The existing coverage
+// (TestWizard_DefaultsClampedToShrunkMachine, TestWizard_ChooseAnAmountTooSmallMachine)
+// pins two machine shapes. The property #2221 actually asks for is universal: on
+// ANY machine, whatever the wizard applies must be something that machine can
+// still give one run. A future rung ladder (the epic's XS 4 · S 16 · M 32 · L 64 ·
+// XL 128 GiB decision of record) is exactly the kind of change that satisfies both
+// examples and breaks the property — offer a fixed rung, and on a small VM it is
+// unhonourable by construction.
+//
+// The k3d row is #2221's own measurement: a Docker Desktop VM of 6 CPU / 11.67 GiB
+// which two uncapped node containers each report in full. Bounding on the node is
+// honest for ONE run precisely because a node's allocatable can never exceed the
+// VM's — the double-count only misleads about CONCURRENCY, which is backend#2419's
+// admission gate rather than this prompt's business.
+func TestWizard_NeverOffersMoreThanTheMachineCanHonour(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		nodeCPU, nodeMem string
+	}{
+		{"k3d on a Docker Desktop VM (#2221's measurement)", "6", "11934Mi"},
+		{"a small laptop VM", "4", "8Gi"},
+		{"an 8-core workstation", "8", "32Gi"},
+		{"a large host", "64", "256Gi"},
+		{"an awkward, non-power-of-two VM", "3", "6600Mi"},
+		{"barely above the floor", "2", "6Gi"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// "Use as much as possible" — the pre-selected answer, so this is the
+			// path most runs take.
+			// THE FULL OPTION STRING, not a prefix. My first version answered
+			// "Use as much as possible", which matches NO option — the fake then
+			// returned the default, the wizard left the budget alone, and the
+			// assertion below matched the CURRENT value instead of an offered one.
+			// The test passed on every machine and survived a mutation that made
+			// the wizard offer a fixed 8-core / 32-GiB rung: exactly the case it
+			// exists to catch. A test that never reaches the code under test
+			// cannot fail for it.
+			pr := &fakePrompter{
+				answers: map[string]string{
+					"How much may one training run use?": "Use as much as possible (recommended if this machine is just for tracebloc)",
+				},
+				confirm: boolPtr(true),
+			}
+			// A current budget that every shape here could also honour — which is
+			// exactly why it is NOT the no-op backstop. My first version claimed it
+			// was: "if the wizard left it alone the floor check would fail". It
+			// would not. 1 core / 3 GiB sits at and above the 1-core / 2-GiB floor,
+			// so a silent no-op passed every assertion (Cursor Bugbot Medium).
+			//
+			// The real backstop is the equality check below: "use as much as
+			// possible" must apply EXACTLY the machine's maximum, so a no-op (which
+			// applies the current budget) and an over-offer both fail. That is the
+			// contract of the option being answered, and it cannot be satisfied by
+			// leaving things alone.
+			cs := csWith(tc.nodeCPU, tc.nodeMem,
+				map[string]string{"RESOURCE_LIMITS": "cpu=1,memory=3Gi"})
+			var buf bytes.Buffer
+			err := applyResourcesSet(context.Background(),
+				ui.New(&buf, ui.WithColor(false)), pr,
+				setTarget(cs), cluster.KubeconfigOptions{}, setReq{dryRun: true})
+
+			node := resources.Machine{
+				CPU: mustQty(t, tc.nodeCPU),
+				Mem: mustQty(t, tc.nodeMem),
+			}
+			maxCores := resources.MaxRunCores(node)
+			maxGiB := resources.MaxRunGiB(node)
+
+			// A machine that cannot seat the floor must FAIL HONESTLY rather than
+			// offer something unhonourable — the Bugbot #241 rule, restated as
+			// part of the same invariant.
+			if maxCores < 1 || maxGiB < 2 {
+				if err == nil {
+					t.Fatalf("machine cannot seat the floor (maxCores=%d maxGiB=%d) "+
+						"but the wizard applied something:\n%s", maxCores, maxGiB, buf.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("wizard failed on a machine that can seat a run "+
+					"(maxCores=%d maxGiB=%d): %v\n%s", maxCores, maxGiB, err, buf.String())
+			}
+
+			gotCores, gotGiB := appliedCPUAndGiB(t, buf.String())
+			if gotCores > maxCores {
+				t.Errorf("offered %d cores, machine can give one run at most %d",
+					gotCores, maxCores)
+			}
+			if gotGiB > maxGiB {
+				t.Errorf("offered %d GiB, machine can give one run at most %d",
+					gotGiB, maxGiB)
+			}
+			// And it must not have collapsed below the per-run floor either: an
+			// offer of nothing is not "bounded", it is broken.
+			if gotCores < 1 || gotGiB < 2 {
+				t.Errorf("offered %d cores / %d GiB, below the 1-core / 2-GiB floor",
+					gotCores, gotGiB)
+			}
+			// THE NO-OP BACKSTOP, and the reason the bound above is not enough on
+			// its own: "use as much as possible" has an exact contract, so anything
+			// that quietly declines to offer — a prompt string that matches no
+			// option, a future rung ladder, a silent early return — lands on the
+			// current budget instead of the maximum and fails here. A bound alone
+			// is satisfied by offering nothing.
+			if gotCores != maxCores || gotGiB != maxGiB {
+				t.Errorf("max-out applied %d cores / %d GiB, want exactly the "+
+					"machine's %d / %d — a no-op or a fixed rung would look like this",
+					gotCores, gotGiB, maxCores, maxGiB)
+			}
+		})
+	}
+}
+
+func mustQty(t *testing.T, s string) resource.Quantity {
+	t.Helper()
+	q, err := resource.ParseQuantity(s)
+	if err != nil {
+		t.Fatalf("ParseQuantity(%q): %v", s, err)
+	}
+	return q
+}
+
+// appliedCPUAndGiB reads the cpu=N,memory=MGi the dry run says it would apply.
+// Parsed from the output rather than returned by applyResourcesSet, because that
+// output is what a user acts on — a bound the code respects internally and
+// misreports is still a bound that misleads.
+func appliedCPUAndGiB(t *testing.T, out string) (cores, gib int) {
+	t.Helper()
+	m := regexp.MustCompile(`cpu=(\d+),memory=(\d+)Gi`).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("no cpu=N,memory=MGi in the output:\n%s", out)
+	}
+	c, _ := strconv.Atoi(m[1])
+	g, _ := strconv.Atoi(m[2])
+	return c, g
 }

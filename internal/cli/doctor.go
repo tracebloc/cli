@@ -112,11 +112,20 @@ func runClusterDoctor(
 	//    an error (5xx/403/decode) is a tracebloc-side problem, distinct from a
 	//    network failure to reach it at all. Conflating the two would blame the
 	//    user's network (and hand them a proxy remedy) for tracebloc's own error.
-	// sessionEnv, not cfg.CurrentEnv: the session probe must target the same host
-	// authedClient would, or `doctor` reports on a backend no other command talks
-	// to. Reading CurrentEnv directly drops sessionEnv's $CLIENT_ENV fallback and
-	// its normalisation — a second resolution of the same question.
-	apiClient := newAPIClient(sessionEnv(cfg))
+	// knownSessionEnv, not cfg.CurrentEnv: the session probe must target the same
+	// host authedClient would, or `doctor` reports on a backend no other command
+	// talks to. Reading CurrentEnv directly drops the $CLIENT_ENV fallback and the
+	// normalisation — a second resolution of the same question. It also FAILS CLOSED
+	// on an unrecognised env: probing prod with this token when the user believes
+	// another backend is the backend#2171 leak, so surface the misconfiguration with
+	// a one-command fix instead of dialling prod.
+	env, envErr := knownSessionEnv(cfg)
+	if envErr != nil {
+		p.Newline()
+		p.Errorf("%v", envErr)
+		return &exitError{code: exitChecksFailed, err: nil}
+	}
+	apiClient := newAPIClient(env)
 	apiClient.Token = cfg.Current().Token
 	if _, werr := apiClient.WhoAmI(ctx); werr != nil {
 		var ae *api.APIError

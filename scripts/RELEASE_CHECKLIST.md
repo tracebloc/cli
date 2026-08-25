@@ -64,6 +64,29 @@ The workflow takes 5-10 minutes. Monitor at
 - [ ] install.sh + install.ps1 present
 - [ ] Each binary has a `.cert` + `.sig` pair
 
+**If there is no GitHub Release at all** — the tag exists and nothing is
+attached — one build leg failed, and `publish` is gated on all eight, by
+design (a release missing `darwin/arm64` is worse than no release). That is
+the backend#2379 shape: on 2026-08-23 a sigstore TUF CDN reset failed the
+darwin/arm64 leg and `v0.10.10-rc.2` sat as a tag with zero assets for
+6h04m. Recover with:
+
+```bash
+gh run rerun <run-id> --repo tracebloc/cli --failed
+```
+
+Re-run the failed jobs, or dispatch the workflow **at the tag ref**. Never
+dispatch from a branch: cosign embeds the run's ref in the keyless identity
+and the installers trust only `@refs/tags/v.*`, so a branch-dispatched
+"rebuild of a tag" publishes signatures every customer install rejects
+(release.yml's own comment; Bugbot on promotion #428).
+
+Transient sigstore failures are now retried in-place by
+`scripts/cosign-retry.sh` (bounded, transient-only), so this recovery should
+be rare. If a leg still fails, read its log before re-running: the wrapper
+does **not** retry a genuine signing refusal, and re-running one of those
+just fails again.
+
 ### 4. Sanity-test each install path on a clean host
 
 ```bash
