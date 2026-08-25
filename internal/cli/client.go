@@ -170,6 +170,30 @@ func sessionEnv(cfg *config.Config) string {
 	return api.ResolveEnv("")
 }
 
+// knownSessionEnv resolves the session env like sessionEnv and then REJECTS an
+// unrecognised value, instead of letting api.BaseURL fall it back to prod. Every
+// path that attaches the stored TOKEN — authedClient, logout's server-side revoke,
+// `cluster doctor`'s session probe — resolves through here, so a typo'd, renamed,
+// or stale current_env fails CLOSED with a message naming the bad env rather than
+// silently sending the token to https://api.tracebloc.io while the user believes
+// they are on another backend (backend#2171).
+//
+// This is the authenticated-path counterpart to login's api.IsKnownEnv gate
+// (auth.go): login validates the env a human PICKS; this validates the env a
+// stored session RESOLVES to. sessionEnv itself stays a pure normaliser — its
+// telemetry/display callers deliberately keep BaseURL's lenient unknown→prod
+// labelling until the cross-component decision on backend#2171 lands — so the gate
+// lives here, at the token boundary, not in the shared resolver.
+func knownSessionEnv(cfg *config.Config) (string, error) {
+	env := sessionEnv(cfg)
+	if !api.IsKnownEnv(env) {
+		return "", fmt.Errorf(
+			"your saved session targets an unrecognised backend %q (not one of dev, stg, "+
+				"or prod) — run `tracebloc login` to sign in again", env)
+	}
+	return env, nil
+}
+
 // authedClient loads the signed-in config and returns a token-bearing API
 // client, or an error telling the user to log in.
 func authedClient() (*api.Client, *config.Config, error) {
@@ -180,7 +204,13 @@ func authedClient() (*api.Client, *config.Config, error) {
 	if !cfg.SignedIn() {
 		return nil, nil, errors.New("not signed in — run `tracebloc login` first")
 	}
-	client := newAPIClient(sessionEnv(cfg))
+	// Fail closed on an unrecognised env: never build a client (whose BaseURL would
+	// default to prod) and attach the token to it (backend#2171).
+	env, err := knownSessionEnv(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	client := newAPIClient(env)
 	client.Token = cfg.Current().Token
 	return client, cfg, nil
 }
