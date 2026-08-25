@@ -77,6 +77,23 @@ run_under_test() {
   CALLS=$(wc -l < "$COUNTER" | tr -d ' ')
 }
 
+# run_under_test_equals — identical, but the --output-* paths are passed in the
+# equals form (--output-certificate=<path>) rather than space-separated. The
+# fake cosign writes to $CERT/$SIG regardless of how the flags are spelled, so
+# this exercises ONLY the script's argument parser (outputs_from_args).
+run_under_test_equals() {
+  OUT="$SBX/out"
+  PATH="$BIN:$PATH" \
+  COSIGN_RETRY_ATTEMPTS="${ATTEMPTS:-3}" \
+  COSIGN_RETRY_DELAYS="${DELAYS:-0 0}" \
+  COSIGN_RETRY_TIMEOUT="${TMO:-120}" \
+    bash "$UNDER_TEST" sign-blob \
+      --output-certificate="$CERT" --output-signature="$SIG" "$SBX/blob" \
+      > "$OUT" 2>&1
+  RC=$?
+  CALLS=$(wc -l < "$COUNTER" | tr -d ' ')
+}
+
 check() { # check <name> <expected_rc> <expected_calls> [needle]
   local name="$1" want_rc="$2" want_calls="$3" needle="${4:-}"
   local why=''
@@ -182,6 +199,42 @@ check "the shipped defaults retry the incident and succeed (3 attempts, 5s first
 grep -qF 'retrying in 5s' "$OUT" \
   && ok "the shipped default backoff is 5s on the first retry" \
   || bad "the shipped default backoff is 5s on the first retry"
+
+echo "== OUTPUT-PATH BOOKKEEPING: no stale leftover, no mis-parsed flag (cli#568)"
+
+# 15. FAIL CLOSED against a STALE leftover — the fail-open the harness must
+#     pin hardest. Attempt 1 writes a real .cert and .sig, then dies on a
+#     transient (a Rekor timeout after the artifacts were already on disk).
+#     Attempt 2 exits 0 and writes NOTHING. Reporting "signed" here would sign
+#     off on attempt-1 debris; the pre-attempt wipe means [ -s ] sees attempt
+#     2's empty output and fails closed. Before the fix this case exits 0.
+make_sandbox "if [ \"\$ATTEMPT\" = 1 ]; then printf 'CERTDATA\n' > \"\$CERT\"; printf 'SIGDATA\n' > \"\$SIG\"; printf '%s\n' '$TRANSIENT_REKOR_TIMEOUT' >&2; exit 1; fi; printf 'signed\n'; exit 0"
+ATTEMPTS=3 DELAYS='0 0' run_under_test
+check "a stale .cert/.sig from a failed attempt is NOT read as a later empty exit 0's signature" 3 2 "produced no signature artifact"
+
+# 16. Equals-form flags parse correctly: a genuine sign using --output-x=path
+#     must succeed. Before the fix the token after each equals-form flag (the
+#     next --output flag, then the blob) is mis-emitted as a phantom output
+#     path, so this good sign fails closed with exit 3 on paths cosign was
+#     never asked to write.
+make_sandbox "$sign_ok"
+ATTEMPTS=3 DELAYS='0 0' run_under_test_equals
+check "equals-form --output flags are parsed, not swallowed (a good sign is not failed closed)" 0 1 "signed on attempt 1/3"
+
+# 17. Equals-form paths are still genuinely tracked: fail-closed must still
+#     trigger when an equals-form invocation exits 0 having written nothing.
+#     Guards against a fix that parses equals-form flags by dropping them.
+make_sandbox 'printf "signed\n"; exit 0'
+ATTEMPTS=3 DELAYS='0 0' run_under_test_equals
+check "equals-form --output flags still fail closed when the attempt writes nothing" 3 1 "produced no signature artifact"
+
+# 18. The wipe must not sabotage the happy path: attempt 1 writes JUNK outputs
+#     then dies transient, attempt 2 re-signs cleanly. The pre-attempt wipe has
+#     to clear attempt-1 debris BEFORE attempt 2 (not after it), so a genuine
+#     re-sign still succeeds. Pins the wipe's ordering, complementing case 15.
+make_sandbox "if [ \"\$ATTEMPT\" = 1 ]; then printf 'JUNK\n' > \"\$CERT\"; printf 'JUNK\n' > \"\$SIG\"; printf '%s\n' '$TRANSIENT_TUF_RESET' >&2; exit 1; fi; $sign_ok"
+ATTEMPTS=3 DELAYS='0 0' run_under_test
+check "attempt-1 junk is cleared and a clean re-sign on attempt 2 still succeeds" 0 2 "signed on attempt 2/3"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
