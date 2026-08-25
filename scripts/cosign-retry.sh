@@ -43,7 +43,9 @@
 #      Every --output-* file named on the command line must exist and be
 #      non-empty afterwards, or this script fails — and does NOT retry, because
 #      a zero exit with no artifact is not a network symptom. "Cannot tell" is a
-#      finding, never a pass.
+#      finding, never a pass. Those files are removed BEFORE each attempt, so
+#      the check reads only what the current attempt wrote — a leftover from an
+#      earlier failed attempt can never stand in as a signature (cli#568).
 #
 #  Usage (arguments are passed to cosign verbatim):
 #    scripts/cosign-retry.sh sign-blob \
@@ -125,8 +127,14 @@ is_transient() {
 outputs_from_args() {
   local prev='' a
   for a in "$@"; do
+    # Space form: the token AFTER an --output-* flag is its path.
     case "$prev" in --output-*) printf '%s\n' "$a" ;; esac
-    case "$a" in --output-*=*) printf '%s\n' "${a#*=}" ;; esac
+    # Equals form: --output-<x>=<path> carries its own path. Clear prev so the
+    # NEXT token is not mis-read as this flag's space-form argument — otherwise
+    # --output-<x>=<path> still matches --output-* and swallows the arg after it.
+    case "$a" in
+      --output-*=*) printf '%s\n' "${a#*=}"; prev=''; continue ;;
+    esac
     prev="$a"
   done
 }
@@ -163,12 +171,25 @@ trap cleanup EXIT
 attempt=1
 while : ; do
   printf 'cosign-retry: attempt %d/%d: %s %s\n' "$attempt" "$ATTEMPTS" "$COSIGN_BIN" "$*"
+
+  # Clear every --output-* file BEFORE the attempt runs. Without this a
+  # non-empty .cert/.sig left by an EARLIER failed attempt survives, and the
+  # fail-closed check below — which only tests [ -s ] — reads that stale
+  # artifact as proof that a later `exit 0` (which wrote nothing) signed. That
+  # is the harness reporting a signature that does not exist: the one property
+  # it exists to prevent. Wiping the slate makes [ -s ] a claim about THIS
+  # attempt alone (backend#2379, cli#568).
+  while IFS= read -r out; do
+    [ -n "$out" ] && rm -f "$out"
+  done < <(outputs_from_args "$@")
+
   run_cosign "$LOG" "$@"
   rc=$?
   cat "$LOG"
 
   if [ "$rc" -eq 0 ]; then
-    # Fail closed: a zero exit is a claim, the artifact is the evidence.
+    # Fail closed: a zero exit is a claim, the artifact is the evidence — and
+    # after the pre-attempt wipe above, the evidence is THIS attempt's alone.
     missing=''
     while IFS= read -r out; do
       [ -n "$out" ] || continue
