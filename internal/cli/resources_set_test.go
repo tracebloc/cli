@@ -1110,9 +1110,17 @@ func TestWizard_NeverOffersMoreThanTheMachineCanHonour(t *testing.T) {
 				},
 				confirm: boolPtr(true),
 			}
-			// A deliberately distinctive current budget: if the wizard were to
-			// leave it alone, the assertions below would read 1/3 and the floor
-			// check would fail — so a silent no-op cannot masquerade as a pass.
+			// A current budget that every shape here could also honour — which is
+			// exactly why it is NOT the no-op backstop. My first version claimed it
+			// was: "if the wizard left it alone the floor check would fail". It
+			// would not. 1 core / 3 GiB sits at and above the 1-core / 2-GiB floor,
+			// so a silent no-op passed every assertion (Cursor Bugbot Medium).
+			//
+			// The real backstop is the equality check below: "use as much as
+			// possible" must apply EXACTLY the machine's maximum, so a no-op (which
+			// applies the current budget) and an over-offer both fail. That is the
+			// contract of the option being answered, and it cannot be satisfied by
+			// leaving things alone.
 			cs := csWith(tc.nodeCPU, tc.nodeMem,
 				map[string]string{"RESOURCE_LIMITS": "cpu=1,memory=3Gi"})
 			var buf bytes.Buffer
@@ -1156,6 +1164,17 @@ func TestWizard_NeverOffersMoreThanTheMachineCanHonour(t *testing.T) {
 			if gotCores < 1 || gotGiB < 2 {
 				t.Errorf("offered %d cores / %d GiB, below the 1-core / 2-GiB floor",
 					gotCores, gotGiB)
+			}
+			// THE NO-OP BACKSTOP, and the reason the bound above is not enough on
+			// its own: "use as much as possible" has an exact contract, so anything
+			// that quietly declines to offer — a prompt string that matches no
+			// option, a future rung ladder, a silent early return — lands on the
+			// current budget instead of the maximum and fails here. A bound alone
+			// is satisfied by offering nothing.
+			if gotCores != maxCores || gotGiB != maxGiB {
+				t.Errorf("max-out applied %d cores / %d GiB, want exactly the "+
+					"machine's %d / %d — a no-op or a fixed rung would look like this",
+					gotCores, gotGiB, maxCores, maxGiB)
 			}
 		})
 	}
