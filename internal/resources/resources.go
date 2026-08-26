@@ -26,12 +26,27 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// DefaultTraining is the chart's default spawned-job size when the operator set
-// no override — mirrors tracebloc/client's jobs-manager-deployment.yaml default
-// ("cpu=2,memory=8Gi") and client-runtime's own fallback. Kept here so a `show`
-// against an older chart that omits the literal env still reports the real
-// effective ceiling rather than "unknown".
-const DefaultTraining = "cpu=2,memory=8Gi"
+// DefaultTraining is the fallback per-run size `show` reports when a release
+// carries no RESOURCE_* env — the contract FLOOR, derived from the embedded
+// envelope_contract.json rather than hand-typed, so it cannot drift from
+// client-runtime's own DEFAULT_JOB_RESOURCES fallback (both are the floor now,
+// backend#2254).
+//
+// It was the hard-coded "cpu=2,memory=8Gi", which EXCEEDED a default Docker
+// Desktop VM (8 GiB out of ~7.7 GiB allocatable, unschedulable once the 1c/3Gi
+// overhead is reserved) — so reporting it as the effective ceiling was itself
+// misleading. The floor is by construction the largest default that still fits
+// the smallest host we support: `show` now reports a number that can schedule.
+//
+// A function, not a const, for the same reason Overhead() is: the value lives
+// in exactly one place (the contract), and nothing should be able to shadow it
+// with a second literal.
+func DefaultTraining() string {
+	f := mustContract().Floor
+	cpu := resource.NewMilliQuantity(f.CPUMilli, resource.DecimalSI)
+	mem := resource.NewQuantity(f.MemoryBytes, resource.BinarySI)
+	return fmt.Sprintf("cpu=%s,memory=%s", cpu.String(), mem.String())
+}
 
 // Machine is a cluster's schedulable capacity: the sum of Ready nodes'
 // allocatable CPU and memory, plus any GPU capacity keyed by its resource name
@@ -114,9 +129,10 @@ func ParseTraining(env map[string]string) Training {
 	spec := firstNonEmpty(env["RESOURCE_LIMITS"], env["RESOURCE_REQUESTS"])
 	cpu, mem, ok := parseCPUMem(spec)
 	if !ok {
-		// Fall back to the chart default rather than reporting nothing: the
-		// chart injects this exact value when the operator set no override.
-		cpu, mem, ok = parseCPUMem(DefaultTraining)
+		// Fall back to the contract floor rather than reporting nothing: it is
+		// what a spawned job requests when no RESOURCE_* env is present, so it
+		// is the effective ceiling to show (client-runtime DEFAULT_JOB_RESOURCES).
+		cpu, mem, ok = parseCPUMem(DefaultTraining())
 	}
 	t := Training{
 		CPU:        cpu,
