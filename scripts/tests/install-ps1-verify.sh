@@ -91,6 +91,23 @@ else
   bad 'no assigned TLS 1.2 floor found in the installer'
 fi
 
+# ── 5b. the cosign bootstrap is size- and time-bounded (backend#2199) ───────
+# cosign is fetched before anything authenticates it — the supply-chain trust
+# root — so a raw, unbounded Invoke-WebRequest there lets a MITM or a broken
+# mirror hang the install or exhaust disk on a never-ending body. Both bootstrap
+# fetches must go through the bounded helper with an explicit byte cap.
+if grep -Eq 'Invoke-WebRequest .*\$base/\$asset' "$INSTALLER"; then
+  bad 'the cosign binary is still fetched with a raw, unbounded Invoke-WebRequest'
+else
+  ok 'the cosign binary is not fetched with a raw Invoke-WebRequest'
+fi
+if grep -Eq 'Save-BoundedFile.*\$asset.*-MaxBytes' "$INSTALLER" \
+   && grep -Eq 'Save-BoundedFile.*cosign_checksums\.txt.*-MaxBytes' "$INSTALLER"; then
+  ok 'both cosign bootstrap fetches are size-capped via the bounded helper'
+else
+  bad 'a cosign bootstrap fetch is missing its size cap'
+fi
+
 # ── 6. behavioural tier ─────────────────────────────────────────────────────
 # pwsh is preinstalled on GitHub-hosted ubuntu runners. If it is missing we
 # cannot tell whether the helpers behave, and "cannot tell" is a finding, not a
