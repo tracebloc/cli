@@ -143,8 +143,15 @@ function Save-BoundedFile {
         }
         $in  = $resp.GetResponseStream()
         $out = [System.IO.File]::Create($OutFile)
-        try     { Copy-StreamBounded -Source $in -Dest $out -MaxBytes $MaxBytes }
-        finally { $out.Dispose(); $in.Dispose() }
+        $ok  = $false
+        try     { Copy-StreamBounded -Source $in -Dest $out -MaxBytes $MaxBytes; $ok = $true }
+        finally {
+            $out.Dispose(); $in.Dispose()
+            # On the throw path (cap tripped / read error) drop the partial file so a
+            # rejected fetch doesn't leave up to MaxBytes of litter behind; handles are
+            # disposed first so the delete succeeds on Windows.
+            if (-not $ok) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
+        }
     } finally {
         $resp.Dispose()
     }
@@ -181,12 +188,14 @@ function Resolve-Cosign([string]$TmpDir) {
     $bin   = Join-Path $TmpDir 'cosign.exe'
     $sums  = Join-Path $TmpDir 'cosign_checksums.txt'
 
-    Write-Host "  cosign not found — downloading pinned cosign $CosignVersion (~17 MB) to verify the signature..."
+    Write-Host "  cosign not found — downloading pinned cosign $CosignVersion (~180 MB) to verify the signature..."
     try {
-        # Bounded (backend#2199). cosign-windows-amd64.exe is ~17 MB at the pinned
-        # version; 100 MB leaves headroom for a future build while still refusing a
-        # runaway. cosign_checksums.txt is a few KB, so it gets a tight 1 MB / 60 s.
-        Save-BoundedFile -Uri "$base/$asset"                -OutFile $bin  -MaxBytes 100MB
+        # Bounded (backend#2199). cosign-windows-amd64.exe is ~178 MB at the pinned
+        # v2.4.1 (186,998,456 B) — the Windows build is far larger than the other
+        # platforms' ~105 MB. 300 MB leaves headroom for growth while still refusing a
+        # runaway; REVISIT this cap whenever $CosignVersion is bumped to a larger build.
+        # cosign_checksums.txt is a few KB, so it gets a tight 1 MB / 60 s.
+        Save-BoundedFile -Uri "$base/$asset"                -OutFile $bin  -MaxBytes 300MB
         Save-BoundedFile -Uri "$base/cosign_checksums.txt"  -OutFile $sums -MaxBytes 1MB -TimeoutSec 60
     } catch {
         Write-Host "  ⚠ couldn't download cosign: $($_.Exception.Message)"

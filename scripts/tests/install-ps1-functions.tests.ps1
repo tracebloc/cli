@@ -153,6 +153,18 @@ try {
     try { Copy-StreamBounded -Source $over -Dest $sink2 -MaxBytes 1024 } catch { $capped = $true }
     is 'Copy-StreamBounded throws when the body exceeds the cap' $capped $true
 
+    # Multi-chunk ceiling (LukasWodka review on #582): the body must exceed the 64 KB read
+    # buffer so the cap trips on $total ACCUMULATING across reads, not on the first chunk --
+    # the exact path the design names as the authority for a server that omits Content-Length.
+    # The length assertion is what bites: it mutation-proofs `if ($n -gt $MaxBytes)` (which
+    # passes a single-read test) by pinning that the ceiling bounded the OUTPUT, not just threw.
+    $overBig = [System.IO.MemoryStream]::new([byte[]]::new(200 * 1024))   # ~4 read buffers
+    $sink3   = [System.IO.MemoryStream]::new()
+    $cappedMid = $false
+    try { Copy-StreamBounded -Source $overBig -Dest $sink3 -MaxBytes (128 * 1024) } catch { $cappedMid = $true }
+    is 'Copy-StreamBounded throws when the body exceeds the cap mid-stream' $cappedMid $true
+    is 'Copy-StreamBounded stops at the cap rather than writing the whole body' ($sink3.Length -le (128 * 1024)) $true
+
     # End-to-end through Save-BoundedFile over a file:// URI — the real request path
     # (Content-Length early-reject + the streamed copy), still hermetic, no network.
     $small = Join-Path $tmp 'bounded-small.bin'
