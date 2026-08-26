@@ -436,25 +436,28 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusUnknown, "Ready to run training — can't check yet", ""}
 		return connected, ready
 	}
+	// The arms are ordered by SEVERITY, not by check: every Fail first, then the
+	// one Warn, then the can't-check Unknowns, then OK. A switch stops at the
+	// first match, so a can't-check arm placed above a real finding would SHADOW
+	// it — ready would report StatusUnknown and doctorVerdict would print "No
+	// problems found, but some checks couldn't finish" over a Fail or Warn that
+	// was actually detected (Bugbot on #561/#566: "Warn rollup shadowed by
+	// Unknown", backend#2438). StatusUnknown carries no signal, so it must be the
+	// last thing consulted — it may only win when nothing above it fired.
 	switch {
+	// ── Fail: a real, training-blocking problem (worst wins) ──
 	case by["Pod health"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — part of your secure environment isn't running.",
 			fmt.Sprintf("Reinstall with `%s`, or email support@tracebloc.io with `%s doctor --diagnose`.", installer.Cmd, launcher())}
-	case by["Pod health"].Status == doctor.StatusWarn && strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
-		// checkPods returns StatusWarn for TWO different situations: pods stuck
-		// Pending (below) AND a failure to list pods at all (e.g. RBAC, doctor.go
-		// checkPods). For the latter we simply can't tell whether training can run,
-		// so report an honest can't-check — never the stuck-pending/compute remedy,
-		// which would misdiagnose a permissions problem (Bugbot).
-		ready = healthLine{doctor.StatusUnknown,
-			"Ready to run training — couldn't check your workloads (run with --verbose)", ""}
-	case by["Pod health"].Status == doctor.StatusWarn:
+	case by["Pod health"].Status == doctor.StatusWarn && !strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
 		// Pods stuck Pending past the grace window (unschedulable / image can't
 		// pull) mean training can't actually schedule — so this is NOT ready, even
 		// though the granular Pod-health check rates it a softer ⚠. Without this,
 		// a stuck-pending environment rolled up to ✔ "Ready to run training" and
-		// the "Everything looks good" verdict (Bugbot).
+		// the "Everything looks good" verdict (Bugbot). The negated guard excludes
+		// the "could not list pods" can't-check, which is handled in the Unknown
+		// tier below now that this arm no longer relies on sitting after it.
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — part of your secure environment can't start yet.",
 			fmt.Sprintf("Some pods are stuck starting — usually not enough free compute, or a training image that can't be pulled. %s Then re-run `%s doctor`; if it persists, email support@tracebloc.io with `%s doctor --diagnose`.", computeRemedy(runtime.GOOS), launcher(), launcher())}
@@ -466,22 +469,11 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — dataset storage isn't available.",
 			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
-	case by["Node capacity"].Status == doctor.StatusWarn &&
-		(strings.HasPrefix(by["Node capacity"].Detail, "couldn't read RESOURCE_REQUESTS") ||
-			strings.HasPrefix(by["Node capacity"].Detail, "could not list nodes")):
-		// checkNodeFit's Warn covers two different situations: a can't-check
-		// (RESOURCE_REQUESTS unreadable, nodes unlistable) and the soft GPU
-		// fallback below. For a can't-check we simply don't know whether a node
-		// can fit a training job, so report an honest can't-check — mirroring
-		// the Pod-health list-failure case above — never a ✔ that skipped the
-		// capacity probe (Bugbot). The GPU-soft Warn intentionally stays Ready:
-		// training still runs via the jobs-manager's CPU fallback.
-		ready = healthLine{doctor.StatusUnknown,
-			"Ready to run training — couldn't check free compute (run with --verbose)", ""}
 	case by["Node capacity"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — not enough free compute to start a training.",
 			computeRemedy(runtime.GOOS)}
+	// ── Warn: a real problem WAS found; training still runs (exit 0) ──
 	case by["Machine capacity"].Status == doctor.StatusWarn:
 		// backend#2221 (Bugbot on #541). checkMachineChain warns when the
 		// environment claims more memory than the machine actually has -- the
@@ -508,6 +500,28 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusWarn,
 			"Ready to run training — but your environment thinks this machine is bigger than it is.",
 			fmt.Sprintf("It reports more memory than the machine really has, so two trainings that each look like they fit can together run it out of memory and take the environment down. Run one training at a time; to fix it for good, recreate the environment as a single-node one. `%s doctor --verbose` shows the numbers and the exact flags.", launcher())}
+	// ── Unknown: a check couldn't complete — no signal, so it never shadows a
+	// Fail or Warn above and only surfaces when nothing real was found. ──
+	case by["Pod health"].Status == doctor.StatusWarn && strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
+		// checkPods returns StatusWarn for TWO different situations: pods stuck
+		// Pending (the Fail arm above) AND a failure to list pods at all (e.g. RBAC,
+		// doctor.go checkPods). For the latter we simply can't tell whether training
+		// can run, so report an honest can't-check — never the stuck-pending/compute
+		// remedy, which would misdiagnose a permissions problem (Bugbot).
+		ready = healthLine{doctor.StatusUnknown,
+			"Ready to run training — couldn't check your workloads (run with --verbose)", ""}
+	case by["Node capacity"].Status == doctor.StatusWarn &&
+		(strings.HasPrefix(by["Node capacity"].Detail, "couldn't read RESOURCE_REQUESTS") ||
+			strings.HasPrefix(by["Node capacity"].Detail, "could not list nodes")):
+		// checkNodeFit's Warn covers two different situations: a can't-check
+		// (RESOURCE_REQUESTS unreadable, nodes unlistable) and the soft GPU
+		// fallback. For a can't-check we simply don't know whether a node can fit
+		// a training job, so report an honest can't-check — mirroring the Pod-health
+		// list-failure case above — never a ✔ that skipped the capacity probe
+		// (Bugbot). The GPU-soft Warn intentionally stays Ready (falls through to
+		// the OK default): training still runs via the jobs-manager's CPU fallback.
+		ready = healthLine{doctor.StatusUnknown,
+			"Ready to run training — couldn't check free compute (run with --verbose)", ""}
 	default:
 		ready = healthLine{doctor.StatusOK, "Ready to run training", ""}
 	}
