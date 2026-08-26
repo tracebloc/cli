@@ -53,12 +53,12 @@ function Get-Fn([string]$Name) {
     return $hit[0].Extent.Text
 }
 
-foreach ($n in 'Get-Sha256', 'Resolve-Cosign', 'Test-CosignRuns') {
+foreach ($n in 'Get-Sha256', 'Copy-StreamBounded', 'Save-BoundedFile', 'Resolve-Cosign', 'Test-CosignRuns') {
     $src = Get-Fn $n
     if (-not $src) { Write-Host "install-ps1-functions: $script:Pass passed, $script:Fail failed"; exit 1 }
     Invoke-Expression $src
 }
-ok 'Get-Sha256 / Resolve-Cosign / Test-CosignRuns extracted'
+ok 'Get-Sha256 / Copy-StreamBounded / Save-BoundedFile / Resolve-Cosign / Test-CosignRuns extracted'
 
 # ── 1. $AllowUnverified: only the literal '1' opts out ──────────────────────
 # The bypass is the single thing standing between a user and an unverified
@@ -136,6 +136,41 @@ try {
     is 'Test-CosignRuns false for a PowerShell shim that sets no exit code' `
         (Test-CosignRuns $shim) $false
 
+    # ── 2b. the bootstrap fetch is bounded by SIZE, not just time (backend#2199) ─
+    # cosign is the supply-chain trust root, fetched before anything authenticates
+    # it, so an unbounded body must not be able to hang the install or exhaust disk.
+    # Copy-StreamBounded is the hard ceiling: it caps the bytes it actually reads, so
+    # a server that lies about (or omits) Content-Length can't slip a runaway body
+    # through. Driven with MemoryStreams — the cap is what's under test, not the wire.
+    $under = [System.IO.MemoryStream]::new([byte[]]::new(4096))
+    $sink  = [System.IO.MemoryStream]::new()
+    Copy-StreamBounded -Source $under -Dest $sink -MaxBytes 1MB
+    is 'Copy-StreamBounded passes a body under the cap through intact' $sink.Length 4096L
+
+    $over  = [System.IO.MemoryStream]::new([byte[]]::new(2048))
+    $sink2 = [System.IO.MemoryStream]::new()
+    $capped = $false
+    try { Copy-StreamBounded -Source $over -Dest $sink2 -MaxBytes 1024 } catch { $capped = $true }
+    is 'Copy-StreamBounded throws when the body exceeds the cap' $capped $true
+
+    # End-to-end through Save-BoundedFile over a file:// URI — the real request path
+    # (Content-Length early-reject + the streamed copy), still hermetic, no network.
+    $small = Join-Path $tmp 'bounded-small.bin'
+    [System.IO.File]::WriteAllBytes($small, [byte[]]::new(2048))
+    $big   = Join-Path $tmp 'bounded-big.bin'
+    [System.IO.File]::WriteAllBytes($big, [byte[]]::new(3 * 1024 * 1024))
+
+    Save-BoundedFile -Uri ([System.Uri]::new($small).AbsoluteUri) `
+        -OutFile (Join-Path $tmp 'bounded-out') -MaxBytes 1MB -TimeoutSec 10
+    is 'Save-BoundedFile writes a file under the cap' (Get-Item (Join-Path $tmp 'bounded-out')).Length 2048L
+
+    $rejected = $false
+    try {
+        Save-BoundedFile -Uri ([System.Uri]::new($big).AbsoluteUri) `
+            -OutFile (Join-Path $tmp 'bounded-out-big') -MaxBytes 1MB -TimeoutSec 10
+    } catch { $rejected = $true }
+    is 'Save-BoundedFile refuses a file over the cap' $rejected $true
+
     # ── 3. Resolve-Cosign returns the one on PATH without a download ─────────
     $onpath = Join-Path $tmp 'pathbin'
     New-Item -ItemType Directory -Path $onpath -Force | Out-Null
@@ -158,12 +193,12 @@ try {
     # more than no verifier, so Resolve-Cosign must return $null — NOT a usable
     # path — and let the caller's fail-closed logic run.
     #
-    # Shadowing the cmdlet: a function defined here wins over Invoke-WebRequest
-    # for the duration, so the extracted Resolve-Cosign hits this instead of
-    # the network. $CosignVersion is what the real file pins.
+    # Shadowing the helper: a function defined here wins over the extracted
+    # Save-BoundedFile for the duration, so the extracted Resolve-Cosign hits this
+    # instead of the network. $CosignVersion is what the real file pins.
     $CosignVersion = 'v0.0.0-test'
-    function Invoke-WebRequest {
-        param($Uri, $OutFile)
+    function Save-BoundedFile {
+        param($Uri, $OutFile, $MaxBytes, $TimeoutSec)
         if ($Uri -match 'checksums') {
             # A well-formed checksums file naming the right asset — with the
             # WRONG digest. Nothing about the transfer failed; the bytes are
@@ -185,8 +220,8 @@ try {
     $good = Join-Path $tmp 'good'
     New-Item -ItemType Directory -Path $good -Force | Out-Null
     $payload = 'pretend-cosign-bytes'
-    function Invoke-WebRequest {
-        param($Uri, $OutFile)
+    function Save-BoundedFile {
+        param($Uri, $OutFile, $MaxBytes, $TimeoutSec)
         if ($Uri -match 'checksums') {
             $probe = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid())
             Set-Content -LiteralPath $probe -Value 'pretend-cosign-bytes' -NoNewline
