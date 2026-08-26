@@ -41,6 +41,19 @@ import (
 // A function, not a const, for the same reason Overhead() is: the value lives
 // in exactly one place (the contract), and nothing should be able to shadow it
 // with a second literal.
+//
+// SIZED FOR ONE RANK, and nothing divides it (backend#2543). Recorded here
+// because this is where the number lives and the constraint is invisible from
+// the value. Under replication (TRACEBLOC_DDP, backend#2224) N ranks run as N
+// processes inside ONE pod sharing this envelope, and its two halves are treated
+// differently: the CPU quota IS divided across ranks (tracebloc-engine#732 sizes
+// the thread pools from quota/world_size), memory is NOT divided by anything.
+//
+// So the floor is correct for world_size == 1 and quietly wrong above it -- and
+// not by a uniform factor, which is why no single scaling of "the envelope" fixes
+// it. This is a STATEMENT, not a fix: per-job vs per-rank is backend#2543's open
+// question and belongs with whoever owns sizing. Replication is default-off, so
+// nothing is wrong today.
 func DefaultTraining() string {
 	f := mustContract().Floor
 	cpu := resource.NewMilliQuantity(f.CPUMilli, resource.DecimalSI)
