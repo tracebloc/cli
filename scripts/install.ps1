@@ -275,11 +275,21 @@ function Resolve-Tag {
     # Follow the /releases/latest redirect to find the tag, same trick
     # install.sh uses. -MaximumRedirection 0 makes Invoke-WebRequest
     # surface the Location header instead of following.
+    #
+    # This is the one fetch that stays a plain Invoke-WebRequest, not a
+    # Save-BoundedFile: it is a header-only redirect probe (-MaximumRedirection 0
+    # reads the Location header, never a body to disk), so the size ceiling that
+    # backend#2544 added to the artifact fetches has nothing to bound here. The
+    # STALL half still applies, though, so pin -TimeoutSec 60 to match the rest of
+    # the script rather than inherit the ~100 s platform default (LukasWodka, #588).
+    # On timeout the WebException is caught below, $resp is $null, and Resolve-Tag
+    # falls through to a clean Fail — never a hang.
     try {
         $resp = Invoke-WebRequest `
             -Uri "https://github.com/$script:GitHubRepo/releases/latest" `
             -MaximumRedirection 0 `
             -UseBasicParsing `
+            -TimeoutSec 60 `
             -ErrorAction SilentlyContinue
     } catch {
         # PowerShell treats 3xx as an error when MaximumRedirection=0.
