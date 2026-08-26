@@ -22,12 +22,25 @@ package helm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
 )
+
+// ErrInterrupted marks an upgrade that was aborted by the operator (Ctrl-C /
+// SIGINT) or a cancelled context, rather than one helm rejected on its own. It
+// matters because helm may have ALREADY applied the values before it was killed
+// — the change can be live on the cluster — so callers MUST report it as
+// "interrupted; the change may have applied", never as "helm upgrade failed"
+// (backend#2255). Test for it with errors.Is(err, helm.ErrInterrupted).
+var ErrInterrupted = errors.New("helm upgrade interrupted")
+
+// sigintExit is a child's exit code after SIGINT (128 + SIGINT): helm exits this
+// on a terminal Ctrl-C. Mirrors exitInterrupted in the cli package.
+const sigintExit = 130
 
 const (
 	// repoName / repoURL / chartName mirror install-client-helm.sh's
@@ -155,9 +168,35 @@ func Upgrade(ctx context.Context, p UpgradeParams) (Plan, error) {
 
 	args := buildArgs(p, chartRef, reuseFlag, f.Name(), timeout)
 	if out, uerr := Runner(ctx, "helm", args...); uerr != nil {
+		if runInterrupted(ctx, uerr) {
+			// Aborted (Ctrl-C / cancelled ctx) mid-upgrade — NOT a helm failure.
+			// helm may have already written the values before it was killed, so
+			// the change can be live. Hand back the resolved Plan (not Plan{}) so
+			// the caller can show what was in flight, and flag it as an interrupt
+			// (the ErrInterrupted sentinel) so it's reported honestly instead of
+			// "helm upgrade failed" (backend#2255).
+			return plan(chartRef, args, valuesYAML), ErrInterrupted
+		}
 		return Plan{}, fmt.Errorf("helm upgrade failed: %w\n%s", uerr, strings.TrimSpace(out))
 	}
 	return plan(chartRef, args, valuesYAML), nil
+}
+
+// runInterrupted reports whether a helm shell-out ended because the operator
+// aborted it (Ctrl-C) rather than helm failing on its own. ctx.Err() catches a
+// cancel the signal handler already propagated; but on a terminal Ctrl-C the helm
+// child can die and CombinedOutput return BEFORE NotifyContext flips ctx.Err() (a
+// race), so also treat helm's 130 (128+SIGINT) exit as an interrupt. Mirrors the
+// cli package's installerRunInterrupted (Bugbot #394/#397).
+func runInterrupted(ctx context.Context, runErr error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	var ee *exec.ExitError
+	if errors.As(runErr, &ee) {
+		return ee.ExitCode() == sigintExit
+	}
+	return false
 }
 
 // buildArgs assembles the helm upgrade argv. Order mirrors the installer/cronjob:
