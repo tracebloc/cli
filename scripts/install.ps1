@@ -153,7 +153,11 @@ function Save-BoundedFile {
             if (-not $ok) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
         }
     } finally {
-        $resp.Dispose()
+        # WebResponse.Dispose() is an explicit IDisposable impl — NOT callable as
+        # $resp.Dispose() on Windows PowerShell 5.1 (the installer floor), where it
+        # throws "does not contain a method named 'Dispose'"; Close() is public on
+        # both 5.1 and pwsh 7 (Bugbot #582; pwsh-7 tests can't see the 5.1 break).
+        $resp.Close()
     }
 }
 
