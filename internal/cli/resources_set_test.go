@@ -564,6 +564,125 @@ func TestSet_DryRunAppliesNothing(t *testing.T) {
 	}
 }
 
+// failingHelm installs a helm.Runner whose mutating `helm upgrade` returns err —
+// the reuse-flag probe and repo calls still succeed — so the apply path can be
+// driven into its failure / interrupt handling without a real cluster.
+func failingHelm(t *testing.T, err error) {
+	t.Helper()
+	orig := helm.Runner
+	helm.Runner = func(_ context.Context, name string, args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "upgrade" && args[1] == "--help" {
+			return "  --reset-then-reuse-values", nil // reuse-flag probe
+		}
+		if len(args) >= 2 && args[0] == "upgrade" { // the mutating upgrade (release != "--help")
+			return "boom", err
+		}
+		return "", nil // repo list / add / update
+	}
+	t.Cleanup(func() { helm.Runner = orig })
+}
+
+// TestSet_InterruptReportedNotFailed: a Ctrl-C / cancelled context mid-`helm
+// upgrade` must exit 130 with an honest "may have applied" note — NOT exit 1
+// "helm upgrade failed", which reads as "nothing changed" when the change may
+// actually be live (backend#2255).
+func TestSet_InterruptReportedNotFailed(t *testing.T) {
+	failingHelm(t, errors.New("signal: killed"))
+	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the SIGINT handler already propagated the cancel
+
+	var buf bytes.Buffer
+	err := applyResourcesSet(ctx, ui.New(&buf, ui.WithColor(false)), nil,
+		setTarget(cs), cluster.KubeconfigOptions{Path: "/tmp/kc"},
+		setReq{cores: "4", coresSet: true, yes: true})
+
+	if got := exitCode(t, err); got != exitInterrupted {
+		t.Fatalf("an interrupted apply must exit %d, got %d (%v)\n%s", exitInterrupted, got, err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Interrupted") || !strings.Contains(out, "may already have applied") {
+		t.Errorf("interrupt output should say the change may already have applied:\n%s", out)
+	}
+	if strings.Contains(out, "helm upgrade failed") {
+		t.Errorf("must not frame an interrupt as a helm failure:\n%s", out)
+	}
+}
+
+// TestSet_GenuineHelmFailureExitsFailure: a real helm failure (live context, a
+// plain non-130 error) still exits with the failure code and "helm upgrade
+// failed" — the interrupt handling must not swallow real failures (backend#2255).
+func TestSet_GenuineHelmFailureExitsFailure(t *testing.T) {
+	failingHelm(t, errors.New("boom"))
+	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
+
+	var buf bytes.Buffer
+	err := applyResourcesSet(context.Background(), ui.New(&buf, ui.WithColor(false)), nil,
+		setTarget(cs), cluster.KubeconfigOptions{Path: "/tmp/kc"},
+		setReq{cores: "4", coresSet: true, yes: true})
+
+	if got := exitCode(t, err); got != exitFailure {
+		t.Fatalf("a genuine helm failure must exit %d, got %d (%v)", exitFailure, got, err)
+	}
+	if !strings.Contains(err.Error(), "helm upgrade failed") {
+		t.Errorf("a genuine failure should read as a helm failure: %v", err)
+	}
+}
+
+// TestSet_PreUpgradeInterruptIsQuiet: a Ctrl-C during the repo add/update phase —
+// BEFORE the mutating `helm upgrade` — exits quietly (130) like the rest of the
+// CLI, not a scary exit-1 "context canceled". But since nothing was applied yet,
+// it must NOT claim the change may have applied (backend#2255).
+func TestSet_PreUpgradeInterruptIsQuiet(t *testing.T) {
+	orig := helm.Runner
+	helm.Runner = func(_ context.Context, name string, args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "upgrade" && args[1] == "--help" {
+			return "  --reset-then-reuse-values", nil // reuse-flag probe
+		}
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "update" {
+			return "boom", errors.New("signal: killed") // Ctrl-C mid repo update
+		}
+		return "", nil
+	}
+	t.Cleanup(func() { helm.Runner = orig })
+
+	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var buf bytes.Buffer
+	err := applyResourcesSet(ctx, ui.New(&buf, ui.WithColor(false)), nil,
+		setTarget(cs), cluster.KubeconfigOptions{Path: "/tmp/kc"},
+		setReq{cores: "4", coresSet: true, yes: true})
+
+	if got := exitCode(t, err); got != exitInterrupted {
+		t.Fatalf("a pre-upgrade interrupt must exit %d, got %d (%v)\n%s", exitInterrupted, got, err, buf.String())
+	}
+	if strings.Contains(buf.String(), "may already have applied") {
+		t.Errorf("nothing was applied before the upgrade ran — must not claim it may have:\n%s", buf.String())
+	}
+}
+
+// TestSet_ShowsProgressOnRealApply: a real (non-dry-run) apply prints a live wait
+// line, so the run isn't invisible while `helm upgrade --wait` runs and a Ctrl-C
+// mid-flight isn't a mystery (backend#2255, requirement #2).
+func TestSet_ShowsProgressOnRealApply(t *testing.T) {
+	fakeHelm(t) // every call succeeds
+	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
+
+	var buf bytes.Buffer
+	err := applyResourcesSet(context.Background(), ui.New(&buf, ui.WithColor(false)), nil,
+		setTarget(cs), cluster.KubeconfigOptions{Path: "/tmp/kc"},
+		setReq{cores: "4", coresSet: true, yes: true})
+	if err != nil {
+		t.Fatalf("real apply: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Applying the resource change") {
+		t.Errorf("a real apply should surface a progress line:\n%s", buf.String())
+	}
+}
+
 // --- wizard -----------------------------------------------------------------
 
 // TestWizard_PreselectedMax: on a terminal with no flags, accepting the default

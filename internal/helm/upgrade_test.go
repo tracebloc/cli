@@ -2,6 +2,8 @@ package helm
 
 import (
 	"context"
+	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -16,6 +18,9 @@ type fakeRunner struct {
 	help string
 	// fail, when set, makes the matching call return an error.
 	failOn string
+	// failErr overrides the error returned on a failOn match (default errBoom) —
+	// e.g. a real *exec.ExitError so the interrupt classifier can be exercised.
+	failErr error
 }
 
 func (f *fakeRunner) run(_ context.Context, name string, args ...string) (string, error) {
@@ -23,6 +28,9 @@ func (f *fakeRunner) run(_ context.Context, name string, args ...string) (string
 	f.calls = append(f.calls, call)
 	joined := strings.Join(call, " ")
 	if f.failOn != "" && strings.Contains(joined, f.failOn) {
+		if f.failErr != nil {
+			return "boom", f.failErr
+		}
 		return "boom", errBoom
 	}
 	if len(args) >= 2 && args[0] == "upgrade" && args[1] == "--help" {
@@ -188,6 +196,82 @@ func TestUpgrade_HelmFailureSurfaces(t *testing.T) {
 	install(t, f)
 	if _, err := Upgrade(context.Background(), baseParams()); err == nil {
 		t.Fatalf("expected an error when helm upgrade fails")
+	}
+}
+
+// TestUpgrade_GenuineFailureIsNotInterrupt pins the "real failure" half of the
+// backend#2255 contrast: a plain helm failure on a live context (no cancel, a
+// non-130 error) stays a "helm upgrade failed" error and is NEVER misclassified
+// as an interrupt — the interrupt handling must not swallow real failures.
+func TestUpgrade_GenuineFailureIsNotInterrupt(t *testing.T) {
+	f := &fakeRunner{help: "  --reset-then-reuse-values", failOn: "upgrade client-123"}
+	install(t, f)
+	_, err := Upgrade(context.Background(), baseParams())
+	if err == nil {
+		t.Fatal("expected an error when helm upgrade fails")
+	}
+	if errors.Is(err, ErrInterrupted) {
+		t.Errorf("a genuine failure must NOT be classified as an interrupt: %v", err)
+	}
+	if !strings.Contains(err.Error(), "helm upgrade failed") {
+		t.Errorf("a genuine failure should read as a helm failure: %v", err)
+	}
+}
+
+// TestUpgrade_CancelledContextIsInterrupt is the interrupt half of the contrast:
+// a Ctrl-C / cancelled context while the mutating `helm upgrade` is in flight must
+// surface as ErrInterrupted — not "helm upgrade failed" — because helm may have
+// ALREADY applied the values before it was killed. The resolved Plan comes back
+// too (not Plan{}) so the caller can show what was in flight (backend#2255).
+func TestUpgrade_CancelledContextIsInterrupt(t *testing.T) {
+	f := &fakeRunner{help: "  --reset-then-reuse-values", failOn: "upgrade client-123"}
+	install(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the signal handler already propagated the cancel
+
+	plan, err := Upgrade(ctx, baseParams())
+	if !errors.Is(err, ErrInterrupted) {
+		t.Fatalf("a cancelled context must yield ErrInterrupted, got %v", err)
+	}
+	if strings.Contains(err.Error(), "helm upgrade failed") {
+		t.Errorf("an interrupt must not be framed as a helm failure: %v", err)
+	}
+	if _, ok := f.upgradeCall(); !ok {
+		t.Errorf("the upgrade should still have been attempted; calls=%v", f.calls)
+	}
+	// Plan is populated so the caller can surface what was in flight.
+	if !strings.Contains(plan.Command, "upgrade client-123") {
+		t.Errorf("interrupt must return the resolved Plan for progress display, got %+v", plan)
+	}
+}
+
+// TestUpgrade_HelmExit130IsInterrupt covers the race the classifier guards: a
+// terminal Ctrl-C can kill the helm child (exit 130 = 128+SIGINT) and
+// CombinedOutput can return BEFORE NotifyContext flips ctx.Err(). On a LIVE
+// context, only that exit code marks the interrupt.
+func TestUpgrade_HelmExit130IsInterrupt(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available to synthesize an exit-130 ExitError")
+	}
+	// A real *exec.ExitError with code 130 — exactly what helm.Runner surfaces
+	// when the helm child is killed by SIGINT.
+	exit130 := exec.Command("sh", "-c", "exit 130").Run()
+	if exit130 == nil {
+		t.Fatal("expected a non-nil error from exit 130")
+	}
+	f := &fakeRunner{help: "  --reset-then-reuse-values", failOn: "upgrade client-123", failErr: exit130}
+	install(t, f)
+
+	plan, err := Upgrade(context.Background(), baseParams()) // live ctx: only the exit code says interrupt
+	if !errors.Is(err, ErrInterrupted) {
+		t.Fatalf("helm exit 130 on a live context must be an interrupt, got %v", err)
+	}
+	if strings.Contains(err.Error(), "helm upgrade failed") {
+		t.Errorf("an interrupt must not be framed as a helm failure: %v", err)
+	}
+	// Plan comes back populated so the caller can surface what was in flight.
+	if !strings.Contains(plan.Command, "upgrade client-123") {
+		t.Errorf("interrupt must return the resolved Plan, got %+v", plan)
 	}
 }
 

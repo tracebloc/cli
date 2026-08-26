@@ -598,8 +598,42 @@ func persistCeiling(ctx context.Context, p *ui.Printer, target *clusterTarget, o
 		Env:          env,
 		DryRun:       dryRun,
 	}
-	plan, err := helm.Upgrade(ctx, params)
+	// Apply. Under --dry-run helm.Upgrade runs nothing and returns immediately, so
+	// no spinner. A real apply shells out to `helm upgrade --wait`, which can take
+	// several seconds during which nothing prints — show a live wait line so the run
+	// doesn't look frozen and a Ctrl-C mid-flight isn't invisible (backend#2255).
+	var (
+		plan helm.Plan
+		err  error
+	)
+	if dryRun {
+		plan, err = helm.Upgrade(ctx, params)
+	} else {
+		sp := p.Spinner("Applying the resource change…", "Ctrl-C to cancel")
+		plan, err = helm.Upgrade(ctx, params)
+		sp.Stop()
+	}
 	if err != nil {
+		// A Ctrl-C / cancelled context mid-upgrade is NOT a failure: helm may have
+		// already written the values before it was killed, so the change can be
+		// live on the cluster. Report that honestly and exit quietly (130) like
+		// seal/upgrade/prepare-host — never "helm upgrade failed", which reads as
+		// "nothing changed" and sends the user off to re-run blind (backend#2255).
+		if errors.Is(err, helm.ErrInterrupted) {
+			p.Newline()
+			p.Warnf("Interrupted before the change could be confirmed.")
+			p.Hintf("It may already have applied — re-run `%s resources set` to check the current per-run ceiling.", launcher())
+			p.Detailf("in-flight command: %s", plan.Command) // verbose-only
+			return &exitError{code: exitInterrupted}
+		}
+		// A Ctrl-C that landed BEFORE the mutating upgrade (during the reuse-flag
+		// probe or the repo add/update) — nothing was applied, so no "may have
+		// applied" note, but still a quiet 130 like the rest of the CLI rather than
+		// a scary exit-1 "context canceled". Reuses the shared helper, which also
+		// catches the exit-130 race where helm dies before ctx.Err() flips.
+		if installerRunInterrupted(ctx, err) {
+			return &exitError{code: exitInterrupted}
+		}
 		return &exitError{code: exitFailure, err: err}
 	}
 
