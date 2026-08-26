@@ -85,6 +85,82 @@ function Get-Sha256([string]$Path) {
     return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLower()
 }
 
+# Bounded download: cap BOTH the time a fetch may take AND the bytes it may write.
+# Invoke-WebRequest has -TimeoutSec but no portable max-size knob
+# (-MaximumSizeToDownload-style parameters are not in the PS 5.1 floor this
+# installer targets), so we stream the body and count it ourselves. This matters
+# most for the cosign bootstrap below: cosign is the supply-chain trust root,
+# fetched before anything has authenticated it, so a MITM or a broken mirror must
+# not be able to wedge the install on an unbounded, never-ending body
+# (backend#2199). Mirrors install.sh's single shared `dl()` download profile.
+#
+# Split so the security-critical bit — the byte ceiling — is a pure function the
+# sibling install-ps1-functions.tests.ps1 can drive against a MemoryStream with no
+# network, rather than a rule restated in a test that could drift from it.
+function Copy-StreamBounded {
+    param([IO.Stream]$Source, [IO.Stream]$Dest, [long]$MaxBytes)
+    # A server that under-declares or omits Content-Length cannot slip a runaway
+    # body past this: the cap is enforced on bytes actually read, not on what the
+    # server claimed. Abort the moment writing the next chunk would cross it.
+    $buf   = New-Object byte[] 65536
+    $total = 0L
+    while (($n = $Source.Read($buf, 0, $buf.Length)) -gt 0) {
+        $total += $n
+        if ($total -gt $MaxBytes) { throw "download exceeded its $MaxBytes-byte cap" }
+        $Dest.Write($buf, 0, $n)
+    }
+}
+
+# Fetch $Uri to $OutFile under a size ceiling and a timeout, or throw.
+#
+# HttpWebRequest.Timeout bounds connect + response-headers; ReadWriteTimeout bounds
+# each individual read — a STALL, not a wall-clock cap on the whole transfer. That
+# is deliberate and matches install.sh (review #426): a slow-but-alive link must be
+# allowed to finish, while a dead connection still aborts instead of hanging the
+# install. The TLS 1.2 floor assigned above via ServicePointManager is inherited.
+function Save-BoundedFile {
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [Parameter(Mandatory)][string]$OutFile,
+        [Parameter(Mandatory)][long]$MaxBytes,
+        [int]$TimeoutSec = 120
+    )
+    $req = [System.Net.WebRequest]::Create($Uri)
+    $req.Timeout = $TimeoutSec * 1000
+    # HTTP-only knobs; a non-HTTP scheme (e.g. a test file:// URI) skips them.
+    if ($req -is [System.Net.HttpWebRequest]) {
+        $req.ReadWriteTimeout  = $TimeoutSec * 1000
+        $req.AllowAutoRedirect = $true
+        $req.UserAgent         = 'tracebloc-cli-installer'
+    }
+    $resp = $req.GetResponse()
+    try {
+        # Cheap early refusal when the server is honest about an oversized body,
+        # before a single body byte is read. Copy-StreamBounded is the authority
+        # for a server that is not.
+        if ($resp.ContentLength -gt $MaxBytes) {
+            throw "refusing ${Uri}: server-declared size $($resp.ContentLength) B exceeds the $MaxBytes B cap"
+        }
+        $in  = $resp.GetResponseStream()
+        $out = [System.IO.File]::Create($OutFile)
+        $ok  = $false
+        try     { Copy-StreamBounded -Source $in -Dest $out -MaxBytes $MaxBytes; $ok = $true }
+        finally {
+            $out.Dispose(); $in.Dispose()
+            # On the throw path (cap tripped / read error) drop the partial file so a
+            # rejected fetch doesn't leave up to MaxBytes of litter behind; handles are
+            # disposed first so the delete succeeds on Windows.
+            if (-not $ok) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
+        }
+    } finally {
+        # WebResponse.Dispose() is an explicit IDisposable impl — NOT callable as
+        # $resp.Dispose() on Windows PowerShell 5.1 (the installer floor), where it
+        # throws "does not contain a method named 'Dispose'"; Close() is public on
+        # both 5.1 and pwsh 7 (Bugbot #582; pwsh-7 tests can't see the 5.1 break).
+        $resp.Close()
+    }
+}
+
 # Resolve a cosign we can vouch for: one already on PATH, else a pinned build
 # fetched and checked against sigstore's own published checksums. Returns the
 # path, or $null when it cannot be obtained — the caller decides what that means.
@@ -116,10 +192,15 @@ function Resolve-Cosign([string]$TmpDir) {
     $bin   = Join-Path $TmpDir 'cosign.exe'
     $sums  = Join-Path $TmpDir 'cosign_checksums.txt'
 
-    Write-Host "  cosign not found — downloading pinned cosign $CosignVersion (~17 MB) to verify the signature..."
+    Write-Host "  cosign not found — downloading pinned cosign $CosignVersion (~180 MB) to verify the signature..."
     try {
-        Invoke-WebRequest -Uri "$base/$asset"                -OutFile $bin  -UseBasicParsing
-        Invoke-WebRequest -Uri "$base/cosign_checksums.txt"  -OutFile $sums -UseBasicParsing
+        # Bounded (backend#2199). cosign-windows-amd64.exe is ~178 MB at the pinned
+        # v2.4.1 (186,998,456 B) — the Windows build is far larger than the other
+        # platforms' ~105 MB. 300 MB leaves headroom for growth while still refusing a
+        # runaway; REVISIT this cap whenever $CosignVersion is bumped to a larger build.
+        # cosign_checksums.txt is a few KB, so it gets a tight 1 MB / 60 s.
+        Save-BoundedFile -Uri "$base/$asset"                -OutFile $bin  -MaxBytes 300MB
+        Save-BoundedFile -Uri "$base/cosign_checksums.txt"  -OutFile $sums -MaxBytes 1MB -TimeoutSec 60
     } catch {
         Write-Host "  ⚠ couldn't download cosign: $($_.Exception.Message)"
         return $null

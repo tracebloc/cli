@@ -153,7 +153,7 @@ func renderResources(ctx context.Context, p *ui.Printer, target *clusterTarget) 
 		if raw := firstNonEmptyEnv(env, "RESOURCE_LIMITS", "RESOURCE_REQUESTS"); raw != "" {
 			p.Field("resource env", raw)
 		} else {
-			p.Field("resource env", "(unset — using chart default "+resources.DefaultTraining+")")
+			p.Field("resource env", "(unset — jobs-manager falls back to "+resources.DefaultTraining()+")")
 		}
 		// backend#2220: who chose the ceiling above. Verbose-only — it answers a
 		// support question ("did someone set this, or did we?"), not one an
