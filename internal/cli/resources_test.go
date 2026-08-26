@@ -159,17 +159,19 @@ func TestShow_MultiClientRedirectOpensWithSingleBlank(t *testing.T) {
 	}
 }
 
-// TestRenderResources_ChartDefaultWhenEnvUnset: with no RESOURCE_* env, the
-// ceiling reported is the chart default (cpu=2,memory=8Gi), not "unknown".
-func TestRenderResources_ChartDefaultWhenEnvUnset(t *testing.T) {
+// TestRenderResources_FallbackFloorWhenEnvUnset: with no RESOURCE_* env, the
+// ceiling reported is the contract-floor fallback (cpu=1,memory=2Gi, what
+// jobs-manager requests when nothing is set), not the old unschedulable
+// cpu=2,memory=8Gi and not "unknown" (backend#2254).
+func TestRenderResources_FallbackFloorWhenEnvUnset(t *testing.T) {
 	cs := fake.NewClientset(resNode("n1", "8", "32Gi"), resJMDeploy("tb", map[string]string{}))
 	var buf bytes.Buffer
 	if err := renderResources(context.Background(), ui.New(&buf, ui.WithColor(false)), resTarget(cs)); err != nil {
 		t.Fatalf("renderResources: %v", err)
 	}
 	if !strings.Contains(buf.String(), "A training run is allocated up to:") ||
-		!strings.Contains(buf.String(), "2 CPU · 8 GiB") {
-		t.Errorf("want chart-default ceiling 2 CPU · 8 GiB:\n%s", buf.String())
+		!strings.Contains(buf.String(), "1 CPU · 2 GiB") {
+		t.Errorf("want fallback-floor ceiling 1 CPU · 2 GiB:\n%s", buf.String())
 	}
 }
 
