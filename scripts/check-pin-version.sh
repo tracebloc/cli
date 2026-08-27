@@ -31,11 +31,14 @@
 #    1  DRIFT     — the pin's contract version differs from HEAD's. Re-pin
 #                   (scripts/.data-ingestors-ref) and re-run scripts/sync-schema.sh.
 #    2  FAIL CLOSED — could not evaluate (bad/absent pin, moved path, unreachable
-#                   URL, non-JSON, missing version). Never reported as agreement.
+#                   URL, non-JSON, missing version, or an unparseable
+#                   sync-schema.sh). Never reported as agreement.
 #
 #  Env knobs (defaults are the production values; overrides exist for the
 #  hermetic test harness, scripts/tests/pin-version-verify.sh):
 #    REF_FILE                       pin file (default: scripts/.data-ingestors-ref)
+#    SYNC_SCHEMA_SH                 source of the vendored layout path
+#                                   (default: scripts/sync-schema.sh)
 #    DATA_INGESTORS_REF             override the pin ref (default: from REF_FILE)
 #    DATA_INGESTORS_DEFAULT_BRANCH  override the upstream default branch
 #                                   (default: resolved via `gh api`)
@@ -44,12 +47,14 @@
 # =============================================================================
 set -uo pipefail
 
-# Where the vendored layout contract lives upstream — keep in lockstep with the
-# UPSTREAM_BASE/layout.v1.json path in scripts/sync-schema.sh.
 readonly UPSTREAM_BASE="https://raw.githubusercontent.com/tracebloc/data-ingestors"
-readonly LAYOUT_SUBPATH="tracebloc_ingestor/schema/layout.v1.json"
 
-REF_FILE="${REF_FILE:-$(cd "$(dirname "$0")" && pwd)/.data-ingestors-ref}"
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REF_FILE="${REF_FILE:-${_here}/.data-ingestors-ref}"
+# sync-schema.sh is the single source of truth for the vendored layout path;
+# see derive_layout_subpath. SYNC_SCHEMA_SH lets the test harness point at a
+# fixture.
+SYNC_SCHEMA_SH="${SYNC_SCHEMA_SH:-${_here}/sync-schema.sh}"
 
 die_closed() { echo "FAIL CLOSED: $*" >&2; exit 2; }
 
@@ -58,6 +63,24 @@ die_closed() { echo "FAIL CLOSED: $*" >&2; exit 2; }
 # alnum . _ - / and no ".." component. Blocks path-traversal / extra segments.
 valid_ref_shape() {
   grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' <<<"$1" && ! grep -q '\.\.' <<<"$1"
+}
+
+# Derive the upstream layout path (tracebloc_ingestor/schema/layout.v1.json)
+# from sync-schema.sh instead of holding a second copy: sync-schema.sh is the
+# single source of truth for the vendored path, so a moved schema dir there
+# changes both in one place, and the old "keep in lockstep" comment becomes an
+# actual check (LukasWodka on cli#595; pin-version-verify.sh asserts the derived
+# value). Returns non-zero — the caller fail-closes — if either declaration it
+# parses is gone. It parses these two sync-schema.sh lines:
+#   UPSTREAM_BASE="...:${DATA_INGESTORS_REF}/<dir>"
+#   "${UPSTREAM_BASE}/<file>|internal/schema/layout.v1.json"
+derive_layout_subpath() {
+  [[ -f "$SYNC_SCHEMA_SH" ]] || { echo "  no sync-schema.sh at $SYNC_SCHEMA_SH" >&2; return 1; }
+  local dir file
+  dir="$(grep -oE 'DATA_INGESTORS_REF\}/[A-Za-z0-9._/-]+' "$SYNC_SCHEMA_SH" | head -1 | sed -E 's#^DATA_INGESTORS_REF\}/##')"
+  file="$(grep -oE 'UPSTREAM_BASE\}/[A-Za-z0-9._-]+\.json\|internal/schema/layout\.v1\.json' "$SYNC_SCHEMA_SH" | head -1 | sed -E 's#^UPSTREAM_BASE\}/##; s#\|.*$##')"
+  [[ -n "$dir" && -n "$file" ]] || { echo "  could not parse the layout path from $SYNC_SCHEMA_SH" >&2; return 1; }
+  printf '%s/%s' "$dir" "$file"
 }
 
 # Resolve the pin: first non-comment, non-blank line of REF_FILE (the rule
@@ -121,14 +144,22 @@ print(str(v).strip())
 }
 
 main() {
-  local pin default_branch pin_url head_url pin_ver head_ver
+  local pin default_branch pin_url head_url pin_ver head_ver layout_subpath=""
 
   pin="$(resolve_pin)"
   [[ -n "$pin" ]] || die_closed "no ref in ${REF_FILE} (first non-comment line must be a commit SHA)"
   valid_ref_shape "$pin" || die_closed "invalid pin ref shape: '$pin'"
 
+  # Derive the layout path only when we actually build a URL from it — the test
+  # harness overrides both URLs and then needs neither sync-schema.sh nor a
+  # network fetch.
+  if [[ -z "${PIN_LAYOUT_URL:-}" || -z "${HEAD_LAYOUT_URL:-}" ]]; then
+    layout_subpath="$(derive_layout_subpath)" \
+      || die_closed "could not derive the layout path from ${SYNC_SCHEMA_SH} (its format changed?)"
+  fi
+
   # Build the pin URL (overridable). The pin comes from the ref file above.
-  pin_url="${PIN_LAYOUT_URL:-${UPSTREAM_BASE}/${pin}/${LAYOUT_SUBPATH}}"
+  pin_url="${PIN_LAYOUT_URL:-${UPSTREAM_BASE}/${pin}/${layout_subpath}}"
 
   # Build the HEAD URL (overridable). Only resolve the default branch when the
   # URL isn't overridden, so the test harness needs no `gh` and no network.
@@ -139,7 +170,7 @@ main() {
     default_branch="$(resolve_default_branch)"
     [[ -n "$default_branch" ]] || die_closed "could not resolve data-ingestors' default branch (gh api)"
     valid_ref_shape "$default_branch" || die_closed "invalid default-branch shape: '$default_branch'"
-    head_url="${UPSTREAM_BASE}/${default_branch}/${LAYOUT_SUBPATH}"
+    head_url="${UPSTREAM_BASE}/${default_branch}/${layout_subpath}"
   fi
 
   pin_ver="$(fetch_version "$pin_url" "pinned")"  || die_closed "could not read the pinned contract version"
@@ -160,4 +191,8 @@ main() {
   return 1
 }
 
-main "$@"
+# Run main only when executed directly, not when sourced — so the test harness
+# can source this file and call derive_layout_subpath in isolation.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

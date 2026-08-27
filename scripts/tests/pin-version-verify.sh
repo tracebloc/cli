@@ -109,6 +109,28 @@ run_case "fail-closed: malformed pin shape ('..') -> exit 2" 2 \
   PIN_LAYOUT_URL="file://$FIX/v2.json" \
   HEAD_LAYOUT_URL="file://$FIX/v3.json"
 
+# 7 — FAIL CLOSED: the layout path can't be derived (sync-schema.sh missing).
+#     One URL is left un-overridden so main actually reaches the derivation; it
+#     must die_closed BEFORE any network fetch, so no real URL is contacted.
+run_case "fail-closed: unparseable sync-schema.sh -> exit 2" 2 \
+  DATA_INGESTORS_REF="0123456789abcdef0123456789abcdef01234567" \
+  SYNC_SCHEMA_SH="$FIX/no-such-sync-schema.sh" \
+  PIN_LAYOUT_URL="file://$FIX/v2.json"
+
+# 8 — the "keep in lockstep" comment turned into a check: the path DERIVED from
+#     the real scripts/sync-schema.sh must equal the known layout subpath. Source
+#     the checker (main is source-guarded) and call the function directly. If
+#     sync-schema.sh's declarations move and the parser stops matching, this
+#     reddens instead of the mismatch going unnoticed.
+WANT_SUBPATH="tracebloc_ingestor/schema/layout.v1.json"
+got_subpath="$(SYNC_SCHEMA_SH="$REPO_ROOT/scripts/sync-schema.sh" \
+  bash -c 'source "$1"; derive_layout_subpath' pin-version-verify "$CHECKER" 2>/dev/null)"
+if [ "$got_subpath" = "$WANT_SUBPATH" ]; then
+  ok "derive_layout_subpath matches sync-schema.sh ($got_subpath)"
+else
+  bad "derive_layout_subpath — want '$WANT_SUBPATH', got '$got_subpath'"
+fi
+
 echo
 echo "pin-version-verify: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

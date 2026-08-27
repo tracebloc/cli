@@ -19,14 +19,14 @@ name: Contract-version drift (pin freshness)
 # (scripts/tests/pin-version-verify.sh, run in build.yml), which touches no
 # network. The pinned PR comparison (sync-schema.sh --check) is left unchanged.
 #
-# FAIL CLOSED. A red run is the signal: version drift (exit 1) AND any
+# FAIL CLOSED, AND it reaches a person. On version drift (checker exit 1) or any
 # "cannot evaluate" — absent/malformed pin, moved path, unreachable raw URL,
-# non-JSON, missing "version" (exit 2) — both fail the job. "Cannot tell" is a
-# finding, never a green pass.
-#
-# Complements head-drift-canary.yml (weekly, advisory, never-blocking, opens a
-# tracking issue on ANY mirrored-source change). This one is narrower and
-# harder: a fail-closed gate on the semantic contract VERSION specifically.
+# non-JSON, missing "version", unparseable sync-schema.sh (exit 2) — the job
+# opens or updates ONE tracking issue (label `pin-version-drift`) AND then fails.
+# The issue is why a red run isn't the *only* signal: a scheduled red that no one
+# is assigned to would quietly become this workflow's normal state (LukasWodka on
+# cli#595). The finding lands where a person sees it, the way head-drift-canary.yml
+# does; the job also reds, so "cannot tell" is never a green pass.
 #
 # data-ingestors is public, so github.token suffices for the `gh api`
 # default-branch lookup and the raw fetches. If it ever goes private, add a
@@ -39,6 +39,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: pin-version-drift
@@ -53,9 +54,73 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Compare pinned contract version against data-ingestors HEAD
-        # GH_TOKEN lets `gh api` resolve the current default branch. python3 and
-        # curl are preinstalled on ubuntu-latest. Non-zero exit (drift OR
-        # cannot-evaluate) reds this run by design — that IS the finding.
+        id: check
+        # Capture the checker's exit WITHOUT failing the step, so the reporting
+        # step can run before the job reds. GH_TOKEN lets `gh api` resolve the
+        # current default branch. python3 and curl are preinstalled on ubuntu.
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/check-pin-version.sh
+        run: |
+          rc=0
+          ./scripts/check-pin-version.sh > check-out.txt 2>&1 || rc=$?
+          cat check-out.txt
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          case "$rc" in
+            0) echo "state=in_sync" >> "$GITHUB_OUTPUT" ;;
+            1) echo "state=drift"   >> "$GITHUB_OUTPUT" ;;
+            *) echo "state=blocked" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Open or update the pin-version-drift tracking issue
+        if: steps.check.outputs.rc != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          STATE: ${{ steps.check.outputs.state }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$STATE" = "drift" ]; then
+            title="data-ingestors contract version has moved past the CLI's pin"
+            headline="The pinned data-ingestors layout contract is a VERSION behind HEAD."
+          else
+            title="pin-version-drift watcher could not evaluate the pin (fail-closed)"
+            headline="The watcher could not evaluate the pin and fail-closed — this is a finding, not agreement."
+          fi
+          # shellcheck disable=SC2016  # printf formats carry markdown backticks, not shell expansions
+          {
+            printf '<!-- pin-version-drift -->\n'
+            printf '**%s**\n\n' "$headline"
+            printf '**Scheduled run:** %s\n\n' "$RUN_URL"
+            printf '```\n'
+            cat check-out.txt
+            printf '\n```\n\n'
+            if [ "$STATE" = "drift" ]; then
+              printf '**Fix (cli#286 shape):** bump `scripts/.data-ingestors-ref`, run `scripts/sync-schema.sh`, and commit the regenerated `internal/schema/*` in one deliberate PR. Close this issue when that lands.\n'
+            else
+              printf 'A bad/absent pin, a moved path, an unreachable raw URL, a non-JSON body, a missing `"version"`, or an unparseable `sync-schema.sh` all land here — "cannot tell" is never a green pass. Fix the cause (see the run log), then re-run this workflow. Close this issue once a run is clean.\n'
+            fi
+          } > body.md
+          gh label create pin-version-drift --repo "$REPO" --force \
+            --description "auto-filed by pin-version-drift.yml (backend#2704)" --color D93F0B
+          # Keyed by the label so there is at most ONE open issue; refresh its
+          # title each run so it reflects the current failure mode.
+          existing="$(gh issue list --repo "$REPO" --label pin-version-drift --state open \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            echo "updating existing tracking issue #$existing"
+            gh issue edit "$existing" --repo "$REPO" --title "$title"
+            gh issue comment "$existing" --repo "$REPO" --body-file body.md
+          else
+            echo "opening new tracking issue"
+            gh issue create --repo "$REPO" --title "$title" --body-file body.md --label pin-version-drift
+          fi
+
+      - name: Fail closed on drift or cannot-evaluate
+        if: steps.check.outputs.rc != '0'
+        run: |
+          echo "::error::pin-version watcher exit ${{ steps.check.outputs.rc }} (${{ steps.check.outputs.state }}) — a tracking issue was opened/updated (label: pin-version-drift)."
+          exit 1
+
+      - name: All clear
+        if: steps.check.outputs.rc == '0'
+        run: echo "::notice::Pinned contract version matches data-ingestors HEAD."

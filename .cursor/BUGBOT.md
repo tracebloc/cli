@@ -152,10 +152,11 @@ Two things make this repo unusual and should shape every finding:
 - `test/integration/*` uses 30s–5min timeouts because it drives a real cluster — not the
   production timeout convention.
 - `mutation.yml` and `head-drift-canary.yml` are advisory and never gate a merge.
-  `pin-version-drift.yml` is scheduled-only (no `pull_request` trigger) and fails CLOSED on
-  data-ingestors contract-version drift — a red scheduled run is the signal, by design; it still
-  never gates a PR merge, and gating PRs on live upstream is the backend#1009 failure it avoids
-  (backend#2704).
+  `pin-version-drift.yml` is scheduled-only (no `pull_request` trigger): on data-ingestors
+  contract-version drift (or any cannot-evaluate) it opens/updates a `pin-version-drift`-labelled
+  tracking issue AND fails closed — a red scheduled run plus a filed issue is the intended signal.
+  It still never gates a PR merge; gating PRs on live upstream is the backend#1009 failure it
+  avoids (backend#2704).
 - No `vendor/` directory — the module cache is used on purpose.
 - `// style-guard: allow` is a defined escape hatch but is currently used nowhere; if one
   appears, it is a novel exception worth scrutiny rather than an accepted pattern.
