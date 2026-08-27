@@ -1,5 +1,19 @@
 # Pinned tracebloc/client-runtime commit that
-# internal/resources/envelope_contract.json is vendored from (backend#2220).
+# internal/resources/envelope_contract.json is vendored from. The vendoring
+# MECHANISM is backend#2220; this pin records WHICH revision the copy is, and
+# that is the whole point of the file — a reader must be able to tell, from the
+# vendored contract plus this ref, which number is current (backend#2580).
+#
+# The pinned commit is where client-runtime's runtime behaviour caught up to
+# what the CLI already reads: DEFAULT_JOB_RESOURCES defaults to the contract
+# FLOOR (1 CPU / 2 GiB), not the historical 2 CPU / 8 GiB `fallback_literal`
+# (backend#2254, client-runtime#406). So DefaultTraining()'s floor-derived value
+# and the runtime's fallback agree, and the still-present `fallback_literal` key
+# is what it says it is — the retired envelope, not a live number.
+#
+# The vendored artifact is therefore contract_version 2: the vm_reserve/topology
+# block from backend#2221 rode along, but the CLI decodes none of it — only
+# overhead, floor and the single-node vectors, all byte-identical to v1.
 #
 # Pin, don't float — the same rule scripts/.client-ref and
 # scripts/.data-ingestors-ref follow: an unrelated client-runtime commit must
@@ -9,4 +23,4 @@
 #   1. cp <client-runtime>/envelope_contract.json internal/resources/
 #   2. update the SHA below
 #   3. go test ./internal/resources/... — the golden vectors WILL have moved
-6293d15f7025d06bc85886df93456e62767a8d45
+0dcc929c87f0712bf08c4a784116b40d50866bce
