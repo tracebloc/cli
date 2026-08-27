@@ -275,11 +275,21 @@ function Resolve-Tag {
     # Follow the /releases/latest redirect to find the tag, same trick
     # install.sh uses. -MaximumRedirection 0 makes Invoke-WebRequest
     # surface the Location header instead of following.
+    #
+    # This is the one fetch that stays a plain Invoke-WebRequest, not a
+    # Save-BoundedFile: it is a header-only redirect probe (-MaximumRedirection 0
+    # reads the Location header, never a body to disk), so the size ceiling that
+    # backend#2544 added to the artifact fetches has nothing to bound here. The
+    # STALL half still applies, though, so pin -TimeoutSec 60 to match the rest of
+    # the script rather than inherit the ~100 s platform default (LukasWodka, #588).
+    # On timeout the WebException is caught below, $resp is $null, and Resolve-Tag
+    # falls through to a clean Fail — never a hang.
     try {
         $resp = Invoke-WebRequest `
             -Uri "https://github.com/$script:GitHubRepo/releases/latest" `
             -MaximumRedirection 0 `
             -UseBasicParsing `
+            -TimeoutSec 60 `
             -ErrorAction SilentlyContinue
     } catch {
         # PowerShell treats 3xx as an error when MaximumRedirection=0.
@@ -311,11 +321,30 @@ $baseUrl     = "https://github.com/$GitHubRepo/releases/download/$tag"
 $tmpDir      = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "tracebloc-install-$tag-$([guid]::NewGuid())") -Force
 
 try {
-    Write-Host "Downloading binary..."
-    Invoke-WebRequest -Uri "$baseUrl/$binaryFile" -OutFile (Join-Path $tmpDir $binaryFile) -UseBasicParsing
+    # Bounded, exactly like the cosign bootstrap above (backend#2544 finishes
+    # what backend#2199 started). These artifacts are SHA256- and cosign-verified
+    # AFTER download, so a corrupted or oversized body is rejected before use —
+    # but an unbounded one can still hang the install or exhaust disk BEFORE that
+    # verification runs, the same DoS the bootstrap fetch closed. So every fetch
+    # goes through Save-BoundedFile (size ceiling + timeout) rather than a raw
+    # Invoke-WebRequest. Caps are sized against the real published assets with
+    # headroom for growth; REVISIT the binary cap as the CLI grows:
+    #   binary      ~50 MB today (windows-amd64 is 49.9 MB at v0.10.x) → 200 MB
+    #   SHA256SUMS  <1 KB → a tight 1 MB / 60 s, mirroring cosign_checksums.txt
+    # Wrapped so a bounded-fetch throw — cap tripped, timeout, 404, oversized
+    # body — surfaces as Fail's clean one-line error, not the raw PowerShell
+    # error record + stack trace that an uncaught throw under `Stop` produces.
+    # These two are mandatory (unlike cosign, there is no fallback), so the
+    # right response is a clean hard failure, not the bootstrap's warn-and-continue.
+    try {
+        Write-Host "Downloading binary..."
+        Save-BoundedFile -Uri "$baseUrl/$binaryFile" -OutFile (Join-Path $tmpDir $binaryFile) -MaxBytes 200MB
 
-    Write-Host "Downloading SHA256SUMS..."
-    Invoke-WebRequest -Uri "$baseUrl/SHA256SUMS" -OutFile (Join-Path $tmpDir 'SHA256SUMS') -UseBasicParsing
+        Write-Host "Downloading SHA256SUMS..."
+        Save-BoundedFile -Uri "$baseUrl/SHA256SUMS" -OutFile (Join-Path $tmpDir 'SHA256SUMS') -MaxBytes 1MB -TimeoutSec 60
+    } catch {
+        Fail "couldn't download the release artifacts for ${tag}: $($_.Exception.Message)"
+    }
 
     # -------------------------------------------------------------
     # Verify SHA256.
@@ -400,8 +429,13 @@ try {
         # process, whose non-zero $LASTEXITCODE cannot be caught anyway.
         $sigDownloaded = $false
         try {
-            Invoke-WebRequest -Uri "$baseUrl/$binaryFile.sig"  -OutFile (Join-Path $tmpDir "$binaryFile.sig")  -UseBasicParsing
-            Invoke-WebRequest -Uri "$baseUrl/$binaryFile.cert" -OutFile (Join-Path $tmpDir "$binaryFile.cert") -UseBasicParsing
+            # Bounded too (backend#2544). Both are tiny — .sig ~96 B, .cert ~3.2 KB
+            # — so a 1 MB / 60 s profile bounds a runaway with vast headroom. A
+            # Save-BoundedFile throw (cap tripped, timeout, 404, oversized body)
+            # lands in the same catch that already handles a missing .sig/.cert:
+            # fail closed unless TRACEBLOC_ALLOW_UNVERIFIED=1.
+            Save-BoundedFile -Uri "$baseUrl/$binaryFile.sig"  -OutFile (Join-Path $tmpDir "$binaryFile.sig")  -MaxBytes 1MB -TimeoutSec 60
+            Save-BoundedFile -Uri "$baseUrl/$binaryFile.cert" -OutFile (Join-Path $tmpDir "$binaryFile.cert") -MaxBytes 1MB -TimeoutSec 60
             $sigDownloaded = $true
         } catch {
             if (-not $AllowUnverified) {
