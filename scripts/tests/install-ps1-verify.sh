@@ -108,6 +108,32 @@ else
   bad 'a cosign bootstrap fetch is missing its size cap'
 fi
 
+# ── 5c. the post-cosign artifact fetches are size-bounded too (backend#2544) ─
+# #2199/5b bounded only the cosign bootstrap — the pre-auth trust root. The four
+# artifacts fetched AFTER it (binary, SHA256SUMS, .sig, .cert) were still raw
+# Invoke-WebRequest: they are SHA256- and cosign-verified after download, but an
+# unbounded body can hang the install or exhaust disk BEFORE that check runs —
+# the same DoS. The sharp invariant that keeps them bounded, and catches the next
+# raw fetch someone adds: NOTHING is written to a file with Invoke-WebRequest
+# -OutFile anymore. (Resolve-Tag's redirect probe has no -OutFile — it reads a
+# Location header, not a body — so it is correctly not caught here.)
+if grep -Eq 'Invoke-WebRequest.*-OutFile' "$INSTALLER"; then
+  bad 'an artifact is still fetched to disk with a raw Invoke-WebRequest -OutFile'
+else
+  ok 'no artifact is fetched to disk with a raw Invoke-WebRequest -OutFile'
+fi
+# …and each of the four goes through the bounded helper with an explicit cap.
+# The closing quote in each pattern pins the exact asset — "$baseUrl/$binaryFile"
+# must not also match the "$binaryFile.sig" / ".cert" lines.
+if grep -Eq 'Save-BoundedFile.*"\$baseUrl/\$binaryFile".*-MaxBytes' "$INSTALLER" \
+   && grep -Eq 'Save-BoundedFile.*"\$baseUrl/SHA256SUMS".*-MaxBytes' "$INSTALLER" \
+   && grep -Eq 'Save-BoundedFile.*"\$baseUrl/\$binaryFile\.sig".*-MaxBytes' "$INSTALLER" \
+   && grep -Eq 'Save-BoundedFile.*"\$baseUrl/\$binaryFile\.cert".*-MaxBytes' "$INSTALLER"; then
+  ok 'binary, SHA256SUMS, .sig and .cert are all size-capped via the bounded helper'
+else
+  bad 'a post-cosign artifact fetch is missing its size cap'
+fi
+
 # ── 6. behavioural tier ─────────────────────────────────────────────────────
 # pwsh is preinstalled on GitHub-hosted ubuntu runners. If it is missing we
 # cannot tell whether the helpers behave, and "cannot tell" is a finding, not a

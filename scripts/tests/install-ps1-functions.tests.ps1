@@ -328,6 +328,46 @@ if ($backslashDollar.Count -eq 0) {
     $backslashDollar | ForEach-Object { bad "bash-style \$ escape in: $($_.Extent.Text)" }
 }
 
+# ── 8. every artifact fetched to disk is size-bounded (backend#2544) ────────
+# backend#2199 bounded the cosign bootstrap. #2544 bounds the four artifacts
+# fetched AFTER it — the CLI binary, SHA256SUMS, and the .sig/.cert — which were
+# still raw Invoke-WebRequest: verified after download, but an unbounded body can
+# hang the install or exhaust disk BEFORE that check runs.
+#
+# Save-BoundedFile's byte ceiling is behaviourally driven above (section 2b); the
+# NEW surface here is the call sites, which are inline in the main script body
+# and can't be extracted and run without the network. So they're asserted
+# structurally against the AST — robust to reformatting, unlike a grep:
+#   (a) the anti-pattern is gone: nothing writes a body to a file via
+#       Invoke-WebRequest -OutFile anymore. This is the sharp invariant — it
+#       fails the moment someone adds the next raw fetch. Resolve-Tag's redirect
+#       probe stays legal: it reads a Location header, never passes -OutFile.
+#   (b) the mechanism is intact: every Save-BoundedFile call carries an explicit
+#       -MaxBytes, so a fetch routed through the helper can't skip the ceiling.
+function Test-HasParam($cmdAst, [string]$name) {
+    return @($cmdAst.CommandElements | Where-Object {
+        $_ -is [System.Management.Automation.Language.CommandParameterAst] -and
+        $_.ParameterName -eq $name
+    }).Count -gt 0
+}
+$iwrToFile = @($ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and
+    $n.GetCommandName() -eq 'Invoke-WebRequest'
+}, $true) | Where-Object { Test-HasParam $_ 'OutFile' })
+is 'no artifact is fetched to disk with a raw Invoke-WebRequest -OutFile' $iwrToFile.Count 0
+
+$sbfCalls = @($ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and
+    $n.GetCommandName() -eq 'Save-BoundedFile'
+}, $true))
+# Non-vacuity: the -MaxBytes assertion below is only meaningful if call sites
+# exist. Two cosign-bootstrap fetches + four post-cosign artifacts = six.
+is 'Save-BoundedFile is used at every artifact fetch (>= 6 call sites)' ($sbfCalls.Count -ge 6) $true
+$sbfNoCap = @($sbfCalls | Where-Object { -not (Test-HasParam $_ 'MaxBytes') })
+is 'every Save-BoundedFile call site carries an explicit -MaxBytes ceiling' $sbfNoCap.Count 0
+
 Write-Host ''
 Write-Host "install-ps1-functions: $script:Pass passed, $script:Fail failed"
 if ($script:Fail -gt 0) { exit 1 }

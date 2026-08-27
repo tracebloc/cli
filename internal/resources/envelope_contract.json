@@ -1,5 +1,5 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "issue": "tracebloc/backend#2220",
   "rfc": "RFC-BACKEND-664 \u00a7P0",
   "source_of_truth": "client-runtime/node_sizing.py::envelope_from_allocatable",
@@ -39,6 +39,73 @@
       "clamping up is how the 4 GiB WSL2 machine ends up asked to host an 8 GiB",
       "pod that stays Pending forever."
     ]
+  },
+  "vm_reserve": {
+    "memory_bytes": 1073741824,
+    "why": [
+      "Memory inside the Docker VM that is NOT a k3d node container and must",
+      "survive whatever the nodes are capped to: the k3d serverlb and tools",
+      "containers, dockerd/containerd itself, and enough page cache for image",
+      "layers. Measured on a live 2-node cluster: serverlb 39.27 MiB + tools",
+      "14.69 MiB, plus the daemon and guest kernel outside any container. 1 GiB",
+      "is deliberately more than the containers alone -- capping the nodes to",
+      "the last byte of the VM starves the runtime that runs them, which is the",
+      "same class of failure as not capping them at all.",
+      "",
+      "This is a reserve against the VM, NOT the per-pod platform overhead in",
+      "`overhead` above. They stack: overhead is subtracted inside a node,",
+      "vm_reserve outside all of them."
+    ]
+  },
+  "topology": {
+    "question": "How many k3d node containers may this VM honestly host, and what is each one's memory cap?",
+    "source_of_truth": "client-runtime/node_sizing.py::honest_topology",
+    "issue": "tracebloc/backend#2221",
+    "rule": [
+      "usable = vm_memory_bytes - vm_reserve.memory_bytes",
+      "nodes  = clamp(usable // per_node_minimum.memory_bytes, 1, requested_nodes)",
+      "cap    = usable // nodes        (floored -- a cap that rounds up is not a cap)"
+    ],
+    "vm_source": "docker info {{.NCPU}} and {{.MemTotal}} -- the container runtime's VM, NOT the host and NOT the sum of node allocatable",
+    "per_node_minimum": {
+      "derived_from": "overhead + floor",
+      "cpu_millicores": 2000,
+      "memory_bytes": 5368709120,
+      "why": [
+        "A node container hosts the platform overhead AND must still clear the",
+        "training floor, or nothing schedules on it. Derived, never a fourth",
+        "constant. Measured: capping a node at 3g -- under the 3 GiB overhead",
+        "alone -- made both nodes of a live cluster report |unschedulable, and",
+        "the `exact-floor` vector (2 cpu / 5 GiB -> viable) sits exactly here."
+      ]
+    },
+    "cpu_cappable": false,
+    "cpu_why": [
+      "MEASURED on k3d v5.9.0 / k3s v1.35.5 / Docker 29.5.2: capacity.cpu cannot",
+      "be capped by ANY container-level mechanism.",
+      "",
+      "  * k3d 5.9.0 has no CPU flag at all -- only --servers-memory/--agents-memory.",
+      "  * docker --cpus=2 sets a CFS quota (cpu.max 200000 100000 in the",
+      "    container) and capacity.cpu stays 10.",
+      "  * docker --cpuset-cpus=0-4 makes nproc report 5 and capacity.cpu stays 10.",
+      "",
+      "cadvisor counts /sys/devices/system/cpu/present and /proc/cpuinfo, neither",
+      "of which any cgroup namespaces. Confirmed against a forced node",
+      "de-register/re-register, so it is not a stale node object.",
+      "",
+      "Consequence: memory is made honest by CAPPING, cpu only by having FEWER",
+      "NODE CONTAINERS. That is why honest_topology reports cpu_honest rather",
+      "than implying the cap closed it, and why collapsing to one node -- the",
+      "remedy the GPU path already chose for --gpus=all -- is the general fix."
+    ],
+    "measured": {
+      "host": "10 cpu / 17179869184 B (16.00 GiB)",
+      "docker_vm": "10 cpu / 8321712128 B (7.75 GiB)",
+      "each_node_uncapped": "10 cpu / 8126672Ki -- byte-identical to the VM MemTotal",
+      "kubernetes_believes": "20 cpu / 15.50 GiB == 2.000x",
+      "capped_3g_each": "capacity.memory 3221225Ki per node; sum 6.14 GiB <= 7.75 GiB VM (0.792x)",
+      "also_double_counted": "ephemeral-storage: 474095688Ki capacity on both nodes, the same VM disk twice"
+    }
   },
   "fallback_literal": {
     "cpu": "2",
@@ -501,6 +568,139 @@
             }
           }
         }
+      }
+    ],
+    "topology": [
+      {
+        "label": "stock-macos-vm-7.75gi",
+        "vm_cpu": "10",
+        "vm_memory": "8321712128",
+        "requested_nodes": 2,
+        "expected": {
+          "nodes": 1,
+          "node_memory_cap_bytes": 7247970304,
+          "cpu_honest": true,
+          "viable": true,
+          "collapsed": true
+        }
+      },
+      {
+        "label": "vm-16gi-want-2",
+        "vm_cpu": "8",
+        "vm_memory": "17179869184",
+        "requested_nodes": 2,
+        "expected": {
+          "nodes": 2,
+          "node_memory_cap_bytes": 8053063680,
+          "cpu_honest": false,
+          "viable": true,
+          "collapsed": false
+        }
+      },
+      {
+        "label": "vm-16gi-want-4",
+        "vm_cpu": "8",
+        "vm_memory": "17179869184",
+        "requested_nodes": 4,
+        "expected": {
+          "nodes": 3,
+          "node_memory_cap_bytes": 5368709120,
+          "cpu_honest": false,
+          "viable": true,
+          "collapsed": true
+        }
+      },
+      {
+        "label": "vm-32gi-want-2",
+        "vm_cpu": "16",
+        "vm_memory": "34359738368",
+        "requested_nodes": 2,
+        "expected": {
+          "nodes": 2,
+          "node_memory_cap_bytes": 16642998272,
+          "cpu_honest": false,
+          "viable": true,
+          "collapsed": false
+        }
+      },
+      {
+        "label": "exact-two-nodes",
+        "vm_cpu": "8",
+        "vm_memory": "11811160064",
+        "requested_nodes": 2,
+        "expected": {
+          "nodes": 2,
+          "node_memory_cap_bytes": 5368709120,
+          "cpu_honest": false,
+          "viable": true,
+          "collapsed": false
+        }
+      },
+      {
+        "label": "one-byte-under-two-nodes",
+        "vm_cpu": "8",
+        "vm_memory": "11811160063",
+        "requested_nodes": 2,
+        "expected": {
+          "nodes": 1,
+          "node_memory_cap_bytes": 10737418239,
+          "cpu_honest": true,
+          "viable": true,
+          "collapsed": true
+        }
+      },
+      {
+        "label": "single-node-requested",
+        "vm_cpu": "8",
+        "vm_memory": "34359738368",
+        "requested_nodes": 1,
+        "expected": {
+          "nodes": 1,
+          "node_memory_cap_bytes": 33285996544,
+          "cpu_honest": true,
+          "viable": true,
+          "collapsed": false
+        }
+      },
+      {
+        "label": "vm-too-small-4gi",
+        "vm_cpu": "4",
+        "vm_memory": "4294967296",
+        "requested_nodes": 2,
+        "expected": {
+          "nodes": 1,
+          "node_memory_cap_bytes": 3221225472,
+          "cpu_honest": true,
+          "viable": false,
+          "collapsed": true
+        }
+      },
+      {
+        "label": "vm-cpu-starved",
+        "vm_cpu": "1",
+        "vm_memory": "17179869184",
+        "requested_nodes": 1,
+        "expected": {
+          "nodes": 1,
+          "node_memory_cap_bytes": 16106127360,
+          "cpu_honest": true,
+          "viable": false,
+          "collapsed": false
+        }
+      },
+      {
+        "label": "vm-unparseable-memory",
+        "vm_cpu": "8",
+        "vm_memory": "lots",
+        "requested_nodes": 2,
+        "expected": null
+      },
+      {
+        "label": "vm-unparseable-cpu",
+        "vm_cpu": "eight",
+        "vm_memory": "8Gi",
+        "requested_nodes": 2,
+        "expected": null
       }
     ]
   }
