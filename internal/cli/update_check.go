@@ -106,6 +106,25 @@ func latestReleaseVersion() string {
 	return latest
 }
 
+// latestReleaseVersionFresh fetches the latest release DIRECTLY, bypassing the
+// 24h throttle cache that latestReleaseVersion prefers. `tracebloc upgrade` is an
+// explicit, infrequent command, and a stale cache here is a correctness bug: it
+// can report the running version as "latest" and make the installer conclude the
+// CLI is already current, skipping the very update the user asked for — worst
+// right after a 426, when a new release lands but the cache still equals what's
+// installed (Bugbot, backend#2253). On success it refreshes the cache (so the
+// later nudge benefits too); on ANY error it returns "" rather than a possibly-
+// stale cached value, so the caller omits TB_CLI_LATEST and the installer updates
+// unconditionally — the correct fail-safe for an explicit upgrade.
+func latestReleaseVersionFresh() string {
+	latest, err := fetchLatestRelease(latestReleaseURL, updateCheckTimeout)
+	if err != nil {
+		return ""
+	}
+	_ = writeUpdateCache(updateCachePath(), updateCache{CheckedAt: time.Now(), Latest: latest})
+	return latest
+}
+
 // fetchLatestRelease reads the tag_name of the latest GitHub release, time-boxed.
 func fetchLatestRelease(url string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
