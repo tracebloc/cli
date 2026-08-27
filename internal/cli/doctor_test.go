@@ -299,6 +299,67 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	// Bugbot on #561/#566 (backend#2438): a real Machine-capacity Warn co-occurs
+	// with a can't-check condition (pod-list RBAC failure, or unreadable
+	// RESOURCE_REQUESTS). The readiness rollup used to consult the can't-check
+	// arms before the Warn arm, so ready collapsed to StatusUnknown and the
+	// closing line printed "No problems found, but some checks couldn't finish"
+	// on top of the over-commit it exists to report — StatusUnknown carries no
+	// signal and must never shadow a found Warn. Assert the Warn survives (and the
+	// verdict owns it) under every can't-check that can fire alongside it.
+	t.Run("over-commit Warn is not shadowed by a co-occurring Unknown", func(t *testing.T) {
+		base := withDetail(allOK, "Machine capacity", doctor.StatusWarn,
+			"Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has")
+		cases := map[string][]doctor.Result{
+			"pod-list RBAC failure": withDetail(base, "Pod health", doctor.StatusWarn,
+				"could not list pods: pods is forbidden"),
+			"RESOURCE_REQUESTS unreadable": withDetail(base, "Node capacity", doctor.StatusWarn,
+				"couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit"),
+			"nodes unlistable": withDetail(base, "Node capacity", doctor.StatusWarn,
+				"could not list nodes: nodes is forbidden"),
+		}
+		// Per-case subtests: map iteration is randomized, so a shared loop with
+		// t.Fatalf would report a nondeterministic single case and hide the rest.
+		for name, results := range cases {
+			t.Run(name, func(t *testing.T) {
+				c, r := summarizeDoctor(results, tokenOK)
+				if r.status != doctor.StatusWarn {
+					t.Fatalf("a can't-check must not shadow the over-commit Warn, got ready=%v (%q)", r.status, r.text)
+				}
+				if v := doctorVerdict(c.status, r.status); v != doctor.StatusWarn {
+					t.Errorf("verdict must own the found Warn, not report a partial/unknown, got %v", v)
+				}
+			})
+		}
+	})
+
+	// The same severity guarantee for the Fail tier: a can't-check Unknown
+	// ("could not list pods") must not shadow a co-occurring, unrelated Fail.
+	// Before the severity-tier reorder the pod-list Unknown arm sat above the
+	// Node-capacity / dataset Fail arms and swallowed them (backend#2438) — the
+	// Warn variant above got the fix + a test; this pins the Fail variant too.
+	t.Run("Fail is not shadowed by a co-occurring Unknown", func(t *testing.T) {
+		base := withDetail(allOK, "Pod health", doctor.StatusWarn,
+			"could not list pods: pods is forbidden")
+		cases := map[string][]doctor.Result{
+			"node capacity Fail": withDetail(base, "Node capacity", doctor.StatusFail,
+				"0 of 2 nodes can fit the training request"),
+			"dataset storage Fail": withDetail(base, "Dataset volume (PVC)", doctor.StatusFail,
+				"PVC is not bound"),
+		}
+		for name, results := range cases {
+			t.Run(name, func(t *testing.T) {
+				c, r := summarizeDoctor(results, tokenOK)
+				if r.status != doctor.StatusFail {
+					t.Fatalf("a can't-check must not shadow the Fail, got ready=%v (%q)", r.status, r.text)
+				}
+				if v := doctorVerdict(c.status, r.status); v != doctor.StatusFail {
+					t.Errorf("verdict must own the Fail, not report a partial/unknown, got %v", v)
+				}
+			})
+		}
+	})
+
 	t.Run("machine capacity unknown → ready stays OK (no alarm)", func(t *testing.T) {
 		// StatusUnknown carries no signal (non-k3d cluster, unreadable VM), so it
 		// must not degrade the verdict either way.

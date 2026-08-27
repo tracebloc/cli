@@ -27,6 +27,14 @@ Two things make this repo unusual and should shape every finding:
   false ✔. Flag any new multi-step command where a partial failure collapses into success, and
   any path where the `--output-json` status and the process exit code can disagree.
 
+- **A severity rollup that lets a can't-check shadow a real finding.** In a first-match-wins
+  `switch` that folds many checks into one status (e.g. `summarizeDoctor`,
+  `internal/cli/doctor.go`), the `StatusUnknown` "couldn't check" arms must sit *below* every
+  real `StatusFail`/`StatusWarn` arm — order by severity, not by check. A can't-check above a
+  found problem returns `StatusUnknown` and prints "some checks couldn't finish" over a Fail or
+  Warn that was actually detected (backend#2438, recurred on #561/#566). Unknown carries no
+  signal, so it may only win when nothing above it fired.
+
 - **An exit code that isn't a named constant from `internal/cli/exitcodes.go`**, a repurposed
   numeric value, or a new failure path returning generic `1` when a specific code already
   exists. Every non-test `&exitError{}` names its code.

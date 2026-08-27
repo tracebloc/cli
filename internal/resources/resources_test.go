@@ -72,16 +72,18 @@ func TestParseTraining_PrefersLimitsThenRequestsThenDefault(t *testing.T) {
 			t.Fatalf("=> %q %q", FormatCPU(tr.CPU), FormatMem(tr.Mem))
 		}
 	})
-	t.Run("empty env falls back to chart default", func(t *testing.T) {
+	t.Run("empty env falls back to the contract floor", func(t *testing.T) {
+		// backend#2254: the fallback is the contract floor (1 CPU / 2 GiB), not
+		// the old cpu=2,memory=8Gi that could not schedule on a small host.
 		tr := ParseTraining(map[string]string{})
-		if !tr.HasCPUMem || FormatCPU(tr.CPU) != "2 CPU" || FormatMem(tr.Mem) != "8 GiB" {
+		if !tr.HasCPUMem || FormatCPU(tr.CPU) != "1 CPU" || FormatMem(tr.Mem) != "2 GiB" {
 			t.Fatalf("default => %q %q ok=%v", FormatCPU(tr.CPU), FormatMem(tr.Mem), tr.HasCPUMem)
 		}
 	})
-	t.Run("unparseable env falls back to chart default", func(t *testing.T) {
+	t.Run("unparseable env falls back to the contract floor", func(t *testing.T) {
 		tr := ParseTraining(map[string]string{"RESOURCE_LIMITS": "cpu=oops"})
-		if !tr.HasCPUMem || FormatCPU(tr.CPU) != "2 CPU" {
-			t.Fatalf("=> %q ok=%v, want chart default", FormatCPU(tr.CPU), tr.HasCPUMem)
+		if !tr.HasCPUMem || FormatCPU(tr.CPU) != "1 CPU" {
+			t.Fatalf("=> %q ok=%v, want the contract floor", FormatCPU(tr.CPU), tr.HasCPUMem)
 		}
 	})
 }
@@ -215,5 +217,70 @@ func TestJobsManagerEnv_ReleaseUnknownAmbiguousIsEmpty(t *testing.T) {
 	)
 	if env := JobsManagerEnv(context.Background(), cs, "tracebloc", ""); len(env) != 0 {
 		t.Errorf("ambiguous multi-release match must yield empty env, got %v", env)
+	}
+}
+
+// ── the default fallback fits the smallest host we support (backend#2254) ────
+//
+// DefaultTraining() is what `show` reports, and mirrors the size a spawned job
+// requests, when a release carries no RESOURCE_* env. It was cpu=2,memory=8Gi,
+// which EXCEEDS a default Docker Desktop VM (8 GiB out of ~7.7 GiB allocatable,
+// unschedulable once the 1c/3Gi overhead is reserved). It is now the contract
+// floor: the largest default that still fits the smallest host preflight admits.
+
+func TestDefaultTraining_IsTheContractFloor(t *testing.T) {
+	// Drift gate: the default IS the embedded contract floor, so it and
+	// client-runtime's DEFAULT_JOB_RESOURCES (the same floor, from the same
+	// byte-identical contract) cannot disagree without a human keeping them in
+	// sync. A floor change in envelope_contract.json flows here automatically.
+	f := mustContract().Floor
+	cpu, mem, ok := parseCPUMem(DefaultTraining())
+	if !ok {
+		t.Fatalf("DefaultTraining() did not parse: %q", DefaultTraining())
+	}
+	if cpu.MilliValue() != f.CPUMilli {
+		t.Errorf("default cpu = %dm, contract floor = %dm", cpu.MilliValue(), f.CPUMilli)
+	}
+	if mem.Value() != f.MemoryBytes {
+		t.Errorf("default mem = %d bytes, contract floor = %d bytes", mem.Value(), f.MemoryBytes)
+	}
+}
+
+func TestDefaultTraining_FitsADefaultDockerDesktop(t *testing.T) {
+	// 11 CPU / 7.7 GiB — the exact environment in backend#2254. The old
+	// cpu=2,memory=8Gi did NOT fit (8Gi + 3Gi overhead > 7.7Gi); the floor fits
+	// with room to spare. This is the assertion that was red before the fix.
+	ddMemBytes := 7.7 * float64(1<<30) // ~7.7 GiB, as a runtime float so int64() may truncate
+	dockerDesktop := Machine{
+		CPU: resource.MustParse("11"),
+		Mem: *resource.NewQuantity(int64(ddMemBytes), resource.BinarySI),
+	}
+	cpu, mem, ok := parseCPUMem(DefaultTraining())
+	if !ok {
+		t.Fatalf("DefaultTraining() did not parse: %q", DefaultTraining())
+	}
+	if !FitsNode(dockerDesktop, cpu, mem, "", resource.Quantity{}, false) {
+		t.Errorf("default %q must fit a 7.7 GiB environment after the platform overhead", DefaultTraining())
+	}
+}
+
+func TestDefaultTraining_FitsTheSmallestSupportedHost(t *testing.T) {
+	// preflight's PF_MIN_MEM_GB floor is 5 GB; 2Gi default + 3Gi overhead == 5Gi,
+	// the tight case the default must still clear.
+	host := Machine{CPU: resource.MustParse("2"), Mem: resource.MustParse("5Gi")}
+	cpu, mem, _ := parseCPUMem(DefaultTraining())
+	if !FitsNode(host, cpu, mem, "", resource.Quantity{}, false) {
+		t.Errorf("default %q must fit the smallest supported host (5 GiB)", DefaultTraining())
+	}
+}
+
+func TestDefaultTraining_ReddensBelowDefaultPlusOverhead(t *testing.T) {
+	// Mutation: a machine below default + overhead cannot host the default — the
+	// check the 8Gi literal could never satisfy on a small box, and the guard
+	// that a future default-bump past the floor reddens here.
+	tiny := Machine{CPU: resource.MustParse("2"), Mem: resource.MustParse("4Gi")}
+	cpu, mem, _ := parseCPUMem(DefaultTraining())
+	if FitsNode(tiny, cpu, mem, "", resource.Quantity{}, false) {
+		t.Errorf("default %q must NOT fit a 4 GiB machine (2Gi default + 3Gi overhead = 5Gi > 4Gi)", DefaultTraining())
 	}
 }
