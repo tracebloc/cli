@@ -85,16 +85,19 @@ func upgradePlanFor(goos string) upgradePlan {
 	}
 }
 
-// upgradeEnv is the installer child's environment: the parent's, plus the latest
-// release we already resolved for the update nudge, passed as TB_CLI_LATEST. That
-// lets the installer skip a needless CLI reinstall when we are already current
-// and update only when actually behind — the precise `cli-behind-latest` case.
+// upgradeEnv is the installer child's environment: the parent's, plus a FRESHLY
+// fetched latest release passed as TB_CLI_LATEST. That lets the installer skip a
+// needless CLI reinstall when we are genuinely already current and update only
+// when actually behind — the precise `cli-behind-latest` case.
 //
-// Best-effort: when we can't determine latest (offline, no cache) we omit it, and
-// the installer updates the CLI unconditionally under TB_UPGRADE_CLI (baked into
-// the command string), which still ends at latest. Any ambient TB_CLI_LATEST is
-// stripped first so a stray value in the user's shell can't drive the installer's
-// decision — mirrors prepareHostEnv's handling of TB_PREPARE_USER.
+// The fetch is deliberately fresh (latestReleaseVersionFresh), NOT the 24h-cached
+// latestReleaseVersion: a stale cache could equal the running version and make
+// the installer skip a real update on an explicit `tracebloc upgrade` (Bugbot).
+// Best-effort — when the fetch fails we omit TB_CLI_LATEST, and the installer
+// updates the CLI unconditionally under TB_UPGRADE_CLI (baked into the command
+// string), which still ends at latest. Any ambient TB_CLI_LATEST is stripped
+// first so a stray value in the user's shell can't drive the installer's decision
+// — mirrors prepareHostEnv's handling of TB_PREPARE_USER.
 func upgradeEnv() []string {
 	parent := os.Environ()
 	env := make([]string, 0, len(parent)+1)
@@ -104,7 +107,7 @@ func upgradeEnv() []string {
 		}
 		env = append(env, kv)
 	}
-	if latest := latestReleaseVersion(); latest != "" {
+	if latest := latestReleaseVersionFresh(); latest != "" {
 		env = append(env, "TB_CLI_LATEST="+latest)
 	}
 	return env

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -130,12 +132,16 @@ func TestUpgradeInstallerCmdIsExplicitUpgrade(t *testing.T) {
 // TestUpgradeEnvStripsAmbientLatest: TB_CLI_LATEST is the installer's decision
 // input, so a stray value pre-set in the user's shell must not leak through and
 // drive it — upgradeEnv strips it before re-adding the value WE resolved (mirrors
-// prepareHostEnv stripping TB_PREPARE_USER; Bugbot #394). Point the config dir at
-// an ABSENT path so latestReleaseVersion() returns "" with no network (the same
-// skip-network idiom the update-check tests use) — this test is about the strip,
-// not about what we resolve, and must not depend on host state.
+// prepareHostEnv stripping TB_PREPARE_USER; Bugbot #394). Point the release URL
+// at a server that refuses, so the fresh fetch returns "" and adds nothing — this
+// test is about the strip, not the add, and must not touch the network.
 func TestUpgradeEnvStripsAmbientLatest(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", filepath.Join(t.TempDir(), "nope")) // never created
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer bad.Close()
+	swapURL(t, bad.URL)
+	t.Setenv("TRACEBLOC_CONFIG_DIR", filepath.Join(t.TempDir(), "nope"))
 	t.Setenv("TB_CLI_LATEST", "9.9.9-attacker")
 	for _, kv := range upgradeEnv() {
 		if kv == "TB_CLI_LATEST=9.9.9-attacker" {
@@ -144,16 +150,16 @@ func TestUpgradeEnvStripsAmbientLatest(t *testing.T) {
 	}
 }
 
-// TestUpgradeEnvCarriesResolvedLatest: the OTHER half — when we DO know latest,
-// upgradeEnv hands it to the installer as TB_CLI_LATEST, so the installer updates
-// the CLI only when actually behind (not on every upgrade). Seed a FRESH update-
-// check cache so latestReleaseVersion() serves it from disk within the throttle,
-// with no network hit (backend#2253).
+// TestUpgradeEnvCarriesResolvedLatest: the OTHER half — when the fetch succeeds,
+// upgradeEnv hands the latest to the installer as TB_CLI_LATEST, so it updates
+// the CLI only when actually behind (not on every upgrade) (backend#2253).
 func TestUpgradeEnvCarriesResolvedLatest(t *testing.T) {
-	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // dir exists → cache is readable
-	if err := writeUpdateCache(updateCachePath(), updateCache{CheckedAt: time.Now(), Latest: "0.10.8"}); err != nil {
-		t.Fatalf("seed update cache: %v", err)
-	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"tag_name":"v0.10.8"}`))
+	}))
+	defer srv.Close()
+	swapURL(t, srv.URL)
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	found := false
 	for _, kv := range upgradeEnv() {
 		if kv == "TB_CLI_LATEST=0.10.8" {
@@ -161,7 +167,34 @@ func TestUpgradeEnvCarriesResolvedLatest(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("upgradeEnv must pass the resolved latest release to the installer as TB_CLI_LATEST=0.10.8")
+		t.Error("upgradeEnv must pass the freshly-resolved latest release as TB_CLI_LATEST=0.10.8")
+	}
+}
+
+// TestUpgradeEnvIgnoresStaleCache is the regression guard for the Bugbot High
+// finding: a stale 24h cache must NOT drive the installer's decision. Seed the
+// cache with an OLD latest (what a user might be running), but have the live
+// endpoint report a NEWER release — upgradeEnv must pass the NEWER one, or
+// `tracebloc upgrade` would tell the installer "already current" and skip a real
+// update (worst right after a 426).
+func TestUpgradeEnvIgnoresStaleCache(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	if err := writeUpdateCache(updateCachePath(), updateCache{CheckedAt: time.Now(), Latest: "0.10.5"}); err != nil {
+		t.Fatalf("seed stale cache: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"tag_name":"v0.10.8"}`)) // GitHub has a newer release
+	}))
+	defer srv.Close()
+	swapURL(t, srv.URL)
+	got := ""
+	for _, kv := range upgradeEnv() {
+		if strings.HasPrefix(kv, "TB_CLI_LATEST=") {
+			got = strings.TrimPrefix(kv, "TB_CLI_LATEST=")
+		}
+	}
+	if got != "0.10.8" {
+		t.Errorf("upgradeEnv passed TB_CLI_LATEST=%q; want 0.10.8 (fresh release, not the stale cache 0.10.5)", got)
 	}
 }
 
