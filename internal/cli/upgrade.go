@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -15,6 +16,17 @@ import (
 // skips itself after this command (the running process swaps its own binary and
 // is stale by design afterwards — see MaybeNotifyUpdate / main).
 const upgradeCmdName = "upgrade"
+
+// upgradeCLIEnvAssign marks the installer run as an EXPLICIT `tracebloc upgrade`.
+// Without it, the installer's stop-and-check gate short-circuits an already-set-
+// up machine to "already set up — no need to run the installer again" and touches
+// nothing — so a CLI that is behind the latest release but still ABOVE the
+// mandatory-reinstall floor could never be brought current by the very command
+// the update nudge tells the user to run (backend#2253). The flag tells the
+// installer to update just the CLI (a small, isolated download) even on an
+// otherwise-healthy box. It is a compile-time constant, so it is safe to bake
+// into the command string itself (unlike TB_CLI_LATEST — see upgradeEnv).
+const upgradeCLIEnvAssign = "TB_UPGRADE_CLI=1"
 
 // The verified update command per OS. On Linux/macOS we re-run the official
 // installer ourselves: it re-downloads + cosign-verifies the release, replaces
@@ -43,24 +55,62 @@ type upgradePlan struct {
 	manual string   // command to show the user
 }
 
+// upgradeInstallerCmd is the bootstrap `tracebloc upgrade` runs on Linux/macOS:
+// the shared installer idiom (installer.Script), carrying the explicit-upgrade
+// flag so a CLI merely behind latest still gets updated instead of hitting the
+// healthy no-op (backend#2253). Built from installer.Script for the same reason
+// prepare-host is — the executed and printed strings share one source, so a
+// URL/idiom change lands everywhere at once (Bugbot #394/#397, cli#396).
+var upgradeInstallerCmd = installer.Script("", upgradeCLIEnvAssign)
+
 // upgradePlanFor returns the upgrade plan for a GOOS. Split out from runtime.GOOS
 // so it's testable on any host.
 func upgradePlanFor(goos string) upgradePlan {
 	if goos == "windows" {
 		return upgradePlan{exec: false, manual: upgradeInstallerCmdWindows}
 	}
-	// Download-then-execute the verified installer (installer.Cmd, shared with
+	// Download-then-execute the verified installer (installer.Script, shared with
 	// prepare-host and every printed remedy): its `set -e`+`curl -o` fails closed
 	// on a bad download, and running a file (not a pipe) keeps the installer's
 	// stdin on the TTY. exec and manual are deliberately the SAME string — if the
 	// run fails, the command we hand the user is byte-identical to the one that
-	// just failed.
+	// just failed. (The optional TB_CLI_LATEST hint rides the child ENVIRONMENT,
+	// not this string — see upgradeEnv — so a copy-pasted retry, which has no such
+	// env, still upgrades unconditionally under TB_UPGRADE_CLI.)
 	return upgradePlan{
 		exec:   true,
 		name:   "bash",
-		args:   []string{"-c", installer.Cmd},
-		manual: installer.Cmd,
+		args:   []string{"-c", upgradeInstallerCmd},
+		manual: upgradeInstallerCmd,
 	}
+}
+
+// upgradeEnv is the installer child's environment: the parent's, plus a FRESHLY
+// fetched latest release passed as TB_CLI_LATEST. That lets the installer skip a
+// needless CLI reinstall when we are genuinely already current and update only
+// when actually behind — the precise `cli-behind-latest` case.
+//
+// The fetch is deliberately fresh (latestReleaseVersionFresh), NOT the 24h-cached
+// latestReleaseVersion: a stale cache could equal the running version and make
+// the installer skip a real update on an explicit `tracebloc upgrade` (Bugbot).
+// Best-effort — when the fetch fails we omit TB_CLI_LATEST, and the installer
+// updates the CLI unconditionally under TB_UPGRADE_CLI (baked into the command
+// string), which still ends at latest. Any ambient TB_CLI_LATEST is stripped
+// first so a stray value in the user's shell can't drive the installer's decision
+// — mirrors prepareHostEnv's handling of TB_PREPARE_USER.
+func upgradeEnv() []string {
+	parent := os.Environ()
+	env := make([]string, 0, len(parent)+1)
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "TB_CLI_LATEST=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	if latest := latestReleaseVersionFresh(); latest != "" {
+		env = append(env, "TB_CLI_LATEST="+latest)
+	}
+	return env
 }
 
 // skipUpdateNudgeAnnotation marks a command after which main must NOT run the
@@ -128,8 +178,12 @@ Safe to run anytime; safe to re-run.`,
 			// Stream the installer straight to the user's terminal, and keep
 			// stdin wired so its interactive prompts (sign-in, etc.) still work.
 			ctx := cmd.Context()
-			c := exec.CommandContext(ctx, plan.name, plan.args...) // #nosec G204 -- upgradePlanFor(runtime.GOOS) yields compile-time constants: "bash" -c installer.Cmd; only the GOOS branch varies, no user input.
+			c := exec.CommandContext(ctx, plan.name, plan.args...) // #nosec G204 -- upgradePlanFor(runtime.GOOS) yields compile-time constants: "bash" -c installer.Script("", "TB_UPGRADE_CLI=1"); only the GOOS branch varies, no user input.
 			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+			// Hand the installer the latest release we already know (TB_CLI_LATEST)
+			// so it updates the CLI only when actually behind, not on every upgrade
+			// (backend#2253). Ambient TB_CLI_LATEST is stripped inside upgradeEnv.
+			c.Env = upgradeEnv()
 			if err := c.Run(); err != nil {
 				// User aborted (Ctrl-C) or the parent context was cancelled: exit
 				// quietly with 130 like prepare-host, not a scary "upgrade didn't
