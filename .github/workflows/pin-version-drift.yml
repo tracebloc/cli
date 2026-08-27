@@ -1,0 +1,61 @@
+name: Contract-version drift (pin freshness)
+
+# Watches the data-ingestors pin ITSELF for contract-version staleness
+# (backend#2704). scripts/sync-schema.sh --check (build.yml) answers "does my
+# vendored copy match the SHA I pinned?"; it never answers "is the SHA I pinned
+# still current?" So the pin sat a whole contract VERSION behind (layout v2 vs
+# data-ingestors@develop v3) while every drift gate stayed green.
+#
+# This job resolves scripts/.data-ingestors-ref, resolves data-ingestors'
+# current default branch, and compares the CONTRACT VERSION — the top-level
+# "version" in tracebloc_ingestor/schema/layout.v1.json — at the pin vs at HEAD.
+# Version, NOT commit distance: 180 unrelated upstream commits are fine, a
+# version bump is the finding (scripts/check-pin-version.sh).
+#
+# SCHEDULED, never a PR gate. Gating open PRs on live upstream is precisely the
+# backend#1009 failure this repo removed by pinning — an unrelated upstream
+# bump would red every open PR. So there is no `pull_request` trigger here; the
+# checker's own logic is guarded on PRs by its hermetic unit test
+# (scripts/tests/pin-version-verify.sh, run in build.yml), which touches no
+# network. The pinned PR comparison (sync-schema.sh --check) is left unchanged.
+#
+# FAIL CLOSED. A red run is the signal: version drift (exit 1) AND any
+# "cannot evaluate" — absent/malformed pin, moved path, unreachable raw URL,
+# non-JSON, missing "version" (exit 2) — both fail the job. "Cannot tell" is a
+# finding, never a green pass.
+#
+# Complements head-drift-canary.yml (weekly, advisory, never-blocking, opens a
+# tracking issue on ANY mirrored-source change). This one is narrower and
+# harder: a fail-closed gate on the semantic contract VERSION specifically.
+#
+# data-ingestors is public, so github.token suffices for the `gh api`
+# default-branch lookup and the raw fetches. If it ever goes private, add a
+# read token (CROSS_REPO_READ_TOKEN) the way head-drift-canary.yml does.
+
+on:
+  schedule:
+    - cron: "30 6 * * 1" # weekly Monday 06:30 UTC — after head-drift-canary (06:00)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pin-version-drift
+  cancel-in-progress: false
+
+jobs:
+  contract-version:
+    timeout-minutes: 10
+    name: Pinned contract version vs HEAD (fail-closed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compare pinned contract version against data-ingestors HEAD
+        # GH_TOKEN lets `gh api` resolve the current default branch. python3 and
+        # curl are preinstalled on ubuntu-latest. Non-zero exit (drift OR
+        # cannot-evaluate) reds this run by design — that IS the finding.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/check-pin-version.sh

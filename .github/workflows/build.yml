@@ -87,6 +87,10 @@ jobs:
           bash -n scripts/tests/install-verify.sh
           shellcheck --shell=bash --severity=error scripts/tests/install-ps1-verify.sh
           bash -n scripts/tests/install-ps1-verify.sh
+          shellcheck --shell=bash --severity=error scripts/check-pin-version.sh
+          shellcheck --shell=bash --severity=error scripts/tests/pin-version-verify.sh
+          bash -n scripts/check-pin-version.sh
+          bash -n scripts/tests/pin-version-verify.sh
       # format.sh's own fail-closed properties. Formatters are stubbed, so this is
       # hermetic and needs no Go toolchain — which is why it lives in this job
       # rather than Lint. It exists because the first cut of format.sh reported
@@ -108,6 +112,13 @@ jobs:
       # since "cannot tell" is not evidence that verification is mandatory.
       - name: Verification harness — Windows (mandatory cosign / fail-closed)
         run: bash scripts/tests/install-ps1-verify.sh
+      # check-pin-version.sh's fail-closed properties: contract-version DRIFT
+      # reddens (exit 1) and every "cannot evaluate" reddens (exit 2). Fetches
+      # are file:// URLs and the pin/branch are injected, so this is hermetic
+      # and needs no network — the live pin-vs-HEAD comparison is the scheduled
+      # pin-version-drift.yml, which must never gate a PR (backend#2704 / #1009).
+      - name: Pin-version watcher harness (drift reddens / fail-closed)
+        run: bash scripts/tests/pin-version-verify.sh
 
   test:
     timeout-minutes: 15
