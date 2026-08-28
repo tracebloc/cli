@@ -38,6 +38,46 @@ import (
 // (backend#2255). Test for it with errors.Is(err, helm.ErrInterrupted).
 var ErrInterrupted = errors.New("helm upgrade interrupted")
 
+// ErrAppliedNotReady marks a `helm upgrade --wait` that COMMITTED the new values
+// but then exited non-zero because the release's pods didn't become ready before
+// --timeout. It is the sibling of ErrInterrupted (backend#2587): helm applies the
+// values first, then waits, and without --atomic it does NOT roll back on a wait
+// timeout — so the resource-ceiling change is already LIVE on the cluster. Callers
+// MUST report it as "applied, may still be rolling", never as "helm upgrade
+// failed" (which reads as "nothing changed"). It is deliberately narrower than a
+// generic failure: only a genuine readiness timeout classifies here — a bad-values
+// or chart error stays a real "helm upgrade failed". Test with
+// errors.Is(err, helm.ErrAppliedNotReady).
+var ErrAppliedNotReady = errors.New("helm upgrade applied but timed out waiting for readiness")
+
+// helmWaitTimeoutSignature is the substring helm prints when a `--wait` upgrade
+// commits the release but its resources don't report ready before --timeout
+// ("Error: UPGRADE FAILED: timed out waiting for the condition"). Because helm
+// has ALREADY applied the values at that point — no --atomic, so no rollback —
+// this signature means "applied, not yet ready", distinct from a failure to
+// apply (bad values / chart error, which never carries it). (backend#2587)
+//
+// Deliberately this ONE literal, not a broader match. The generic "context
+// deadline exceeded" is intentionally EXCLUDED: helm emits it for a whole-
+// operation deadline that can trip BEFORE the release is committed, so treating
+// it as "applied" would soften a genuine not-applied failure — the one thing
+// this fix must never do. The trade-off is a helm build that words its readiness
+// timeout differently would miss this classifier and read as "helm upgrade
+// failed" again; that is the safe direction to fail, and this is the wording
+// helm has used for the readiness wait across the 3.14+ range we pin to.
+//
+// CROSS-REPO DEPENDENCY (tracebloc/client, backend#2587 review): helm reuses this
+// SAME readiness waiter for chart hooks, so a `pre-upgrade` / `pre-install` hook
+// that times out emits this SAME string BEFORE any manifest is applied — for which
+// "applied" would be a lie. This is safe ONLY because the client chart defines no
+// pre-* hooks: every hook there is post-install/post-upgrade or test, so the
+// signature can currently arise only post-commit. Nothing in THIS repo enforces
+// that — adding a `pre-upgrade` hook to the client chart would flip this classifier
+// from correct to silently wrong without touching this file or failing any test
+// here. If you add one, gate it (or re-scope this signature) so a pre-apply hook
+// timeout stays a real "helm upgrade failed".
+const helmWaitTimeoutSignature = "timed out waiting for the condition"
+
 // sigintExit is a child's exit code after SIGINT (128 + SIGINT): helm exits this
 // on a terminal Ctrl-C. Mirrors exitInterrupted in the cli package.
 const sigintExit = 130
@@ -177,6 +217,15 @@ func Upgrade(ctx context.Context, p UpgradeParams) (Plan, error) {
 			// "helm upgrade failed" (backend#2255).
 			return plan(chartRef, args, valuesYAML), ErrInterrupted
 		}
+		if readinessTimedOut(out) {
+			// A `--wait` readiness timeout — NOT a failure to apply. helm already
+			// committed the new values, then exited non-zero because the jobs-manager
+			// didn't become ready in time; without --atomic there's no rollback, so
+			// the ceiling change is LIVE. Hand back the resolved Plan (not Plan{}) so
+			// the caller can show what landed, flagged with ErrAppliedNotReady so it's
+			// reported reassuringly instead of "helm upgrade failed" (backend#2587).
+			return plan(chartRef, args, valuesYAML), ErrAppliedNotReady
+		}
 		return Plan{}, fmt.Errorf("helm upgrade failed: %w\n%s", uerr, strings.TrimSpace(out))
 	}
 	return plan(chartRef, args, valuesYAML), nil
@@ -199,6 +248,16 @@ func runInterrupted(ctx context.Context, runErr error) bool {
 	return false
 }
 
+// readinessTimedOut reports whether a failed `helm upgrade --wait` failed only
+// because its resources didn't become ready before --timeout — the values were
+// already committed. It keys on helm's own combined output rather than the exit
+// code (a wait timeout and a genuine apply/config error both exit 1): only a real
+// readiness timeout carries the helmWaitTimeoutSignature, so a bad-values or chart
+// error never matches here and stays a "helm upgrade failed" (backend#2587).
+func readinessTimedOut(out string) bool {
+	return strings.Contains(out, helmWaitTimeoutSignature)
+}
+
 // buildArgs assembles the helm upgrade argv. Order mirrors the installer/cronjob:
 // release, chart, --namespace, [--kube-context], [--kubeconfig], --version, reuse,
 // -f values, --wait --timeout. Context/kubeconfig/version are appended only when
@@ -214,6 +273,11 @@ func buildArgs(p UpgradeParams, chartRef, reuseFlag, valuesPath, timeout string)
 	if p.ChartVersion != "" {
 		args = append(args, "--version", p.ChartVersion)
 	}
+	// DO NOT add --atomic here without revisiting ErrAppliedNotReady: --atomic
+	// makes helm ROLL BACK on a --wait timeout, which would make the "the change
+	// is applied" reassurance a lie (the readiness-timeout classifier keys on the
+	// same output that --atomic would emit AFTER reverting). The applied-not-ready
+	// contract depends on there being no rollback on timeout (backend#2587).
 	args = append(args, reuseFlag, "-f", valuesPath, "--wait", "--timeout", timeout)
 	return args
 }

@@ -21,6 +21,10 @@ type fakeRunner struct {
 	// failErr overrides the error returned on a failOn match (default errBoom) —
 	// e.g. a real *exec.ExitError so the interrupt classifier can be exercised.
 	failErr error
+	// failOut overrides the combined output returned on a failOn match (default
+	// "boom") — e.g. helm's readiness-timeout signature so the applied-not-ready
+	// classifier can be exercised (backend#2587).
+	failOut string
 }
 
 func (f *fakeRunner) run(_ context.Context, name string, args ...string) (string, error) {
@@ -28,10 +32,14 @@ func (f *fakeRunner) run(_ context.Context, name string, args ...string) (string
 	f.calls = append(f.calls, call)
 	joined := strings.Join(call, " ")
 	if f.failOn != "" && strings.Contains(joined, f.failOn) {
-		if f.failErr != nil {
-			return "boom", f.failErr
+		out := "boom"
+		if f.failOut != "" {
+			out = f.failOut
 		}
-		return "boom", errBoom
+		if f.failErr != nil {
+			return out, f.failErr
+		}
+		return out, errBoom
 	}
 	if len(args) >= 2 && args[0] == "upgrade" && args[1] == "--help" {
 		return f.help, nil
@@ -272,6 +280,63 @@ func TestUpgrade_HelmExit130IsInterrupt(t *testing.T) {
 	// Plan comes back populated so the caller can surface what was in flight.
 	if !strings.Contains(plan.Command, "upgrade client-123") {
 		t.Errorf("interrupt must return the resolved Plan, got %+v", plan)
+	}
+}
+
+// TestUpgrade_WaitTimeoutIsAppliedNotReady is the applied-but-not-ready half of
+// the backend#2587 contrast: helm committed the new values, then `--wait` exited
+// non-zero because the pods didn't become ready before --timeout. Its combined
+// output carries "timed out waiting for the condition", so it must surface as
+// ErrAppliedNotReady — NOT "helm upgrade failed" (the change is live) and NOT an
+// interrupt. The resolved Plan comes back so the caller can show what landed.
+func TestUpgrade_WaitTimeoutIsAppliedNotReady(t *testing.T) {
+	f := &fakeRunner{
+		help:    "  --reset-then-reuse-values",
+		failOn:  "upgrade client-123",
+		failErr: errors.New("exit status 1"), // helm's wait timeout exits 1, not 130
+		failOut: "Error: UPGRADE FAILED: timed out waiting for the condition",
+	}
+	install(t, f)
+
+	plan, err := Upgrade(context.Background(), baseParams())
+	if !errors.Is(err, ErrAppliedNotReady) {
+		t.Fatalf("a --wait readiness timeout must yield ErrAppliedNotReady, got %v", err)
+	}
+	if errors.Is(err, ErrInterrupted) {
+		t.Errorf("a readiness timeout is not an interrupt: %v", err)
+	}
+	if strings.Contains(err.Error(), "helm upgrade failed") {
+		t.Errorf("applied-but-not-ready must not be framed as a helm failure: %v", err)
+	}
+	// Plan is populated so the caller can surface what was applied.
+	if !strings.Contains(plan.Command, "upgrade client-123") {
+		t.Errorf("applied-not-ready must return the resolved Plan, got %+v", plan)
+	}
+}
+
+// TestUpgrade_GenuineFailureIsNotAppliedNotReady is the other half of that
+// contrast: a genuine apply/config failure (bad values, chart error) exits
+// non-zero too, but WITHOUT helm's readiness-timeout signature — so it must stay a
+// real "helm upgrade failed" and NEVER be softened into ErrAppliedNotReady. Do not
+// soften genuine failures (backend#2587).
+func TestUpgrade_GenuineFailureIsNotAppliedNotReady(t *testing.T) {
+	f := &fakeRunner{
+		help:    "  --reset-then-reuse-values",
+		failOn:  "upgrade client-123",
+		failErr: errors.New("exit status 1"),
+		failOut: "Error: UPGRADE FAILED: values don't meet the specifications of the schema",
+	}
+	install(t, f)
+
+	_, err := Upgrade(context.Background(), baseParams())
+	if err == nil {
+		t.Fatal("expected an error when helm upgrade fails on bad values")
+	}
+	if errors.Is(err, ErrAppliedNotReady) {
+		t.Errorf("a genuine apply failure must NOT be classified as applied-but-not-ready: %v", err)
+	}
+	if !strings.Contains(err.Error(), "helm upgrade failed") {
+		t.Errorf("a genuine failure should read as a helm failure: %v", err)
 	}
 }
 
