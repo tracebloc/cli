@@ -630,6 +630,50 @@ func TestSet_GenuineHelmFailureExitsFailure(t *testing.T) {
 	}
 }
 
+// timedOutHelm installs a helm.Runner whose mutating `helm upgrade` fails with
+// helm's `--wait` readiness-timeout signature in its combined output — the
+// "values applied, but pods not ready in time" case (backend#2587). The reuse-flag
+// probe and repo calls still succeed.
+func timedOutHelm(t *testing.T) {
+	t.Helper()
+	orig := helm.Runner
+	helm.Runner = func(_ context.Context, name string, args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "upgrade" && args[1] == "--help" {
+			return "  --reset-then-reuse-values", nil // reuse-flag probe
+		}
+		if len(args) >= 2 && args[0] == "upgrade" { // the mutating upgrade
+			return "Error: UPGRADE FAILED: timed out waiting for the condition", errors.New("exit status 1")
+		}
+		return "", nil // repo list / add / update
+	}
+	t.Cleanup(func() { helm.Runner = orig })
+}
+
+// TestSet_WaitTimeoutReportedAsApplied: a `helm upgrade --wait` readiness timeout
+// committed the values, so `resources set` must report it as APPLIED — exit 0 with
+// a reassuring "may still be rolling" note — never exit 1 "helm upgrade failed",
+// which reads as "nothing changed" (backend#2587, sibling of the interrupt case).
+func TestSet_WaitTimeoutReportedAsApplied(t *testing.T) {
+	timedOutHelm(t)
+	cs := csWith("8", "32Gi", map[string]string{"RESOURCE_LIMITS": "cpu=2,memory=8Gi"})
+
+	var buf bytes.Buffer
+	err := applyResourcesSet(context.Background(), ui.New(&buf, ui.WithColor(false)), nil,
+		setTarget(cs), cluster.KubeconfigOptions{Path: "/tmp/kc"},
+		setReq{cores: "4", coresSet: true, yes: true})
+
+	if err != nil {
+		t.Fatalf("a --wait readiness timeout applied the values — must not error, got %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "the change is applied") || !strings.Contains(out, "may still be rolling") {
+		t.Errorf("timeout output should reassure the change applied and may still be rolling:\n%s", out)
+	}
+	if strings.Contains(out, "helm upgrade failed") {
+		t.Errorf("must not frame an applied-but-not-ready timeout as a helm failure:\n%s", out)
+	}
+}
+
 // TestSet_PreUpgradeInterruptIsQuiet: a Ctrl-C during the repo add/update phase —
 // BEFORE the mutating `helm upgrade` — exits quietly (130) like the rest of the
 // CLI, not a scary exit-1 "context canceled". But since nothing was applied yet,
