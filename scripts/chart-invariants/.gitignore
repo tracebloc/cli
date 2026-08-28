@@ -1,0 +1,4 @@
+# `go build` in this dir drops a binary named after the package ("chart-invariants").
+# The tool is only ever run via `go run ./scripts/chart-invariants` (CI + docs), so
+# that binary is a local build artifact — never commit it. (One was, once; removed.)
+/chart-invariants
