@@ -65,6 +65,17 @@ var ErrAppliedNotReady = errors.New("helm upgrade applied but timed out waiting 
 // timeout differently would miss this classifier and read as "helm upgrade
 // failed" again; that is the safe direction to fail, and this is the wording
 // helm has used for the readiness wait across the 3.14+ range we pin to.
+//
+// CROSS-REPO DEPENDENCY (tracebloc/client, backend#2587 review): helm reuses this
+// SAME readiness waiter for chart hooks, so a `pre-upgrade` / `pre-install` hook
+// that times out emits this SAME string BEFORE any manifest is applied — for which
+// "applied" would be a lie. This is safe ONLY because the client chart defines no
+// pre-* hooks: every hook there is post-install/post-upgrade or test, so the
+// signature can currently arise only post-commit. Nothing in THIS repo enforces
+// that — adding a `pre-upgrade` hook to the client chart would flip this classifier
+// from correct to silently wrong without touching this file or failing any test
+// here. If you add one, gate it (or re-scope this signature) so a pre-apply hook
+// timeout stays a real "helm upgrade failed".
 const helmWaitTimeoutSignature = "timed out waiting for the condition"
 
 // sigintExit is a child's exit code after SIGINT (128 + SIGINT): helm exits this
