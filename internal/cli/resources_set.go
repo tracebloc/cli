@@ -626,6 +626,31 @@ func persistCeiling(ctx context.Context, p *ui.Printer, target *clusterTarget, o
 			p.Detailf("in-flight command: %s", plan.Command) // verbose-only
 			return &exitError{code: exitInterrupted}
 		}
+		// A `helm upgrade --wait` readiness timeout is the sibling of the interrupt
+		// above (backend#2587), but with LESS uncertainty: helm committed the new
+		// values and only the readiness wait timed out, so the change is applied and
+		// live — the jobs-manager is likely still rolling. Report it as applied (exit
+		// 0, the documented "applied" outcome) with a reassuring note to re-check,
+		// never "helm upgrade failed" — which reads as "nothing changed" and sends
+		// the user off to re-run blind.
+		if errors.Is(err, helm.ErrAppliedNotReady) {
+			p.Newline()
+			p.Successf("Each training run may now use up to %s — the change is applied.", perRunSize(d))
+			if gpuRemoved {
+				// BuildEnvSpec wrote the explicit no-GPU value, so the GPU really is
+				// gone (same honesty as the success path below).
+				p.Hintf("GPU access removed — training runs will use CPU only.")
+			}
+			p.Warnf("tracebloc's jobs-manager didn't report ready within the timeout — it may still be rolling.")
+			p.Hintf("Re-run `%s resources set` to see the current per-run ceiling, or `%s doctor` to check health.", launcher(), launcher())
+			// Same reassurances a clean apply gives — they matter most here, while
+			// the jobs-manager is mid-roll (reused verbatim from the success path
+			// below, so no new user-facing strings).
+			p.Hintf("Applies to your next training run; a run already going keeps its size.")
+			p.Hintf("Only tracebloc's small jobs-manager restarts — running training isn't interrupted.")
+			p.Detailf("command: %s", plan.Command) // verbose-only
+			return nil
+		}
 		// A Ctrl-C that landed BEFORE the mutating upgrade (during the reuse-flag
 		// probe or the repo add/update) — nothing was applied, so no "may have
 		// applied" note, but still a quiet 130 like the rest of the CLI rather than
