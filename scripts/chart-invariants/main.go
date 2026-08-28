@@ -1,4 +1,4 @@
-// Command chart-invariants asserts the 8 tracebloc/client chart invariants the
+// Command chart-invariants asserts the 9 tracebloc/client chart invariants the
 // CLI hardcodes for discovery, doctor, and dataset ingest (cli#290). It reads a
 // `helm template` render (multi-doc YAML) from a file argument or stdin and
 // exits non-zero when any invariant no longer holds — so a chart rename that
@@ -32,6 +32,14 @@
 //     container must expose that port and the chart must still document the
 //     path (the rendered manifests carry it in comments — a client-runtime
 //     endpoint move updates those in the same breath).
+//  9. No pre-apply hooks — internal/helm/upgrade.go's Upgrade classifier reads
+//     helm's "timed out waiting for the condition" as ErrAppliedNotReady
+//     ("values committed, still rolling"). That holds only because helm emits
+//     that string for the post-commit `--wait`; helm reuses the SAME waiter for
+//     chart hooks, so a pre-install/pre-upgrade hook that times out emits it
+//     BEFORE any manifest is applied — turning the classifier into a false
+//     "applied". The chart defines no such hooks today; this keeps it that way
+//     (backend#2792).
 //
 // Usage:
 //
@@ -97,12 +105,13 @@ func run(args []string, stdin io.Reader, out io.Writer) int {
 	c.checkIngestorDigestEnv()
 	c.checkRequestsProxy()
 	c.checkSubmitPath()
+	c.checkNoPreHooks()
 	printf(out, "──────────────────────────────────────────────────────────────\n")
 	if c.failed > 0 {
-		printf(out, "DRIFT: %d invariant(s) broken. Fix the chart, or bump the CLI-side constants (internal/cluster, internal/doctor, internal/submit) together with scripts/.client-ref in one deliberate PR.\n", c.failed)
+		printf(out, "DRIFT: %d invariant(s) broken. Fix the chart, or bump the CLI-side constants (internal/cluster, internal/doctor, internal/submit, internal/helm) together with scripts/.client-ref in one deliberate PR.\n", c.failed)
 		return 1
 	}
-	printf(out, "all 8 invariants hold.\n")
+	printf(out, "all 9 invariants hold.\n")
 	return 0
 }
 
@@ -459,4 +468,42 @@ func (c *checker) checkSubmitPath() {
 		return
 	}
 	c.ok(n, "jobs-manager exposes containerPort 8080 and the chart still references POST /internal/submit-ingestion-run (SubmitPath)")
+}
+
+// 9. No pre-install / pre-upgrade hooks. The CLI's Upgrade classifier
+// (internal/helm/upgrade.go, helmWaitTimeoutSignature -> ErrAppliedNotReady)
+// reads helm's "timed out waiting for the condition" as "values committed, still
+// rolling", which is true ONLY because helm emits that string for the post-commit
+// `--wait`. helm reuses the SAME waiter for chart hooks, so a pre-install or
+// pre-upgrade hook that times out emits the SAME string BEFORE any manifest is
+// applied — for which "applied" is a lie (backend#2792). The client chart defines
+// no pre-apply hooks today; this asserts it stays that way, so that classifier
+// cannot silently flip to false-success. Add one and you MUST re-scope
+// helmWaitTimeoutSignature (or gate the hook) first.
+//
+// Scoped to pre-install/pre-upgrade — the two events `helm upgrade [--install]`
+// runs pre-commit, the only path that reaches the classifier. pre-delete and
+// pre-rollback run under operations the CLI never drives here, so a legitimate
+// cleanup/rollback hook is not flagged. Matched token-wise (helm.sh/hook is a
+// comma-separated event list), not by substring, so post-install et al. are safe.
+func (c *checker) checkNoPreHooks() {
+	const n = 9
+	var offenders []string
+	for _, d := range c.docs {
+		hook := digStr(d, "metadata", "annotations", "helm.sh/hook")
+		if hook == "" {
+			continue
+		}
+		for _, ev := range strings.Split(hook, ",") {
+			if e := strings.TrimSpace(ev); e == "pre-install" || e == "pre-upgrade" {
+				offenders = append(offenders, fmt.Sprintf("%s/%s (helm.sh/hook: %s)", kind(d), name(d), strings.TrimSpace(hook)))
+				break // one entry per offending doc, even if it lists both events
+			}
+		}
+	}
+	if len(offenders) > 0 {
+		c.fail(n, "the chart defines pre-apply hook(s): %s — a pre-install/pre-upgrade hook that times out emits helm's readiness-timeout string BEFORE anything is committed, so the CLI's Upgrade classifier (internal/helm/upgrade.go, ErrAppliedNotReady) would report \"applied\" when nothing was. Re-scope helmWaitTimeoutSignature (or gate the hook) before adding one", strings.Join(offenders, "; "))
+		return
+	}
+	c.ok(n, "no pre-install/pre-upgrade hooks — the CLI's readiness-timeout classifier (ErrAppliedNotReady) can arise only post-commit")
 }
