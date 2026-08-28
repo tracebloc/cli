@@ -8,9 +8,10 @@ import (
 	"testing"
 )
 
-// goodRender is a minimal render carrying every shape the 8 invariants assert.
-// It tests the CHECKER's logic — the real chart is exercised in CI at the
-// pinned ref (scripts/.client-ref) by .github/workflows/chart-drift.yml.
+// goodRender is a minimal render carrying every shape the invariants assert
+// (and, for invariant 9, none they forbid — it defines no pre-apply hooks). It
+// tests the CHECKER's logic — the real chart is exercised in CI at the pinned
+// ref (scripts/.client-ref) by .github/workflows/chart-drift.yml.
 const goodRender = `---
 apiVersion: v1
 kind: ServiceAccount
@@ -103,7 +104,7 @@ func TestAllInvariantsHold(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("want exit 0 on the good render, got %d:\n%s", code, out)
 	}
-	if !strings.Contains(out, "all 8 invariants hold") {
+	if !strings.Contains(out, "all 9 invariants hold") {
 		t.Fatalf("missing success line:\n%s", out)
 	}
 }
@@ -274,5 +275,55 @@ func TestUnparseableRenderIsAnError(t *testing.T) {
 	}
 	if code, _ := runOn(t, ""); code != 2 {
 		t.Fatalf("want exit 2 on an empty render, got %d", code)
+	}
+}
+
+// withHook appends a hook Job carrying the given helm.sh/hook value to the good
+// render. Mirrors what `helm template` emits: hooks render as ordinary manifests
+// distinguished only by the annotation.
+func withHook(events string) string {
+	return goodRender + `---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: tracebloc
+  annotations:
+    "helm.sh/hook": ` + events + "\n"
+}
+
+// Invariant 9: a pre-install/pre-upgrade hook in the render must FAIL the gate.
+// If it did not, adding such a hook to the client chart would ship green here
+// while flipping the CLI's readiness-timeout classifier to a silent false
+// "applied" — exactly the false-success this asserts against (backend#2792).
+func TestPreHookFailsInvariant9(t *testing.T) {
+	for _, events := range []string{
+		"pre-upgrade",
+		"pre-install",
+		"pre-install,pre-upgrade",
+		"post-install,pre-upgrade", // a mixed list is caught on its pre-* member
+	} {
+		t.Run("fails/"+events, func(t *testing.T) {
+			code, out := runOn(t, withHook(events))
+			if code != 1 {
+				t.Fatalf("want exit 1 for helm.sh/hook %q, got %d:\n%s", events, code, out)
+			}
+			if !strings.Contains(out, "✖ 9.") {
+				t.Fatalf("want a ✖ 9. failure for %q, got:\n%s", events, out)
+			}
+		})
+	}
+	// Post-* and test hooks run AFTER the commit, so the classifier stays honest —
+	// invariant 9 must not flag them (and no pre-* substring false-positive).
+	for _, events := range []string{"post-install,post-upgrade", "test", "pre-delete", "pre-rollback"} {
+		t.Run("allows/"+events, func(t *testing.T) {
+			code, out := runOn(t, withHook(events))
+			if code != 0 {
+				t.Fatalf("want exit 0 for benign helm.sh/hook %q, got %d:\n%s", events, code, out)
+			}
+			if !strings.Contains(out, "all 9 invariants hold") {
+				t.Fatalf("hook %q must not trip invariant 9, got:\n%s", events, out)
+			}
+		})
 	}
 }

@@ -1,11 +1,13 @@
 name: Chart drift (cross-repo)
 
-# The CLI hardcodes 8 invariants about the tracebloc/client chart — discovery
+# The CLI hardcodes 9 invariants about the tracebloc/client chart — discovery
 # labels + Deployment name forms, the jobs-manager Service on 8080, the
 # client-pvc mount at /data/shared, the ingestion-authz ConfigMap + "ingestor"
 # SA fallback, the INGESTOR_IMAGE_DIGEST env, the requests-proxy Deployment,
-# and the /internal/submit-ingestion-run port. A chart rename ships green in
-# BOTH repos and breaks discovery/doctor/ingest in the field (cli#290).
+# the /internal/submit-ingestion-run port, and no pre-install/pre-upgrade hooks
+# (which would flip the CLI's readiness-timeout classifier to a false "applied",
+# backend#2792). A chart rename ships green in BOTH repos and breaks
+# discovery/doctor/ingest in the field (cli#290).
 #
 # This gate renders the chart at the PINNED ref in scripts/.client-ref (same
 # pattern as build.yml's schema-drift job with scripts/.data-ingestors-ref:
@@ -28,6 +30,7 @@ on:
     paths:
       - "internal/cluster/**"
       - "internal/doctor/**"
+      - "internal/helm/**"
       - "scripts/.client-ref"
       - "scripts/chart-invariants/**"
       - ".github/workflows/chart-drift.yml"
@@ -97,6 +100,6 @@ jobs:
             -f client/client/ci/bm-values.yaml > rendered.yaml
           echo "rendered $(grep -c '^kind:' rendered.yaml) objects @ $CLIENT_REF"
 
-      - name: Assert the 8 CLI-assumed chart invariants
+      - name: Assert the 9 CLI-assumed chart invariants
         working-directory: cli
         run: go run ./scripts/chart-invariants -release tracebloc -namespace tracebloc ../rendered.yaml
