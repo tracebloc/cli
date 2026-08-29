@@ -71,11 +71,13 @@ var ErrAppliedNotReady = errors.New("helm upgrade applied but timed out waiting 
 // that times out emits this SAME string BEFORE any manifest is applied — for which
 // "applied" would be a lie. This is safe ONLY because the client chart defines no
 // pre-* hooks: every hook there is post-install/post-upgrade or test, so the
-// signature can currently arise only post-commit. Nothing in THIS repo enforces
-// that — adding a `pre-upgrade` hook to the client chart would flip this classifier
-// from correct to silently wrong without touching this file or failing any test
-// here. If you add one, gate it (or re-scope this signature) so a pre-apply hook
-// timeout stays a real "helm upgrade failed".
+// signature can currently arise only post-commit. That assumption is now ENFORCED:
+// scripts/chart-invariants asserts it as invariant 9 (checkNoPreHooks), and
+// .github/workflows/chart-drift.yml runs it against the pinned client chart render,
+// so a pre-install/pre-upgrade hook added to the chart reds CI here rather than
+// silently flipping this classifier to a false "applied". If you must add one, that
+// gate will demand you re-scope this signature (or gate the hook) first, so a
+// pre-apply hook timeout stays a real "helm upgrade failed" (backend#2792).
 const helmWaitTimeoutSignature = "timed out waiting for the condition"
 
 // sigintExit is a child's exit code after SIGINT (128 + SIGINT): helm exits this
