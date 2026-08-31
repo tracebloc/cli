@@ -144,7 +144,7 @@ func runResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, opts clust
 	// single-client path there's no note and the confirm/dry-run self-lead
 	// supplies the only leading blank — so `set` keeps NO pre-resolve Newline()
 	// and never regresses the #375 double-blank (§380).
-	target, err := resolveClusterTarget(ctx, p, opts, binding, false, true)
+	target, err := resolveClusterTarget(ctx, p, opts, binding, false, true, true)
 	if err != nil {
 		return binding.explain(ctx, err)
 	}

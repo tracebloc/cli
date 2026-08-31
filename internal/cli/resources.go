@@ -91,7 +91,7 @@ func runResourcesShow(ctx context.Context, p *ui.Printer, opts cluster.Kubeconfi
 	binding := bindActiveClientNamespace(&opts)
 	// leadRedirect=true: this resolve is the command's first output, so the
 	// multi-client redirect note self-leads its one leading blank (§380).
-	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true)
+	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true, false)
 	if err != nil {
 		return binding.explain(ctx, err)
 	}

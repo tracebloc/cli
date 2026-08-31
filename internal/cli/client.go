@@ -918,6 +918,11 @@ func setActiveClient(p *config.Profile, c *api.ProvisionedClient) {
 	p.ActiveClientID = strconv.Itoa(c.ID)
 	p.ActiveClientNamespace = c.Namespace
 	p.ActiveClientName = c.Name
+	// WHICH CLUSTER, not just which namespace (backend#2863). The namespace cache
+	// alone let a mutating command bind the right namespace on the wrong cluster;
+	// this is the anchor guardActiveClientCluster compares against. The backend
+	// record is authoritative — same value, so the two can never disagree.
+	p.ActiveClientClusterID = c.ClusterID
 }
 
 // renderClientReview shows the assembled inputs before the confirm prompt, so
