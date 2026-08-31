@@ -89,9 +89,22 @@ type pushJSONSummary struct {
 // --output-json mode). Errors are dropped: marshaling our own struct
 // can't fail in practice, and the exit code remains the contract.
 func writePushJSON(w io.Writer, status string, spec map[string]any, s *submit.Summary, ns, jobName string) {
+	// THE TABLE THAT WAS ACTUALLY CREATED, not the one that was asked for
+	// (tracebloc/backend#2895). `spec["table"]` is the operator's --name; under
+	// the cluster's per-ingestion-tables mode the physical table is a `ds_<hex>`
+	// handle, so echoing the label named a table that does not exist — and
+	// `data delete <that value>` then failed on a dataset just created.
+	//
+	// The ingestor reports the real name in its banner; prefer it, and fall back
+	// to the requested name when it is absent (older ingestor, or a run that
+	// failed before the banner) so output stays byte-identical there.
+	table := fmt.Sprintf("%v", spec["table"])
+	if s != nil && s.DestinationTable != "" {
+		table = s.DestinationTable
+	}
 	res := pushJSONResult{
 		Status:    status,
-		Table:     fmt.Sprintf("%v", spec["table"]),
+		Table:     table,
 		Category:  fmt.Sprintf("%v", spec["category"]),
 		Intent:    fmt.Sprintf("%v", spec["intent"]),
 		Namespace: ns,

@@ -504,6 +504,7 @@ screen. %s/%d are runtime placeholders.
 "decoding submit response (got body %q): %w"
 "deleting stage Pod %s/%s: %w"
 "destination"
+"destination table"
 "docker info reported cores=%d mem=%d"
 "docker info returned %q, want two fields"
 "docker info: %w"

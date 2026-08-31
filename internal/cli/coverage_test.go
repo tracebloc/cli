@@ -367,3 +367,76 @@ func TestRunClusterInfo_BadKubeconfigExitsThree(t *testing.T) {
 		t.Errorf("exit code = %d, want 3 (kubeconfig/local-input error)", ee.Code())
 	}
 }
+
+// ---------------------------------------------------------------------------
+//  backend#2895 — --output-json must name the table that was CREATED.
+//
+//  `spec["table"]` is the operator's --name. Under per-ingestion tables the
+//  physical table is a `ds_<hex>` handle, so echoing the label emitted
+//  `"table": "<label>"` for a table that does not exist — and feeding that value
+//  to `data delete` failed on a dataset just created. The delete path already
+//  reports "the REAL (case-resolved) spelling, not the raw argument"; ingest
+//  now holds itself to the same standard.
+// ---------------------------------------------------------------------------
+
+func TestWritePushJSON_ReportsPhysicalTableWhenIngestorNamesIt(t *testing.T) {
+	spec := map[string]any{"table": "dropcheck_train", "category": "tabular_classification", "intent": "train"}
+	s := &submit.Summary{
+		IngestorID:       "46ad219b-8192-4be3-a0eb-3d9120fa10b4",
+		DestinationTable: "ds_46ad219b81924be3a0eb3d9120fa10b4",
+		TotalRecords:     30000, InsertedRecords: 30000, APISentRecords: 30000,
+	}
+
+	var buf bytes.Buffer
+	writePushJSON(&buf, "succeeded", spec, s, "ns1", "ingest-job-x")
+
+	var got pushJSONResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	if got.Table != "ds_46ad219b81924be3a0eb3d9120fa10b4" {
+		t.Errorf("Table = %q, want the physical handle the ingestor reported", got.Table)
+	}
+	// The whole point: the emitted value must not be the label, because the
+	// label is not addressable by `data delete` / `data list`.
+	if got.Table == "dropcheck_train" {
+		t.Error("Table echoed the operator's --name, which names no table that exists")
+	}
+}
+
+func TestWritePushJSON_FallsBackToRequestedNameWhenUnreported(t *testing.T) {
+	// Older ingestor, or a run that failed before the banner: the field is
+	// empty and output must stay byte-identical to today's rather than
+	// emitting an empty table.
+	spec := map[string]any{"table": "reg_train", "category": "tabular_regression", "intent": "train"}
+	s := &submit.Summary{IngestorID: "run-1", TotalRecords: 240, InsertedRecords: 240}
+
+	var buf bytes.Buffer
+	writePushJSON(&buf, "succeeded", spec, s, "ns1", "ingest-job-x")
+
+	var got pushJSONResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	if got.Table != "reg_train" {
+		t.Errorf("Table = %q, want the requested name as fallback", got.Table)
+	}
+}
+
+func TestWritePushJSON_FallsBackWhenThereIsNoSummaryAtAll(t *testing.T) {
+	// A submit/auth failure emits JSON with a nil summary. Dereferencing it to
+	// read the table would panic on the error path — the one place output
+	// matters most.
+	spec := map[string]any{"table": "reg_train", "category": "tabular_regression", "intent": "train"}
+
+	var buf bytes.Buffer
+	writePushJSON(&buf, "submit_error", spec, nil, "ns1", "")
+
+	var got pushJSONResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	if got.Table != "reg_train" {
+		t.Errorf("Table = %q, want the requested name when no summary exists", got.Table)
+	}
+}
