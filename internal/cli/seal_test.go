@@ -22,7 +22,7 @@ import (
 func stubSealTarget(t *testing.T) {
 	t.Helper()
 	orig := resolveClusterTargetFn
-	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _ bool) (*clusterTarget, error) {
+	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _, _ bool) (*clusterTarget, error) {
 		return &clusterTarget{
 			Resolved: &cluster.ResolvedConfig{Context: "resolved-ctx", Namespace: "acme"},
 			Release:  &cluster.ParentRelease{ReleaseName: "acme"},
@@ -312,7 +312,7 @@ func TestSeal_HookListError_NoVerdict(t *testing.T) {
 // §7.3 binding-miss rewrite path returns exit 4) — the seal check adds nothing.
 func TestSeal_ResolveErrorPropagates(t *testing.T) {
 	orig := resolveClusterTargetFn
-	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _ bool) (*clusterTarget, error) {
+	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _, _ bool) (*clusterTarget, error) {
 		return nil, &exitError{code: exitNoWorkspace, err: errors.New("no tracebloc client found in namespace \"acme\"")}
 	}
 	t.Cleanup(func() { resolveClusterTargetFn = orig })

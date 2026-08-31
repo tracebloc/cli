@@ -8,8 +8,14 @@
 // Grounding (verified against tracebloc/client + client-runtime, 2026-07):
 //   - The machine's capacity is the sum of Ready nodes' Status.Allocatable
 //     (the installer path is single-node, so this is normally one node).
-//   - A training run's ceiling is the jobs-manager env RESOURCE_LIMITS
-//     ("cpu=2,memory=8Gi", requests==limits for Guaranteed QoS). This is the
+//   - A training run's ceiling is the jobs-manager env RESOURCE_LIMITS. This
+//     package writes it equal to RESOURCE_REQUESTS on both dimensions, so a CPU
+//     training pod comes out Guaranteed. Two caveats this comment used to elide
+//     (backend#2872): the built-in fallback is the contract floor
+//     cpu=1,memory=2Gi since backend#2254, not the "cpu=2,memory=8Gi" named
+//     here before; and a GPU pod is BestEffort whatever this writes, because
+//     client-runtime's GPU path sets only nvidia.com/gpu and ephemeral-storage
+//     and neither counts toward QoS (backend#2871). This is the
 //     exact value client-runtime's jobs_manager.py stamps on spawned jobs and
 //     the same value `cluster doctor`'s checkNodeFit already parses — so the two
 //     read it identically (di#358 lesson: a reader must mirror the writer).
@@ -135,7 +141,9 @@ func MachineCapacity(nodes []corev1.Node) Machine {
 
 // ParseTraining reads the per-run ceiling from a jobs-manager env map. It
 // prefers RESOURCE_LIMITS (the true ceiling) and falls back to RESOURCE_REQUESTS
-// (requests==limits by chart contract), then to the chart default so an older
+// (which this package writes equal to the limits; NOT a chart-wide contract --
+// the chart's derive path writes no cpu limit at all since backend#2418,
+// backend#2872), then to the chart default so an older
 // chart without the literal env still reports the effective size. GPU is read
 // from GPU_LIMITS, then GPU_REQUESTS.
 func ParseTraining(env map[string]string) Training {

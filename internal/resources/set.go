@@ -194,8 +194,15 @@ func MemFloorText() string  { return "2 GiB" }
 const NoGPUEnvValue = ""
 
 // BuildEnvSpec renders a per-run ceiling into the exact chart env the run is
-// stamped with. RESOURCE_REQUESTS == RESOURCE_LIMITS (Guaranteed QoS, the chart
-// contract), both "cpu=X,memory=Y".
+// stamped with. RESOURCE_REQUESTS == RESOURCE_LIMITS, both "cpu=X,memory=Y" --
+// which yields a Guaranteed CPU training pod.
+//
+// NOT "the chart contract", as this said until backend#2872. The chart's own
+// DERIVE path (DERIVE_JOB_ENVELOPE) writes no cpu limit at all since
+// backend#2418, so requests == limits is this package's choice for the explicit
+// envelope, not a chart-wide invariant -- and calling it a contract is what let
+// the claim survive after #2418 falsified it elsewhere. A GPU pod is BestEffort
+// regardless of what is written here (backend#2871).
 //
 // Every dimension is ALWAYS written — never omitted. The apply uses
 // `helm upgrade --reset-then-reuse-values`, which re-applies the release's

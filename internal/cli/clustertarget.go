@@ -94,7 +94,12 @@ type clusterTarget struct {
 // note then self-leads its one clean leading blank), false when the command has
 // already printed something before resolving (data ingest's "Connecting…", data
 // delete's warning — the note stays inline, no mid-output blank). See §380.
-func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, b activeClientBinding, needPVC, leadRedirect bool) (*clusterTarget, error) {
+// mutates is NOT a convenience flag — it is the compiler making every caller decide.
+// A mutating command that reaches the wrong cluster writes to it (backend#2863), so
+// the choice must be impossible to omit rather than an opt-in helper a new command
+// forgets to call. `true` runs guardActiveClientCluster before the target is handed
+// back; `false` is a read.
+func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, b activeClientBinding, needPVC, leadRedirect, mutates bool) (*clusterTarget, error) {
 	resolved, err := loadClusterFn(opts)
 	if err != nil {
 		return nil, &exitError{code: exitLocalEnv, err: fmt.Errorf("loading kubeconfig: %w", err)}
@@ -126,6 +131,14 @@ func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.Kubec
 	// prints) keys on Resolved.Namespace, so it must follow.
 	resolved.Namespace = nsUsed
 	t := &clusterTarget{Resolved: resolved, Clientset: cs, Release: release}
+	// Identity check BEFORE the PVC discovery below and before the target is handed
+	// back, so a mutating command cannot have touched anything by the time it is told
+	// this is the wrong cluster.
+	if mutates {
+		if err := guardActiveClientCluster(ctx, p, t); err != nil {
+			return nil, err
+		}
+	}
 	if needPVC {
 		pvc, err := cluster.DiscoverSharedPVC(ctx, cs, resolved.Namespace)
 		if err != nil {
