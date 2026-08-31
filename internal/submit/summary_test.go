@@ -325,3 +325,70 @@ func TestCommaSep(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+//  backend#2895 — the parser must pick up the destination table.
+//
+//  Under the cluster's per-ingestion-tables mode the physical table is a
+//  `ds_<hex>` handle while the operator's --name is only a label. The banner is
+//  the ONLY channel this parser sees, so without this line the CLI cannot name
+//  the table it just created — and `data delete <--name>` fails on a dataset
+//  that exists, while `data list | grep <--name>` finds nothing. Both read as
+//  "already clean", which is why the failure is silent.
+// ---------------------------------------------------------------------------
+
+// realBannerWithDestTable mirrors realBanner, plus the destination-table line
+// the ingestor prints (tracebloc/data-ingestors#549). Kept as its own fixture
+// so the flag-off banner above still pins the legacy shape.
+const realBannerWithDestTable = "some earlier log line\n" +
+	"\x1b[36m" + "════════════════════════════════════════════════════════════" + "\x1b[0m\n" +
+	"\x1b[1m\x1b[36m📊 INGESTION SUMMARY 📊\x1b[0m\n" +
+	"\x1b[36m" + "════════════════════════════════════════════════════════════" + "\x1b[0m\n" +
+	"\x1b[1mIngestor ID:\x1b[0m                \x1b[34m46ad219b-8192-4be3-a0eb-3d9120fa10b4\x1b[0m\n" +
+	"\x1b[1mDestination table:\x1b[0m          \x1b[34mds_46ad219b81924be3a0eb3d9120fa10b4\x1b[0m\n" +
+	"\x1b[1m📈 Total Records Found:\x1b[0m     \x1b[34m30,000\x1b[0m\n" +
+	"\x1b[1m✅ Successfully Processed:\x1b[0m  \x1b[32m30,000\x1b[0m\n" +
+	"\x1b[1m💾 Inserted to Database:\x1b[0m    \x1b[32m30,000\x1b[0m\n" +
+	"\x1b[1m🚀 Sent to API:\x1b[0m             \x1b[32m30,000\x1b[0m\n" +
+	"\x1b[1m⏭️  Skipped Records:\x1b[0m        \x1b[33m0\x1b[0m\n" +
+	"\x1b[1m📁 File Transfer Failures:\x1b[0m  \x1b[32m0\x1b[0m\n" +
+	"\x1b[1m❌ Failed DB Insertion:\x1b[0m     \x1b[31m0\x1b[0m\n" +
+	"\x1b[36m" + "════════════════════════════════════════════════════════════" + "\x1b[0m\n"
+
+func TestSummaryParser_ExtractsDestinationTable(t *testing.T) {
+	p := NewSummaryParser()
+	p.Feed([]byte(realBannerWithDestTable))
+	got := p.Result()
+	if got == nil {
+		t.Fatal("parser returned nil summary")
+	}
+	const want = "ds_46ad219b81924be3a0eb3d9120fa10b4"
+	if got.DestinationTable != want {
+		t.Errorf("DestinationTable = %q, want %q", got.DestinationTable, want)
+	}
+	// The handle must not be confused with the ingestor ID it derives from —
+	// they differ only by `ds_` and the hyphens, so a sloppy regex could
+	// capture the wrong line and still look plausible.
+	if got.IngestorID != "46ad219b-8192-4be3-a0eb-3d9120fa10b4" {
+		t.Errorf("IngestorID = %q, want the hyphenated uuid", got.IngestorID)
+	}
+	// The rest of the banner must still parse with the extra line present.
+	if got.TotalRecords != 30000 || got.InsertedRecords != 30000 {
+		t.Errorf("counters broke with the new line: total=%d inserted=%d",
+			got.TotalRecords, got.InsertedRecords)
+	}
+}
+
+func TestSummaryParser_DestinationTableAbsentOnLegacyBanner(t *testing.T) {
+	// An older ingestor prints no such line. The field must stay empty so
+	// callers fall back to the requested name rather than reporting "".
+	p := NewSummaryParser()
+	p.Feed([]byte(realIngestorBanner))
+	got := p.Result()
+	if got == nil {
+		t.Fatal("parser returned nil summary")
+	}
+	if got.DestinationTable != "" {
+		t.Errorf("DestinationTable = %q, want empty on a legacy banner", got.DestinationTable)
+	}
+}
