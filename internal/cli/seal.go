@@ -76,7 +76,7 @@ func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOpt
 	binding := bindActiveClientNamespace(&opts)
 	// leadRedirect=true: seal prints nothing before resolving, so the
 	// multi-client redirect note is the opening line and self-leads its blank.
-	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true)
+	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true, true)
 	if err != nil {
 		return binding.explain(ctx, err)
 	}

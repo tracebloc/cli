@@ -53,6 +53,17 @@ func DiscoverInClusterClient(ctx context.Context, opts KubeconfigOptions) (*InCl
 	return DiscoverInClusterClientID(ctx, cs)
 }
 
+// ClusterIDFrom reads the kube-system UID from an ALREADY-BUILT clientset.
+//
+// Exported for the mutating-command identity guard (backend#2863): every mutating
+// command has a clientset in hand by the time it would mutate, and re-entering
+// ClusterID would load the kubeconfig a second time — a second chance to resolve a
+// different cluster than the one about to be written to, which is the exact defect
+// the guard exists to close.
+func ClusterIDFrom(ctx context.Context, cs kubernetes.Interface) (string, error) {
+	return clusterIDFrom(ctx, cs)
+}
+
 // clusterIDFrom reads the kube-system UID from a clientset. Split out so it can be
 // exercised with a fake clientset without a real cluster.
 func clusterIDFrom(ctx context.Context, cs kubernetes.Interface) (string, error) {

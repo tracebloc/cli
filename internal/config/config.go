@@ -51,6 +51,21 @@ type Profile struct {
 	// when no client is active or for pre-v2 configs that predate the cache.
 	ActiveClientNamespace string `json:"active_client_namespace,omitempty"`
 	ActiveClientName      string `json:"active_client_name,omitempty"`
+
+	// ActiveClientClusterID pins WHICH CLUSTER the active client lives on: the
+	// kube-system namespace UID, the same anchor the backend record uses
+	// (api.ProvisionedClient.ClusterID). Recorded at `client create` time.
+	//
+	// Why it exists (backend#2863): the namespace cache above let the data
+	// commands bind the right NAMESPACE while the CLUSTER stayed whatever
+	// kubectl's current-context happened to reach. So a mutating command run on a
+	// laptop whose context pointed at a remote cluster would act there — writing a
+	// dataset, dropping a table, rolling a release, or uninstalling a same-named
+	// release — with nothing on screen to reveal it.
+	//
+	// Empty for configs that predate this field, so the guard degrades to a warning
+	// rather than locking existing installs out of their own commands.
+	ActiveClientClusterID string `json:"active_client_cluster_id,omitempty"`
 }
 
 // Config is the on-disk CLI state: env-scoped profiles plus the current env.

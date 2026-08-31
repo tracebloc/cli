@@ -174,7 +174,7 @@ undone — re-ingesting the data is the only way back.`)
 	// leadRedirect=false: the warning paragraph above is already this command's
 	// opening output, so the multi-client redirect note stays inline — no
 	// mid-output blank between the warning and the note (§380).
-	target, err := resolveClusterTargetFn(ctx, a.Printer, opts, binding, true, false)
+	target, err := resolveClusterTargetFn(ctx, a.Printer, opts, binding, true, false, true)
 	if err != nil {
 		return binding.explain(ctx, err)
 	}
