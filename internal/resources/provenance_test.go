@@ -29,7 +29,10 @@ func TestBuildEnvSpecStampsUserProvenance(t *testing.T) {
 		t.Errorf("RESOURCE_LIMITS = %q, want cpu=6,memory=24Gi", env["RESOURCE_LIMITS"])
 	}
 	if env["RESOURCE_REQUESTS"] != env["RESOURCE_LIMITS"] {
-		t.Error("requests and limits diverged — Guaranteed QoS is the chart contract")
+		t.Error("requests and limits diverged — BuildEnvSpec writes them equal so a" +
+			" CPU training pod is Guaranteed. (Not \"the chart contract\", as this" +
+			" message said until backend#2872: the chart's derive path writes no cpu" +
+			" limit at all since backend#2418.)")
 	}
 }
 
