@@ -13,10 +13,15 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/tracebloc/cli/internal/api"
+	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/nodeboot"
 	"github.com/tracebloc/cli/internal/ui"
 )
+
+// clusterIDForDelete is a test seam over cluster.ClusterID for the identity guard
+// in runDelete (backend#2863).
+var clusterIDForDelete = cluster.ClusterID
 
 // nodeboot teardown hooks — package vars so tests fake the k3d/helm/docker
 // shell-outs (a delete test never touches a real cluster or the docker daemon).
@@ -139,6 +144,38 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	ns := o.namespace
 	if ns == "" {
 		ns = prof.ActiveClientNamespace
+	}
+
+	// Cluster-identity guard (backend#2863). `delete` never resolves a cluster
+	// target — it hands the raw kubeconfig flags to `helm uninstall` — so on a
+	// machine whose current-context points elsewhere it uninstalled a release of
+	// the SAME NAME off that other cluster. This is the one command where the
+	// mistake is unrecoverable, so the check runs HERE: before the credential is
+	// revoked and before anything is torn down, so a refusal leaves the machine
+	// exactly as it was.
+	//
+	// Asymmetric on purpose, and the opposite way round from the data commands:
+	// a cluster we cannot reach must NOT block offboarding, because a dead
+	// cluster is the main reason to offboard. Only a cluster we positively
+	// identify as a DIFFERENT one refuses.
+	if want := prof.ActiveClientClusterID; want != "" {
+		if got, idErr := clusterIDForDelete(ctx, cluster.KubeconfigOptions{
+			Path:    o.kubeconfigPath,
+			Context: o.contextOverride,
+			// Namespace is irrelevant to the kube-system anchor read.
+		}); idErr == nil && got != want {
+			return &exitError{code: exitLocalEnv, err: fmt.Errorf(
+				"this is not the cluster your secure environment runs on — refusing to offboard.\n"+
+					"  reached:  cluster %s\n"+
+					"  expected: cluster %s\n"+
+					"  Offboarding here would uninstall a release of the same name off the wrong\n"+
+					"  cluster. Your kubeconfig's current context points somewhere else: either\n"+
+					"  switch it, or pass --context/--kubeconfig for your own cluster.",
+				short(got), short(want))}
+		}
+		// idErr != nil is deliberately silent: unreachable is the expected state of
+		// a cluster being retired, and the Helm uninstall below is already
+		// best-effort and reports its own failure.
 	}
 
 	// Work-guard: refuse to offboard while training runs are ACTIVE (offboarding
@@ -276,6 +313,7 @@ func runDelete(ctx context.Context, p *ui.Printer, pr prompter, o deleteOpts) er
 	// the --keep-data and killed-mid-teardown cases safe. Re-running `client create`
 	// re-adopts by cluster_id.
 	prof.ActiveClientID, prof.ActiveClientName, prof.ActiveClientNamespace = "", "", ""
+	prof.ActiveClientClusterID = "" // the cluster anchor goes with the rest (backend#2863)
 	if serr := cfg.Save(); serr != nil {
 		degraded = true
 		p.Warnf("Couldn't clear the stored active-client pointer (%v) — the on-disk config "+

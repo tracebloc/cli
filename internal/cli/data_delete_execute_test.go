@@ -35,7 +35,7 @@ func TestRunDataDelete_Execute(t *testing.T) {
 		resolveClusterTargetFn, listDatasetsFn, teardownFn = origRCT, origList, origTD
 	})
 
-	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _ bool) (*clusterTarget, error) {
+	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _, _ bool) (*clusterTarget, error) {
 		return &clusterTarget{
 			Resolved:  &cluster.ResolvedConfig{Context: "ctx", Namespace: "tracebloc"},
 			Clientset: fake.NewSimpleClientset(),
