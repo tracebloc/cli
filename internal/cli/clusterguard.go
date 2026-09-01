@@ -101,6 +101,11 @@ func guardActiveClientCluster(ctx context.Context, p *ui.Printer, t *clusterTarg
 	//    unreadable means we cannot name what we are about to write to.
 	got, idErr := clusterIDFromFn(ctx, t.Clientset)
 	if idErr != nil {
+		// A Ctrl-C (or parent deadline) during the read is an operator abort, not an
+		// unreadable cluster: exit quietly (130) rather than refuse-or-proceed on it.
+		if err := interrupted(ctx); err != nil {
+			return err
+		}
 		if ackTarget {
 			p.Warnf("Couldn't read this cluster's identity (%v) — proceeding anyway because "+
 				"--i-know-the-target was set. Target: %s.", idErr, serverURL)
@@ -143,6 +148,15 @@ func guardActiveClientCluster(ctx context.Context, p *ui.Printer, t *clusterTarg
 		// "HTTP 426 must be a hard failure, not a warning"). --i-know-the-target does
 		// not override it — upgrading is the only way through, and the error says so.
 		return &exitError{code: exitFailure, err: verr}
+	}
+	// A Ctrl-C during the backend lookup cancels our context and surfaces as a plain
+	// lookup error, which verifyTargetFromAPI folds into reached=false. Left unchecked
+	// that would let the anchor-match below AUTHORIZE the mutation after the operator
+	// aborted (Bugbot), or refuse with a misleading "couldn't reach / run login" at
+	// exit 3 instead of a quiet 130. Catch the abort here — the inner verify timeout
+	// does not cancel THIS context, so a merely-slow backend still reads as reached=false.
+	if err := interrupted(ctx); err != nil {
+		return err
 	}
 	if c != nil {
 		p.Successf("Target verified with tracebloc: %s (namespace %s) — cluster %s.",
@@ -254,6 +268,19 @@ func verifyTargetFromAPI(ctx context.Context, clusterID string) (client *api.Pro
 	// client match `client create` uses to decide adopt-vs-mint; reuse it so the two
 	// paths can't drift. A nil result here is a CONFIRMED absence, not a couldn't-ask.
 	return anchoredClient(clients, clusterID), true, nil
+}
+
+// interrupted returns the quiet Ctrl-C exit (130) when the command's context was
+// cancelled during a blocking guard step — an operator abort (or a parent deadline),
+// NOT an unreadable/unreachable cluster. It checks the context itself, so it is not
+// fooled by verifyTargetFromAPI's inner timeout (which cancels only its own derived
+// context, never this one). Returns nil while the context is still live, so callers
+// fall through to their normal refuse/proceed logic.
+func interrupted(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return &exitError{code: exitInterrupted, err: ctx.Err()}
+	}
+	return nil
 }
 
 // short trims a UID for messages — enough to compare by eye, not a wall of hex.

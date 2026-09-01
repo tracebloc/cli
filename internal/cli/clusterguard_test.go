@@ -242,6 +242,35 @@ func TestResolveClusterTarget_Mutating_UpgradeRequired_HardStops(t *testing.T) {
 	}
 }
 
+// A Ctrl-C DURING the backend verify (its context cancelled) must be a quiet
+// interrupt (exit 130), NOT swallowed into reached=false — which, on a MATCHING
+// recorded anchor, would authorize the mutation the operator just aborted (Bugbot),
+// or refuse with a misleading "couldn't reach / run login" at exit 3.
+func TestResolveClusterTarget_Mutating_CtrlCDuringVerify_Interrupts(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	withAnchor(t, "MATCHING-UID") // matches → without the check, 3b would PROCEED
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("MATCHING-UID")))
+	withClusterID(t, "MATCHING-UID", nil)
+	// The lookup returns a cancellation error, mirroring an aborted in-flight request.
+	withAccountClients(t, nil, context.Canceled)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the operator hit Ctrl-C
+
+	var out bytes.Buffer
+	_, err := resolveClusterTarget(ctx, ui.New(&out),
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, false)
+	if err == nil {
+		t.Fatal("a Ctrl-C during verify must abort, not authorize the mutation on a matching anchor")
+	}
+	if got := ExitCodeFromError(err); got != exitInterrupted {
+		t.Errorf("exit code = %d, want %d (quiet Ctrl-C), not a refusal/proceed; err: %v", got, exitInterrupted, err)
+	}
+	if strings.Contains(out.String(), "matches this machine's recorded cluster") {
+		t.Errorf("the anchor-match proceed must NOT fire after an abort; got:\n%s", out.String())
+	}
+}
+
 // withAccountClients stubs the backend clients lookup the target verifier
 // (verifyTargetFromAPI) makes, so a guard test can drive "the API names this
 // cluster" / "the API can't confirm" without standing up a server. An error models
