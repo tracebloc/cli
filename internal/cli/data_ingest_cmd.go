@@ -67,10 +67,11 @@ func newDataIngestCmd() *cobra.Command {
 		numberOfKeypoints int
 
 		// Operations flags.
-		dryRun     bool
-		overwrite  bool
-		noInput    bool
-		outputJSON bool
+		dryRun      bool
+		overwrite   bool
+		noInput     bool
+		outputJSON  bool
+		iKnowTarget bool
 
 		// Stage Pod image override. Defaults to the digest-pinned
 		// alpine that ships with the CLI; air-gapped customers
@@ -246,6 +247,7 @@ Exit codes:
 					ChangedFlags:   changedFlags,
 					OutputJSON:     outputJSON,
 					JSONOut:        jsonOut,
+					AckTarget:      iKnowTarget,
 				})
 		},
 	}
@@ -300,6 +302,7 @@ Exit codes:
 		"disable interactive prompts; fail on missing required values (for CI/scripts)")
 	cmd.Flags().BoolVar(&outputJSON, "output-json", false,
 		"emit a machine-readable JSON result on stdout (human output → stderr; implies --no-input)")
+	addKnowTargetFlag(cmd, &iKnowTarget)
 	cmd.Flags().StringVar(&stagePodImage, "stage-pod-image", "",
 		"override the ephemeral stage Pod's image (default: digest-pinned alpine 3.20 baked into the CLI). "+
 			"Pin by digest in your override too — tag-only refs drift silently.")
@@ -375,4 +378,9 @@ type runDataIngestArgs struct {
 	Detach         bool
 	IdempotencyKey string
 	ImageDigest    string
+
+	// AckTarget carries --i-know-the-target: proceed even when the target
+	// cluster's identity can't be verified with tracebloc (backend#2983). It
+	// threads to the mutating-target guard via resolveClusterTarget.
+	AckTarget bool
 }

@@ -1197,9 +1197,16 @@ func TestSet_MultiClientRedirectOpensWithSingleBlank(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir()) // no active-client binding → scan allowed
 	fakeHelm(t)
 	// Ready node for the fit-check, plus a chart-labeled jobs-manager in a
-	// NON-default namespace so the scan retargets there.
-	cs := fake.NewClientset(resNode("n1", "8", "32Gi"), jmDep("lukas-01"))
+	// NON-default namespace so the scan retargets there, and a kube-system UID so
+	// the mutating-target guard can read the cluster identity.
+	cs := fake.NewClientset(resNode("n1", "8", "32Gi"), jmDep("lukas-01"), kubeSystem("MULTI-UID"))
 	withClusterSeams(t, cs)
+	// The recorded anchor matches the live cluster, so the guard proceeds (this test
+	// is about the redirect blank, not the guard); the API is offline so it does not
+	// second-guess. Setting only the cluster anchor leaves the namespace binding
+	// unset, so allowScan stays true and the redirect still fires.
+	withAnchor(t, "MULTI-UID")
+	withAccountClients(t, nil, errors.New("offline (test): no backend"))
 
 	var buf bytes.Buffer
 	// No --context/--namespace so allowScan stays true; a flag-driven change

@@ -72,11 +72,11 @@ func (m sealModel) failedCount() int {
 // way the data commands do (exit 3 unreachable, exit 4 no client — with the
 // §7.3 active-client binding and its "runs on another machine" rewrite), list
 // the chart's test hooks, run each one, render, and exit by the verdict.
-func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, timeout time.Duration) error {
+func runSealCheck(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, timeout time.Duration, ackTarget bool) error {
 	binding := bindActiveClientNamespace(&opts)
 	// leadRedirect=true: seal prints nothing before resolving, so the
 	// multi-client redirect note is the opening line and self-leads its blank.
-	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true, true)
+	target, err := resolveClusterTargetFn(ctx, p, opts, binding, false, true, true, ackTarget)
 	if err != nil {
 		return binding.explain(ctx, err)
 	}
