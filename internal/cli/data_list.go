@@ -123,7 +123,7 @@ func runDataList(ctx context.Context, a runDataListArgs) (err error) {
 	binding := bindActiveClientNamespace(&opts)
 	// leadRedirect=true: data list prints nothing before resolving, so the
 	// multi-client redirect note is the opening line and self-leads its blank.
-	target, err := resolveClusterTarget(ctx, p, opts, binding, false, true, false)
+	target, err := resolveClusterTarget(ctx, p, opts, binding, false, true, false, false)
 	if err != nil {
 		return binding.explain(ctx, err)
 	}

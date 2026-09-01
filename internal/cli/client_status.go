@@ -21,7 +21,7 @@ import (
 )
 
 func newClientStatusCmd() *cobra.Command {
-	var wait, seal bool
+	var wait, seal, iKnowTarget bool
 	var timeout time.Duration
 	var kubeconfigPath, contextOverride, nsOverride string
 	cmd := &cobra.Command{
@@ -63,7 +63,7 @@ Exit codes with --seal:
 			if cmd.Flags().Changed("timeout") && !wait && !seal {
 				return &exitError{code: exitFailure, err: errors.New("--timeout has no effect without --wait or --seal")}
 			}
-			for _, name := range []string{"kubeconfig", "context", "namespace"} {
+			for _, name := range []string{"kubeconfig", "context", "namespace", knowTargetFlag} {
 				if cmd.Flags().Changed(name) && !seal {
 					return &exitError{code: exitFailure, err: fmt.Errorf("--%s has no effect without --seal", name)}
 				}
@@ -71,7 +71,7 @@ Exit codes with --seal:
 			if seal {
 				return runSealCheck(cmd.Context(), printerFor(cmd),
 					cluster.KubeconfigOptions{Path: kubeconfigPath, Context: contextOverride, Namespace: nsOverride},
-					timeout)
+					timeout, iKnowTarget)
 			}
 			return runClientStatus(cmd.Context(), printerFor(cmd), wait, timeout)
 		},
@@ -85,6 +85,10 @@ Exit codes with --seal:
 		"with --seal: "+kubeconfigFlagUsage,
 		"with --seal: "+contextFlagUsage)
 	addNamespaceFlag(cmd, &nsOverride, "with --seal: "+namespaceFlagUsage)
+	// Registered directly (not addKnowTargetFlag) so the help carries the same
+	// "with --seal:" prefix as the other cluster-side flags above: it is inert
+	// without --seal, and the rejection loop enforces that.
+	cmd.Flags().BoolVar(&iKnowTarget, knowTargetFlag, false, "with --seal: "+knowTargetFlagUsage)
 	return cmd
 }
 

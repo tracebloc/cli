@@ -42,7 +42,7 @@ func withClusterSeams(t *testing.T, cs kubernetes.Interface) {
 func TestResolveClusterTarget_NoClient_InstallerMessageExit4(t *testing.T) {
 	withClusterSeams(t, fake.NewSimpleClientset()) // empty cluster
 	_, err := resolveClusterTarget(context.Background(), nil,
-		cluster.KubeconfigOptions{}, activeClientBinding{}, true, true, false)
+		cluster.KubeconfigOptions{}, activeClientBinding{}, true, true, false, false)
 	if err == nil {
 		t.Fatal("expected an error when the cluster hosts no client")
 	}
@@ -68,7 +68,7 @@ func TestResolveClusterTarget_NoClient_InstallerMessageExit4(t *testing.T) {
 func TestResolveClusterTarget_MultipleClients_PickOneExit4(t *testing.T) {
 	withClusterSeams(t, fake.NewSimpleClientset(jmDep("alpha"), jmDep("beta")))
 	_, err := resolveClusterTarget(context.Background(), nil,
-		cluster.KubeconfigOptions{}, activeClientBinding{}, true, true, false)
+		cluster.KubeconfigOptions{}, activeClientBinding{}, true, true, false, false)
 	if err == nil {
 		t.Fatal("expected an error when multiple clients are present")
 	}
@@ -338,7 +338,7 @@ func TestExplain_BindingMiss_NamesTheLocalClientWithoutRetargeting(t *testing.T)
 
 	binding := activeClientBinding{applied: true, name: "gpu-box-01", namespace: "stale-ns"}
 	target, err := resolveClusterTarget(context.Background(), nil,
-		cluster.KubeconfigOptions{Namespace: "stale-ns"}, binding, false, false, false)
+		cluster.KubeconfigOptions{Namespace: "stale-ns"}, binding, false, false, false, false)
 	if err == nil {
 		t.Fatal("a binding miss must still fail — this changes the message, not the target")
 	}

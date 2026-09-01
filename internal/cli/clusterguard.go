@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
 	"github.com/tracebloc/cli/internal/config"
 	"github.com/tracebloc/cli/internal/ui"
@@ -12,80 +14,194 @@ import (
 // clusterIDFromFn is a test seam over cluster.ClusterIDFrom.
 var clusterIDFromFn = cluster.ClusterIDFrom
 
-// guardActiveClientCluster refuses a MUTATING operation when the cluster actually
-// reached is not the one the active client lives on.
+// targetVerifyTimeout bounds the backend lookup guardActiveClientCluster makes to
+// NAME the target cluster. The lookup only makes the guard better-informed, so it
+// must never make a mutating command slower than the mutation would be: past this,
+// the guard falls back to the local anchor and the --no-input contract below.
+const targetVerifyTimeout = 8 * time.Second
+
+// listAccountClientsFn resolves the signed-in account's clients for the target
+// verifier (verifyTargetFromAPI). Production authenticates with the stored token
+// and calls the backend; tests override it. An error means "couldn't ask the API"
+// — offline, not signed in, or a backend failure — which the verifier treats as
+// "couldn't confirm", never as "the account has no clients".
+var listAccountClientsFn = func(ctx context.Context) ([]api.ProvisionedClient, error) {
+	client, _, err := authedClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.ListClients(ctx)
+}
+
+// guardActiveClientCluster refuses a MUTATING operation unless it can confirm WHICH
+// cluster it is about to change — and prints that identity when it can.
 //
-// WHY THIS EXISTS (backend#2863). Every command resolved its target cluster from the
-// ambient kubeconfig + current-context, while binding only the NAMESPACE from the
-// active client. So on a machine whose current-context pointed elsewhere — a laptop
-// that also administers a managed cluster, which is the normal case for anyone who
-// runs both — a mutating command acted on that other cluster:
+// WHY THIS EXISTS (backend#2863, then backend#2983). Every command resolved its
+// target cluster from the ambient kubeconfig + current-context, while binding only
+// the NAMESPACE from the active client. So on a machine whose current-context
+// pointed elsewhere — a laptop that also administers a managed cluster, which is the
+// normal case for anyone who runs both — a mutating command acted on that other
+// cluster:
 //
 //   - `data ingest` staged a private dataset onto it
 //   - `data delete` dropped a table and removed files from its shared PVC
 //   - `resources set` rolled its jobs-manager with a new envelope
 //   - `tracebloc delete` uninstalled a release of the same name
 //
-// The namespace binding made this MORE likely, not less: it supplied a namespace that
-// probably exists on the other cluster too, so discovery succeeded and nothing looked
-// wrong. The hazard was already documented at internal/nodeboot/nodeboot.go, whose
-// comment ends "preserving the default-context behavior" — that clause was the bug.
+// backend#2863 added a local anchor to compare against, but left one path open: a
+// machine with NO recorded anchor warned "the target couldn't be verified …
+// Proceeding against https://127.0.0.1:8444" and then mutated anyway (backend#2983).
+// The endpoint it named is a localhost port-forward — the same command shape reaches
+// a different fleet depending on which tunnel is up on which port — so the operator's
+// only signal about which environment was about to change was a port number, and
+// --no-input (whose contract is "fail on missing required values") did not fail
+// closed. A CI job could ingest into the wrong fleet and get a green exit.
+//
+// The fix is two-fold, matching the issue's directions:
+//
+//  1. VERIFY, don't merely record. Ask the API which client owns the cluster we
+//     actually reached and print THAT identity (name + namespace) — an identity
+//     that does not depend on local state, which is precisely what was missing in
+//     the field. verifyTargetFromAPI keys on the live kube-system UID, so the
+//     printed name is the backend's answer, not config's.
+//  2. FAIL CLOSED when the target is unverifiable. If the API can't confirm the
+//     target and no recorded anchor matches it, refuse (exit non-zero, no write)
+//     unless the operator explicitly accepts the target with --i-know-the-target.
+//     A scripted (--no-input) caller has no human to ask, so this honours its
+//     contract; a human gets the same escape hatch, named in the message.
 //
 // The check is on IDENTITY, not on the context name. Pinning a context string would
 // break bring-your-own-cluster installs (EKS/AKS/OpenShift have no k3d context) and
 // would still pass if two kubeconfigs named the same context differently. The
-// kube-system namespace UID is the same anchor the backend record uses, so local and
-// remote agree by construction.
+// kube-system namespace UID is the same anchor the backend record uses, so local,
+// remote, and backend agree by construction.
 //
 // FAILURE MODES, deliberately asymmetric:
 //
-//   - mismatch            -> REFUSE. Naming both ids and the way forward.
-//   - id unreadable       -> REFUSE. We are about to write to a cluster we cannot
-//     identify. Every caller needs API access anyway, so this
-//     costs nothing legitimate.
-//   - no anchor recorded  -> WARN and proceed. Configs written before this field
-//     exists must not be locked out of their own commands;
-//     `client create` records it and the warning names that.
+//   - id unreadable    -> REFUSE. We are about to write to a cluster we cannot
+//     identify at all. --i-know-the-target overrides (nothing left to check).
+//   - anchor mismatch  -> REFUSE. Affirmative evidence of the WRONG cluster;
+//     --i-know-the-target does NOT override a known-wrong target.
+//   - API-verified     -> print the identity and proceed.
+//   - anchor matches   -> proceed (positive local evidence; works offline).
+//   - unverifiable     -> REFUSE unless --i-know-the-target (backend#2983).
 //
 // Read-only commands never call this: being wrong about which cluster you are
 // READING is a confusing answer, not a destructive act, and the target is already
 // printed by doctor / cluster info.
-func guardActiveClientCluster(ctx context.Context, p *ui.Printer, t *clusterTarget) error {
+func guardActiveClientCluster(ctx context.Context, p *ui.Printer, t *clusterTarget, ackTarget bool) error {
 	if t == nil || t.Clientset == nil {
 		return nil // nothing resolved (a test seam, or a command that mutates nothing)
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		// No readable config means no anchor to compare against — same case as an
-		// unrecorded anchor below, not a reason to block.
-		p.Warnf("Couldn't read the local config, so this machine's cluster couldn't be " +
-			"verified before changing anything. Proceeding.")
-		return nil
-	}
-	want := cfg.Current().ActiveClientClusterID
-	if want == "" {
-		p.Warnf("This machine hasn't recorded which cluster its secure environment runs on, "+
-			"so the target couldn't be verified before changing anything. Run `tracebloc client "+
-			"create` to record it. Proceeding against %s.", t.Resolved.ServerURL)
-		return nil
-	}
+	serverURL := t.Resolved.ServerURL
+
+	// 1. Read the live cluster's own identity — the kube-system UID, the fingerprint
+	//    the backend record and the local anchor both key on. Offline-readable;
+	//    unreadable means we cannot name what we are about to write to.
 	got, idErr := clusterIDFromFn(ctx, t.Clientset)
 	if idErr != nil {
+		if ackTarget {
+			p.Warnf("Couldn't read this cluster's identity (%v) — proceeding anyway because "+
+				"--i-know-the-target was set. Target: %s.", idErr, serverURL)
+			return nil
+		}
 		return &exitError{code: exitLocalEnv, err: fmt.Errorf(
 			"couldn't confirm which cluster this is before changing anything (%w).\n"+
 				"  Refusing rather than writing to an unidentified cluster.\n"+
-				"  reached: %s", idErr, t.Resolved.ServerURL)}
+				"  reached: %s\n"+
+				"  Fix your --context/--kubeconfig, or pass --i-know-the-target if you are certain.",
+			idErr, serverURL)}
 	}
-	if got != want {
+
+	// 2. Local anchor mismatch (backend#2863): the machine recorded which cluster its
+	//    secure environment runs on, and this is a DIFFERENT one. Affirmative evidence
+	//    of the wrong target — a hard refusal that --i-know-the-target does NOT
+	//    override (the flag accepts an UNKNOWN target, never a known-wrong one).
+	want := recordedClusterAnchor()
+	if want != "" && got != want {
 		return &exitError{code: exitLocalEnv, err: fmt.Errorf(
 			"this is not the cluster your secure environment runs on — refusing to change anything.\n"+
 				"  reached:  %s  (cluster %s, context %q)\n"+
 				"  expected: cluster %s\n"+
 				"  Your kubeconfig's current context points somewhere else. Either switch it, or pass\n"+
 				"  --context/--kubeconfig for the cluster your secure environment runs on.",
-			t.Resolved.ServerURL, short(got), t.Resolved.Context, short(want))}
+			serverURL, short(got), t.Resolved.Context, short(want))}
 	}
-	return nil
+
+	// 3. VERIFY THE IDENTITY FROM THE API (backend#2983, direction 1). Ask tracebloc
+	//    which client owns the cluster we reached and print THAT — an identity that
+	//    does not depend on local state (a missing local anchor is exactly what fell
+	//    open in the field). Authoritative and self-checking: the printed name is the
+	//    backend record keyed on the live cluster fingerprint, never config's.
+	if c, ok := verifyTargetFromAPI(ctx, got); ok {
+		p.Successf("Target verified with tracebloc: %s (namespace %s) — cluster %s.",
+			c.Name, c.Namespace, short(got))
+		return nil
+	}
+
+	// 3b. The API couldn't name it (offline / not signed in / no such record), but the
+	//     machine's RECORDED anchor matches the live cluster: the operator ran
+	//     `client create` here, so this is positive local evidence — proceed. This is
+	//     NOT the backend#2983 fail-open, which was NO evidence at all (want == "").
+	if want != "" && got == want {
+		p.Infof("Target matches this machine's recorded cluster (%s) — proceeding.", short(got))
+		return nil
+	}
+
+	// 4. UNVERIFIABLE: the API can't confirm the target and no recorded anchor matches
+	//    it. This is the backend#2983 fail-open. Honour --no-input's contract — a
+	//    scripted caller has no human to ask, so FAIL CLOSED — and require an explicit
+	//    --i-know-the-target to proceed otherwise.
+	if ackTarget {
+		p.Warnf("Couldn't verify which cluster this is — proceeding anyway because "+
+			"--i-know-the-target was set. Target: %s (cluster %s).", serverURL, short(got))
+		return nil
+	}
+	return &exitError{code: exitLocalEnv, err: fmt.Errorf(
+		"couldn't verify which cluster this is before changing anything — tracebloc has no client "+
+			"registered for it, and this machine hasn't recorded one.\n"+
+			"  reached: %s  (cluster %s)\n"+
+			"  Refusing rather than writing to an unverified cluster.\n"+
+			"  Run `tracebloc client create` to record it, fix your --context/--kubeconfig, or\n"+
+			"  re-run with --i-know-the-target if you are certain this is the right cluster.",
+		serverURL, short(got))}
+}
+
+// recordedClusterAnchor returns this machine's recorded cluster anchor (the
+// active client's kube-system UID), or "" when there is no readable config or no
+// anchor. Best-effort by contract: a config it cannot read is "no anchor", which
+// routes to the API verification / fail-closed path rather than a hard error.
+func recordedClusterAnchor() string {
+	cfg, err := config.Load()
+	if err != nil {
+		return ""
+	}
+	return cfg.Current().ActiveClientClusterID
+}
+
+// verifyTargetFromAPI asks the backend which client owns the cluster identified by
+// clusterID (the kube-system UID) and returns that record. The identity it returns
+// is the API's, not local config's — which is the whole point (backend#2983): the
+// field failure was a MISSING local anchor, so a check that read local state could
+// never have caught it. ok is false when the API can't be reached, the user isn't
+// signed in, or no client is anchored to this cluster — all "couldn't confirm",
+// which the caller treats as unverifiable rather than as a wrong-cluster verdict.
+func verifyTargetFromAPI(ctx context.Context, clusterID string) (*api.ProvisionedClient, bool) {
+	if clusterID == "" {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, targetVerifyTimeout)
+	defer cancel()
+	clients, err := listAccountClientsFn(ctx)
+	if err != nil {
+		return nil, false
+	}
+	// anchoredClient is the same kube-system-UID → client match `client create`
+	// uses to decide adopt-vs-mint; reuse it so the two paths can't drift.
+	if c := anchoredClient(clients, clusterID); c != nil {
+		return c, true
+	}
+	return nil, false
 }
 
 // short trims a UID for messages — enough to compare by eye, not a wall of hex.

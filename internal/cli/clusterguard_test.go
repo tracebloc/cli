@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
@@ -89,9 +90,11 @@ func TestResolveClusterTarget_Mutating_WrongCluster_Refuses(t *testing.T) {
 	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("BBBBBBBB-9999-8888-7777-666666666666")))
 	withClusterID(t, "BBBBBBBB-9999-8888-7777-666666666666", nil)
 
+	withAccountClients(t, nil, errors.New("offline (test): no backend"))
+
 	var out bytes.Buffer
 	_, err := resolveClusterTarget(context.Background(), ui.New(&out),
-		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true)
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, false)
 	if err == nil {
 		t.Fatal("a mutating command must refuse a cluster that is not the recorded one")
 	}
@@ -122,7 +125,7 @@ func TestResolveClusterTarget_ReadOnly_WrongCluster_Proceeds(t *testing.T) {
 
 	var out bytes.Buffer
 	if _, err := resolveClusterTarget(context.Background(), ui.New(&out),
-		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, false); err != nil {
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, false, false); err != nil {
 		t.Fatalf("a read-only command must not be gated on cluster identity: %v", err)
 	}
 }
@@ -135,10 +138,13 @@ func TestResolveClusterTarget_Mutating_RightCluster_Proceeds(t *testing.T) {
 	withAnchor(t, "SAME-CLUSTER-UID")
 	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("SAME-CLUSTER-UID")))
 	withClusterID(t, "SAME-CLUSTER-UID", nil)
+	// API offline: the recorded anchor matching the live cluster is the positive
+	// local evidence that must let the command through even when the API can't name it.
+	withAccountClients(t, nil, errors.New("offline (test): no backend"))
 
 	var out bytes.Buffer
 	if _, err := resolveClusterTarget(context.Background(), ui.New(&out),
-		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true); err != nil {
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, false); err != nil {
 		t.Fatalf("the recorded cluster must be usable: %v", err)
 	}
 }
@@ -154,7 +160,7 @@ func TestResolveClusterTarget_Mutating_UnreadableID_Refuses(t *testing.T) {
 
 	var out bytes.Buffer
 	_, err := resolveClusterTarget(context.Background(), ui.New(&out),
-		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true)
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, false)
 	if err == nil {
 		t.Fatal("an unidentifiable cluster must not be written to")
 	}
@@ -166,25 +172,176 @@ func TestResolveClusterTarget_Mutating_UnreadableID_Refuses(t *testing.T) {
 	}
 }
 
-// NO anchor recorded → warn and proceed. Configs written before this field
-// existed must not be locked out of their own commands, and the warning has to
-// name the way to fix it or it is just noise.
-func TestResolveClusterTarget_Mutating_NoAnchor_WarnsAndProceeds(t *testing.T) {
+// withAccountClients stubs the backend clients lookup the target verifier
+// (verifyTargetFromAPI) makes, so a guard test can drive "the API names this
+// cluster" / "the API can't confirm" without standing up a server. An error models
+// offline / not-signed-in / a backend failure.
+func withAccountClients(t *testing.T, clients []api.ProvisionedClient, err error) {
+	t.Helper()
+	orig := listAccountClientsFn
+	t.Cleanup(func() { listAccountClientsFn = orig })
+	listAccountClientsFn = func(context.Context) ([]api.ProvisionedClient, error) {
+		return clients, err
+	}
+}
+
+// withActiveClientName records a display name (but NO cluster anchor) for the
+// active client, so a test can prove the guard's printed identity comes from the
+// API and not from this local cache.
+func withActiveClientName(t *testing.T, name string) {
+	t.Helper()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CurrentEnv == "" {
+		cfg.CurrentEnv = "test"
+	}
+	cfg.Current().ActiveClientName = name
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// backend#2983 direction 1: with NO local anchor — the exact field condition that
+// fell open — the guard VERIFIES the target against the API and prints the fleet's
+// identity (name + namespace), an identity that comes from the API record and not
+// from local state. Here the local cache carries a DECOY name; the printed identity
+// must be the API's, and the command proceeds.
+func TestResolveClusterTarget_Mutating_VerifiesIdentityFromAPI(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
-	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01")))
-	withClusterID(t, "WHATEVER", nil)
+	withActiveClientName(t, "stale-local-decoy") // no ActiveClientClusterID → no anchor
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("hasan-prod"), kubeSystem("KUBE-UID-PROD")))
+	withClusterID(t, "KUBE-UID-PROD", nil)
+	withAccountClients(t, []api.ProvisionedClient{
+		{ID: 9, Name: "other-box", Namespace: "other-ns", ClusterID: "SOME-OTHER-UID"},
+		{ID: 7, Name: "hasan-prod", Namespace: "tracebloc-templates-prod", ClusterID: "KUBE-UID-PROD"},
+	}, nil)
 
 	var out bytes.Buffer
 	if _, err := resolveClusterTarget(context.Background(), ui.New(&out),
-		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true); err != nil {
-		t.Fatalf("an unrecorded anchor must not block: %v", err)
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, false); err != nil {
+		t.Fatalf("an API-verified target must proceed: %v", err)
 	}
 	got := out.String()
-	if !strings.Contains(got, "hasn't recorded which cluster") {
-		t.Errorf("an unverified mutation must say so; got:\n%s", got)
+	for _, want := range []string{"hasan-prod", "tracebloc-templates-prod"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the printed identity must be the API's %q; got:\n%s", want, got)
+		}
 	}
-	if !strings.Contains(got, "client create") {
-		t.Errorf("the warning must name how to record it; got:\n%s", got)
+	// The name came from the API record, not the local cache — the whole point of
+	// backend#2983 direction 1 (local state is what was missing in the field).
+	if strings.Contains(got, "stale-local-decoy") {
+		t.Errorf("the identity must come from the API, not the local cache; got:\n%s", got)
+	}
+}
+
+// backend#2983 direction 2: an unverifiable target does NOT proceed without an
+// explicit acknowledgement. No anchor, and the API can't confirm (offline / not
+// signed in / no such client) — a scripted --no-input caller has no human to ask,
+// so this fails closed (non-zero exit, nothing written) rather than mutating a
+// cluster identified only by a localhost port.
+func TestResolveClusterTarget_Mutating_Unverifiable_FailsClosed(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("KUBE-UID-X")))
+	withClusterID(t, "KUBE-UID-X", nil)
+	withAccountClients(t, nil, errors.New("dial tcp: connect: connection refused"))
+
+	var out bytes.Buffer
+	_, err := resolveClusterTarget(context.Background(), ui.New(&out),
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, false /* ack: as under --no-input */)
+	if err == nil {
+		t.Fatal("an unverifiable target must NOT proceed without --i-know-the-target — this is the backend#2983 fail-open")
+	}
+	if got := ExitCodeFromError(err); got != exitLocalEnv {
+		t.Errorf("exit code = %d, want %d (a local-environment problem)", got, exitLocalEnv)
+	}
+	msg := err.Error()
+	for _, want := range []string{"couldn't verify which cluster this is", "client create", knowTargetFlag} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal must name %q so it isn't a dead end; got:\n%s", want, msg)
+		}
+	}
+}
+
+// The escape hatch: --i-know-the-target lets an operator through an unverifiable
+// target on purpose, with a warning naming what little is known. Without this the
+// fail-closed above would be a wall for the legitimate air-gapped / not-yet-
+// registered case.
+func TestResolveClusterTarget_Mutating_Unverifiable_AckProceeds(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("KUBE-UID-X")))
+	withClusterID(t, "KUBE-UID-X", nil)
+	withAccountClients(t, nil, errors.New("dial tcp: connect: connection refused"))
+
+	var out bytes.Buffer
+	if _, err := resolveClusterTarget(context.Background(), ui.New(&out),
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, true /* --i-know-the-target */); err != nil {
+		t.Fatalf("--i-know-the-target must let an unverifiable target through: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, knowTargetFlag) {
+		t.Errorf("proceeding on an unverified target must say why (it named --%s); got:\n%s", knowTargetFlag, got)
+	}
+}
+
+// The backend#2983 scenario end-to-end at the command boundary: `data ingest`
+// under --no-input (AckTarget=false), against a cluster the API can't confirm and
+// with no recorded anchor, must FAIL CLOSED before staging anything — not warn and
+// write, which is what a CI job hit in the field. connectIngestTarget is the money
+// path's pre-flight; the guard fires inside it, before the PVC discovery and the
+// destination-table read, so nothing is touched by the time it refuses.
+func TestConnectIngestTarget_Unverifiable_NoInput_FailsClosed(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	// A reachable cluster (kube-system UID readable), hosting a client, but the API
+	// can't say which fleet it is and this machine never recorded one.
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("KUBE-UID-CI")))
+	withAccountClients(t, nil, errors.New("dial tcp: connect: connection refused"))
+
+	var out bytes.Buffer
+	a := &runDataIngestArgs{Printer: ui.New(&out), AckTarget: false} // --no-input passes no ack
+	target, _, cancelled, err := connectIngestTarget(context.Background(), a)
+	if err == nil {
+		t.Fatal("data ingest --no-input against an unverifiable target must fail closed, not stage")
+	}
+	if target != nil || cancelled {
+		t.Errorf("nothing may be handed back on a fail-closed refusal (target=%v cancelled=%v)", target, cancelled)
+	}
+	if got := ExitCodeFromError(err); got != exitLocalEnv {
+		t.Errorf("exit code = %d, want %d — a CI job must get a non-zero exit, not a green run", got, exitLocalEnv)
+	}
+	if !strings.Contains(err.Error(), "couldn't verify which cluster this is") {
+		t.Errorf("the refusal must say the target couldn't be verified; got: %v", err)
+	}
+}
+
+// The destructive twin the issue also called out: `data delete` drops a MySQL
+// table and removes files on the shared PVC. An unverifiable target must refuse
+// BEFORE the dataset list is even read — the teardown never gets a chance to run.
+func TestRunDataDelete_Unverifiable_FailsClosedBeforeTeardown(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("KUBE-UID-D")))
+	withAccountClients(t, nil, errors.New("dial tcp: connect: connection refused"))
+	// If anything past the guard runs, the delete is proceeding — fail loudly.
+	origList := listDatasetsFn
+	t.Cleanup(func() { listDatasetsFn = origList })
+	listDatasetsFn = func(context.Context, kubernetes.Interface, *rest.Config, string) ([]string, error) {
+		t.Fatal("the delete reached the dataset list — the guard did not fail closed before teardown")
+		return nil, nil
+	}
+
+	var out bytes.Buffer
+	// Yes:true is the scriptable delete; the guard must refuse regardless.
+	err := runDataDelete(context.Background(), runDataDeleteArgs{
+		Table: "probe", Printer: ui.New(&out), Yes: true, AckTarget: false,
+	})
+	if err == nil {
+		t.Fatal("data delete against an unverifiable target must refuse, not drop the table")
+	}
+	if got := ExitCodeFromError(err); got != exitLocalEnv {
+		t.Errorf("exit code = %d, want %d", got, exitLocalEnv)
+	}
+	if !strings.Contains(err.Error(), "couldn't verify which cluster this is") {
+		t.Errorf("the refusal must say the target couldn't be verified; got: %v", err)
 	}
 }
 
@@ -358,8 +515,8 @@ func TestEveryClusterCallSiteDeclaresMutationIntent(t *testing.T) {
 			if !ok || (id.Name != "resolveClusterTarget" && id.Name != "resolveClusterTargetFn") {
 				return true
 			}
-			if len(call.Args) != 7 {
-				t.Errorf("%s: resolveClusterTarget called with %d args, want 7 — the"+
+			if len(call.Args) != 8 {
+				t.Errorf("%s: resolveClusterTarget called with %d args, want 8 — the"+
 					" mutates parameter is what forces the decision", f, len(call.Args))
 				return true
 			}

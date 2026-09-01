@@ -40,6 +40,7 @@ Flags:
       --context string      name of the kubeconfig context to use (default: kubeconfig's current-context)
       --dry-run             show what would be deleted without deleting anything
   -h, --help                help for delete
+      --i-know-the-target   proceed even if the target cluster's identity can't be verified with tracebloc (overrides the safety check — only when you are certain which cluster you are on)
       --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
   -n, --namespace string    namespace where your tracebloc client is installed
       --output-json         emit the delete result as JSON on stdout (human output → stderr; never prompts — pass --yes to delete, or --dry-run)
