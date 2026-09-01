@@ -276,9 +276,14 @@ func verifyTargetFromAPI(ctx context.Context, clusterID string) (client *api.Pro
 // fooled by verifyTargetFromAPI's inner timeout (which cancels only its own derived
 // context, never this one). Returns nil while the context is still live, so callers
 // fall through to their normal refuse/proceed logic.
+//
+// The exitError carries NO inner err on purpose: exitInterrupted is a SILENT exit
+// (IsSilentError keys on err==nil), so main() prints nothing — same as every other
+// interrupt path (auth.go, seal.go, client_status.go). Attaching ctx.Err() would
+// print a bare "Error: context canceled" on Ctrl-C.
 func interrupted(ctx context.Context) error {
 	if ctx.Err() != nil {
-		return &exitError{code: exitInterrupted, err: ctx.Err()}
+		return &exitError{code: exitInterrupted}
 	}
 	return nil
 }

@@ -266,6 +266,11 @@ func TestResolveClusterTarget_Mutating_CtrlCDuringVerify_Interrupts(t *testing.T
 	if got := ExitCodeFromError(err); got != exitInterrupted {
 		t.Errorf("exit code = %d, want %d (quiet Ctrl-C), not a refusal/proceed; err: %v", got, exitInterrupted, err)
 	}
+	// exitInterrupted is a SILENT exit — main() must print nothing (no bare
+	// "Error: context canceled"), same as every other interrupt path.
+	if !IsSilentError(err) {
+		t.Errorf("a Ctrl-C exit must be silent (no inner err), else main() prints 'Error: context canceled'; err: %v", err)
+	}
 	if strings.Contains(out.String(), "matches this machine's recorded cluster") {
 		t.Errorf("the anchor-match proceed must NOT fire after an abort; got:\n%s", out.String())
 	}
