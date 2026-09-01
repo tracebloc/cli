@@ -134,6 +134,33 @@ else
   bad 'a post-cosign artifact fetch is missing its size cap'
 fi
 
+
+# ── 5d. every native call sits in a stderr window (cli, Windows PowerShell 5.1)
+# THE SUCCESS PATH WAS FATAL. cosign writes "Verified OK" to STDERR when a
+# signature VERIFIES. Windows PowerShell 5.1 turns native-command stderr into a
+# NativeCommandError record, and this installer runs under
+# `$ErrorActionPreference = 'Stop'`, so that record TERMINATES the run at the
+# moment verification succeeds. `2>$null` does not prevent it -- 5.1 raises the
+# record before the redirection applies. Measured on a real Windows 11 box
+# against the published v0.10.17 installer: "cosign.exe : Verified OK" followed
+# by NativeCommandError, and nothing installed.
+#
+# Invisible on PowerShell 7, which does not make error records out of native
+# stderr -- so it passes wherever it is tested and fails on the Windows default.
+#
+# THE INVARIANT, and it catches the next native call someone adds: every `& $...`
+# invocation must sit inside an `$ErrorActionPreference = 'Continue'` window.
+# There are exactly two (cosign version, cosign verify-blob) and there must be at
+# least as many windows as calls.
+native_calls=$(grep -cE '^[[:space:]]*&[[:space:]]*\$' "$INSTALLER" || true)
+eap_windows=$(grep -cF "ErrorActionPreference = 'Continue'" "$INSTALLER" || true)
+if [ "$native_calls" -eq 0 ]; then
+  bad 'no native invocation found at all -- this guard would pass vacuously'
+elif [ "$eap_windows" -ge "$native_calls" ]; then
+  ok "every native invocation ($native_calls) sits in a stderr window ($eap_windows)"
+else
+  bad "a native invocation runs outside an ErrorActionPreference window ($native_calls calls, $eap_windows windows) -- cosign's 'Verified OK' on stderr will terminate the install under Windows PowerShell 5.1"
+fi
 # ── 6. behavioural tier ─────────────────────────────────────────────────────
 # pwsh is preinstalled on GitHub-hosted ubuntu runners. If it is missing we
 # cannot tell whether the helpers behave, and "cannot tell" is a finding, not a

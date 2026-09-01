@@ -464,12 +464,51 @@ try {
             # pass. Only cosign actually completing can bring it back to 0. That is
             # the whole guarantee behind RFC-0001 R8, and it was one line away.
             $global:LASTEXITCODE = 255
-            & $cosign verify-blob `
-                --certificate-identity-regexp "https://github.com/$GitHubRepo/.github/workflows/release.yml@refs/tags/v.*" `
-                --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
-                --certificate (Join-Path $tmpDir "$binaryFile.cert") `
-                --signature   (Join-Path $tmpDir "$binaryFile.sig") `
-                (Join-Path $tmpDir $binaryFile) 2>$null
+            # AND THE STDERR WINDOW, WITHOUT WHICH SUCCESS ITSELF IS FATAL.
+            #
+            # cosign writes "Verified OK" to STDERR on the SUCCESS path. Windows
+            # PowerShell 5.1 turns any native-command stderr into a
+            # NativeCommandError record, and this script runs under
+            # `$ErrorActionPreference = 'Stop'` (line 27) -- so the record is
+            # TERMINATING and the installer dies at the moment verification
+            # passes. `2>$null` does not save it: 5.1 raises the record before
+            # the redirection applies. Measured on a real Windows 11 box against
+            # the published v0.10.17 installer:
+            #
+            #     Verifying cosign signature...
+            #     cosign.exe : Verified OK
+            #     +             & $cosign verify-blob `
+            #     + FullyQualifiedErrorId : NativeCommandError
+            #
+            # ...and nothing was installed. So `tracebloc client` cannot be
+            # installed on Windows at all, and tracebloc/client's installer
+            # Step 4 fails with it, which drops Step 5 to manual sign-in and
+            # Step 6 to the hand-typed credential prompt.
+            #
+            # INVISIBLE ON POWERSHELL 7, which is why it survived: pwsh 7 does
+            # not make error records out of native stderr, so it passes there
+            # and fails on the Windows default.
+            #
+            # THIS FILE ALREADY HAD THE FIX, 230 LINES UP. `Test-CosignRuns`
+            # opens exactly this window for `cosign version` and says why. The
+            # idiom was simply never applied to the call that matters.
+            #
+            # NOT piped to Out-Null: `$LASTEXITCODE` is the entire verdict here
+            # and piping a native command through a cmdlet is a documented way
+            # to lose it. The window makes the record non-terminating; `2>$null`
+            # still discards the text.
+            $prevEap = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                & $cosign verify-blob `
+                    --certificate-identity-regexp "https://github.com/$GitHubRepo/.github/workflows/release.yml@refs/tags/v.*" `
+                    --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
+                    --certificate (Join-Path $tmpDir "$binaryFile.cert") `
+                    --signature   (Join-Path $tmpDir "$binaryFile.sig") `
+                    (Join-Path $tmpDir $binaryFile) 2>$null
+            } finally {
+                $ErrorActionPreference = $prevEap
+            }
             if ($LASTEXITCODE -ne 0) {
                 # No TRACEBLOC_ALLOW_UNVERIFIED branch here, deliberately.
                 # Verification RAN and said no.
