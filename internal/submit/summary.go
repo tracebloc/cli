@@ -28,6 +28,21 @@ type Summary struct {
 	// "you can grep cluster logs for this ID."
 	IngestorID string
 
+	// DestinationTable is the PHYSICAL table the run wrote into, as
+	// reported by the ingestor (tracebloc/backend#2895).
+	//
+	// Under the cluster's per-ingestion-tables mode this is a
+	// `ds_<hex>` handle and the operator's --name is only a label, so
+	// the label names no table that exists: `data delete <--name>`
+	// fails on a dataset that was just created, and a follow-up
+	// `data list | grep <--name>` finds nothing — which reads as
+	// "already clean". Both signals agree and both are wrong.
+	//
+	// Empty when the ingestor did not report it (older ingestor, or a
+	// run that failed before the banner). Callers must fall back to
+	// the requested name rather than surfacing an empty table.
+	DestinationTable string
+
 	// TotalRecords is the row count the ingestor saw in the
 	// source data. Includes every row regardless of outcome.
 	TotalRecords int64
@@ -168,6 +183,11 @@ var numberRE = regexp.MustCompile(`([0-9][0-9,]*)\s*$`)
 // value is a UUID-ish string, not a number, so it gets its own
 // pattern.
 var ingestorIDRE = regexp.MustCompile(`Ingestor ID:\s*(.+?)\s*$`)
+
+// destTableRE matches the destination-table line. Like the ingestor
+// ID the value is an identifier rather than a number, so it needs its
+// own pattern rather than the trailing-number one.
+var destTableRE = regexp.MustCompile(`Destination table:\s*(.+?)\s*$`)
 
 // SummaryParser is a streaming parser for the 📊 banner. Feed it
 // log lines as they arrive (any chunk size, any line splitting);
@@ -339,6 +359,15 @@ func (p *SummaryParser) feedLine(rawLine string) {
 		return
 	}
 
+	// Destination table — the name the operator can actually pass to
+	// `data delete` / `data list`. Handled beside the ingestor ID (and
+	// like it, not counted as a numeric field) because it is an
+	// identifier line, not a statistic.
+	if m := destTableRE.FindStringSubmatch(line); m != nil {
+		p.summary.DestinationTable = strings.TrimSpace(m[1])
+		return
+	}
+
 	// Otherwise: try each field pattern. The prefix match is
 	// linear over a 7-element slice — microscopic overhead per
 	// line, and the fixed order matches the ingestor's print
@@ -420,6 +449,9 @@ func RenderSummary(p *ui.Printer, s *Summary) {
 	}
 
 	p.Section("Ingestion summary")
+	if s.DestinationTable != "" {
+		p.Field("destination table", s.DestinationTable)
+	}
 	if s.IngestorID != "" {
 		p.Field("ingestor ID", s.IngestorID)
 	}
