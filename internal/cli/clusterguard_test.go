@@ -342,33 +342,43 @@ func TestResolveClusterTarget_Mutating_Unverifiable_Unreachable_FailsClosed(t *t
 	}
 }
 
-// The other half: the API WAS reached and answered with clients, none anchored to
-// this cluster — a CONFIRMED absence. Here naming `client create` is correct (it
-// adopts an existing client on the cluster, or mints for a genuinely new one), and
-// the message may honestly say tracebloc has no client registered for it.
-func TestResolveClusterTarget_Mutating_ConfirmedAbsence_FailsClosed(t *testing.T) {
+// The other half: the API WAS reached and answered, but no account client is
+// anchored to this cluster's UID (here every record is anchored elsewhere; the
+// legacy empty-ClusterID record is the same shape). This is NOT a confirmed absence
+// — discovery already found a client release on the cluster — so the refusal must
+// say the on-cluster client "isn't linked to any client in your account", NEVER
+// "tracebloc has no client registered" (Bugbot). `client create` is the right fix
+// because it adopts the on-cluster client and records the anchor.
+func TestResolveClusterTarget_Mutating_ReachedButUnmatched_FailsClosed(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("KUBE-UID-X")))
 	withClusterID(t, "KUBE-UID-X", nil)
-	// API answered, but no client is anchored to KUBE-UID-X.
+	// API answered, but no client is anchored to KUBE-UID-X (one anchored elsewhere,
+	// one legacy with an empty ClusterID — neither can match by UID).
 	withAccountClients(t, []api.ProvisionedClient{
 		{ID: 3, Name: "someone-else", Namespace: "other", ClusterID: "A-DIFFERENT-UID"},
+		{ID: 4, Name: "legacy-box", Namespace: "legacy", ClusterID: ""},
 	}, nil)
 
 	var out bytes.Buffer
 	_, err := resolveClusterTarget(context.Background(), ui.New(&out),
 		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, false)
 	if err == nil {
-		t.Fatal("a cluster with no registered client and no anchor must fail closed")
+		t.Fatal("a cluster whose client isn't linked to the account, with no anchor, must fail closed")
 	}
 	if got := ExitCodeFromError(err); got != exitLocalEnv {
 		t.Errorf("exit code = %d, want %d", got, exitLocalEnv)
 	}
 	msg := err.Error()
-	for _, want := range []string{"has no client registered", "client create", knowTargetFlag} {
+	for _, want := range []string{"isn't linked to any client in your account", "client create", knowTargetFlag} {
 		if !strings.Contains(msg, want) {
-			t.Errorf("a CONFIRMED-absence refusal should name %q; got:\n%s", want, msg)
+			t.Errorf("a reached-but-unmatched refusal should name %q; got:\n%s", want, msg)
 		}
+	}
+	// Must NOT assert an absence: discovery already found a client release here, and a
+	// legacy empty-ClusterID client can never match by UID (Bugbot).
+	if strings.Contains(msg, "has no client registered") {
+		t.Errorf("must not assert absence when a client release IS on the cluster; got:\n%s", msg)
 	}
 }
 

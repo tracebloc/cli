@@ -168,19 +168,25 @@ func guardActiveClientCluster(ctx context.Context, p *ui.Printer, t *clusterTarg
 			"--i-know-the-target was set. Target: %s (cluster %s).", serverURL, short(got))
 		return nil
 	}
-	// The refusal must NOT conflate "the API answered — no client for this cluster"
-	// with "couldn't reach the API": asserting an absence we never confirmed, and then
-	// recommending `client create` on an unconfirmed cluster, is the #515 adopt-vs-mint
-	// trap (Bugbot). reached distinguishes the two, and only the confirmed-absence
-	// branch names `client create`.
+	// The refusal must not overstate what's known. Two distinct situations, and
+	// neither may assert an ABSENCE:
+	//   - reached=false: we couldn't ask the API at all — say exactly that.
+	//   - reached=true, no anchored match: the API answered but nothing in the account
+	//     is anchored to this cluster's UID. This is NOT "no client here" — discovery
+	//     already found a client release on this cluster to get us this far, and a
+	//     legacy client's ClusterID is empty so it can never match by UID (Bugbot).
+	//     So the honest framing is "not LINKED to your account records", and
+	//     `client create` is the right fix precisely because it ADOPTS the on-cluster
+	//     client and records the anchor.
 	if reached {
 		return &exitError{code: exitLocalEnv, err: fmt.Errorf(
-			"couldn't verify which cluster this is before changing anything — tracebloc has no client "+
-				"registered for it, and this machine hasn't recorded one.\n"+
+			"couldn't verify which cluster this is before changing anything — the tracebloc client on this "+
+				"cluster isn't linked to any client in your account (it may be newly installed, or created "+
+				"before cluster anchoring), and this machine hasn't recorded one.\n"+
 				"  reached: %s  (cluster %s)\n"+
 				"  Refusing rather than writing to an unverified cluster.\n"+
-				"  Run `tracebloc client create` to record it (it adopts an existing client on this cluster), "+
-				"fix your --context/--kubeconfig, or\n"+
+				"  Run `tracebloc client create` — it adopts the client already on this cluster and records it — "+
+				"or fix your --context/--kubeconfig, or\n"+
 				"  re-run with --i-know-the-target if you are certain this is the right cluster.",
 			serverURL, short(got))}
 	}
@@ -220,11 +226,13 @@ func recordedClusterAnchor() string {
 // UNCONFIRMED cluster is the adopt-vs-mint hazard.
 //
 //   - (client, true,  nil) — the API answered and a client is anchored here: verified.
-//   - (nil,    true,  nil) — the API answered and NO client is anchored here: a
-//     CONFIRMED absence (client create is then correct — it adopts an existing client
-//     on this cluster, or mints for a genuinely new one).
+//   - (nil,    true,  nil) — the API answered but NO account client is anchored to this
+//     cluster's UID. NOT a proof of absence: discovery already found a client release
+//     on the cluster, and a legacy client's ClusterID is empty so it can never match by
+//     UID. The caller frames this as "not linked to your account" and points at
+//     `client create`, which adopts the on-cluster client and records the anchor.
 //   - (nil,    false, nil) — the API could not be reached / not signed in / a transient
-//     backend error: we could NOT confirm either way. The caller must not assert absence.
+//     backend error: we could NOT ask. The caller must not assert absence.
 //   - (nil,    false, err) — the API returned 426 Upgrade Required. This alone
 //     propagates as an error: a CLI too old for the server must HARD-STOP, never be
 //     swallowed and then press on against a local anchor (learned rule / Bugbot).
