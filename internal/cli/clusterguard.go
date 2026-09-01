@@ -134,10 +134,10 @@ func guardActiveClientCluster(ctx context.Context, p *ui.Printer, t *clusterTarg
 	//    does not depend on local state (a missing local anchor is exactly what fell
 	//    open in the field). Authoritative and self-checking: the printed name is the
 	//    backend record keyed on the live cluster fingerprint, never config's.
-	c, verr := verifyTargetFromAPI(ctx, got)
+	c, reached, verr := verifyTargetFromAPI(ctx, got)
 	if verr != nil {
 		// Only a 426 (this CLI is too old for the server) reaches here — every other
-		// lookup failure is swallowed to "couldn't confirm" below. A too-old CLI must
+		// lookup failure is folded into reached=false below. A too-old CLI must
 		// HARD-STOP before mutating and before the offline anchor-match: it is exactly
 		// when we must not press on against a stale local anchor (Bugbot; learned rule
 		// "HTTP 426 must be a hard failure, not a warning"). --i-know-the-target does
@@ -168,12 +168,28 @@ func guardActiveClientCluster(ctx context.Context, p *ui.Printer, t *clusterTarg
 			"--i-know-the-target was set. Target: %s (cluster %s).", serverURL, short(got))
 		return nil
 	}
+	// The refusal must NOT conflate "the API answered — no client for this cluster"
+	// with "couldn't reach the API": asserting an absence we never confirmed, and then
+	// recommending `client create` on an unconfirmed cluster, is the #515 adopt-vs-mint
+	// trap (Bugbot). reached distinguishes the two, and only the confirmed-absence
+	// branch names `client create`.
+	if reached {
+		return &exitError{code: exitLocalEnv, err: fmt.Errorf(
+			"couldn't verify which cluster this is before changing anything — tracebloc has no client "+
+				"registered for it, and this machine hasn't recorded one.\n"+
+				"  reached: %s  (cluster %s)\n"+
+				"  Refusing rather than writing to an unverified cluster.\n"+
+				"  Run `tracebloc client create` to record it (it adopts an existing client on this cluster), "+
+				"fix your --context/--kubeconfig, or\n"+
+				"  re-run with --i-know-the-target if you are certain this is the right cluster.",
+			serverURL, short(got))}
+	}
 	return &exitError{code: exitLocalEnv, err: fmt.Errorf(
-		"couldn't verify which cluster this is before changing anything — tracebloc has no client "+
-			"registered for it, and this machine hasn't recorded one.\n"+
+		"couldn't verify which cluster this is before changing anything — tracebloc couldn't be reached to "+
+			"confirm the target, and this machine hasn't recorded one.\n"+
 			"  reached: %s  (cluster %s)\n"+
 			"  Refusing rather than writing to an unverified cluster.\n"+
-			"  Run `tracebloc client create` to record it, fix your --context/--kubeconfig, or\n"+
+			"  Check you're signed in (`tracebloc login`) and pointed at the right --context/--kubeconfig, or\n"+
 			"  re-run with --i-know-the-target if you are certain this is the right cluster.",
 		serverURL, short(got))}
 }
@@ -196,36 +212,40 @@ func recordedClusterAnchor() string {
 // field failure was a MISSING local anchor, so a check that read local state could
 // never have caught it.
 //
-// Return contract:
-//   - (client, nil) — a client is anchored to this cluster: verified.
-//   - (nil, nil)    — the API answered but no client is anchored here, OR it couldn't
-//     be reached (offline, not signed in, transient backend error). Both are
-//     "couldn't confirm", which the caller treats as unverifiable — never as a
-//     wrong-cluster verdict.
-//   - (nil, err)    — the API returned 426 Upgrade Required. This alone propagates:
-//     a CLI too old for the server must HARD-STOP, never be swallowed as
-//     "couldn't confirm" and then press on against a local anchor (learned rule /
-//     Bugbot). Every other error is deliberately collapsed to (nil, nil).
-func verifyTargetFromAPI(ctx context.Context, clusterID string) (*api.ProvisionedClient, error) {
+// It reports THREE outcomes, because collapsing "couldn't reach the API" into "the
+// API says there is no such client" is the #515 trap the rest of the codebase is
+// careful about (DiscoverInClusterClientID's three-valued return, clientSurvey.looked):
+// telling an operator "tracebloc has no client for this cluster — run client create"
+// when we simply could not ask is a false absence, and `client create` on an
+// UNCONFIRMED cluster is the adopt-vs-mint hazard.
+//
+//   - (client, true,  nil) — the API answered and a client is anchored here: verified.
+//   - (nil,    true,  nil) — the API answered and NO client is anchored here: a
+//     CONFIRMED absence (client create is then correct — it adopts an existing client
+//     on this cluster, or mints for a genuinely new one).
+//   - (nil,    false, nil) — the API could not be reached / not signed in / a transient
+//     backend error: we could NOT confirm either way. The caller must not assert absence.
+//   - (nil,    false, err) — the API returned 426 Upgrade Required. This alone
+//     propagates as an error: a CLI too old for the server must HARD-STOP, never be
+//     swallowed and then press on against a local anchor (learned rule / Bugbot).
+func verifyTargetFromAPI(ctx context.Context, clusterID string) (client *api.ProvisionedClient, reached bool, err error) {
 	if clusterID == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, targetVerifyTimeout)
 	defer cancel()
-	clients, err := listAccountClientsFn(ctx)
-	if err != nil {
+	clients, lerr := listAccountClientsFn(ctx)
+	if lerr != nil {
 		var ue *api.UpgradeRequiredError
-		if errors.As(err, &ue) {
-			return nil, err // 426 → hard-stop; the caller exits with the upgrade message
+		if errors.As(lerr, &ue) {
+			return nil, false, lerr // 426 → hard-stop; the caller exits with the upgrade message
 		}
-		return nil, nil // offline / not signed in / transient → unverifiable
+		return nil, false, nil // offline / not signed in / transient → couldn't ask
 	}
-	// anchoredClient is the same kube-system-UID → client match `client create`
-	// uses to decide adopt-vs-mint; reuse it so the two paths can't drift.
-	if c := anchoredClient(clients, clusterID); c != nil {
-		return c, nil
-	}
-	return nil, nil
+	// The API answered (reached=true). anchoredClient is the same kube-system-UID →
+	// client match `client create` uses to decide adopt-vs-mint; reuse it so the two
+	// paths can't drift. A nil result here is a CONFIRMED absence, not a couldn't-ask.
+	return anchoredClient(clients, clusterID), true, nil
 }
 
 // short trims a UID for messages — enough to compare by eye, not a wall of hex.

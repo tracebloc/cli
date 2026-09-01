@@ -306,12 +306,13 @@ func TestResolveClusterTarget_Mutating_VerifiesIdentityFromAPI(t *testing.T) {
 	}
 }
 
-// backend#2983 direction 2: an unverifiable target does NOT proceed without an
-// explicit acknowledgement. No anchor, and the API can't confirm (offline / not
-// signed in / no such client) — a scripted --no-input caller has no human to ask,
-// so this fails closed (non-zero exit, nothing written) rather than mutating a
-// cluster identified only by a localhost port.
-func TestResolveClusterTarget_Mutating_Unverifiable_FailsClosed(t *testing.T) {
+// backend#2983 direction 2, the API-UNREACHABLE case: no anchor, and the API can't
+// be reached (offline / not signed in) — a scripted --no-input caller has no human
+// to ask, so this fails closed rather than mutating a cluster identified only by a
+// localhost port. And it must NOT assert an absence it never confirmed: a
+// couldn't-reach refusal names sign-in / context, never `client create` on an
+// unconfirmed cluster (the #515 adopt-vs-mint trap; Bugbot).
+func TestResolveClusterTarget_Mutating_Unverifiable_Unreachable_FailsClosed(t *testing.T) {
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
 	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("KUBE-UID-X")))
 	withClusterID(t, "KUBE-UID-X", nil)
@@ -327,9 +328,46 @@ func TestResolveClusterTarget_Mutating_Unverifiable_FailsClosed(t *testing.T) {
 		t.Errorf("exit code = %d, want %d (a local-environment problem)", got, exitLocalEnv)
 	}
 	msg := err.Error()
-	for _, want := range []string{"couldn't verify which cluster this is", "client create", knowTargetFlag} {
+	for _, want := range []string{"couldn't verify which cluster this is", "couldn't be reached", knowTargetFlag} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("the refusal must name %q so it isn't a dead end; got:\n%s", want, msg)
+		}
+	}
+	// Must NOT claim a confirmed absence we never confirmed, nor push `client create`
+	// on an unconfirmed cluster (the #515 trap the fix closes).
+	for _, forbidden := range []string{"has no client registered", "client create"} {
+		if strings.Contains(msg, forbidden) {
+			t.Errorf("a couldn't-REACH refusal must not assert absence / recommend %q; got:\n%s", forbidden, msg)
+		}
+	}
+}
+
+// The other half: the API WAS reached and answered with clients, none anchored to
+// this cluster — a CONFIRMED absence. Here naming `client create` is correct (it
+// adopts an existing client on the cluster, or mints for a genuinely new one), and
+// the message may honestly say tracebloc has no client registered for it.
+func TestResolveClusterTarget_Mutating_ConfirmedAbsence_FailsClosed(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("KUBE-UID-X")))
+	withClusterID(t, "KUBE-UID-X", nil)
+	// API answered, but no client is anchored to KUBE-UID-X.
+	withAccountClients(t, []api.ProvisionedClient{
+		{ID: 3, Name: "someone-else", Namespace: "other", ClusterID: "A-DIFFERENT-UID"},
+	}, nil)
+
+	var out bytes.Buffer
+	_, err := resolveClusterTarget(context.Background(), ui.New(&out),
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, false)
+	if err == nil {
+		t.Fatal("a cluster with no registered client and no anchor must fail closed")
+	}
+	if got := ExitCodeFromError(err); got != exitLocalEnv {
+		t.Errorf("exit code = %d, want %d", got, exitLocalEnv)
+	}
+	msg := err.Error()
+	for _, want := range []string{"has no client registered", "client create", knowTargetFlag} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("a CONFIRMED-absence refusal should name %q; got:\n%s", want, msg)
 		}
 	}
 }
