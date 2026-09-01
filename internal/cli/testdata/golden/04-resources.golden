@@ -80,6 +80,7 @@ Flags:
       --dry-run             show exactly what would change and apply nothing
       --gpus int            whole GPUs one training run may use (only on a GPU machine)
   -h, --help                help for set
+      --i-know-the-target   proceed even if the target cluster's identity can't be verified with tracebloc (overrides the safety check — only when you are certain which cluster you are on)
       --kubeconfig string   path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
       --memory string       memory one training run may use (e.g. 16 or 16Gi — the number is GiB)
   -n, --namespace string    namespace where your tracebloc client is installed (default: the context's namespace, or 'default')

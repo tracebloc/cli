@@ -22,7 +22,7 @@ import (
 func stubSealTarget(t *testing.T) {
 	t.Helper()
 	orig := resolveClusterTargetFn
-	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _, _ bool) (*clusterTarget, error) {
+	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _, _, _ bool) (*clusterTarget, error) {
 		return &clusterTarget{
 			Resolved: &cluster.ResolvedConfig{Context: "resolved-ctx", Namespace: "acme"},
 			Release:  &cluster.ParentRelease{ReleaseName: "acme"},
@@ -79,7 +79,7 @@ func runSeal(t *testing.T, timeout time.Duration) (string, error) {
 	var out bytes.Buffer
 	err := runSealCheck(context.Background(), ui.New(&out), cluster.KubeconfigOptions{
 		Path: "/tmp/kc", Context: "kind-acme",
-	}, timeout)
+	}, timeout, false)
 	return out.String(), err
 }
 
@@ -312,7 +312,7 @@ func TestSeal_HookListError_NoVerdict(t *testing.T) {
 // §7.3 binding-miss rewrite path returns exit 4) — the seal check adds nothing.
 func TestSeal_ResolveErrorPropagates(t *testing.T) {
 	orig := resolveClusterTargetFn
-	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _, _ bool) (*clusterTarget, error) {
+	resolveClusterTargetFn = func(_ context.Context, _ *ui.Printer, _ cluster.KubeconfigOptions, _ activeClientBinding, _, _, _, _ bool) (*clusterTarget, error) {
 		return nil, &exitError{code: exitNoWorkspace, err: errors.New("no tracebloc client found in namespace \"acme\"")}
 	}
 	t.Cleanup(func() { resolveClusterTargetFn = orig })
@@ -338,7 +338,7 @@ func TestSeal_CancelledDuringListing_QuietExit(t *testing.T) {
 	t.Cleanup(func() { listTestHooksFn = origList })
 
 	var out bytes.Buffer
-	err := runSealCheck(ctx, ui.New(&out), cluster.KubeconfigOptions{}, 0)
+	err := runSealCheck(ctx, ui.New(&out), cluster.KubeconfigOptions{}, 0, false)
 	if got := ExitCodeFromError(err); got != exitInterrupted {
 		t.Fatalf("exit code = %d, want %d (%v)", got, exitInterrupted, err)
 	}
@@ -369,7 +369,7 @@ func TestSeal_CancelledMidSuite_NoVerdict(t *testing.T) {
 	t.Cleanup(func() { listTestHooksFn, runHelmTestFn = origList, origRun })
 
 	var out bytes.Buffer
-	err := runSealCheck(ctx, ui.New(&out), cluster.KubeconfigOptions{}, 0)
+	err := runSealCheck(ctx, ui.New(&out), cluster.KubeconfigOptions{}, 0, false)
 	if got := ExitCodeFromError(err); got != exitInterrupted {
 		t.Fatalf("exit code = %d, want %d (%v)", got, exitInterrupted, err)
 	}
@@ -414,7 +414,7 @@ func TestSeal_CtrlCExit130BeforeCtxFlips_NoFalseUnsealed(t *testing.T) {
 	t.Cleanup(func() { listTestHooksFn, runHelmTestFn = origList, origRun })
 
 	var out bytes.Buffer
-	err := runSealCheck(context.Background(), ui.New(&out), cluster.KubeconfigOptions{}, 0)
+	err := runSealCheck(context.Background(), ui.New(&out), cluster.KubeconfigOptions{}, 0, false)
 	if got := ExitCodeFromError(err); got != exitInterrupted {
 		t.Fatalf("exit code = %d, want %d — a Ctrl-C (helm exit 130) must be a quiet interrupt, not a verdict: %v", got, exitInterrupted, err)
 	}

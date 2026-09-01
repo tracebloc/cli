@@ -40,6 +40,9 @@ type setReq struct {
 	max      bool // the `max` positional: give a run the whole machine (− overhead)
 	yes      bool
 	dryRun   bool
+	// ackTarget carries --i-know-the-target: proceed even when the target
+	// cluster's identity can't be verified with tracebloc (backend#2983).
+	ackTarget bool
 }
 
 // newResourcesSetCmd wires `tracebloc resources set` — raising how much of this
@@ -116,6 +119,7 @@ Exit codes:
 		"skip the confirmation prompt (for automation)")
 	setCmd.Flags().BoolVar(&req.dryRun, "dry-run", false,
 		"show exactly what would change and apply nothing")
+	addKnowTargetFlag(setCmd, &req.ackTarget)
 
 	setCmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "",
 		"path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
@@ -144,7 +148,7 @@ func runResourcesSet(ctx context.Context, p *ui.Printer, pr prompter, opts clust
 	// single-client path there's no note and the confirm/dry-run self-lead
 	// supplies the only leading blank — so `set` keeps NO pre-resolve Newline()
 	// and never regresses the #375 double-blank (§380).
-	target, err := resolveClusterTarget(ctx, p, opts, binding, false, true, true)
+	target, err := resolveClusterTarget(ctx, p, opts, binding, false, true, true, req.ackTarget)
 	if err != nil {
 		return binding.explain(ctx, err)
 	}

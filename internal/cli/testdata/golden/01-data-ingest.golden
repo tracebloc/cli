@@ -285,6 +285,7 @@ Flags:
       --detach kubectl logs -f -n <ns> job/<name>   exit immediately after jobs-manager accepts the run (no log streaming, no summary panel). Use for CI scenarios; reconnect later with kubectl logs -f -n <ns> job/<name>.
       --dry-run                                     validate + discover + walk, but don't create any cluster resources
   -h, --help                                        help for ingest
+      --i-know-the-target                           proceed even if the target cluster's identity can't be verified with tracebloc (overrides the safety check — only when you are certain which cluster you are on)
       --idempotency-key string                      reuse this idempotency key across retry attempts (default: fresh per invocation). jobs-manager treats a duplicate key as a replay and attaches to the existing Job rather than spawning a new one — useful for at-most-once-across-attempts semantics.
       --image-digest images.ingestor.digest         pin the ingestor container image to a specific digest (default: jobs-manager picks the cluster-configured images.ingestor.digest). Format: sha256:<hex>.
       --intent string                               is this training or test data? train|test (default train)
