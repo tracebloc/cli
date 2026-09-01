@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -133,7 +134,17 @@ func guardActiveClientCluster(ctx context.Context, p *ui.Printer, t *clusterTarg
 	//    does not depend on local state (a missing local anchor is exactly what fell
 	//    open in the field). Authoritative and self-checking: the printed name is the
 	//    backend record keyed on the live cluster fingerprint, never config's.
-	if c, ok := verifyTargetFromAPI(ctx, got); ok {
+	c, verr := verifyTargetFromAPI(ctx, got)
+	if verr != nil {
+		// Only a 426 (this CLI is too old for the server) reaches here — every other
+		// lookup failure is swallowed to "couldn't confirm" below. A too-old CLI must
+		// HARD-STOP before mutating and before the offline anchor-match: it is exactly
+		// when we must not press on against a stale local anchor (Bugbot; learned rule
+		// "HTTP 426 must be a hard failure, not a warning"). --i-know-the-target does
+		// not override it — upgrading is the only way through, and the error says so.
+		return &exitError{code: exitFailure, err: verr}
+	}
+	if c != nil {
 		p.Successf("Target verified with tracebloc: %s (namespace %s) — cluster %s.",
 			c.Name, c.Namespace, short(got))
 		return nil
@@ -183,25 +194,38 @@ func recordedClusterAnchor() string {
 // clusterID (the kube-system UID) and returns that record. The identity it returns
 // is the API's, not local config's — which is the whole point (backend#2983): the
 // field failure was a MISSING local anchor, so a check that read local state could
-// never have caught it. ok is false when the API can't be reached, the user isn't
-// signed in, or no client is anchored to this cluster — all "couldn't confirm",
-// which the caller treats as unverifiable rather than as a wrong-cluster verdict.
-func verifyTargetFromAPI(ctx context.Context, clusterID string) (*api.ProvisionedClient, bool) {
+// never have caught it.
+//
+// Return contract:
+//   - (client, nil) — a client is anchored to this cluster: verified.
+//   - (nil, nil)    — the API answered but no client is anchored here, OR it couldn't
+//     be reached (offline, not signed in, transient backend error). Both are
+//     "couldn't confirm", which the caller treats as unverifiable — never as a
+//     wrong-cluster verdict.
+//   - (nil, err)    — the API returned 426 Upgrade Required. This alone propagates:
+//     a CLI too old for the server must HARD-STOP, never be swallowed as
+//     "couldn't confirm" and then press on against a local anchor (learned rule /
+//     Bugbot). Every other error is deliberately collapsed to (nil, nil).
+func verifyTargetFromAPI(ctx context.Context, clusterID string) (*api.ProvisionedClient, error) {
 	if clusterID == "" {
-		return nil, false
+		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, targetVerifyTimeout)
 	defer cancel()
 	clients, err := listAccountClientsFn(ctx)
 	if err != nil {
-		return nil, false
+		var ue *api.UpgradeRequiredError
+		if errors.As(err, &ue) {
+			return nil, err // 426 → hard-stop; the caller exits with the upgrade message
+		}
+		return nil, nil // offline / not signed in / transient → unverifiable
 	}
 	// anchoredClient is the same kube-system-UID → client match `client create`
 	// uses to decide adopt-vs-mint; reuse it so the two paths can't drift.
 	if c := anchoredClient(clients, clusterID); c != nil {
-		return c, true
+		return c, nil
 	}
-	return nil, false
+	return nil, nil
 }
 
 // short trims a UID for messages — enough to compare by eye, not a wall of hex.

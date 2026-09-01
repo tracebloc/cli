@@ -172,6 +172,76 @@ func TestResolveClusterTarget_Mutating_UnreadableID_Refuses(t *testing.T) {
 	}
 }
 
+// The security asymmetry, pinned as a mutation-proof (Lukas' review): the whole
+// safety story rests on "--i-know-the-target overrides an UNKNOWN target, never a
+// known-WRONG one." So a wrong-cluster mismatch must STILL refuse even with the ack
+// flag set. If a future edit "for symmetry" made the mismatch branch consult
+// ackTarget, this reddens — the flag would otherwise become a wrong-cluster bypass.
+func TestResolveClusterTarget_Mutating_WrongCluster_AckDoesNotOverride(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	withAnchor(t, "AAAAAAAA-1111-2222-3333-444444444444")
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("BBBBBBBB-9999-8888-7777-666666666666")))
+	withClusterID(t, "BBBBBBBB-9999-8888-7777-666666666666", nil)
+	withAccountClients(t, nil, errors.New("offline (test): no backend"))
+
+	var out bytes.Buffer
+	_, err := resolveClusterTarget(context.Background(), ui.New(&out),
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, true /* --i-know-the-target */)
+	if err == nil {
+		t.Fatal("--i-know-the-target must NOT override a KNOWN-WRONG cluster — only an unknown one")
+	}
+	if !strings.Contains(err.Error(), "not the cluster your secure environment runs on") {
+		t.Errorf("the mismatch refusal must stand even with the ack flag; got: %v", err)
+	}
+}
+
+// The unreadable-ID + ack branch (Lukas' review #2): with --i-know-the-target, a
+// cluster whose identity can't even be read proceeds with a warning rather than
+// refusing — the ack overrides the one unverifiable case where there is nothing
+// left to check.
+func TestResolveClusterTarget_Mutating_UnreadableID_AckProceeds(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01")))
+	withClusterID(t, "", errors.New("namespaces \"kube-system\" is forbidden"))
+
+	var out bytes.Buffer
+	if _, err := resolveClusterTarget(context.Background(), ui.New(&out),
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, true /* --i-know-the-target */); err != nil {
+		t.Fatalf("--i-know-the-target must let an unreadable-identity cluster through: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, knowTargetFlag) {
+		t.Errorf("proceeding on an unreadable identity must say why (named --%s); got:\n%s", knowTargetFlag, got)
+	}
+}
+
+// A 426 (this CLI is too old for the server) must HARD-STOP, never be swallowed as
+// "couldn't confirm" and then wave the mutation through on a matching local anchor
+// (Bugbot / learned rule). The anchor here MATCHES the live cluster, so without the
+// hard-stop the guard would proceed via the offline anchor-match path; it must
+// instead refuse and point at `tracebloc upgrade`, and --i-know-the-target must not
+// override it (upgrading is the only way through).
+func TestResolveClusterTarget_Mutating_UpgradeRequired_HardStops(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	withAnchor(t, "MATCHING-UID") // would otherwise proceed via anchor-match (3b)
+	withClusterSeams(t, fake.NewSimpleClientset(jmDep("gpu-box-01"), kubeSystem("MATCHING-UID")))
+	withClusterID(t, "MATCHING-UID", nil)
+	withAccountClients(t, nil, &api.UpgradeRequiredError{MinVersion: "0.11.0"})
+
+	var out bytes.Buffer
+	_, err := resolveClusterTarget(context.Background(), ui.New(&out),
+		cluster.KubeconfigOptions{}, activeClientBinding{}, false, false, true, true /* even with ack */)
+	if err == nil {
+		t.Fatal("a 426 must hard-stop the mutation, not be swallowed and proceed on the local anchor")
+	}
+	var ue *api.UpgradeRequiredError
+	if !errors.As(err, &ue) {
+		t.Errorf("the 426 must propagate as an UpgradeRequiredError so the exit says 'upgrade'; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "tracebloc upgrade") {
+		t.Errorf("the refusal must point at the upgrade, not `client create`; got: %v", err)
+	}
+}
+
 // withAccountClients stubs the backend clients lookup the target verifier
 // (verifyTargetFromAPI) makes, so a guard test can drive "the API names this
 // cluster" / "the API can't confirm" without standing up a server. An error models
