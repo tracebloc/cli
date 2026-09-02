@@ -413,6 +413,43 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	t.Run("over-commit Fail must NOT advise sizing runs to the machine", func(t *testing.T) {
+		// Bugbot Medium on #628. The two Node-capacity Fails need OPPOSITE advice:
+		// "no node is big enough" is fixed by giving the machine more (or sizing
+		// runs to it); "big enough, but not beside what is already running" is
+		// made WORSE by that, because `resources set max` measures the machine's
+		// total, which is the figure this Fail rejected. A user who follows it asks
+		// for more and stays stuck.
+		//
+		// DETAIL BUILT FROM THE PRODUCER'S CONSTANT so the arm and the producer
+		// cannot drift apart -- the classification is by prefix, so a reworded
+		// producer would silently fall through to the generic arm again.
+		_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusFail,
+			doctor.OverCommitted+" for a training job (cpu=2, memory=8Gi) but not beside what is already running on it — the envelope over-asks the node's FREE memory, so the pod schedules Pending"), tokenOK)
+		if r.status != doctor.StatusFail {
+			t.Fatalf("over-commit is still Not ready, got %v", r.status)
+		}
+		if strings.Contains(r.remedy, "resources set max") {
+			t.Errorf("the top-line remedy tells the user to size runs to the machine, which raises the ask this Fail rejected: %q", r.remedy)
+		}
+		if !strings.Contains(r.remedy, "Do NOT") {
+			t.Errorf("the remedy should warn against sizing to the machine, got %q", r.remedy)
+		}
+	})
+
+	t.Run("generic capacity Fail still gets the sizing advice", func(t *testing.T) {
+		// The other side: the fix must not strip the correct advice from the Fail
+		// it IS correct for -- a machine that is genuinely too small.
+		_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusFail,
+			"no Ready node can fit a training job (needs cpu=2, memory=8Gi)"), tokenOK)
+		if r.status != doctor.StatusFail {
+			t.Fatalf("want Fail, got %v", r.status)
+		}
+		if !strings.Contains(r.remedy, "resources set max") {
+			t.Errorf("a too-small machine should still be offered the sizing fix: %q", r.remedy)
+		}
+	})
+
 	t.Run("node capacity GPU-soft warn → still ready", func(t *testing.T) {
 		_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn,
 			"no single Ready node satisfies cpu+memory AND nvidia.com/gpu — GPU jobs rely on the CPU fallback (needs cpu=2, memory=8Gi)"), tokenOK)

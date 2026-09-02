@@ -764,7 +764,7 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		return Result{
 			Name:   name,
 			Status: StatusFail,
-			Detail: fmt.Sprintf("a Ready node is large enough for a training job (%s) but not beside what is already running on it — the envelope over-asks the node's FREE %s, so the pod schedules Pending", req, short),
+			Detail: fmt.Sprintf("%s for a training job (%s) but not beside what is already running on it — the envelope over-asks the node's FREE %s, so the pod schedules Pending", OverCommitted, req, short),
 			Remedy: "Lower RESOURCE_REQUESTS on jobs-manager to leave room for the platform's own pods, or move the control plane / add a node. The installer sizes the envelope from allocatable, not free, so a machine that is 'big enough' can still be over-committed (backend#2870).",
 		}
 	case !cpuMemFits:
@@ -850,6 +850,18 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		return Result{Name: name, Status: StatusOK, Detail: detail}
 	}
 }
+
+// OverCommitted is the prefix of the #2870 Fail: a node IS big enough, but not
+// beside what its own control plane already holds. ONE definition, same reason
+// as CantVerifyFreeCompute below.
+//
+// The rollup needs to tell this Fail apart from the generic "no node is big
+// enough" one because the REMEDIES ARE OPPOSITE. `computeRemedy` ends every
+// variant with "size runs to this machine with `tracebloc resources set max`",
+// and `set max` sizes from ALLOCATABLE -- the exact figure this Fail rejected.
+// Following it raises the envelope and the pod stays Pending (Bugbot Medium,
+// #628). The generic arm is right for a too-small machine and wrong here.
+const OverCommitted = "a Ready node is large enough"
 
 // CantVerifyFreeCompute is the prefix every "we could not check free compute"
 // Node-capacity Warn must start with, and the ONE definition of it.

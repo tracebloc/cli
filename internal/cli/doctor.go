@@ -469,6 +469,22 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — dataset storage isn't available.",
 			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
+	case by["Node capacity"].Status == doctor.StatusFail &&
+		strings.HasPrefix(by["Node capacity"].Detail, doctor.OverCommitted):
+		// THE OPPOSITE REMEDY FROM THE ARM BELOW, which is why this case exists
+		// (Bugbot Medium, #628). `computeRemedy` ends every variant with "size runs
+		// to this machine with `resources set max`" -- and `set max` sizes from the
+		// machine's TOTAL, which is the figure this Fail just rejected. The machine
+		// is big enough; what is missing is room beside what is already on it. So
+		// the generic advice would raise the ask and leave the training stuck, which
+		// is worse than no advice: the user follows it and the symptom persists.
+		//
+		// PLAIN TERMS, no Kubernetes vocabulary, like its two neighbours --
+		// `renderDoctorDetails` is documented as the only place that appears, and
+		// the granular Remedy one `--verbose` away already names the knob.
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — this machine is big enough, but the platform's own services have already claimed the room.",
+			fmt.Sprintf("Ask for less per training run, or give the machine more memory/CPU. Do NOT size runs to the machine here — that measures the machine's total, not what is free, so it would ask for MORE and leave the training stuck. `%s doctor --verbose` shows the exact numbers and the knob to turn.", launcher())}
 	case by["Node capacity"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — not enough free compute to start a training.",
