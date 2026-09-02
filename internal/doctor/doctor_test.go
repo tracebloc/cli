@@ -783,6 +783,25 @@ func TestCheckNodeFitFreeMemory(t *testing.T) {
 		}
 	})
 
+	// A DISK-only shortfall must not take the over-commit arm (Bugbot Medium):
+	// free cpu+memory are fine, only ephemeral-storage is short, so the message
+	// must name disk via the generic fail, not blame FREE memory.
+	t.Run("disk-only shortfall is not blamed on memory", func(t *testing.T) {
+		diskReq := map[string]string{"RESOURCE_REQUESTS": "cpu=2,memory=8Gi,ephemeral-storage=50Gi"}
+		n := nodeWithDisk("n1", "4", "16Gi", "20Gi") // cpu+mem fit free; disk 20Gi < 50Gi
+		cs := fake.NewClientset(n)
+		r := checkNodeFit(bg(), cs, diskReq)
+		if r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail (disk)", r.Status, r.Detail)
+		}
+		if strings.Contains(r.Detail, "over-asks") || strings.Contains(r.Detail, "FREE memory") {
+			t.Fatalf("disk shortfall must not be reported as a memory over-commit: %q", r.Detail)
+		}
+		if !strings.Contains(r.Detail, "ephemeral-storage") {
+			t.Fatalf("detail should name ephemeral-storage: %q", r.Detail)
+		}
+	})
+
 	// UNKNOWN free is not a clean pass (Bugbot High): when the pod list can't be
 	// read, the fit falls back to allocatable and must WARN with a caveat, never
 	// green node capacity as if free were verified.

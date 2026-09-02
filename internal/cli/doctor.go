@@ -512,7 +512,8 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 			"Ready to run training — couldn't check your workloads (run with --verbose)", ""}
 	case by["Node capacity"].Status == doctor.StatusWarn &&
 		(strings.HasPrefix(by["Node capacity"].Detail, "couldn't read RESOURCE_REQUESTS") ||
-			strings.HasPrefix(by["Node capacity"].Detail, "could not list nodes")):
+			strings.HasPrefix(by["Node capacity"].Detail, "could not list nodes") ||
+			strings.HasPrefix(by["Node capacity"].Detail, "could not read the pod list")):
 		// checkNodeFit's Warn covers two different situations: a can't-check
 		// (RESOURCE_REQUESTS unreadable, nodes unlistable) and the soft GPU
 		// fallback. For a can't-check we simply don't know whether a node can fit

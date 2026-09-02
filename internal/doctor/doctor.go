@@ -750,7 +750,7 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	}
 
 	switch {
-	case !cpuMemFits && allocOnlyFit && freeKnown:
+	case !cpuMemFits && allocOnlyFit && freeKnown && (overCPU || overMem):
 		// The #2870 case: a node IS big enough, but not beside the requests its own
 		// control plane already holds. Allocatable said yes; free says no. This is
 		// the shape that goes Pending/Insufficient memory after a clean install.
@@ -811,9 +811,15 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		// invisible. Warn and say so rather than greening node capacity.
 		if !freeKnown {
 			return Result{
-				Name:   name,
+				Name: name,
+				// DISTINCT can't-check PREFIX so the rollup (summarizeDoctor in
+				// cli/doctor.go) classifies this as "couldn't check free compute"
+				// rather than greening it: it matches Node-capacity can't-checks by
+				// prefix, and "a Ready node can schedule..." would fall through to
+				// "Ready to run training" at exit 0 (Bugbot High). Keep the
+				// "allocatable only" phrase the caveat and its test rely on.
 				Status: StatusWarn,
-				Detail: detail + " — but the pod list could not be read, so this was checked against allocatable only; an over-committed control plane would be invisible here",
+				Detail: "could not read the pod list, so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here (the node fits the envelope on allocatable: " + req + ")",
 				Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity.",
 			}
 		}

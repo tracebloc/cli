@@ -389,6 +389,9 @@ func TestSummarizeDoctor(t *testing.T) {
 		for _, detail := range []string{
 			"could not list nodes: nodes is forbidden",
 			"couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit",
+			// backend#2870: unreadable pod list -> free unverifiable -> can't-check,
+			// not a green pass (Bugbot High: this used to roll up to "Ready").
+			"could not read the pod list, so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here",
 		} {
 			_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn, detail), tokenOK)
 			if r.status != doctor.StatusUnknown {
