@@ -3,9 +3,10 @@ package cli
 import (
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/tracebloc/cli/internal/push"
 	"github.com/tracebloc/cli/internal/schema"
-	"gopkg.in/yaml.v3"
 )
 
 // TestBuiltSpecValidatesAgainstVendoredSchema closes the loop backend#1006

@@ -218,8 +218,8 @@
         32
       ],
       "cli_verdict": "reject",
-      "ingestor_verdict": "accept",
-      "note": "DELIBERATE divergence: labels.csv names its file column image_id, not filename. The ingestor's preflight (validate_data) accepts it (IngestableRecordsValidator passes when the filename column is absent), but at TRANSFER time record.get('filename') is empty for every row, so all files fail ('No filename found in record'), 0 records ingested, exit 9. The CLI previews this structural gap up front (CheckImageFilenameColumn), mirroring the ingestor's file_transfer contract (requires_filename_column)."
+      "ingestor_verdict": "reject",
+      "note": "RESOLVED divergence (was CLI-rejects / ingestor-accepts). labels.csv names its file column image_id, not filename. The CLI has always rejected this up front (CheckImageFilenameColumn), previewing a failure the ingestor only hit at TRANSFER time \u2014 record.get('filename') empty for every row, 0 records ingested, exit 9. IngestableRecordsValidator now rejects it at preflight too, so both sides agree and the divergence is closed. The CLI's verdict is unchanged; upstream caught up."
     },
     {
       "name": "imgc-uppercase-filename-col",
@@ -232,8 +232,8 @@
         32
       ],
       "cli_verdict": "reject",
-      "ingestor_verdict": "accept",
-      "note": "DELIBERATE divergence: the file column is 'Filename' (capitalized). The ingestor's preflight matches it case-insensitively and accepts, but at TRANSFER time record.get('filename') is case-sensitive, so every row fails ('No filename found in record'), 0 records ingested, exit 9. The CLI requires an exact lowercase 'filename' up front (CheckImageFilenameColumn), previewing the transfer failure that the #340-class asymmetry (#372) still leaves for other clients."
+      "ingestor_verdict": "reject",
+      "note": "RESOLVED divergence (was CLI-rejects / ingestor-accepts). The file column is 'Filename' (capitalized); the ingestor's preflight used to match case-insensitively and accept, while record.get('filename') at TRANSFER is case-sensitive \u2014 every row failing, 0 records ingested, exit 9. IngestableRecordsValidator now requires exact lowercase at preflight, closing the #340-class asymmetry (#372) for every client, not just this one. The CLI's verdict is unchanged; upstream caught up."
     },
     {
       "name": "imgc-label-uniform",

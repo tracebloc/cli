@@ -98,6 +98,15 @@ def read_label_values(case, csv_path, cfg, options):
         intent="train",
         category=case["category"],
         file_options=file_opts,
+        # Pin the data_id strategy instead of inheriting the ingestor's default.
+        # This harness measures LABEL values, classes and row counts; data_id is
+        # not part of what it compares. Inheriting the default coupled it to an
+        # unrelated upstream decision, and when data-ingestors#350 flipped that
+        # default uuid -> content_hash the generator started dying with
+        # "data_id_strategy='content_hash' requires a table_salt" — a crash in
+        # the parity harness, not drift in the thing it measures. "uuid" needs
+        # no salt and keeps the goldens keyed to labels only.
+        data_id_strategy="uuid",
     )
     if not hasattr(ing, "_resolve_label_column"):
         sys.exit(
