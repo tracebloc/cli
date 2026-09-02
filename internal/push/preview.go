@@ -111,6 +111,11 @@ func SniffFamily(path string) FamilySniff {
 	hasSequences := markerResolves(abs, "sequences")
 	hasText := hasTexts || hasSequences
 	hasLabels := regularFileResolves(abs, "labels.csv")
+	// object_detection is enumerated from annotations/*.xml and ships NO
+	// manifest (backend#1006), so images/ + annotations/ is a complete,
+	// valid image layout. Probed the same literal-Lstat way as the media
+	// markers, so the sniff tracks what DiscoverObjectDetection accepts.
+	hasAnnotations := markerResolves(abs, "annotations")
 
 	// badMarker flags an entry whose name matches a media marker (exactly or
 	// case-insensitively) but which the walk can't use — a symlink, a mis-cased
@@ -163,6 +168,14 @@ func SniffFamily(path string) FamilySniff {
 	case hasImages && !hasText && hasLabels:
 		return FamilySniff{Family: FamilyImage, Confident: true,
 			Echo: "Found labels.csv and an images/ folder — this is image data."}
+	// Ordered AFTER the manifest case so a dataset carrying both still echoes
+	// the manifest it has. Without this arm a valid object-detection folder
+	// sniffed as unconfident, and the guided flow then asked the family
+	// question while describing image data as needing the very file
+	// backend#1006 makes invalid for the task.
+	case hasImages && hasAnnotations && !hasText && !hasLabels:
+		return FamilySniff{Family: FamilyImage, Confident: true,
+			Echo: "Found images/ and annotations/ — this is object-detection data."}
 	case hasText && !hasImages && hasLabels:
 		dir := "texts/"
 		if hasSequences {

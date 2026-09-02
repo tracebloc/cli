@@ -338,3 +338,41 @@ func TestVOCClasses_FailsClosedOnUnreadableXML(t *testing.T) {
 		t.Errorf("error must name the file: %v", err)
 	}
 }
+
+// TestSniffFamily_RecognisesObjectDetection: a valid manifest-free
+// object-detection folder must sniff CONFIDENTLY as image data (Bugbot).
+//
+// SniffFamily's contract is that it never claims more than the matching
+// Discover* would accept — and DiscoverObjectDetection accepts images/ +
+// annotations/ with no manifest. Without this the guided flow fell back to
+// asking the family question, and described image data as needing the very
+// labels.csv backend#1006 makes invalid for the task.
+func TestSniffFamily_RecognisesObjectDetection(t *testing.T) {
+	got := SniffFamily(mkODNoManifest(t))
+	if !got.Confident {
+		t.Fatalf("a valid images/+annotations/ dataset sniffed unconfident (hint: %q)", got.Hint)
+	}
+	if got.Family != FamilyImage {
+		t.Errorf("family = %v, want %v", got.Family, FamilyImage)
+	}
+	if strings.Contains(got.Echo, "labels.csv") {
+		t.Errorf("echo names labels.csv for a manifest-free dataset: %q", got.Echo)
+	}
+}
+
+// TestSniffFamily_ManifestStillWinsItsEcho: a dataset carrying BOTH still
+// echoes the manifest it has, so the new arm cannot mask the existing one.
+func TestSniffFamily_ManifestStillWinsItsEcho(t *testing.T) {
+	dir := mkODNoManifest(t)
+	if err := os.WriteFile(filepath.Join(dir, "labels.csv"),
+		[]byte("filename\n001.jpg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := SniffFamily(dir)
+	if !got.Confident || got.Family != FamilyImage {
+		t.Fatalf("confident=%v family=%v, want confident image", got.Confident, got.Family)
+	}
+	if !strings.Contains(got.Echo, "labels.csv") {
+		t.Errorf("echo = %q, want the manifest arm's wording", got.Echo)
+	}
+}
