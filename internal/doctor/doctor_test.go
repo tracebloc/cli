@@ -715,6 +715,19 @@ func TestCheckNodeFit(t *testing.T) {
 				"8 cores / 24Gi are free -- following it recreates the over-commit "+
 				"this check fails on: %q", r.Detail)
 		}
+		// AND THE COMMAND MUST APPLY THE PRINTED NUMBERS (Bugbot Medium).
+		// Bounding the figure by free is only half the fix: `set max` sizes from
+		// allocatable via LargestReadyNode, so attributing a free-bounded figure
+		// to it still sends the operator to a command that over-commits. On a
+		// claimed node the explicit form is the honest one.
+		if strings.Contains(r.Detail, "resources set max") {
+			t.Fatalf("nudge names 'set max', which sizes from ALLOCATABLE and so "+
+				"applies more than the figure printed beside it: %q", r.Detail)
+		}
+		if r.Detail != "" && !strings.Contains(r.Detail, "resources set --cores") {
+			t.Fatalf("nudge does not name the explicit command that applies exactly "+
+				"what it printed: %q", r.Detail)
+		}
 	})
 	t.Run("heterogeneous nodes: nudge quotes the CPU-major node, matching set max (Bugbot)", func(t *testing.T) {
 		// resources.LargestReadyNode (what `set max` applies) is CPU-major:

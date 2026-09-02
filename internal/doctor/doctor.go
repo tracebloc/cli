@@ -861,7 +861,24 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		if freeKnown && maxCores >= 1 && maxGiB >= 2 &&
 			cpuReq.MilliValue()*2 <= int64(maxCores)*1000 &&
 			memReq.Value()*2 <= int64(maxGiB)<<30 {
-			detail += fmt.Sprintf(" — this machine could give a run up to cpu=%d,memory=%dGi ('tracebloc resources set max')", maxCores, maxGiB)
+			// NAME THE COMMAND THAT APPLIES THESE NUMBERS (Bugbot Medium).
+			// Bounding the ceiling by free fixed the figure and left the
+			// attribution behind: `resources set max` sizes from ALLOCATABLE via
+			// `LargestReadyNode`, so on a claimed node it applies more than the
+			// figure printed beside it -- and reapplies the over-commit this
+			// check just started refusing. The printed numbers and the suggested
+			// command have to be the same thing.
+			//
+			// So `set max` is named only when it would genuinely land on these
+			// numbers -- i.e. nothing meaningful is claimed and the free-bounded
+			// ceiling equals the allocatable one. Otherwise the explicit form is
+			// named, which applies exactly what is printed.
+			allocM := resources.Machine{CPU: bestCPU, Mem: bestMem}
+			how := fmt.Sprintf("'tracebloc resources set --cores %d --memory %dGi'", maxCores, maxGiB)
+			if maxCores == resources.MaxRunCores(allocM) && maxGiB == resources.MaxRunGiB(allocM) {
+				how = "'tracebloc resources set max'"
+			}
+			detail += fmt.Sprintf(" — this machine could give a run up to cpu=%d,memory=%dGi (%s)", maxCores, maxGiB, how)
 		}
 		// UNKNOWN free is not a clean pass (Bugbot High). When the pod list could
 		// not be read, this fit was against allocatable, not free -- so it cannot

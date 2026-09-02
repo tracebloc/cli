@@ -89,6 +89,7 @@ screen. %s/%d are runtime placeholders.
 "%w in namespace %q. If your client runs in another namespace, pass --namespace; if this cluster has no tracebloc client yet, run the installer: %s. Diagnose with `tracebloc doctor`."
 "%w on the cluster your kubeconfig points at — if this machine should have one, run the installer to provision it; otherwise point at the right cluster with --context/--namespace"
 "%w. Run `tracebloc login` to start a new one"
+"'tracebloc resources set --cores %d --memory %dGi'"
 "(%d CPU · %d GiB"
 "(+%d more)"
 "(Pod phase: %s)"
@@ -815,4 +816,4 @@ screen. %s/%d are runtime placeholders.
 "· %d classes"
 "— largest node offers ephemeral-storage=%s"
 "— sign-in codes are valid for %s"
-"— this machine could give a run up to cpu=%d,memory=%dGi ('tracebloc resources set max')"
+"— this machine could give a run up to cpu=%d,memory=%dGi (%s)"
