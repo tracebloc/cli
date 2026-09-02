@@ -644,6 +644,17 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 				p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 				continue
 			}
+			// SKIP batch-Job pods (they carry the `job-name` label the batch/v1
+			// controller stamps -- see internal/submit/watch.go). A running
+			// training or ingestion job holds the envelope itself, so counting it
+			// would make doctor report "no room for a training job" on the exact
+			// healthy state it exists to bless -- a false negative that exits 2
+			// during training (Bugbot High). The question is whether the envelope
+			// fits beside the STEADY-STATE control plane (Deployments/DaemonSets),
+			// not beside a transient workload; those pods have no `job-name`.
+			if _, isJob := p.Labels["job-name"]; isJob {
+				continue
+			}
 			for j := range p.Spec.Containers {
 				r := p.Spec.Containers[j].Resources.Requests
 				if q, ok := r[corev1.ResourceCPU]; ok {
@@ -658,7 +669,7 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		freeKnown = false
 	}
 
-	var cpuMemFits, fullFits, allocOnlyFit bool
+	var cpuMemFits, fullFits, allocOnlyFit, overCPU, overMem bool
 	// Largest Ready node for the drift nudge — CPU-major with memory as the
 	// tie-break, EXACTLY like resources.nodeLarger, so the advertised ceiling
 	// always matches what `resources set max` will actually apply (Bugbot).
@@ -703,6 +714,14 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		// "a node is big enough but not beside its control plane" in the message.
 		if alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0 {
 			allocOnlyFit = true
+			// Which dimension the FREE fit falls short on, so the over-commit
+			// message names cpu vs memory instead of always blaming memory (Bugbot).
+			if freeCPUm < cpuReq.MilliValue() {
+				overCPU = true
+			}
+			if freeMemB < memReq.Value() {
+				overMem = true
+			}
 		}
 		// Disk joins cpu+memory as a WHOLE-NODE condition. A pod gets every
 		// resource it requests from ONE node, so this must be AND-ed into the
@@ -732,13 +751,20 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 
 	switch {
 	case !cpuMemFits && allocOnlyFit && freeKnown:
-		// The #2870 case: a node IS big enough, but not beside the memory its own
-		// control plane already requests. Allocatable said yes; free says no. This
-		// is the shape that goes Pending/Insufficient memory after a clean install.
+		// The #2870 case: a node IS big enough, but not beside the requests its own
+		// control plane already holds. Allocatable said yes; free says no. This is
+		// the shape that goes Pending/Insufficient memory after a clean install.
+		short := "memory"
+		switch {
+		case overCPU && overMem:
+			short = "cpu and memory"
+		case overCPU:
+			short = "cpu"
+		}
 		return Result{
 			Name:   name,
 			Status: StatusFail,
-			Detail: fmt.Sprintf("a Ready node is large enough for a training job (%s) but not beside what is already running on it — the envelope over-asks the node's FREE memory, so the pod schedules Pending", req),
+			Detail: fmt.Sprintf("a Ready node is large enough for a training job (%s) but not beside what is already running on it — the envelope over-asks the node's FREE %s, so the pod schedules Pending", req, short),
 			Remedy: "Lower RESOURCE_REQUESTS on jobs-manager to leave room for the platform's own pods, or move the control plane / add a node. The installer sizes the envelope from allocatable, not free, so a machine that is 'big enough' can still be over-committed (backend#2870).",
 		}
 	case !cpuMemFits:
@@ -778,6 +804,18 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			cpuReq.MilliValue()*2 <= int64(maxCores)*1000 &&
 			memReq.Value()*2 <= int64(maxGiB)<<30 {
 			detail += fmt.Sprintf(" — this machine could give a run up to cpu=%d,memory=%dGi ('tracebloc resources set max')", maxCores, maxGiB)
+		}
+		// UNKNOWN free is not a clean pass (Bugbot High). When the pod list could
+		// not be read, this fit was against allocatable, not free -- so it cannot
+		// assert schedulability, and an over-committed control plane would be
+		// invisible. Warn and say so rather than greening node capacity.
+		if !freeKnown {
+			return Result{
+				Name:   name,
+				Status: StatusWarn,
+				Detail: detail + " — but the pod list could not be read, so this was checked against allocatable only; an over-committed control plane would be invisible here",
+				Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity.",
+			}
 		}
 		return Result{Name: name, Status: StatusOK, Detail: detail}
 	}

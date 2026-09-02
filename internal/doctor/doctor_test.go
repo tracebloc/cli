@@ -696,16 +696,24 @@ func TestCheckNodeFit(t *testing.T) {
 // cpPod is a control-plane pod scheduled on a node, requesting memory — the
 // neighbour whose requests the fit must subtract (backend#2870).
 func cpPod(name, nodeName, mem string) *corev1.Pod {
+	return podOn(name, nodeName, "", mem, nil)
+}
+
+// podOn is a running pod on a node requesting cpu/mem (empty = unset), with
+// optional labels (e.g. the batch/v1 job-name label that marks a training pod).
+func podOn(name, nodeName, cpu, mem string, labels map[string]string) *corev1.Pod {
+	reqs := corev1.ResourceList{}
+	if cpu != "" {
+		reqs[corev1.ResourceCPU] = resource.MustParse(cpu)
+	}
+	if mem != "" {
+		reqs[corev1.ResourceMemory] = resource.MustParse(mem)
+	}
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "kube-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "kube-system", Labels: labels},
 		Spec: corev1.PodSpec{
-			NodeName: nodeName,
-			Containers: []corev1.Container{{
-				Name: "c",
-				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(mem)},
-				},
-			}},
+			NodeName:   nodeName,
+			Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: reqs}}},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
@@ -746,6 +754,49 @@ func TestCheckNodeFitFreeMemory(t *testing.T) {
 		cs := fake.NewClientset(node("n1", "4", "16Gi"), done)
 		if r := checkNodeFit(bg(), cs, req); r.Status != StatusOK {
 			t.Fatalf("=> %v (%q), want ok (terminal pod ignored)", r.Status, r.Detail)
+		}
+	})
+
+	// A RUNNING training job (batch/v1 job-name label) holds the envelope itself.
+	// It must NOT count against free, or doctor fails on the exact healthy state it
+	// blesses (Bugbot High). Same 12Gi neighbour, but labelled a Job -> still ok.
+	t.Run("a running training job is excluded, not counted -> ok", func(t *testing.T) {
+		job := podOn("train-sim", "n1", "", "12Gi", map[string]string{"job-name": "exp-42"})
+		cs := fake.NewClientset(node("n1", "4", "16Gi"), job)
+		if r := checkNodeFit(bg(), cs, req); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok (training job excluded)", r.Status, r.Detail)
+		}
+	})
+
+	// The over-commit message names the SHORT dimension, not always memory (Bugbot).
+	// Control plane claims cpu (3 of 4), leaving 1 free < the 2-cpu envelope; memory
+	// is fine. The message must say cpu, not memory.
+	t.Run("over-commit on cpu names cpu, not memory", func(t *testing.T) {
+		cp := podOn("cp", "n1", "3", "", nil) // 3 cpu, no memory
+		cs := fake.NewClientset(node("n1", "4", "16Gi"), cp)
+		r := checkNodeFit(bg(), cs, req) // needs cpu=2, memory=8Gi
+		if r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail (cpu over-commit)", r.Status, r.Detail)
+		}
+		if !strings.Contains(r.Detail, "FREE cpu") {
+			t.Fatalf("detail should name FREE cpu, not memory: %q", r.Detail)
+		}
+	})
+
+	// UNKNOWN free is not a clean pass (Bugbot High): when the pod list can't be
+	// read, the fit falls back to allocatable and must WARN with a caveat, never
+	// green node capacity as if free were verified.
+	t.Run("unknown free (pod list fails) -> warn with caveat", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "4", "16Gi"))
+		cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("pods is forbidden")
+		})
+		r := checkNodeFit(bg(), cs, req)
+		if r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want warn (free unknown)", r.Status, r.Detail)
+		}
+		if !strings.Contains(r.Detail, "allocatable only") {
+			t.Fatalf("detail should caveat allocatable-only: %q", r.Detail)
 		}
 	})
 }
