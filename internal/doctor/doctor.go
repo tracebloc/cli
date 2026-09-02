@@ -779,6 +779,30 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			Remedy: "Add/resize a node to meet the job's requests, or lower RESOURCE_REQUESTS on jobs-manager.",
 		}
 	case gpuRequested && !fullFits:
+		// UNKNOWN FREE OUTRANKS THE SOFT GPU WARN (Bugbot High, #628).
+		//
+		// This case sits ABOVE the `!freeKnown` branch in the default arm, and its
+		// detail carries no `CantVerifyFreeCompute` prefix -- so when the pod list
+		// could not be read AND a GPU is requested, this Warn won, the can't-check
+		// was never emitted, and `summarizeDoctor` fell through to "Ready to run
+		// training" at exit 0. Doctor printed a clean bill over a cluster whose
+		// free compute it had not looked at.
+		//
+		// It is not an exotic path: the chart stamps `nvidia.com/gpu` on CPU-only
+		// installs too, so `gpuRequested` is commonly true where no node exposes a
+		// GPU -- which is exactly this case.
+		//
+		// The GPU fallback stays SOFT and stays reported; it just no longer
+		// suppresses the stronger statement. Both facts go in one Warn, with the
+		// can't-check FIRST because the rollup matches on the prefix.
+		if !freeKnown {
+			return Result{
+				Name:   name,
+				Status: StatusWarn,
+				Detail: fmt.Sprintf("%s, so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here. Also, no single Ready node satisfies cpu+memory AND %s, so GPU jobs would rely on the CPU fallback (needs %s)", CantVerifyFreeCompute, gpuName, req),
+				Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity. If GPU training is expected, also ensure one node has both the compute and the GPU capacity, with its device plugin.",
+			}
+		}
 		return Result{
 			Name:   name,
 			Status: StatusWarn,
@@ -819,13 +843,27 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 				// "Ready to run training" at exit 0 (Bugbot High). Keep the
 				// "allocatable only" phrase the caveat and its test rely on.
 				Status: StatusWarn,
-				Detail: "could not read the pod list, so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here (the node fits the envelope on allocatable: " + req + ")",
+				Detail: CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here (the node fits the envelope on allocatable: " + req + ")",
 				Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity.",
 			}
 		}
 		return Result{Name: name, Status: StatusOK, Detail: detail}
 	}
 }
+
+// CantVerifyFreeCompute is the prefix every "we could not check free compute"
+// Node-capacity Warn must start with, and the ONE definition of it.
+//
+// `summarizeDoctor` in internal/cli/doctor.go classifies a Node-capacity Warn as
+// a can't-check by PREFIX, so the producer's wording is load-bearing: a Warn that
+// does not start with this string falls through to "Ready to run training" at
+// exit 0. That string was written out three times -- here, in the classifier, and
+// in the classifier's test -- which is a rule the checks held their own copy of.
+//
+// It is exported rather than duplicated because the two live in different
+// packages and internal/cli already imports this one. A third caller that needs
+// the same classification must reference this, not retype it.
+const CantVerifyFreeCompute = "could not read the pod list"
 
 // checkImagePull verifies that any registry pull secret the jobs-manager
 // references exists and is a well-formed dockerconfigjson — so private-image

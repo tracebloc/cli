@@ -391,7 +391,17 @@ func TestSummarizeDoctor(t *testing.T) {
 			"couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit",
 			// backend#2870: unreadable pod list -> free unverifiable -> can't-check,
 			// not a green pass (Bugbot High: this used to roll up to "Ready").
-			"could not read the pod list, so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here",
+			//
+			// BUILT FROM THE PRODUCER'S CONSTANT, not retyped. This string was a
+			// third copy of the prefix the classifier matches on -- so a producer
+			// that reworded it would leave this test passing against a phrase
+			// nothing emits any more.
+			doctor.CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here",
+			// Bugbot High on #628: the same can't-check ARRIVING WITH the soft GPU
+			// warn. The GPU case fires first in checkNodeFit, so this combined
+			// detail is what a GPU-requesting install with an unreadable pod list
+			// actually produces -- and it must roll up the same way.
+			doctor.CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here. Also, no single Ready node satisfies cpu+memory AND nvidia.com/gpu, so GPU jobs would rely on the CPU fallback (needs cpu=2, memory=8Gi)",
 		} {
 			_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn, detail), tokenOK)
 			if r.status != doctor.StatusUnknown {

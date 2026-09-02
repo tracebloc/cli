@@ -818,6 +818,58 @@ func TestCheckNodeFitFreeMemory(t *testing.T) {
 			t.Fatalf("detail should caveat allocatable-only: %q", r.Detail)
 		}
 	})
+
+	// Bugbot High on #628: the SOFT GPU warn used to outrank this one.
+	//
+	// `gpuRequested && !fullFits` sits above the `!freeKnown` branch and its
+	// detail carried no can't-check prefix, so with a GPU requested and the pod
+	// list unreadable the GPU Warn won, the caveat was never emitted, and
+	// `summarizeDoctor` -- which classifies by PREFIX -- fell through to "Ready
+	// to run training" at exit 0 over a cluster whose free compute doctor had
+	// not looked at. The chart stamps `nvidia.com/gpu` on CPU-only installs, so
+	// this is the common shape rather than an exotic one.
+	t.Run("unknown free AND gpu requested -> can't-check wins, GPU still reported", func(t *testing.T) {
+		gpu := map[string]string{
+			"RESOURCE_REQUESTS": "cpu=2,memory=8Gi",
+			"GPU_REQUESTS":      "nvidia.com/gpu=1",
+		}
+		cs := fake.NewClientset(node("n1", "4", "16Gi")) // cpu/mem fit, NO gpu
+		cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("pods is forbidden")
+		})
+		r := checkNodeFit(bg(), cs, gpu)
+		if r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
+		}
+		// PREFIX, not Contains: that is what the rollup matches on, so a detail
+		// merely mentioning the phrase somewhere would still green the run.
+		if !strings.HasPrefix(r.Detail, CantVerifyFreeCompute) {
+			t.Fatalf("detail must START with %q so summarizeDoctor classifies it as a can't-check, got %q",
+				CantVerifyFreeCompute, r.Detail)
+		}
+		// The soft GPU fact is not lost, it is just no longer the whole story.
+		if !strings.Contains(r.Detail, "nvidia.com/gpu") {
+			t.Fatalf("the GPU fallback should still be reported: %q", r.Detail)
+		}
+	})
+
+	// The other side, so the fix above cannot be read as "always warn about free":
+	// with the pod list READABLE, the GPU warn keeps its own wording and must not
+	// claim a can't-check.
+	t.Run("gpu requested, free KNOWN -> plain GPU warn, no can't-check prefix", func(t *testing.T) {
+		gpu := map[string]string{
+			"RESOURCE_REQUESTS": "cpu=2,memory=8Gi",
+			"GPU_REQUESTS":      "nvidia.com/gpu=1",
+		}
+		cs := fake.NewClientset(node("n1", "4", "16Gi"))
+		r := checkNodeFit(bg(), cs, gpu)
+		if r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
+		}
+		if strings.HasPrefix(r.Detail, CantVerifyFreeCompute) {
+			t.Fatalf("free WAS readable; this must not report a can't-check: %q", r.Detail)
+		}
+	})
 }
 
 func dockerSecret(name string, data []byte) *corev1.Secret {
