@@ -140,6 +140,7 @@ Usage:
 Flags:
       --context string      with --seal: name of the kubeconfig context to use (default: kubeconfig's current-context)
   -h, --help                help for status
+      --i-know-the-target   with --seal: proceed even if the target cluster's identity can't be verified with tracebloc (overrides the safety check — only when you are certain which cluster you are on)
       --kubeconfig string   with --seal: path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
   -n, --namespace string    with --seal: namespace where your tracebloc client is installed
       --seal                verify this environment's protections: run the chart's conformance checks and report sealed / unsealed

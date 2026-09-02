@@ -33,6 +33,9 @@ type runDataDeleteArgs struct {
 	// --output-json mode. Same contract as data list / data ingest.
 	OutputJSON bool
 	JSONOut    io.Writer
+	// AckTarget carries --i-know-the-target: proceed even when the target
+	// cluster's identity can't be verified with tracebloc (backend#2983).
+	AckTarget bool
 }
 
 // newDataDeleteCmd implements `tracebloc data delete <table>` — the
@@ -50,6 +53,7 @@ func newDataDeleteCmd() *cobra.Command {
 		dryRun          bool
 		yes             bool
 		outputJSON      bool
+		iKnowTarget     bool
 	)
 
 	cmd := &cobra.Command{
@@ -106,6 +110,7 @@ docs/json-output.md for the shape and the stability promise.`,
 				Prompter:   pr,
 				OutputJSON: outputJSON,
 				JSONOut:    jsonOut,
+				AckTarget:  iKnowTarget,
 			})
 		},
 	}
@@ -118,6 +123,7 @@ docs/json-output.md for the shape and the stability promise.`,
 		"skip the confirmation prompt (required when not on a terminal)")
 	cmd.Flags().BoolVar(&outputJSON, "output-json", false,
 		"emit the delete result as JSON on stdout (human output → stderr; never prompts — pass --yes to delete, or --dry-run)")
+	addKnowTargetFlag(cmd, &iKnowTarget)
 
 	return cmd
 }
@@ -174,7 +180,7 @@ undone — re-ingesting the data is the only way back.`)
 	// leadRedirect=false: the warning paragraph above is already this command's
 	// opening output, so the multi-client redirect note stays inline — no
 	// mid-output blank between the warning and the note (§380).
-	target, err := resolveClusterTargetFn(ctx, a.Printer, opts, binding, true, false, true)
+	target, err := resolveClusterTargetFn(ctx, a.Printer, opts, binding, true, false, true, a.AckTarget)
 	if err != nil {
 		return binding.explain(ctx, err)
 	}

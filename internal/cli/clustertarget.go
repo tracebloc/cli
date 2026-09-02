@@ -99,7 +99,11 @@ type clusterTarget struct {
 // the choice must be impossible to omit rather than an opt-in helper a new command
 // forgets to call. `true` runs guardActiveClientCluster before the target is handed
 // back; `false` is a read.
-func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, b activeClientBinding, needPVC, leadRedirect, mutates bool) (*clusterTarget, error) {
+//
+// ackTarget carries the mutating command's --i-know-the-target flag through to the
+// guard: it lets an operator proceed against a cluster whose identity can't be
+// verified (backend#2983). It is only read when mutates is true; reads pass false.
+func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.KubeconfigOptions, b activeClientBinding, needPVC, leadRedirect, mutates, ackTarget bool) (*clusterTarget, error) {
 	resolved, err := loadClusterFn(opts)
 	if err != nil {
 		return nil, &exitError{code: exitLocalEnv, err: fmt.Errorf("loading kubeconfig: %w", err)}
@@ -135,7 +139,7 @@ func resolveClusterTarget(ctx context.Context, p *ui.Printer, opts cluster.Kubec
 	// back, so a mutating command cannot have touched anything by the time it is told
 	// this is the wrong cluster.
 	if mutates {
-		if err := guardActiveClientCluster(ctx, p, t); err != nil {
+		if err := guardActiveClientCluster(ctx, p, t, ackTarget); err != nil {
 			return nil, err
 		}
 	}
