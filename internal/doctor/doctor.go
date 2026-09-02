@@ -679,6 +679,13 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	// to pick a node, so it must not perturb the drift nudge's tie-break.
 	var bestDisk resource.Quantity
 	var sawDisk bool
+	// The most cpu/memory actually FREE on any one Ready node. Tracked next to
+	// the allocatable-derived best above because the drift nudge must not
+	// advertise a ceiling the fit would refuse: the fit moved to free, the nudge
+	// did not, so on a large-but-claimed node it advised sizing UP to a figure
+	// that recreates the over-commit this very check now fails (Bugbot Medium,
+	// confirmed by @saqlainsyed007).
+	var bestFreeCPUm, bestFreeMemB int64
 	for i := range nodes.Items {
 		n := nodes.Items[i]
 		if !nodeReady(n) {
@@ -707,6 +714,10 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			if freeMemB -= reqMem[n.Name]; freeMemB < 0 {
 				freeMemB = 0
 			}
+		}
+		if freeCPUm > bestFreeCPUm ||
+			(freeCPUm == bestFreeCPUm && freeMemB > bestFreeMemB) {
+			bestFreeCPUm, bestFreeMemB = freeCPUm, freeMemB
 		}
 		nodeCPUMem := freeCPUm >= cpuReq.MilliValue() && freeMemB >= memReq.Value()
 		// Whether the node is big enough IGNORING neighbours -- the old, blind
@@ -822,9 +833,32 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		// stale when a machine GROWS. When the configured budget uses no more
 		// than half of what this machine could give one run (largest node −
 		// platform overhead), say so.
+		//
+		// BOUNDED BY FREE, NOT ALLOCATABLE. The ceiling is derived from the
+		// largest node, but the verdict above is derived from what is FREE on
+		// it. On a node that is big enough and already partly claimed those two
+		// disagree, and the nudge won: an operator who ran `resources set max`
+		// recreated the exact over-commit this check fails on, and the next
+		// `doctor` told them not to size to their own machine. Advice that
+		// contradicts the verdict printed beside it is worse than no advice.
+		//
+		// So the machine handed to `MaxRunCores`/`MaxRunGiB` is the smaller of
+		// allocatable and free, and when free is UNKNOWN the nudge is suppressed
+		// entirely -- there is nothing to bound it with, and this arm is already
+		// a Warn that says free could not be verified.
 		m := resources.Machine{CPU: bestCPU, Mem: bestMem}
+		if freeKnown {
+			freeCPU := *resource.NewMilliQuantity(bestFreeCPUm, resource.DecimalSI)
+			freeMem := *resource.NewQuantity(bestFreeMemB, resource.BinarySI)
+			if freeCPU.Cmp(m.CPU) < 0 {
+				m.CPU = freeCPU
+			}
+			if freeMem.Cmp(m.Mem) < 0 {
+				m.Mem = freeMem
+			}
+		}
 		maxCores, maxGiB := resources.MaxRunCores(m), resources.MaxRunGiB(m)
-		if maxCores >= 1 && maxGiB >= 2 &&
+		if freeKnown && maxCores >= 1 && maxGiB >= 2 &&
 			cpuReq.MilliValue()*2 <= int64(maxCores)*1000 &&
 			memReq.Value()*2 <= int64(maxGiB)<<30 {
 			detail += fmt.Sprintf(" — this machine could give a run up to cpu=%d,memory=%dGi ('tracebloc resources set max')", maxCores, maxGiB)

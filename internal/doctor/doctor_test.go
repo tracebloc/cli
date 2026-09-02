@@ -678,6 +678,44 @@ func TestCheckNodeFit(t *testing.T) {
 			t.Fatalf("=> %v (%q), want ok without nudge", r.Status, r.Detail)
 		}
 	})
+	t.Run("large but CLAIMED node -> nudge must not advise past free", func(t *testing.T) {
+		// Bugbot Medium, confirmed by @saqlainsyed007. The fit moved to FREE;
+		// the nudge stayed on allocatable. On a node that is big enough and
+		// already partly claimed the two disagree, and the nudge won -- so an
+		// operator who ran `resources set max` recreated the exact over-commit
+		// this check now fails on, and the next `doctor` told them not to size
+		// to their own machine.
+		//
+		// 32/64Gi node, 24 cores + 40Gi already held by a non-job pod: the run
+		// (2/8Gi) still fits in the 8/24Gi that is free, so this stays OK -- but
+		// the advertised ceiling may not be the allocatable-derived 31/61Gi.
+		claim := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "control-plane", Namespace: ns},
+			Spec: corev1.PodSpec{
+				NodeName: "n1",
+				Containers: []corev1.Container{{
+					Name: "c",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("24"),
+							corev1.ResourceMemory: resource.MustParse("40Gi"),
+						},
+					},
+				}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		cs := fake.NewClientset(node("n1", "32", "64Gi"), claim)
+		r := checkNodeFit(bg(), cs, cpuOnly)
+		if r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok (2/8Gi fits in the free 8/24Gi)", r.Status, r.Detail)
+		}
+		if strings.Contains(r.Detail, "cpu=31,memory=61Gi") {
+			t.Fatalf("nudge advertises the ALLOCATABLE ceiling 31/61Gi while only "+
+				"8 cores / 24Gi are free -- following it recreates the over-commit "+
+				"this check fails on: %q", r.Detail)
+		}
+	})
 	t.Run("heterogeneous nodes: nudge quotes the CPU-major node, matching set max (Bugbot)", func(t *testing.T) {
 		// resources.LargestReadyNode (what `set max` applies) is CPU-major:
 		// it picks cpuBig (32/64Gi -> max 31/61Gi), not memBig (8/128Gi ->
