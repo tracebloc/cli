@@ -437,6 +437,64 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	t.Run("over-commit outranks stuck-Pending, which it CAUSES", func(t *testing.T) {
+		// Bugbot Medium on #628, second pass -- and the case the test above could
+		// not reach. That one starts from `allOK`, so Pod health is OK and the
+		// over-commit arm is the first Fail either way. The bug lived in the state
+		// where BOTH fire.
+		//
+		// THEY CO-OCCUR BY CONSTRUCTION, which is what makes this ordering a
+		// correctness question and not a preference: the producer's Detail ends
+		// "so the pod schedules Pending" (internal/doctor/doctor.go:778), so an
+		// over-committed node is EXPECTED to also have pods stuck Pending. With
+		// the stuck-Pending arm first, the rollup printed `computeRemedy` -- which
+		// ends in `resources set max` -- in the one state the Node-capacity Fail
+		// exists to refuse. The figure was fixed on the previous commit and the
+		// rollup went on recommending the thing.
+		//
+		// Both details are built from the producer's own constant/text rather than
+		// retyped, so a reworded producer reddens this instead of silently falling
+		// through to the generic arm.
+		results := withDetail(allOK, "Node capacity", doctor.StatusFail,
+			doctor.OverCommitted+" for a training job (cpu=2, memory=8Gi) but not beside what is already running on it — the envelope over-asks the node's FREE memory, so the pod schedules Pending")
+		results = withDetail(results, "Pod health", doctor.StatusWarn,
+			"1 pod stuck Pending past the grace window")
+
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail {
+			t.Fatalf("want Fail, got %v", r.status)
+		}
+		if strings.Contains(r.remedy, "resources set max") {
+			t.Errorf("the stuck-Pending arm shadowed the over-commit arm and put `set max` back in front of the operator, in the exact state the Fail refuses: %q", r.remedy)
+		}
+		if !strings.Contains(r.remedy, "Do NOT") {
+			t.Errorf("want the over-commit remedy, got the generic one: %q", r.remedy)
+		}
+		if !strings.Contains(r.text, "already claimed the room") {
+			t.Errorf("want the over-commit top line, got %q", r.text)
+		}
+	})
+
+	t.Run("a hard Pod-health Fail still outranks over-commit", func(t *testing.T) {
+		// The other side of the reorder: over-commit was moved above the
+		// stuck-Pending WARN, not above the Pod-health FAIL. Pods not running at
+		// all is a different problem with a different fix (reinstall), and it is
+		// not caused by over-commitment -- so it must still win. Without this,
+		// "move it up" could keep sliding until it shadowed a harder failure.
+		results := withDetail(allOK, "Node capacity", doctor.StatusFail,
+			doctor.OverCommitted+" for a training job (cpu=2, memory=8Gi) but not beside what is already running on it")
+		results = withDetail(results, "Pod health", doctor.StatusFail,
+			"2 pods CrashLoopBackOff")
+
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail {
+			t.Fatalf("want Fail, got %v", r.status)
+		}
+		if !strings.Contains(r.text, "isn't running") {
+			t.Errorf("a hard Pod-health Fail must still win the rollup, got %q", r.text)
+		}
+	})
+
 	t.Run("generic capacity Fail still gets the sizing advice", func(t *testing.T) {
 		// The other side: the fix must not strip the correct advice from the Fail
 		// it IS correct for -- a machine that is genuinely too small.
