@@ -59,6 +59,18 @@ type CategorySpec struct {
 	// self-supervised tasks. The label-diversity preflight reads it so it can't
 	// drift from the ingestor's wiring.
 	IsClassification bool
+	// NoManifest marks categories whose records are enumerated from their
+	// SIDECAR FILES rather than from a labels.csv manifest. object_detection
+	// is the first: since backend#1006 the ingestor reads annotations/*.xml —
+	// <annotation><filename> names the image, <object><name> gives the classes
+	// — so there is no manifest to stage and no user-declared label column.
+	//
+	// ingest.v1.json REJECTS both `csv` and `label` for such a category rather
+	// than ignoring them, so emitting either would build a spec the ingestor
+	// refuses outright. A registry fact rather than a hardcoded id so a future
+	// sidecar-enumerated task can't be wired without deciding this
+	// (NoManifestCategory reads it).
+	NoManifest bool
 	// CLISupported reports whether `dataset push` implements the category
 	// today. semantic_segmentation is known (the schema defines it) but
 	// not yet pushable.
@@ -95,7 +107,7 @@ const (
 var categoryRegistry = []CategorySpec{
 	{ID: "image_classification", Family: FamilyImage, Label: "Image classification", CLISupported: true, IsClassification: true,
 		Blurb: "sort images into classes"},
-	{ID: "object_detection", Family: FamilyImage, Label: "Object detection", CLISupported: true, IsClassification: true,
+	{ID: "object_detection", Family: FamilyImage, Label: "Object detection", CLISupported: true, IsClassification: true, NoManifest: true,
 		Blurb: "draw boxes around objects in an image"},
 	{ID: "keypoint_detection", Family: FamilyImage, Label: "Keypoint detection", CLISupported: true, IsClassification: true,
 		Blurb: "locate landmark points on an image (e.g. pose)"},
@@ -244,6 +256,15 @@ func FamilyNouns() []string {
 func SelfSupervisedText(category string) bool {
 	c, ok := categoryByID[category]
 	return ok && c.SelfSupervised
+}
+
+// NoManifestCategory reports whether category's records are enumerated from
+// sidecar files instead of a labels.csv manifest, so neither the manifest nor
+// a `label` column is required locally or emitted into the spec
+// (backend#1006).
+func NoManifestCategory(category string) bool {
+	c, ok := categoryByID[category]
+	return ok && c.NoManifest
 }
 
 // IsKnown reports whether category is a recognized task category (in the

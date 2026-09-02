@@ -217,8 +217,9 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 
 	// 3. Walk the local directory FIRST (local "fail fast"), dispatched
 	//    by category family. Image categories expect labels.csv +
-	//    images/; tabular / time-series categories expect a single
-	//    data CSV. The walk also yields what the per-category
+	//    images/ — except object_detection, which is enumerated from
+	//    annotations/*.xml and has no manifest (backend#1006); tabular /
+	//    time-series categories expect a single data CSV. The walk also yields what the per-category
 	//    resolution below needs (the image list for target-size, the
 	//    CSV for schema inference).
 	// err and layout are this function's named returns, so neither is
@@ -236,6 +237,7 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 		layout, err = push.DiscoverSemanticSegmentation(a.LocalPath)
 	default:
 		// image_classification + keypoint_detection: labels.csv + images/.
+		// (object_detection is handled above — it has no manifest.)
 		layout, err = push.Discover(a.LocalPath)
 	}
 	walkSpin.Stop()
@@ -478,7 +480,12 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 		p.Field("labels.csv", layout.LabelsCSV)
 		p.Field(dir, fmt.Sprintf("%d files", len(layout.Sidecars[dir])))
 	default:
-		p.Field("labels.csv", layout.LabelsCSV)
+		// object_detection has no manifest (backend#1006), so LabelsCSV is
+		// empty for it — print the field only when there is one, rather than
+		// an empty value that reads like a discovery failure.
+		if layout.LabelsCSV != "" {
+			p.Field("labels.csv", layout.LabelsCSV)
+		}
 		imagesVal := fmt.Sprintf("%d files", len(layout.Images))
 		if ext, _ := spec["spec"].(map[string]any); ext != nil {
 			if fo, _ := ext["file_options"].(map[string]any); fo != nil {

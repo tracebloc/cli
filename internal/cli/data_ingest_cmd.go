@@ -119,13 +119,25 @@ tabular / time-series families; pick one with --task.
       churn/
         data.csv               (the one .csv in the folder)
 
-  image (classification, object/keypoint detection) — a folder with
+  image (classification, keypoint detection) — a folder with
   labels.csv + an images/ subfolder:
 
       cats_dogs/
         labels.csv             (required)
         images/                (required)
           001.jpg
+          ...
+
+  object detection — a folder with images/ + annotations/, and NO
+  labels.csv: the filename and the object classes are read straight
+  from the Pascal-VOC XML, so a manifest would only repeat them:
+
+      street_scenes/
+        images/                (required)
+          001.jpg
+          ...
+        annotations/           (required — one <image_name>.xml per image)
+          001.xml
           ...
 
   text (classification, masked language modeling) — a folder with
@@ -274,7 +286,8 @@ Exit codes:
 	cmd.Flags().StringVar(&intent, "intent", "",
 		"is this training or test data? train|test (default train)")
 	cmd.Flags().StringVar(&labelColumn, "label-column", "",
-		"name of the label/target column (in labels.csv for image tasks, in the data CSV for tabular)")
+		"name of the label/target column (in labels.csv for image tasks, in the data CSV for tabular; "+
+			"not used by object detection, which reads classes from the Pascal-VOC XML)")
 	cmd.Flags().StringVar(&targetSize, "target-size", "",
 		"image tasks only: the resolution your images already are, as WxH (e.g. 512x512). tracebloc never "+
 			"resizes — it checks every image is exactly this size and rejects any that differ. Default: "+

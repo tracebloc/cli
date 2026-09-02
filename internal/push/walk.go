@@ -111,6 +111,27 @@ var imageExtensions = map[string]struct{}{
 // over-cap returns ErrTooBig with a pointer to the cloud-source
 // story.
 func Discover(rootDir string) (*LocalLayout, error) {
+	return discover(rootDir, true)
+}
+
+// discover is Discover's body, parameterised on whether <root>/labels.csv is
+// required.
+//
+// object_detection stopped requiring it in backend#1006: its records are
+// enumerated from annotations/*.xml, so a manifest is not merely optional
+// there, it is not part of the layout at all. Everything else about the walk —
+// the images/ requirement, the symlink rejection, the size caps — is identical,
+// so this is a flag on the shared body rather than a second copy of it. A copy
+// is how the symlink-bypass hole (Bugbot, PR-b round 4) would grow back.
+func discover(rootDir string, requireLabelsCSV bool) (*LocalLayout, error) {
+	// What the layout looks like for this caller, used in the messages below so
+	// an object_detection user is never told to add a labels.csv the ingestor
+	// would now reject.
+	layoutHint := "labels.csv + images/"
+	if !requireLabelsCSV {
+		layoutHint = "images/ + annotations/"
+	}
+
 	abs, err := filepath.Abs(rootDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolving %q: %w", rootDir, err)
@@ -125,8 +146,8 @@ func Discover(rootDir string) (*LocalLayout, error) {
 	}
 	if !st.IsDir() {
 		return nil, fmt.Errorf(
-			"%q is not a directory; pass the directory containing labels.csv + images/",
-			abs)
+			"%q is not a directory; pass the directory containing %s",
+			abs, layoutHint)
 	}
 
 	layout := &LocalLayout{Root: abs}
@@ -140,37 +161,11 @@ func Discover(rootDir string) (*LocalLayout, error) {
 	// the target's full contents — a size-cap bypass and an
 	// arbitrary-local-file disclosure to the cluster PVC. Bugbot
 	// flagged this as Medium-severity security on PR-b round 4.
-	labelsPath := filepath.Join(abs, "labels.csv")
-	labelsStat, err := os.Lstat(labelsPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf(
-				"missing labels.csv in %q. The CLI expects "+
-					"<dir>/labels.csv + <dir>/images/ for image_classification; "+
-					"see https://docs.tracebloc.io for the dataset layout.",
-				abs)
+	if requireLabelsCSV {
+		if err := discoverLabelsCSV(abs, layout); err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("stat labels.csv: %w", err)
 	}
-	if err := rejectSymlink(labelsStat, "labels.csv"); err != nil {
-		return nil, err
-	}
-	if labelsStat.IsDir() {
-		// A directory literally named "labels.csv" passes the
-		// os.Stat above — without this check the pre-flight would
-		// accept it, and PR-b's tar stream would fail confusingly
-		// trying to read a directory as a CSV. Symmetric with the
-		// imagesStat.IsDir() check below.
-		return nil, fmt.Errorf(
-			"%q is a directory, not a file. labels.csv must be the "+
-				"CSV file holding the filename,label rows.",
-			labelsPath)
-	}
-	if err := checkFileSize("labels.csv", labelsStat.Size()); err != nil {
-		return nil, err
-	}
-	layout.LabelsCSV = labelsPath
-	layout.TotalBytes += labelsStat.Size()
 
 	// images/ subdir (required, must contain at least one
 	// image-extension file). Use os.Lstat — NOT Stat — so a
@@ -185,8 +180,8 @@ func Discover(rootDir string) (*LocalLayout, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf(
 				"missing images/ subdirectory in %q. The CLI expects "+
-					"<dir>/labels.csv + <dir>/images/*.{jpg,jpeg,png}.",
-				abs)
+					"<dir>/%s with images/*.{jpg,jpeg,png}.",
+				abs, layoutHint)
 		}
 		return nil, fmt.Errorf("stat images/: %w", err)
 	}
@@ -267,6 +262,45 @@ func Discover(rootDir string) (*LocalLayout, error) {
 	}
 
 	return layout, nil
+}
+
+// discoverLabelsCSV stats, validates and records <root>/labels.csv.
+//
+// Split out of discover so the object_detection path (backend#1006) can skip
+// it without the rest of the walk growing a second code path.
+func discoverLabelsCSV(abs string, layout *LocalLayout) error {
+	labelsPath := filepath.Join(abs, "labels.csv")
+	labelsStat, err := os.Lstat(labelsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf(
+				"missing labels.csv in %q. The CLI expects "+
+					"<dir>/labels.csv + <dir>/images/ for image_classification; "+
+					"see https://docs.tracebloc.io for the dataset layout.",
+				abs)
+		}
+		return fmt.Errorf("stat labels.csv: %w", err)
+	}
+	if err := rejectSymlink(labelsStat, "labels.csv"); err != nil {
+		return err
+	}
+	if labelsStat.IsDir() {
+		// A directory literally named "labels.csv" passes the
+		// os.Stat above — without this check the pre-flight would
+		// accept it, and PR-b's tar stream would fail confusingly
+		// trying to read a directory as a CSV. Symmetric with the
+		// imagesStat.IsDir() check in discover.
+		return fmt.Errorf(
+			"%q is a directory, not a file. labels.csv must be the "+
+				"CSV file holding the filename,label rows.",
+			labelsPath)
+	}
+	if err := checkFileSize("labels.csv", labelsStat.Size()); err != nil {
+		return err
+	}
+	layout.LabelsCSV = labelsPath
+	layout.TotalBytes += labelsStat.Size()
+	return nil
 }
 
 // rejectSymlink returns a non-nil error if info describes a symlink.

@@ -63,6 +63,9 @@ label: image_label
 `,
 		},
 		{
+			// No csv and no label: object_detection enumerates its records
+			// from annotations/*.xml (backend#1006), and the schema REJECTS
+			// both keys for this category rather than ignoring them.
 			name: "object_detection",
 			yaml: `
 apiVersion: tracebloc.io/v1
@@ -70,10 +73,8 @@ kind: IngestConfig
 table: visdrone_train
 intent: train
 category: object_detection
-csv: /data/labels.csv
 images: /data/images/
 annotations: /data/annotations/
-label: image_label
 `,
 		},
 		{

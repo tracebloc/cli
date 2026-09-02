@@ -10,12 +10,22 @@
 # Format: the first non-comment, non-blank line is the ref (a full commit SHA
 # preferred; a branch name works but reintroduces floating drift).
 #
-# CURRENT PIN: data-ingestors develop HEAD as of 2026-07-14 (the di#368
-# merge — ingest correlation id). Adopts the 6 commits since the previous
-# 7b4ecac pin (cli#286): di#358 (require-and-enforce semseg mask_id
-# validator, backend#816 — previewed by CheckMaskIdColumn), di#365
-# (min_size values validated as positive ints at construction — the CLI's
-# ParseMinSize already enforces the same grammar), di#369 (orphan-row
-# reconcile, ingest path only), di#366 (e2e test), di#368 (correlation id),
-# and the 0.7.0 version bump. No schema or validator-verdict changes.
-8f89aece1e0c249a28644eb6cdec47b7572bbec6
+# CURRENT PIN: tracebloc/data-ingestors PR #552 head (backend#1006 — drop
+# labels.csv for object_detection). Previous pin was 8f89aece, develop HEAD as
+# of 2026-07-14.
+#
+# ⚠️  THIS IS AN UNMERGED FEATURE-BRANCH COMMIT. It is pinned here so this PR's
+# schema-check is green and reviewable against the real upstream file. BEFORE
+# THIS PR MERGES, re-pin to the data-ingestors develop SHA that carries the
+# #552 merge and re-run scripts/sync-schema.sh. Merging with a feature-branch
+# pin would leave the CLI vendoring a schema that exists on no permanent ref.
+#
+# What this bump adopts beyond #1006 — the pin was 7 weeks stale, so the
+# re-sync necessarily brings these along (each verified against the CLI's own
+# suite, see the PR body):
+#   ff77a7d di#360  uploader-declared unit/ordinal descriptors (enriched schema)
+#   913dd7a di#350  default data_id strategy uuid -> content_hash
+#   36d2c72 di#360  top-level alignment facts settable from ingest.yaml
+#   ed2d051 di#535  time-ordering constraint surfaced in layout.v1.json
+#   b6f950f #1006   object_detection: no csv/label, records from Pascal-VOC XML
+f7e690fe07d84673f889b9d6c787d137153ca206

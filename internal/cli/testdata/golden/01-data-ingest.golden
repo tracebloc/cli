@@ -38,6 +38,7 @@ $ tb data ingest   # guided · tabular classification
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
+  Object detection is the exception: images/ + annotations/, no labels.csv.
 
 ? Path: ~/data/patients
   ✔ Found a CSV table — this is tabular data.
@@ -93,6 +94,7 @@ $ tb data ingest   # guided · image classification
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
+  Object detection is the exception: images/ + annotations/, no labels.csv.
 
 ? Path: ~/data/xray
   ✔ Found labels.csv and an images/ folder — this is image data.
@@ -147,6 +149,7 @@ $ tb data ingest   # guided · text classification
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
+  Object detection is the exception: images/ + annotations/, no labels.csv.
 
 ? Path: ~/data/reviews
   ✔ Found labels.csv and a texts/ folder — this looks like text data.
@@ -228,13 +231,25 @@ tabular / time-series families; pick one with --task.
       churn/
         data.csv               (the one .csv in the folder)
 
-  image (classification, object/keypoint detection) — a folder with
+  image (classification, keypoint detection) — a folder with
   labels.csv + an images/ subfolder:
 
       cats_dogs/
         labels.csv             (required)
         images/                (required)
           001.jpg
+          ...
+
+  object detection — a folder with images/ + annotations/, and NO
+  labels.csv: the filename and the object classes are read straight
+  from the Pascal-VOC XML, so a manifest would only repeat them:
+
+      street_scenes/
+        images/                (required)
+          001.jpg
+          ...
+        annotations/           (required — one <image_name>.xml per image)
+          001.xml
           ...
 
   text (classification, masked language modeling) — a folder with
@@ -290,7 +305,7 @@ Flags:
       --image-digest images.ingestor.digest         pin the ingestor container image to a specific digest (default: jobs-manager picks the cluster-configured images.ingestor.digest). Format: sha256:<hex>.
       --intent string                               is this training or test data? train|test (default train)
       --kubeconfig string                           path to the kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)
-      --label-column string                         name of the label/target column (in labels.csv for image tasks, in the data CSV for tabular)
+      --label-column string                         name of the label/target column (in labels.csv for image tasks, in the data CSV for tabular; not used by object detection, which reads classes from the Pascal-VOC XML)
       --label-policy string                         regression-class only (tabular_regression, time_series_forecasting, time_to_event_prediction): passthrough|bucket (default bucket — bins the target so the raw value never leaves the cluster)
       --min-size string                             image tasks only: reject images smaller than WxH before the ingest (e.g. 64x64). Set it to the smallest size your model can train on — raise or lower it freely. Default: unset (no local size check).
       --name string                                 a name for this dataset — start with a letter or underscore, then letters/digits/underscores — you'll reference it by this name when you start a training run

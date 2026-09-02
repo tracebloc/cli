@@ -293,6 +293,11 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 		p.Infof("Tabular   one CSV file                        e.g. %s", exTab)
 		p.Infof("Images    a folder with labels.csv + images/   e.g. %s", exImg)
 		p.Infof("Text      a folder with labels.csv + texts/     e.g. %s", exTxt)
+		// Object detection is the one image task with no manifest — its classes
+		// come from the Pascal-VOC XML (backend#1006). A hint rather than a
+		// fourth bullet: the bullets are the three data-type FAMILIES, and
+		// detection is a task inside the image one.
+		p.Hintf("Object detection is the exception: images/ + annotations/, no labels.csv.")
 		p.Newline()
 		ans, err := pr.Input("Path:", fmt.Sprintf("e.g. %s or %s", exTab, exImg),
 			a.LocalPath, validateDatasetPath)

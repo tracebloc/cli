@@ -17,16 +17,21 @@ var pngExtensions = map[string]struct{}{".png": {}}
 
 // DiscoverObjectDetection validates a local object_detection dataset:
 //
-//   - <root>/labels.csv        (required)
 //   - <root>/images/*          (required)
 //   - <root>/annotations/*.xml (required; Pascal VOC)
 //
-// It builds on the image-classification layout (labels.csv + images/)
-// and adds the annotations/ sidecar via the shared sidecar walker, so
-// the existing tar/stream machinery stages annotations under
-// "annotations/".
+// NO labels.csv. Since backend#1006 the ingestor enumerates object_detection
+// records from the Pascal-VOC XML — <annotation><filename> names the image and
+// <object><name> gives the classes — so a manifest carries nothing the
+// annotations do not, and ingest.v1.json now REJECTS `csv:` for this category
+// rather than ignoring it. Requiring one here would make the CLI demand a file
+// the ingestor refuses.
+//
+// It shares the image walk (images/ + caps + symlink guards) and adds the
+// annotations/ sidecar via the shared sidecar walker, so the existing
+// tar/stream machinery stages annotations under "annotations/".
 func DiscoverObjectDetection(rootDir string) (*LocalLayout, error) {
-	layout, err := Discover(rootDir) // labels.csv + images/ (+ caps + symlink guards)
+	layout, err := discover(rootDir, false) // images/ only (+ caps + symlink guards)
 	if err != nil {
 		return nil, err
 	}

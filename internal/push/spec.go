@@ -241,7 +241,8 @@ type SpecArgs struct {
 //
 // File-name conventions inside that subdir (labels.csv,
 // images/) are dictated by the local layout that internal/push.Discover
-// requires. Keeping the layout convention in lock-step on both
+// requires. Manifest-free categories (object_detection, backend#1006) emit
+// neither `csv` nor `label`. Keeping the layout convention in lock-step on both
 // sides — the CLI's view of "what local files we expect" and the
 // spec's view of "where they'll live in the cluster" — means a
 // successful Discover guarantees a runnable spec.
@@ -256,7 +257,12 @@ func (a SpecArgs) Build() map[string]any {
 		"category":   a.Category,
 		"table":      a.Table,
 		"intent":     a.Intent,
-		"csv":        path.Join(prefix, "labels.csv"),
+	}
+	// object_detection enumerates its records from annotations/*.xml and has no
+	// manifest (backend#1006); the schema REJECTS `csv` for it, so emitting one
+	// would build a spec the ingestor refuses rather than one it ignores.
+	if !NoManifestCategory(a.Category) {
+		spec["csv"] = path.Join(prefix, "labels.csv")
 	}
 	switch {
 	case IsTabular(a.Category):
@@ -309,7 +315,12 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 	// (data-ingestors/examples/yaml/image_classification.yaml); the
 	// ingestor treats them as directory globs.
 	spec["images"] = path.Join(prefix, "images") + "/"
-	spec["label"] = a.LabelColumn
+	// Same reason as `csv` in Build: a manifest-free category has no
+	// user-declared label column — the ingestor derives the per-image label
+	// from <object><name> — and the schema rejects `label` for it.
+	if !NoManifestCategory(a.Category) {
+		spec["label"] = a.LabelColumn
+	}
 	if a.Category == "object_detection" {
 		spec["annotations"] = path.Join(prefix, "annotations") + "/"
 	}
