@@ -258,6 +258,25 @@ func SelfSupervisedText(category string) bool {
 	return ok && c.SelfSupervised
 }
 
+// UsesLabelColumn reports whether the category ships a USER-DECLARED label
+// column — i.e. whether `--label-column` applies, the guided flow should ask
+// for it, and the built spec should emit `label`.
+//
+// False in two different ways, which is why this is one predicate rather than
+// two checks at each call site:
+//
+//   - self-supervised text has NO label at all (the target is derived from the
+//     text itself);
+//   - object_detection HAS labels, they are simply not user-declared — the
+//     ingestor reads them from <object><name> in the Pascal-VOC XML, and the
+//     schema rejects a `label` key for it (backend#1006).
+//
+// Either way, accepting the flag would silently discard the user's answer and
+// let Review echo a column that never ships.
+func UsesLabelColumn(category string) bool {
+	return !SelfSupervisedText(category) && !NoManifestCategory(category)
+}
+
 // NoManifestCategory reports whether category's records are enumerated from
 // sidecar files instead of a labels.csv manifest, so neither the manifest nor
 // a `label` column is required locally or emitted into the spec

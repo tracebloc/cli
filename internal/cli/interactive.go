@@ -521,8 +521,9 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 	// A supplied --label-column pre-fills the pick (like every other value under
 	// #509) — it no longer SKIPS the question, so a wrong or mistyped column can
 	// be corrected here the same way a stale path can. Only self-supervised text
-	// (no label at all) still bypasses it.
-	if !push.SelfSupervisedText(cat) {
+	// (no label at all) still bypasses it — as does object_detection, whose
+	// classes come from the annotation XML rather than a column (backend#1006).
+	if push.UsesLabelColumn(cat) {
 		// The prompt label tracks the wording: a class to sort into is a "Label",
 		// a numeric target is a "Target". Keeping them distinct is what lets the
 		// two branches be told apart on the prompt line as well as in the header.

@@ -293,7 +293,7 @@ func (a SpecArgs) buildText(spec map[string]any, prefix string) {
 	// Trailing slash matches the directory-glob convention the
 	// ingestor uses for sidecar dirs.
 	spec[dir] = path.Join(prefix, dir) + "/"
-	if !SelfSupervisedText(a.Category) {
+	if UsesLabelColumn(a.Category) {
 		spec["label"] = a.LabelColumn
 	}
 }
@@ -318,7 +318,7 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 	// Same reason as `csv` in Build: a manifest-free category has no
 	// user-declared label column — the ingestor derives the per-image label
 	// from <object><name> — and the schema rejects `label` for it.
-	if !NoManifestCategory(a.Category) {
+	if UsesLabelColumn(a.Category) {
 		spec["label"] = a.LabelColumn
 	}
 	if a.Category == "object_detection" {

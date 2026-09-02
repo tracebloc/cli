@@ -1520,28 +1520,35 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		}
 
 	case IsImage(spec.Category):
-		if err := CheckCSVEncoding(layout.LabelsCSV); err != nil {
-			return nil, dataProblem(err)
-		}
-		if err := CheckHasDataRows(layout.LabelsCSV); err != nil {
-			return nil, dataProblem(err)
-		}
-		header, err := ReadCSVHeader(layout.LabelsCSV)
-		if err != nil {
-			return nil, dataProblem(err)
-		}
-		if err := CheckDuplicateHeaders(header, "labels.csv"); err != nil {
-			return nil, dataProblem(err)
-		}
-		// The ingestor reads each image's file from a case-sensitive
-		// record.get("filename") at transfer time; a manifest without a
-		// filename column drops EVERY row ("No filename found in record",
-		// exit 9) AFTER the upload, and the ingestor's own preflight does not
-		// catch it. Enforce the contract's requires_filename_column locally —
-		// the image mirror of the text family's up-front check.
-		if tl, ok := LayoutFor(spec.Category); ok && tl.Manifest.RequiresFilenameColumn {
-			if err := CheckImageFilenameColumn(header); err != nil {
+		// This prologue READS the manifest; a manifest-free category
+		// (object_detection, backend#1006) has none, so these would fail a
+		// valid images+annotations dataset on an empty path.
+		var header []string
+		if !NoManifestCategory(spec.Category) {
+			if err := CheckCSVEncoding(layout.LabelsCSV); err != nil {
 				return nil, dataProblem(err)
+			}
+			if err := CheckHasDataRows(layout.LabelsCSV); err != nil {
+				return nil, dataProblem(err)
+			}
+			var err error
+			header, err = ReadCSVHeader(layout.LabelsCSV)
+			if err != nil {
+				return nil, dataProblem(err)
+			}
+			if err := CheckDuplicateHeaders(header, "labels.csv"); err != nil {
+				return nil, dataProblem(err)
+			}
+			// The ingestor reads each image's file from a case-sensitive
+			// record.get("filename") at transfer time; a manifest without a
+			// filename column drops EVERY row ("No filename found in record",
+			// exit 9) AFTER the upload, and the ingestor's own preflight does not
+			// catch it. Enforce the contract's requires_filename_column locally —
+			// the image mirror of the text family's up-front check.
+			if tl, ok := LayoutFor(spec.Category); ok && tl.Manifest.RequiresFilenameColumn {
+				if err := CheckImageFilenameColumn(header); err != nil {
+					return nil, dataProblem(err)
+				}
 			}
 		}
 		// Per-image decode (O(files)) — runs AFTER the cheap manifest/header checks
@@ -1576,7 +1583,7 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		// too); it benign-skips when no label column resolves, and so
 		// does the preview. Image labels are read untyped, so no NA drop
 		// and no numeric collapse.
-		if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
+		if err := previewImageLabelDiversity(spec, layout); err != nil {
 			return nil, dataProblem(err)
 		}
 		switch spec.Category {

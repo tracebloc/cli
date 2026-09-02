@@ -45,8 +45,16 @@ func TestDiscoverObjectDetection(t *testing.T) {
 	if len(layout.Sidecars["annotations"]) != 1 {
 		t.Errorf("annotations = %d, want 1", len(layout.Sidecars["annotations"]))
 	}
-	if got := layout.FileCount(); got != 3 { // labels.csv + image + xml
-		t.Errorf("FileCount = %d, want 3", got)
+	// image + xml only. The fixture still writes a labels.csv, but since
+	// backend#1006 object_detection does not read or stage one, so it must not
+	// be counted — FileCount drives the staging progress total, and counting a
+	// file the tar never writes would leave the upload permanently short of
+	// 100%.
+	if got := layout.FileCount(); got != 2 {
+		t.Errorf("FileCount = %d, want 2 (image + xml, no manifest)", got)
+	}
+	if layout.LabelsCSV != "" {
+		t.Errorf("LabelsCSV = %q, want empty — the manifest is not part of the layout", layout.LabelsCSV)
 	}
 }
 

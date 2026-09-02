@@ -107,16 +107,21 @@ var taskScopedValues = []taskScopedValue{
 		},
 	},
 	{
-		// The one inverted scope: every task uses a label column EXCEPT
-		// self-supervised text, which trains on the text itself. buildText drops
-		// the value, so accepting it silently discarded the user's answer and
-		// the review echoed a column that never shipped.
+		// The one inverted scope: most tasks use a label column, but two kinds
+		// do not — self-supervised text (no label at all) and manifest-free
+		// object_detection (labels come from <object><name>, backend#1006).
+		// The builder drops the value in both cases, so accepting it silently
+		// discarded the user's answer and the review echoed a column that never
+		// shipped.
 		flag:    "--label-column",
-		inScope: func(cat string) bool { return !push.SelfSupervisedText(cat) },
+		inScope: func(cat string) bool { return push.UsesLabelColumn(cat) },
 		isSet:   func(a *runDataIngestArgs) bool { return a.Spec.LabelColumn != "" },
 		clear:   func(a *runDataIngestArgs) { a.Spec.LabelColumn = "" },
 		set:     func(a *runDataIngestArgs) { a.Spec.LabelColumn = "label" },
 		message: func(cat string) string {
+			if push.NoManifestCategory(cat) {
+				return fmt.Sprintf("--label-column doesn't apply to task %q — its classes come from <object><name> in the Pascal-VOC XML, not a label column", cat)
+			}
 			return fmt.Sprintf("--label-column doesn't apply to task %q — it trains on the text itself, with no label column", cat)
 		},
 	},

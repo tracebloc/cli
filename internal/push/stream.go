@@ -364,12 +364,17 @@ func writeLayoutTar(w io.Writer, layout *LocalLayout) (err error) {
 	// PR-b r8 as Medium.
 	var totalBytes int64
 
-	// labels.csv first (small, sanity-checks the stream quickly).
-	n, err := writeTarFile(tw, layout.LabelsCSV, "labels.csv")
-	if err != nil {
-		return fmt.Errorf("packaging labels.csv: %w", err)
+	// labels.csv first (small, sanity-checks the stream quickly). Absent for a
+	// manifest-free category — object_detection is enumerated from
+	// annotations/*.xml since backend#1006 — where packaging it unconditionally
+	// would fail the stream on an empty path.
+	if layout.LabelsCSV != "" {
+		n, err := writeTarFile(tw, layout.LabelsCSV, "labels.csv")
+		if err != nil {
+			return fmt.Errorf("packaging labels.csv: %w", err)
+		}
+		totalBytes += n
 	}
-	totalBytes += n
 	if totalBytes > MaxTotalBytes {
 		return fmt.Errorf(
 			"dataset exceeded v0.1 total cap of %s during stream "+

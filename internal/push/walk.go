@@ -71,7 +71,10 @@ type LocalLayout struct {
 // "staging N files" messaging so it's accurate across all category
 // families.
 func (l *LocalLayout) FileCount() int {
-	n := 1 // labels.csv
+	n := 0
+	if l.LabelsCSV != "" {
+		n++ // labels.csv — absent for a manifest-free category (backend#1006)
+	}
 	n += len(l.Images)
 	for _, files := range l.Sidecars {
 		n += len(files)
