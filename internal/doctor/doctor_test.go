@@ -693,6 +693,63 @@ func TestCheckNodeFit(t *testing.T) {
 	})
 }
 
+// cpPod is a control-plane pod scheduled on a node, requesting memory — the
+// neighbour whose requests the fit must subtract (backend#2870).
+func cpPod(name, nodeName, mem string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "kube-system"},
+		Spec: corev1.PodSpec{
+			NodeName: nodeName,
+			Containers: []corev1.Container{{
+				Name: "c",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(mem)},
+				},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+}
+
+// backend#2870: node-fit must be against FREE memory (allocatable − what is
+// already requested on the node), not allocatable. A node big enough by
+// allocatable but over-committed by the control plane it hosts must FAIL.
+func TestCheckNodeFitFreeMemory(t *testing.T) {
+	req := map[string]string{"RESOURCE_REQUESTS": "cpu=2,memory=8Gi"}
+
+	t.Run("allocatable fits but FREE does not -> fail", func(t *testing.T) {
+		// 16Gi node, control plane already claims 12Gi -> 4Gi free < 8Gi envelope.
+		// Allocatable (16Gi) "fits"; free (4Gi) does not.
+		cs := fake.NewClientset(node("n1", "4", "16Gi"), cpPod("cp", "n1", "12Gi"))
+		r := checkNodeFit(bg(), cs, req)
+		if r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail (over-committed)", r.Status, r.Detail)
+		}
+		if !strings.Contains(r.Detail, "FREE") || !strings.Contains(r.Detail, "over-asks") {
+			t.Fatalf("detail should name the free-memory over-commit: %q", r.Detail)
+		}
+	})
+
+	// The subtraction is load-bearing: the SAME node without the neighbour passes,
+	// so it is the pod request — not the node size — that flips the verdict.
+	t.Run("same node without the neighbour -> ok", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "4", "16Gi"))
+		if r := checkNodeFit(bg(), cs, req); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok", r.Status, r.Detail)
+		}
+	})
+
+	// A terminal pod holds no memory; free stays 16Gi and the job fits.
+	t.Run("terminal neighbour does not consume free", func(t *testing.T) {
+		done := cpPod("old", "n1", "12Gi")
+		done.Status.Phase = corev1.PodSucceeded
+		cs := fake.NewClientset(node("n1", "4", "16Gi"), done)
+		if r := checkNodeFit(bg(), cs, req); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok (terminal pod ignored)", r.Status, r.Detail)
+		}
+	})
+}
+
 func dockerSecret(name string, data []byte) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},

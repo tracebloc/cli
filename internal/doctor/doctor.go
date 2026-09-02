@@ -623,7 +623,42 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	// A pod gets ALL its requested resources from ONE node, so evaluate each
 	// node as a whole — never OR cpu/mem and GPU across different nodes, which
 	// would pass even when no single node can run the job (Bugbot on PR #91).
-	var cpuMemFits, fullFits bool
+	// FREE, not allocatable (backend#2870). A node whose control plane already
+	// requests memory has less room than its allocatable advertises, and fitting
+	// the training envelope against allocatable is the blind spot that let every
+	// install go Pending unnoticed: the installer writes `allocatable − overhead`,
+	// and if the real control plane exceeds `overhead` the pod cannot schedule even
+	// though allocatable "fits". Sum the requests already on each node and evaluate
+	// the job against what is FREE. If the pod list cannot be read, free is UNKNOWN:
+	// say so and fall back to allocatable, never silently pass it off as free.
+	reqCPU := map[string]int64{} // node -> already-requested millicores
+	reqMem := map[string]int64{} // node -> already-requested bytes
+	freeKnown := true
+	if pods, perr := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); perr == nil {
+		for i := range pods.Items {
+			p := pods.Items[i]
+			// A pod with no node holds no node's memory yet; a terminal pod holds
+			// none at all -- counting either would understate free (mirrors
+			// requestedMemory's Succeeded/Failed skip).
+			if p.Spec.NodeName == "" ||
+				p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			for j := range p.Spec.Containers {
+				r := p.Spec.Containers[j].Resources.Requests
+				if q, ok := r[corev1.ResourceCPU]; ok {
+					reqCPU[p.Spec.NodeName] += q.MilliValue()
+				}
+				if q, ok := r[corev1.ResourceMemory]; ok {
+					reqMem[p.Spec.NodeName] += q.Value()
+				}
+			}
+		}
+	} else {
+		freeKnown = false
+	}
+
+	var cpuMemFits, fullFits, allocOnlyFit bool
 	// Largest Ready node for the drift nudge — CPU-major with memory as the
 	// tie-break, EXACTLY like resources.nodeLarger, so the advertised ceiling
 	// always matches what `resources set max` will actually apply (Bugbot).
@@ -650,7 +685,25 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 				bestDisk = d
 			}
 		}
-		nodeCPUMem := alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0
+		// Allocatable minus what is already requested on THIS node (never below 0).
+		// When free is unknown, this is allocatable and the caveat is reported below.
+		freeCPUm := alloc.Cpu().MilliValue()
+		freeMemB := alloc.Memory().Value()
+		if freeKnown {
+			if freeCPUm -= reqCPU[n.Name]; freeCPUm < 0 {
+				freeCPUm = 0
+			}
+			if freeMemB -= reqMem[n.Name]; freeMemB < 0 {
+				freeMemB = 0
+			}
+		}
+		nodeCPUMem := freeCPUm >= cpuReq.MilliValue() && freeMemB >= memReq.Value()
+		// Whether the node is big enough IGNORING neighbours -- the old, blind
+		// verdict. Kept only to tell "no node is big enough at all" apart from
+		// "a node is big enough but not beside its control plane" in the message.
+		if alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0 {
+			allocOnlyFit = true
+		}
 		// Disk joins cpu+memory as a WHOLE-NODE condition. A pod gets every
 		// resource it requests from ONE node, so this must be AND-ed into the
 		// same per-node verdict and never OR-ed across nodes (Bugbot on PR #91
@@ -678,11 +731,25 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	}
 
 	switch {
-	case !cpuMemFits:
+	case !cpuMemFits && allocOnlyFit && freeKnown:
+		// The #2870 case: a node IS big enough, but not beside the memory its own
+		// control plane already requests. Allocatable said yes; free says no. This
+		// is the shape that goes Pending/Insufficient memory after a clean install.
 		return Result{
 			Name:   name,
 			Status: StatusFail,
-			Detail: fmt.Sprintf("no Ready node can fit a training job (needs %s)", req),
+			Detail: fmt.Sprintf("a Ready node is large enough for a training job (%s) but not beside what is already running on it — the envelope over-asks the node's FREE memory, so the pod schedules Pending", req),
+			Remedy: "Lower RESOURCE_REQUESTS on jobs-manager to leave room for the platform's own pods, or move the control plane / add a node. The installer sizes the envelope from allocatable, not free, so a machine that is 'big enough' can still be over-committed (backend#2870).",
+		}
+	case !cpuMemFits:
+		detail := fmt.Sprintf("no Ready node can fit a training job (needs %s)", req)
+		if !freeKnown {
+			detail += " — checked against allocatable only; the pod list could not be read, so an over-committed control plane would be invisible here"
+		}
+		return Result{
+			Name:   name,
+			Status: StatusFail,
+			Detail: detail,
 			Remedy: "Add/resize a node to meet the job's requests, or lower RESOURCE_REQUESTS on jobs-manager.",
 		}
 	case gpuRequested && !fullFits:
