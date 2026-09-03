@@ -411,8 +411,8 @@ Tracked as a cross-repo governance ticket:
 | Family | Task(s) | Required layout |
 |---|---|---|
 | Image | image_classification, keypoint_detection | `<dir>/labels.csv` + `<dir>/images/*.{jpg,jpeg,png}` (keypoint also `--number-of-keypoints`) |
-| Image | object_detection | the above + `<dir>/annotations/*.xml` (Pascal VOC) |
-| Image | semantic_segmentation *(CLI-pending)* | the above + `<dir>/masks/*.png` |
+| Image | object_detection | `<dir>/images/*.{jpg,jpeg,png}` + `<dir>/annotations/*.xml` (Pascal VOC) — **no `labels.csv`**: records are enumerated from the XML and the label derived from `<object><name>` (backend#1006) |
+| Image | semantic_segmentation | `<dir>/labels.csv` + `<dir>/images/*.{jpg,jpeg,png}` + `<dir>/masks/*.png` |
 | Text | text_classification, token_classification, sentence_pair_classification | `<dir>/labels.csv` + `<dir>/texts/*.txt` |
 | Text | masked_language_modeling | `<dir>/sequences/*.txt` + `<dir>/tokenizer.json` (no labels) |
 | Text | causal_language_modeling, seq2seq, embeddings *(CLI-pending)* | `<dir>/texts/*.txt`, in-file format per task (raw / `prompt⇥completion` / `source⇥target` / `anchor⇥positive[⇥negative]`) |

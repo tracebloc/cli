@@ -10,12 +10,20 @@
 # Format: the first non-comment, non-blank line is the ref (a full commit SHA
 # preferred; a branch name works but reintroduces floating drift).
 #
-# CURRENT PIN: data-ingestors develop HEAD as of 2026-07-14 (the di#368
-# merge — ingest correlation id). Adopts the 6 commits since the previous
-# 7b4ecac pin (cli#286): di#358 (require-and-enforce semseg mask_id
-# validator, backend#816 — previewed by CheckMaskIdColumn), di#365
-# (min_size values validated as positive ints at construction — the CLI's
-# ParseMinSize already enforces the same grammar), di#369 (orphan-row
-# reconcile, ingest path only), di#366 (e2e test), di#368 (correlation id),
-# and the 0.7.0 version bump. No schema or validator-verdict changes.
-8f89aece1e0c249a28644eb6cdec47b7572bbec6
+# CURRENT PIN: data-ingestors fix/3076-od-layout-contract HEAD (backend#3076 —
+# completes the backend#1006 object_detection migration). The previous pin
+# (8f89aece, 2026-07-14) sat a full contract VERSION behind: its layout.v1.json
+# was v2 and its ingest.v1.json PREDATED backend#1006, so it still accepted a
+# `csv`/`label` for object_detection — the stale schema the CLI validated
+# against locally while the cluster ingestor rejected the same config (HTTP 400,
+# OD ingest impossible). This pin adopts the intervening upstream in one
+# deliberate re-vendor: layout contract v2 -> v4 (v3 `ordering` block,
+# backend#1870; v4 OD manifest kind="none", backend#3076), the di#360 dataset
+# alignment fields + `data_id` default flip (content_hash) in ingest.v1.json,
+# and the backend#1006 OD carve-out (csv/json + label rejected for OD).
+#
+# NOTE: this is an UNMERGED data-ingestors branch commit — raw.githubusercontent
+# serves it by SHA so sync-schema.sh --check is green now. Re-pin to the
+# data-ingestors develop SHA once backend#3076 merges there (identical bytes; a
+# trivial follow-up).
+624b798c246480b001f4aa692d966196696d7729

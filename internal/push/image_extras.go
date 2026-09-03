@@ -17,16 +17,20 @@ var pngExtensions = map[string]struct{}{".png": {}}
 
 // DiscoverObjectDetection validates a local object_detection dataset:
 //
-//   - <root>/labels.csv        (required)
 //   - <root>/images/*          (required)
 //   - <root>/annotations/*.xml (required; Pascal VOC)
 //
-// It builds on the image-classification layout (labels.csv + images/)
-// and adds the annotations/ sidecar via the shared sidecar walker, so
-// the existing tar/stream machinery stages annotations under
-// "annotations/".
+// There is NO labels.csv: since backend#1006 object_detection records are
+// enumerated from the Pascal-VOC XML (one per image) and each label is derived
+// from <object><name>, so there is no manifest CSV and no user label column
+// (the vendored layout contract declares manifest kind="none"). It walks
+// images/ WITHOUT requiring the CSV, then adds the annotations/ sidecar via the
+// shared sidecar walker, so the existing tar/stream machinery stages
+// annotations under "annotations/".
 func DiscoverObjectDetection(rootDir string) (*LocalLayout, error) {
-	layout, err := Discover(rootDir) // labels.csv + images/ (+ caps + symlink guards)
+	// requireLabelsCSV=false — OD has no manifest CSV (backend#1006). Requiring
+	// one here is exactly the stale layout the ingestor's schema rejects.
+	layout, err := discover(rootDir, false) // images/ only (+ caps + symlink guards)
 	if err != nil {
 		return nil, err
 	}

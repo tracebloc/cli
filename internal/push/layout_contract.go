@@ -56,11 +56,46 @@ type GroupingSpec struct {
 	CountUnit   string `json:"count_unit"`   // "sequences"
 }
 
-// ManifestLayout describes the task's manifest CSV.
+// ManifestLayout describes the task's manifest CSV. Kind "none" means the task
+// has NO manifest CSV at all — object_detection, whose records are enumerated
+// from the annotations/*.xml sidecar and whose label is derived, not read from
+// a column (backend#1006). A "none" task carries neither a filename nor a label
+// column, and a consumer must skip every labels-CSV read for it.
 type ManifestLayout struct {
-	Kind                   string `json:"kind"` // labels_csv | data_csv
+	Kind                   string `json:"kind"` // labels_csv | data_csv | none
 	RequiresFilenameColumn bool   `json:"requires_filename_column"`
 	HasLabelColumn         bool   `json:"has_label_column"`
+}
+
+// manifestKindNone is the Kind a task with no manifest CSV declares (backend#1006,
+// object_detection). Kept a named constant so the CSV-gating predicates below and
+// the mirror test read the same token.
+const manifestKindNone = "none"
+
+// HasManifestCSV reports whether a category ships a manifest CSV (labels_csv or
+// data_csv) the CLI must discover, read, and stage — false only for the
+// manifest-less categories (Kind "none": object_detection). Driven by the
+// vendored layout contract so a future no-manifest category is handled by
+// re-vendoring, not a code edit. An unknown category (absent from the contract)
+// returns true: the schema validator then produces the canonical
+// unrecognized-category error, unchanged from before this predicate existed.
+func HasManifestCSV(category string) bool {
+	t, ok := LayoutFor(category)
+	if !ok {
+		return true
+	}
+	return t.Manifest.Kind != manifestKindNone
+}
+
+// ManifestHasLabelColumn reports whether a category's manifest carries a
+// user-declared label/target column — the fact that gates emitting `label` in
+// the spec and previewing the label column locally. Mirrors the ingestor's
+// has_label_column: false for the self-supervised text tasks AND for
+// object_detection (label derived from the XML, not a column — backend#1006).
+// Unknown category returns false (nothing to point a label at).
+func ManifestHasLabelColumn(category string) bool {
+	t, ok := LayoutFor(category)
+	return ok && t.Manifest.HasLabelColumn
 }
 
 // SidecarSpec is an extra per-row directory a file-bearing task needs beyond

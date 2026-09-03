@@ -105,6 +105,7 @@ screen. %s/%d are runtime placeholders.
 "-%02d"
 "--%s has no effect without --seal"
 "--label-column doesn't apply to task %q — it trains on the text itself, with no label column"
+"--label-column doesn't apply to task %q — its per-image label is derived from the annotation XML (<object><name>), not a column"
 "--label-policy is regression-class tasks only (tabular_regression, time_series_forecasting, time_to_event_prediction); it doesn't apply to task %q"
 "--min-size is image tasks only; it doesn't apply to task %q"
 "--number-of-keypoints is keypoint_detection only; it doesn't apply to task %q"

@@ -509,13 +509,11 @@
         32,
         32
       ],
-      "csv": "labels.csv",
       "name": "objdet-ok",
       "category": "object_detection",
-      "label_column": "label",
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "object_detection happy path: paired images/annotations (valid Pascal VOC), filename-referenced manifest. Labels come from the XML, so the CSV has no label column \u2014 LabelDiversityValidator benign-skips on both sides."
+      "note": "object_detection happy path: paired images/annotations (valid Pascal VOC). Since backend#1006 records are enumerated from the XML and each label is derived from <object><name> \u2014 there is NO manifest CSV and no label column, so the CLI stages images/ + annotations/ only and LabelDiversityValidator benign-skips the (absent) label preview on both sides."
     },
     {
       "extension": ".jpg",
@@ -523,10 +521,8 @@
         32,
         32
       ],
-      "csv": "labels.csv",
       "name": "objdet-missing-annotation",
       "category": "object_detection",
-      "label_column": "label",
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
       "note": "b.jpg has no b.xml: FilePairingValidator rejects in-cluster; CheckAnnotationPairing previews the image-without-annotation direction."
@@ -537,10 +533,8 @@
         32,
         32
       ],
-      "csv": "labels.csv",
       "name": "objdet-orphan-annotation",
       "category": "object_detection",
-      "label_column": "label",
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
       "note": "c.xml has no c.jpg: FilePairingValidator rejects orphan sidecars; CheckAnnotationPairing previews the annotation-without-image direction."
@@ -551,10 +545,8 @@
         32,
         32
       ],
-      "csv": "labels.csv",
       "name": "objdet-bad-xml",
       "category": "object_detection",
-      "label_column": "label",
       "cli_verdict": "accept",
       "ingestor_verdict": "reject",
       "note": "DOCUMENTED under-preview: a.xml is malformed Pascal VOC (no <size>, inverted bndbox) \u2014 PascalVOCXMLValidator rejects in-cluster, but the CLI has no XML-content mirror, so the failure surfaces post-upload. Candidate for a future CheckVOCAnnotations preview."

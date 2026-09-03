@@ -107,16 +107,25 @@ var taskScopedValues = []taskScopedValue{
 		},
 	},
 	{
-		// The one inverted scope: every task uses a label column EXCEPT
-		// self-supervised text, which trains on the text itself. buildText drops
-		// the value, so accepting it silently discarded the user's answer and
-		// the review echoed a column that never shipped.
+		// A label column applies to every task whose manifest declares one —
+		// the contract's has_label_column, read via ManifestHasLabelColumn. Two
+		// kinds of task have none: self-supervised text (MLM/CLM/seq2seq/
+		// embeddings), which trains on the text itself, and object_detection,
+		// whose per-image label is derived from the annotation XML, not a column
+		// (backend#1006). buildImage/buildText drop the value for those, so
+		// accepting --label-column there silently discarded the user's answer and
+		// the review echoed a column that never shipped — exactly what this guard
+		// exists to catch.
 		flag:    "--label-column",
-		inScope: func(cat string) bool { return !push.SelfSupervisedText(cat) },
+		inScope: push.ManifestHasLabelColumn,
 		isSet:   func(a *runDataIngestArgs) bool { return a.Spec.LabelColumn != "" },
 		clear:   func(a *runDataIngestArgs) { a.Spec.LabelColumn = "" },
 		set:     func(a *runDataIngestArgs) { a.Spec.LabelColumn = "label" },
 		message: func(cat string) string {
+			if cat == "object_detection" {
+				return fmt.Sprintf("--label-column doesn't apply to task %q — its per-image label is "+
+					"derived from the annotation XML (<object><name>), not a column", cat)
+			}
 			return fmt.Sprintf("--label-column doesn't apply to task %q — it trains on the text itself, with no label column", cat)
 		},
 	},
@@ -163,13 +172,15 @@ func rejectMisappliedTaskValues(a *runDataIngestArgs) error {
 // not a task anyone walked away from, and treating it as one clears values on
 // its behalf: every
 // `inScope` predicate answers from the registry, so an unknown id lands on the
-// default side of each one — `!SelfSupervisedText("tabular_classifier")` is
-// true because the lookup misses, not because the task uses a label column. So
-// `--task tabular_classifier --label-column x`, picking a self-supervised
-// text task, silently dropped --label-column, and the guided flow runs BEFORE
-// the category gate (data_ingest_local.go:103 vs :165), so the typo itself was
-// never reported either — the picker had already overwritten it with a valid id.
-// Two values lost, no message, where --no-input exits 2 on the same command.
+// default side of each one — a lookup miss, not a real fact about the typo'd
+// task. (Before backend#3076 the label-column scope was `!SelfSupervisedText`,
+// which MISSED to true, so `--task tabular_classifier --label-column x` cleared
+// --label-column on the phantom task's behalf; it now uses
+// `ManifestHasLabelColumn`, which misses to false — but the guard must not
+// depend on which way a given predicate happens to miss.) The guided flow also
+// runs BEFORE the category gate (data_ingest_local.go:103 vs :165), so the typo
+// itself was never reported either — the picker had already overwritten it with
+// a valid id, where --no-input exits 2 on the same command.
 // An unknown `from` is therefore the no-task case: clear nothing, and let
 // rejectMisappliedTaskValues speak (Bugbot).
 func dropValuesLeftBehindByATaskChange(a *runDataIngestArgs, from string) {

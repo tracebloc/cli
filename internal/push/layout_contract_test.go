@@ -41,11 +41,20 @@ func TestRegistryMirrorsLayoutContract(t *testing.T) {
 			t.Errorf("%s: registry Family = %d, contract says %q (%d)", c.ID, c.Family, layout.Family, want)
 		}
 		// SelfSupervised (no label question) is the inverse of the contract's
-		// has_label_column, for EVERY category — image/tabular carry a label
-		// and are not self-supervised; the self-supervised text tasks carry
-		// none. This is the fact spec.buildText + the interactive label prompt
-		// both key off, so pinning it here catches a mis-set flag.
-		if c.SelfSupervised == layout.Manifest.HasLabelColumn {
+		// has_label_column for every category WITH a manifest CSV — image/tabular
+		// carry a label and are not self-supervised; the self-supervised text
+		// tasks carry none. This is the fact spec.buildImage/buildText + the
+		// interactive label prompt key off (via ManifestHasLabelColumn), so
+		// pinning it here catches a mis-set flag. The manifest-less categories
+		// (Kind "none": object_detection) are the exception: NOT self-supervised,
+		// yet no label column either — the per-image label is derived from the
+		// XML, not a user column (backend#1006) — so has_label_column is just
+		// false there.
+		if layout.Manifest.Kind == manifestKindNone {
+			if layout.Manifest.HasLabelColumn {
+				t.Errorf("%s: manifest kind=%q must have has_label_column=false, got true", c.ID, manifestKindNone)
+			}
+		} else if c.SelfSupervised == layout.Manifest.HasLabelColumn {
 			t.Errorf("%s: registry SelfSupervised = %v but contract has_label_column = %v (must be opposite)",
 				c.ID, c.SelfSupervised, layout.Manifest.HasLabelColumn)
 		}

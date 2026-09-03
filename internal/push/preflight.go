@@ -1520,28 +1520,38 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		}
 
 	case IsImage(spec.Category):
-		if err := CheckCSVEncoding(layout.LabelsCSV); err != nil {
-			return nil, dataProblem(err)
-		}
-		if err := CheckHasDataRows(layout.LabelsCSV); err != nil {
-			return nil, dataProblem(err)
-		}
-		header, err := ReadCSVHeader(layout.LabelsCSV)
-		if err != nil {
-			return nil, dataProblem(err)
-		}
-		if err := CheckDuplicateHeaders(header, "labels.csv"); err != nil {
-			return nil, dataProblem(err)
-		}
-		// The ingestor reads each image's file from a case-sensitive
-		// record.get("filename") at transfer time; a manifest without a
-		// filename column drops EVERY row ("No filename found in record",
-		// exit 9) AFTER the upload, and the ingestor's own preflight does not
-		// catch it. Enforce the contract's requires_filename_column locally —
-		// the image mirror of the text family's up-front check.
-		if tl, ok := LayoutFor(spec.Category); ok && tl.Manifest.RequiresFilenameColumn {
-			if err := CheckImageFilenameColumn(header); err != nil {
+		// object_detection has NO manifest CSV — its records are enumerated from
+		// the annotations/*.xml sidecar and its label is derived, not read from a
+		// column (backend#1006, manifest kind="none"). So every labels-CSV check
+		// below is gated on HasManifestCSV: for OD `layout.LabelsCSV` is empty and
+		// there is nothing to encode-check, header-read, or diversity-check. The
+		// images and the images↔annotations pairing (in the switch) still run.
+		var header []string
+		if HasManifestCSV(spec.Category) {
+			if err := CheckCSVEncoding(layout.LabelsCSV); err != nil {
 				return nil, dataProblem(err)
+			}
+			if err := CheckHasDataRows(layout.LabelsCSV); err != nil {
+				return nil, dataProblem(err)
+			}
+			h, err := ReadCSVHeader(layout.LabelsCSV)
+			if err != nil {
+				return nil, dataProblem(err)
+			}
+			header = h
+			if err := CheckDuplicateHeaders(header, "labels.csv"); err != nil {
+				return nil, dataProblem(err)
+			}
+			// The ingestor reads each image's file from a case-sensitive
+			// record.get("filename") at transfer time; a manifest without a
+			// filename column drops EVERY row ("No filename found in record",
+			// exit 9) AFTER the upload, and the ingestor's own preflight does not
+			// catch it. Enforce the contract's requires_filename_column locally —
+			// the image mirror of the text family's up-front check.
+			if tl, ok := LayoutFor(spec.Category); ok && tl.Manifest.RequiresFilenameColumn {
+				if err := CheckImageFilenameColumn(header); err != nil {
+					return nil, dataProblem(err)
+				}
 			}
 		}
 		// Per-image decode (O(files)) — runs AFTER the cheap manifest/header checks
@@ -1575,9 +1585,15 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		// family (is_classification covers object_detection + keypoint
 		// too); it benign-skips when no label column resolves, and so
 		// does the preview. Image labels are read untyped, so no NA drop
-		// and no numeric collapse.
-		if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
-			return nil, dataProblem(err)
+		// and no numeric collapse. object_detection is skipped here: it has
+		// no manifest CSV to read labels from (its per-image labels are
+		// derived from the XML in-cluster — backend#1006), so the preview has
+		// nothing to open; the in-cluster validator still runs on the derived
+		// labels.
+		if HasManifestCSV(spec.Category) {
+			if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
+				return nil, dataProblem(err)
+			}
 		}
 		switch spec.Category {
 		case "image_classification":
