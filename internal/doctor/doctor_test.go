@@ -678,6 +678,57 @@ func TestCheckNodeFit(t *testing.T) {
 			t.Fatalf("=> %v (%q), want ok without nudge", r.Status, r.Detail)
 		}
 	})
+	t.Run("large but CLAIMED node -> nudge must not advise past free", func(t *testing.T) {
+		// Bugbot Medium, confirmed by @saqlainsyed007. The fit moved to FREE;
+		// the nudge stayed on allocatable. On a node that is big enough and
+		// already partly claimed the two disagree, and the nudge won -- so an
+		// operator who ran `resources set max` recreated the exact over-commit
+		// this check now fails on, and the next `doctor` told them not to size
+		// to their own machine.
+		//
+		// 32/64Gi node, 24 cores + 40Gi already held by a non-job pod: the run
+		// (2/8Gi) still fits in the 8/24Gi that is free, so this stays OK -- but
+		// the advertised ceiling may not be the allocatable-derived 31/61Gi.
+		claim := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "control-plane", Namespace: ns},
+			Spec: corev1.PodSpec{
+				NodeName: "n1",
+				Containers: []corev1.Container{{
+					Name: "c",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("24"),
+							corev1.ResourceMemory: resource.MustParse("40Gi"),
+						},
+					},
+				}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		cs := fake.NewClientset(node("n1", "32", "64Gi"), claim)
+		r := checkNodeFit(bg(), cs, cpuOnly)
+		if r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok (2/8Gi fits in the free 8/24Gi)", r.Status, r.Detail)
+		}
+		if strings.Contains(r.Detail, "cpu=31,memory=61Gi") {
+			t.Fatalf("nudge advertises the ALLOCATABLE ceiling 31/61Gi while only "+
+				"8 cores / 24Gi are free -- following it recreates the over-commit "+
+				"this check fails on: %q", r.Detail)
+		}
+		// AND THE COMMAND MUST APPLY THE PRINTED NUMBERS (Bugbot Medium).
+		// Bounding the figure by free is only half the fix: `set max` sizes from
+		// allocatable via LargestReadyNode, so attributing a free-bounded figure
+		// to it still sends the operator to a command that over-commits. On a
+		// claimed node the explicit form is the honest one.
+		if strings.Contains(r.Detail, "resources set max") {
+			t.Fatalf("nudge names 'set max', which sizes from ALLOCATABLE and so "+
+				"applies more than the figure printed beside it: %q", r.Detail)
+		}
+		if r.Detail != "" && !strings.Contains(r.Detail, "resources set --cores") {
+			t.Fatalf("nudge does not name the explicit command that applies exactly "+
+				"what it printed: %q", r.Detail)
+		}
+	})
 	t.Run("heterogeneous nodes: nudge quotes the CPU-major node, matching set max (Bugbot)", func(t *testing.T) {
 		// resources.LargestReadyNode (what `set max` applies) is CPU-major:
 		// it picks cpuBig (32/64Gi -> max 31/61Gi), not memBig (8/128Gi ->
@@ -689,6 +740,185 @@ func TestCheckNodeFit(t *testing.T) {
 		r := checkNodeFit(bg(), cs, cpuOnly)
 		if r.Status != StatusOK || !strings.Contains(r.Detail, "cpu=31,memory=61Gi") {
 			t.Fatalf("=> %v (%q), want the CPU-major node's ceiling cpu=31,memory=61Gi", r.Status, r.Detail)
+		}
+	})
+}
+
+// cpPod is a control-plane pod scheduled on a node, requesting memory — the
+// neighbour whose requests the fit must subtract (backend#2870).
+func cpPod(name, nodeName, mem string) *corev1.Pod {
+	return podOn(name, nodeName, "", mem, nil)
+}
+
+// podOn is a running pod on a node requesting cpu/mem (empty = unset), with
+// optional labels (e.g. the batch/v1 job-name label that marks a training pod).
+func podOn(name, nodeName, cpu, mem string, labels map[string]string) *corev1.Pod {
+	reqs := corev1.ResourceList{}
+	if cpu != "" {
+		reqs[corev1.ResourceCPU] = resource.MustParse(cpu)
+	}
+	if mem != "" {
+		reqs[corev1.ResourceMemory] = resource.MustParse(mem)
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "kube-system", Labels: labels},
+		Spec: corev1.PodSpec{
+			NodeName:   nodeName,
+			Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: reqs}}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+}
+
+// backend#2870: node-fit must be against FREE memory (allocatable − what is
+// already requested on the node), not allocatable. A node big enough by
+// allocatable but over-committed by the control plane it hosts must FAIL.
+func TestCheckNodeFitFreeMemory(t *testing.T) {
+	req := map[string]string{"RESOURCE_REQUESTS": "cpu=2,memory=8Gi"}
+
+	t.Run("allocatable fits but FREE does not -> fail", func(t *testing.T) {
+		// 16Gi node, control plane already claims 12Gi -> 4Gi free < 8Gi envelope.
+		// Allocatable (16Gi) "fits"; free (4Gi) does not.
+		cs := fake.NewClientset(node("n1", "4", "16Gi"), cpPod("cp", "n1", "12Gi"))
+		r := checkNodeFit(bg(), cs, req)
+		if r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail (over-committed)", r.Status, r.Detail)
+		}
+		if !strings.Contains(r.Detail, "FREE") || !strings.Contains(r.Detail, "over-asks") {
+			t.Fatalf("detail should name the free-memory over-commit: %q", r.Detail)
+		}
+	})
+
+	// The subtraction is load-bearing: the SAME node without the neighbour passes,
+	// so it is the pod request — not the node size — that flips the verdict.
+	t.Run("same node without the neighbour -> ok", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "4", "16Gi"))
+		if r := checkNodeFit(bg(), cs, req); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok", r.Status, r.Detail)
+		}
+	})
+
+	// A terminal pod holds no memory; free stays 16Gi and the job fits.
+	t.Run("terminal neighbour does not consume free", func(t *testing.T) {
+		done := cpPod("old", "n1", "12Gi")
+		done.Status.Phase = corev1.PodSucceeded
+		cs := fake.NewClientset(node("n1", "4", "16Gi"), done)
+		if r := checkNodeFit(bg(), cs, req); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok (terminal pod ignored)", r.Status, r.Detail)
+		}
+	})
+
+	// A RUNNING training job (batch/v1 job-name label) holds the envelope itself.
+	// It must NOT count against free, or doctor fails on the exact healthy state it
+	// blesses (Bugbot High). Same 12Gi neighbour, but labelled a Job -> still ok.
+	t.Run("a running training job is excluded, not counted -> ok", func(t *testing.T) {
+		job := podOn("train-sim", "n1", "", "12Gi", map[string]string{"job-name": "exp-42"})
+		cs := fake.NewClientset(node("n1", "4", "16Gi"), job)
+		if r := checkNodeFit(bg(), cs, req); r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want ok (training job excluded)", r.Status, r.Detail)
+		}
+	})
+
+	// The over-commit message names the SHORT dimension, not always memory (Bugbot).
+	// Control plane claims cpu (3 of 4), leaving 1 free < the 2-cpu envelope; memory
+	// is fine. The message must say cpu, not memory.
+	t.Run("over-commit on cpu names cpu, not memory", func(t *testing.T) {
+		cp := podOn("cp", "n1", "3", "", nil) // 3 cpu, no memory
+		cs := fake.NewClientset(node("n1", "4", "16Gi"), cp)
+		r := checkNodeFit(bg(), cs, req) // needs cpu=2, memory=8Gi
+		if r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail (cpu over-commit)", r.Status, r.Detail)
+		}
+		if !strings.Contains(r.Detail, "FREE cpu") {
+			t.Fatalf("detail should name FREE cpu, not memory: %q", r.Detail)
+		}
+	})
+
+	// A DISK-only shortfall must not take the over-commit arm (Bugbot Medium):
+	// free cpu+memory are fine, only ephemeral-storage is short, so the message
+	// must name disk via the generic fail, not blame FREE memory.
+	t.Run("disk-only shortfall is not blamed on memory", func(t *testing.T) {
+		diskReq := map[string]string{"RESOURCE_REQUESTS": "cpu=2,memory=8Gi,ephemeral-storage=50Gi"}
+		n := nodeWithDisk("n1", "4", "16Gi", "20Gi") // cpu+mem fit free; disk 20Gi < 50Gi
+		cs := fake.NewClientset(n)
+		r := checkNodeFit(bg(), cs, diskReq)
+		if r.Status != StatusFail {
+			t.Fatalf("=> %v (%q), want fail (disk)", r.Status, r.Detail)
+		}
+		if strings.Contains(r.Detail, "over-asks") || strings.Contains(r.Detail, "FREE memory") {
+			t.Fatalf("disk shortfall must not be reported as a memory over-commit: %q", r.Detail)
+		}
+		if !strings.Contains(r.Detail, "ephemeral-storage") {
+			t.Fatalf("detail should name ephemeral-storage: %q", r.Detail)
+		}
+	})
+
+	// UNKNOWN free is not a clean pass (Bugbot High): when the pod list can't be
+	// read, the fit falls back to allocatable and must WARN with a caveat, never
+	// green node capacity as if free were verified.
+	t.Run("unknown free (pod list fails) -> warn with caveat", func(t *testing.T) {
+		cs := fake.NewClientset(node("n1", "4", "16Gi"))
+		cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("pods is forbidden")
+		})
+		r := checkNodeFit(bg(), cs, req)
+		if r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want warn (free unknown)", r.Status, r.Detail)
+		}
+		if !strings.Contains(r.Detail, "allocatable only") {
+			t.Fatalf("detail should caveat allocatable-only: %q", r.Detail)
+		}
+	})
+
+	// Bugbot High on #628: the SOFT GPU warn used to outrank this one.
+	//
+	// `gpuRequested && !fullFits` sits above the `!freeKnown` branch and its
+	// detail carried no can't-check prefix, so with a GPU requested and the pod
+	// list unreadable the GPU Warn won, the caveat was never emitted, and
+	// `summarizeDoctor` -- which classifies by PREFIX -- fell through to "Ready
+	// to run training" at exit 0 over a cluster whose free compute doctor had
+	// not looked at. The chart stamps `nvidia.com/gpu` on CPU-only installs, so
+	// this is the common shape rather than an exotic one.
+	t.Run("unknown free AND gpu requested -> can't-check wins, GPU still reported", func(t *testing.T) {
+		gpu := map[string]string{
+			"RESOURCE_REQUESTS": "cpu=2,memory=8Gi",
+			"GPU_REQUESTS":      "nvidia.com/gpu=1",
+		}
+		cs := fake.NewClientset(node("n1", "4", "16Gi")) // cpu/mem fit, NO gpu
+		cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("pods is forbidden")
+		})
+		r := checkNodeFit(bg(), cs, gpu)
+		if r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
+		}
+		// PREFIX, not Contains: that is what the rollup matches on, so a detail
+		// merely mentioning the phrase somewhere would still green the run.
+		if !strings.HasPrefix(r.Detail, CantVerifyFreeCompute) {
+			t.Fatalf("detail must START with %q so summarizeDoctor classifies it as a can't-check, got %q",
+				CantVerifyFreeCompute, r.Detail)
+		}
+		// The soft GPU fact is not lost, it is just no longer the whole story.
+		if !strings.Contains(r.Detail, "nvidia.com/gpu") {
+			t.Fatalf("the GPU fallback should still be reported: %q", r.Detail)
+		}
+	})
+
+	// The other side, so the fix above cannot be read as "always warn about free":
+	// with the pod list READABLE, the GPU warn keeps its own wording and must not
+	// claim a can't-check.
+	t.Run("gpu requested, free KNOWN -> plain GPU warn, no can't-check prefix", func(t *testing.T) {
+		gpu := map[string]string{
+			"RESOURCE_REQUESTS": "cpu=2,memory=8Gi",
+			"GPU_REQUESTS":      "nvidia.com/gpu=1",
+		}
+		cs := fake.NewClientset(node("n1", "4", "16Gi"))
+		r := checkNodeFit(bg(), cs, gpu)
+		if r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
+		}
+		if strings.HasPrefix(r.Detail, CantVerifyFreeCompute) {
+			t.Fatalf("free WAS readable; this must not report a can't-check: %q", r.Detail)
 		}
 	})
 }
