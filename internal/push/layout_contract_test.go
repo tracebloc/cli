@@ -275,6 +275,26 @@ func TestGroupingForMirrorsContract(t *testing.T) {
 func TestManifestLessTasksArePinned(t *testing.T) {
 	allowed := map[string]bool{"object_detection": true}
 
+	// VERSION-AWARE, and it has to be. `object_detection` becomes
+	// manifest-less in contract v4 (data-ingestors#556); the vendored copy
+	// here is still v3 because `scripts/sync-schema.sh --check` compares it
+	// against the schema at the PINNED SHA, and that pin cannot move to #556
+	// until #556 is on a permanent ref.
+	//
+	// I got this wrong first: I vendored the v4 bytes early on the reasoning
+	// that a generated file's content is deterministic even when its commit
+	// is not. The drift check refused it, correctly — a vendored schema that
+	// exists on no permanent ref is exactly what that check is for, and the
+	// determinism argument would have let a hand-edited schema through too.
+	//
+	// So the two directions have different scopes:
+	//   - "no UNPINNED nulls" applies at every version. It is the one that
+	//     protects the readers, since a nil Manifest takes the else branch of
+	//     any two-way comparison.
+	//   - "the pinned set IS null" can only apply from v4, and asserting it
+	//     on v3 would demand the premature vendor all over again.
+	v4OrLater := layoutContract.Version >= "4"
+
 	for id, layout := range layoutContract.Tasks {
 		manifestLess := layout.Manifest == nil
 		if manifestLess && !allowed[id] {
@@ -283,11 +303,21 @@ func TestManifestLessTasksArePinned(t *testing.T) {
 				"reason and check every reader of Manifest.Kind — a nil "+
 				"manifest takes the else branch of any two-way comparison", id)
 		}
-		if !manifestLess && allowed[id] {
-			t.Errorf("%s is pinned as manifest-less but the contract declares "+
-				"a %q manifest. Either the vendored schema is stale or the "+
-				"pin is (backend#3110)", id, layout.Manifest.Kind)
+		if v4OrLater && !manifestLess && allowed[id] {
+			t.Errorf("%s is pinned as manifest-less and the contract is v%s, "+
+				"but it declares a %q manifest. Either the vendored schema is "+
+				"stale or the pin is (backend#3110)",
+				id, layoutContract.Version, layout.Manifest.Kind)
 		}
+	}
+
+	// The re-pin is the step that makes the above bite, so say so here rather
+	// than only in the pin file: whoever bumps `scripts/.data-ingestors-ref`
+	// to a SHA carrying #556 turns the second branch on.
+	if !v4OrLater {
+		t.Logf("contract is v%s; the pinned-set assertion activates at v4 "+
+			"(re-pin to a develop SHA carrying data-ingestors#556)",
+			layoutContract.Version)
 	}
 
 	// GUARD THE GUARD: with an empty contract every branch above is skipped

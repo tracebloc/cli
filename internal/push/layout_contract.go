@@ -124,6 +124,17 @@ func LayoutFor(category string) (TaskLayout, bool) {
 // manifest-less task Kind is neither "labels_csv" nor "data_csv", so a
 // two-branch comparison silently takes whichever branch is the else. Contract
 // v4 is the first to make that reachable (backend#3110).
+//
+// The rationale lives here rather than at the call sites, and not only for
+// tidiness: `internal/push/preflight.go` sits at its 1700-line budget, and
+// four lines of this explanation beside its one consumer put it over. A reader
+// asking "why nil-check this?" looks at the accessor, so this is the better
+// home anyway — but the budget is what forced the question.
+//
+// Its consumer, preflight's `requires_filename_column` check, was
+// accidentally correct before this existed: a zero-value ManifestLayout read
+// as "not required", which is the right answer for a task with no filename
+// column, reached for the wrong reason. Nil is what makes it deliberate.
 func (t TaskLayout) HasManifest() bool { return t.Manifest != nil }
 
 // GroupingFor returns the sequence-grouping trait for a category and whether
