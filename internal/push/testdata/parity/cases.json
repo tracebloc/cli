@@ -218,8 +218,8 @@
         32
       ],
       "cli_verdict": "reject",
-      "ingestor_verdict": "accept",
-      "note": "DELIBERATE divergence: labels.csv names its file column image_id, not filename. The ingestor's preflight (validate_data) accepts it (IngestableRecordsValidator passes when the filename column is absent), but at TRANSFER time record.get('filename') is empty for every row, so all files fail ('No filename found in record'), 0 records ingested, exit 9. The CLI previews this structural gap up front (CheckImageFilenameColumn), mirroring the ingestor's file_transfer contract (requires_filename_column)."
+      "ingestor_verdict": "reject",
+      "note": "labels.csv names its file column image_id, not filename. As of the pinned data-ingestors, IngestableRecordsValidator REJECTS a manifest with no 'filename' column at preflight; previously its preflight passed and every row failed at TRANSFER with 'No filename found in record' (exit 9). The CLI previewed exactly this gap up front (CheckImageFilenameColumn, mirroring the layout contract's requires_filename_column), so what used to be a deliberate CLI-ahead-of-ingestor divergence is now an agreement on both sides."
     },
     {
       "name": "imgc-uppercase-filename-col",
@@ -232,8 +232,8 @@
         32
       ],
       "cli_verdict": "reject",
-      "ingestor_verdict": "accept",
-      "note": "DELIBERATE divergence: the file column is 'Filename' (capitalized). The ingestor's preflight matches it case-insensitively and accepts, but at TRANSFER time record.get('filename') is case-sensitive, so every row fails ('No filename found in record'), 0 records ingested, exit 9. The CLI requires an exact lowercase 'filename' up front (CheckImageFilenameColumn), previewing the transfer failure that the #340-class asymmetry (#372) still leaves for other clients."
+      "ingestor_verdict": "reject",
+      "note": "the file column is 'Filename' (capitalized). As of the pinned data-ingestors, IngestableRecordsValidator REJECTS a non-lowercase 'filename' column at preflight; previously its preflight matched case-insensitively and accepted, then every row failed at TRANSFER because record.get('filename') is case-sensitive (exit 9). The CLI already required an exact lowercase 'filename' up front (CheckImageFilenameColumn), so the two verdicts now agree."
     },
     {
       "name": "imgc-label-uniform",
@@ -509,11 +509,13 @@
         32,
         32
       ],
+      "csv": "labels.csv",
       "name": "objdet-ok",
       "category": "object_detection",
+      "label_column": "label",
       "cli_verdict": "accept",
       "ingestor_verdict": "accept",
-      "note": "object_detection happy path: paired images/annotations (valid Pascal VOC). Since backend#1006 records are enumerated from the XML and each label is derived from <object><name> \u2014 there is NO manifest CSV and no label column, so the CLI stages images/ + annotations/ only and LabelDiversityValidator benign-skips the (absent) label preview on both sides."
+      "note": "object_detection happy path: paired images/annotations (valid Pascal VOC). Records + labels come from the XML (backend#1006) \u2014 production OD has NO manifest CSV. The harness keeps a labels.csv fixture only because the parity runner is CSV-driven; both sides ignore it for OD (the Go preflight skips it, the validators read annotations/images), so LabelDiversityValidator benign-skips on both sides."
     },
     {
       "extension": ".jpg",
@@ -521,8 +523,10 @@
         32,
         32
       ],
+      "csv": "labels.csv",
       "name": "objdet-missing-annotation",
       "category": "object_detection",
+      "label_column": "label",
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
       "note": "b.jpg has no b.xml: FilePairingValidator rejects in-cluster; CheckAnnotationPairing previews the image-without-annotation direction."
@@ -533,8 +537,10 @@
         32,
         32
       ],
+      "csv": "labels.csv",
       "name": "objdet-orphan-annotation",
       "category": "object_detection",
+      "label_column": "label",
       "cli_verdict": "reject",
       "ingestor_verdict": "reject",
       "note": "c.xml has no c.jpg: FilePairingValidator rejects orphan sidecars; CheckAnnotationPairing previews the annotation-without-image direction."
@@ -545,8 +551,10 @@
         32,
         32
       ],
+      "csv": "labels.csv",
       "name": "objdet-bad-xml",
       "category": "object_detection",
+      "label_column": "label",
       "cli_verdict": "accept",
       "ingestor_verdict": "reject",
       "note": "DOCUMENTED under-preview: a.xml is malformed Pascal VOC (no <size>, inverted bndbox) \u2014 PascalVOCXMLValidator rejects in-cluster, but the CLI has no XML-content mirror, so the failure surfaces post-upload. Candidate for a future CheckVOCAnnotations preview."

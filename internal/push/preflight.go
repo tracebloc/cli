@@ -1520,12 +1520,8 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		}
 
 	case IsImage(spec.Category):
-		// object_detection has NO manifest CSV — its records are enumerated from
-		// the annotations/*.xml sidecar and its label is derived, not read from a
-		// column (backend#1006, manifest kind="none"). So every labels-CSV check
-		// below is gated on HasManifestCSV: for OD `layout.LabelsCSV` is empty and
-		// there is nothing to encode-check, header-read, or diversity-check. The
-		// images and the images↔annotations pairing (in the switch) still run.
+		// object_detection has NO manifest CSV (backend#1006, kind="none") — its
+		// labels-CSV checks are gated on HasManifestCSV; images + pairing still run.
 		var header []string
 		if HasManifestCSV(spec.Category) {
 			if err := CheckCSVEncoding(layout.LabelsCSV); err != nil {
@@ -1581,15 +1577,10 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 		if err := ValidateImages(layout.Images, expW, expH, minW, minH); err != nil {
 			return nil, dataProblem(err)
 		}
-		// LabelDiversityValidator runs in-cluster for the WHOLE image
-		// family (is_classification covers object_detection + keypoint
-		// too); it benign-skips when no label column resolves, and so
-		// does the preview. Image labels are read untyped, so no NA drop
-		// and no numeric collapse. object_detection is skipped here: it has
-		// no manifest CSV to read labels from (its per-image labels are
-		// derived from the XML in-cluster — backend#1006), so the preview has
-		// nothing to open; the in-cluster validator still runs on the derived
-		// labels.
+		// LabelDiversityValidator runs in-cluster for the whole image family
+		// (benign-skips with no label column); image labels are read untyped
+		// (no NA drop, no numeric collapse). Skipped for OD in the preview: no
+		// manifest CSV to read labels from — they're XML-derived (backend#1006).
 		if HasManifestCSV(spec.Category) {
 			if err := CheckLabelDiversity(layout.LabelsCSV, spec.LabelColumn, false, false); err != nil {
 				return nil, dataProblem(err)
