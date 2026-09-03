@@ -1545,7 +1545,11 @@ func PreflightDataset(spec SpecArgs, layout *LocalLayout) (notes []string, probl
 			// exit 9) AFTER the upload, and the ingestor's own preflight does not
 			// catch it. Enforce the contract's requires_filename_column locally —
 			// the image mirror of the text family's up-front check.
-			if tl, ok := LayoutFor(spec.Category); ok && tl.Manifest.RequiresFilenameColumn {
+			// nil Manifest = contract v4 says this task stages none, so there is
+			// no filename column to require (backend#3110). Nil-checked rather
+			// than relying on the zero value, which read as "not required" by
+			// accident when Manifest was a value type.
+			if tl, ok := LayoutFor(spec.Category); ok && tl.HasManifest() && tl.Manifest.RequiresFilenameColumn {
 				if err := CheckImageFilenameColumn(header); err != nil {
 					return nil, dataProblem(err)
 				}

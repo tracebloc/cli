@@ -45,6 +45,27 @@ func TestRegistryMirrorsLayoutContract(t *testing.T) {
 		// and are not self-supervised; the self-supervised text tasks carry
 		// none. This is the fact spec.buildText + the interactive label prompt
 		// both key off, so pinning it here catches a mis-set flag.
+		// A MANIFEST-LESS TASK HAS NO LABEL COLUMN TO BE THE INVERSE OF.
+		// Contract v4 declares `"manifest": null` for object_detection
+		// (backend#3110), which is neither self-supervised nor label-bearing:
+		// its records come from `annotations/*.xml` and the class is read from
+		// <object><name>, so there is no user-named column at all. Comparing
+		// against a nil manifest's zero value would assert `false != false`
+		// and fail on a category the rule was never about.
+		//
+		// Skipping is only safe because it is PAIRED with the check below,
+		// which pins exactly which categories may be manifest-less. Without
+		// that, a contract that lost every manifest would skip its way to
+		// green here.
+		if !layout.HasManifest() {
+			if c.SelfSupervised {
+				t.Errorf("%s: contract declares no manifest, but the registry "+
+					"marks it self-supervised — those describe different things "+
+					"(no manifest vs no label), and a task that is both needs "+
+					"this rule rethought rather than skipped", c.ID)
+			}
+			continue
+		}
 		if c.SelfSupervised == layout.Manifest.HasLabelColumn {
 			t.Errorf("%s: registry SelfSupervised = %v but contract has_label_column = %v (must be opposite)",
 				c.ID, c.SelfSupervised, layout.Manifest.HasLabelColumn)
@@ -236,5 +257,44 @@ func TestGroupingForMirrorsContract(t *testing.T) {
 	// Unknown category: no grouping, no panic.
 	if _, grouped := GroupingFor("nope"); grouped {
 		t.Error("unknown category must report no grouping")
+	}
+}
+
+// TestManifestLessTasksArePinned: exactly which categories may declare
+// `"manifest": null`, and every other one must declare a manifest.
+//
+// This is the PAIR to the skip in TestRegistryMirrorsLayoutContract. That test
+// cannot assert the label-column inverse for a task with no manifest, so it
+// continues past them — and a skip with no pin is how a contract that lost
+// every manifest would skip its way to green.
+//
+// `object_detection` is the only one, since backend#1006 moved its records to
+// enumeration from `annotations/*.xml`. Adding a second name here should be a
+// deliberate, argued edit: a manifest-less task changes what `push` looks for
+// on disk, and getting it wrong produces an upload that ingests zero records.
+func TestManifestLessTasksArePinned(t *testing.T) {
+	allowed := map[string]bool{"object_detection": true}
+
+	for id, layout := range layoutContract.Tasks {
+		manifestLess := layout.Manifest == nil
+		if manifestLess && !allowed[id] {
+			t.Errorf("%s declares no manifest in layout.v1.json but is not in "+
+				"the pinned set. If that is intended, add it here WITH the "+
+				"reason and check every reader of Manifest.Kind — a nil "+
+				"manifest takes the else branch of any two-way comparison", id)
+		}
+		if !manifestLess && allowed[id] {
+			t.Errorf("%s is pinned as manifest-less but the contract declares "+
+				"a %q manifest. Either the vendored schema is stale or the "+
+				"pin is (backend#3110)", id, layout.Manifest.Kind)
+		}
+	}
+
+	// GUARD THE GUARD: with an empty contract every branch above is skipped
+	// and this reports green having checked nothing.
+	if len(layoutContract.Tasks) < 16 {
+		t.Fatalf("layout contract has only %d tasks; this test asserts over "+
+			"the whole taxonomy and cannot be meaningful on a short contract",
+			len(layoutContract.Tasks))
 	}
 }

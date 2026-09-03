@@ -20,6 +20,27 @@
 # #552 merge and re-run scripts/sync-schema.sh. Merging with a feature-branch
 # pin would leave the CLI vendoring a schema that exists on no permanent ref.
 #
+# ⚠️  AND #552 IS NOT THE WHOLE STORY. It changed `ingest.v1.json` but left
+# `layout.v1.json` still declaring a `labels_csv` manifest for object_detection,
+# so data-ingestors contradicted itself and this vendored copy inherited the
+# wrong half. Reported by @LukasWodka reviewing this PR; fixed by
+# data-ingestors#556, which regenerates the contract at version 4 with
+# `"manifest": null`.
+#
+# `internal/schema/layout.v1.json` here has ALREADY been updated to that v4
+# content — the file is GENERATED from the ModalitySpec flags, so its bytes are
+# deterministic and the only thing that has to wait for the merge is this SHA.
+# The two-line diff against the old vendored copy is exactly #556's two changes
+# and nothing else, verified by diff.
+#
+# So the re-pin below must land on the develop SHA carrying BOTH #552 and #556.
+# Landing #552's alone would re-vendor the self-contradictory schema and quietly
+# revert the fix. Order, per data-ingestors' own contract-consumers gate:
+#   1. e2e-test-agent#428  — the consumer that refuses an unknown version
+#   2. backend#3117        — sidecar-enumerated dataset generation
+#   3. data-ingestors#556  — publish v4
+#   4. THIS PR             — re-pin + re-sync
+#
 # What this bump adopts beyond #1006 — the pin was 7 weeks stale, so the
 # re-sync necessarily brings these along (each verified against the CLI's own
 # suite, see the PR body):

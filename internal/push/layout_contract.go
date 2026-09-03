@@ -34,12 +34,23 @@ type LayoutContract struct {
 
 // TaskLayout is one task's on-disk layout.
 type TaskLayout struct {
-	Family        string         `json:"family"` // image | text | tabular
-	Manifest      ManifestLayout `json:"manifest"`
-	PrimarySubdir *string        `json:"primary_subdir"` // images | texts | sequences | null
-	Sidecars      []SidecarSpec  `json:"sidecars"`
-	RecordFormat  *RecordFormat  `json:"record_format"` // structured-text tasks only
-	Grouping      *GroupingSpec  `json:"grouping"`      // sequence-grouped tasks only (time_series_classification)
+	Family string `json:"family"` // image | text | tabular
+	// POINTER, so `"manifest": null` is distinguishable from a manifest whose
+	// fields happen to be zero. Layout contract v4 (backend#3110) declares null
+	// for `object_detection`: it is the first task that is FILE-BEARING but
+	// stages no manifest, because its records are enumerated from
+	// `annotations/*.xml`.
+	//
+	// As a VALUE type this field silently absorbed `null` as the zero struct --
+	// no unmarshal error, `Kind == ""`, both bools false. That is worse than a
+	// crash: any `if Kind == "labels_csv" { ... } else { ... }` routes a
+	// manifest-less task down the `else` and asks for a `data.csv` the ingestor
+	// rejects. Nil forces every reader to answer the question.
+	Manifest      *ManifestLayout `json:"manifest"`
+	PrimarySubdir *string         `json:"primary_subdir"` // images | texts | sequences | null
+	Sidecars      []SidecarSpec   `json:"sidecars"`
+	RecordFormat  *RecordFormat   `json:"record_format"` // structured-text tasks only
+	Grouping      *GroupingSpec   `json:"grouping"`      // sequence-grouped tasks only (time_series_classification)
 }
 
 // GroupingSpec is the sequence-grouping trait a grouped task declares
@@ -106,6 +117,14 @@ func LayoutFor(category string) (TaskLayout, bool) {
 	t, ok := layoutContract.Tasks[category]
 	return t, ok
 }
+
+// HasManifest reports whether this task stages a manifest CSV at all.
+//
+// Read this rather than comparing Manifest.Kind to a literal: for a
+// manifest-less task Kind is neither "labels_csv" nor "data_csv", so a
+// two-branch comparison silently takes whichever branch is the else. Contract
+// v4 is the first to make that reachable (backend#3110).
+func (t TaskLayout) HasManifest() bool { return t.Manifest != nil }
 
 // GroupingFor returns the sequence-grouping trait for a category and whether
 // it declares one (today only time_series_classification). Ungrouped tasks
