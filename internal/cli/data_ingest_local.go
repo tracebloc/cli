@@ -478,7 +478,12 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 		p.Field("labels.csv", layout.LabelsCSV)
 		p.Field(dir, fmt.Sprintf("%d files", len(layout.Sidecars[dir])))
 	default:
-		p.Field("labels.csv", layout.LabelsCSV)
+		// object_detection stages no labels.csv (records come from the
+		// annotations sidecar, backend#1006), so LabelsCSV is empty — don't echo
+		// an empty field for a file the CLI never stages.
+		if layout.LabelsCSV != "" {
+			p.Field("labels.csv", layout.LabelsCSV)
+		}
 		imagesVal := fmt.Sprintf("%d files", len(layout.Images))
 		if ext, _ := spec["spec"].(map[string]any); ext != nil {
 			if fo, _ := ext["file_options"].(map[string]any); fo != nil {

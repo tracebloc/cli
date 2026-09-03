@@ -6,12 +6,13 @@ import (
 	"testing"
 )
 
-// mkODDir builds an object_detection dataset dir: labels.csv +
-// images/001.jpg, plus annotations/001.xml when withAnnotations.
+// mkODDir builds an object_detection dataset dir: images/001.jpg, plus
+// annotations/001.xml when withAnnotations. There is NO labels.csv — since
+// backend#1006 OD records are enumerated from the annotations XML, so the
+// layout carries no manifest CSV.
 func mkODDir(t *testing.T, withAnnotations bool) string {
 	t.Helper()
 	dir := t.TempDir()
-	writeFile(t, dir, "labels.csv", "image_label,filename\ncat,001.jpg\n")
 	imgs := filepath.Join(dir, "images")
 	if err := os.MkdirAll(imgs, 0o755); err != nil {
 		t.Fatal(err)
@@ -45,8 +46,13 @@ func TestDiscoverObjectDetection(t *testing.T) {
 	if len(layout.Sidecars["annotations"]) != 1 {
 		t.Errorf("annotations = %d, want 1", len(layout.Sidecars["annotations"]))
 	}
-	if got := layout.FileCount(); got != 3 { // labels.csv + image + xml
-		t.Errorf("FileCount = %d, want 3", got)
+	// No manifest CSV for OD (backend#1006) — LabelsCSV is empty and it is not
+	// staged, so FileCount is image + xml only.
+	if layout.LabelsCSV != "" {
+		t.Errorf("LabelsCSV = %q, want empty (OD has no manifest CSV)", layout.LabelsCSV)
+	}
+	if got := layout.FileCount(); got != 2 { // image + xml
+		t.Errorf("FileCount = %d, want 2", got)
 	}
 }
 

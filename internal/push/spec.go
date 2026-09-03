@@ -296,7 +296,11 @@ func (a SpecArgs) buildText(spec map[string]any, prefix string) {
 	// Trailing slash matches the directory-glob convention the
 	// ingestor uses for sidecar dirs.
 	spec[dir] = path.Join(prefix, dir) + "/"
-	if !SelfSupervisedText(a.Category) {
+	// Emit the label only when the manifest carries one — the SAME contract
+	// fact buildImage keys off (ManifestHasLabelColumn), so the two families
+	// can't drift. For text this is exactly the supervised-vs-self-supervised
+	// split (self-supervised text has has_label_column=false).
+	if ManifestHasLabelColumn(a.Category) {
 		spec["label"] = a.LabelColumn
 	}
 }

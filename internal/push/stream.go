@@ -364,18 +364,25 @@ func writeLayoutTar(w io.Writer, layout *LocalLayout) (err error) {
 	// PR-b r8 as Medium.
 	var totalBytes int64
 
-	// labels.csv first (small, sanity-checks the stream quickly).
-	n, err := writeTarFile(tw, layout.LabelsCSV, "labels.csv")
-	if err != nil {
-		return fmt.Errorf("packaging labels.csv: %w", err)
-	}
-	totalBytes += n
-	if totalBytes > MaxTotalBytes {
-		return fmt.Errorf(
-			"dataset exceeded v0.1 total cap of %s during stream "+
-				"(labels.csv alone is %s; pre-flight likely raced with "+
-				"a file growing on disk)",
-			HumanBytes(MaxTotalBytes), HumanBytes(totalBytes))
+	// labels.csv first (small, sanity-checks the stream quickly) — for every
+	// category that HAS a manifest CSV. object_detection has none: its records
+	// are enumerated from the annotations sidecar and its label derived
+	// (backend#1006), so discover() leaves LabelsCSV empty. Guard on that:
+	// writeTarFile on an empty path would os.Lstat("") and fail the whole
+	// upload — the transfer this fix exists to enable.
+	if layout.LabelsCSV != "" {
+		wrote, werr := writeTarFile(tw, layout.LabelsCSV, "labels.csv")
+		if werr != nil {
+			return fmt.Errorf("packaging labels.csv: %w", werr)
+		}
+		totalBytes += wrote
+		if totalBytes > MaxTotalBytes {
+			return fmt.Errorf(
+				"dataset exceeded v0.1 total cap of %s during stream "+
+					"(labels.csv alone is %s; pre-flight likely raced with "+
+					"a file growing on disk)",
+				HumanBytes(MaxTotalBytes), HumanBytes(totalBytes))
+		}
 	}
 
 	// Then each image. We write them in the order Discover returned

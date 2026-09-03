@@ -67,11 +67,16 @@ type LocalLayout struct {
 }
 
 // FileCount returns the total number of files this layout stages:
-// labels.csv, and every Images / Sidecars entry. Used for the
+// labels.csv (when present), and every Images / Sidecars entry. Used for the
 // "staging N files" messaging so it's accurate across all category
-// families.
+// families — including object_detection, which stages NO labels.csv (its
+// records come from the annotations sidecar, backend#1006), so LabelsCSV is
+// empty and must not be counted.
 func (l *LocalLayout) FileCount() int {
-	n := 1 // labels.csv
+	n := 0
+	if l.LabelsCSV != "" {
+		n++ // labels.csv
+	}
 	n += len(l.Images)
 	for _, files := range l.Sidecars {
 		n += len(files)
