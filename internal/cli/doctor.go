@@ -450,6 +450,38 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — part of your secure environment isn't running.",
 			fmt.Sprintf("Reinstall with `%s`, or email support@tracebloc.io with `%s doctor --diagnose`.", installer.Cmd, launcher())}
+	case by["Node capacity"].Status == doctor.StatusFail &&
+		strings.HasPrefix(by["Node capacity"].Detail, doctor.OverCommitted):
+		// THE OPPOSITE REMEDY FROM THE GENERIC CAPACITY ARM BELOW, which is why
+		// this case exists (Bugbot Medium, #628). `computeRemedy` ends every
+		// variant with "size runs to this machine with `resources set max`" -- and
+		// `set max` sizes from the machine's TOTAL, which is the figure this Fail
+		// just rejected. The machine is big enough; what is missing is room beside
+		// what is already on it. So the generic advice would raise the ask and
+		// leave the training stuck, which is worse than no advice: the user
+		// follows it and the symptom persists.
+		//
+		// IT SITS ABOVE THE STUCK-PENDING ARM, and that ordering is the whole
+		// point rather than a preference (Bugbot Medium, #628 second pass). The
+		// two states CO-OCCUR BY CONSTRUCTION: the producer's own Detail ends
+		// "so the pod schedules Pending" (`doctor.go:778`), so an over-committed
+		// node is *expected* to also have Pod health warning about pods stuck
+		// Pending. Below that arm this case was therefore almost unreachable in
+		// the field -- the stuck-Pending arm matched first and printed
+		// `computeRemedy`, putting `set max` back in front of the operator in the
+		// exact state this Fail exists to refuse. The first fix corrected the
+		// figure and left the ROLLUP still recommending the thing.
+		//
+		// Only a hard `Pod health` Fail outranks it: pods not running at all is a
+		// different problem with a different fix (reinstall), and it is not
+		// caused by this one.
+		//
+		// PLAIN TERMS, no Kubernetes vocabulary, like its two neighbours --
+		// `renderDoctorDetails` is documented as the only place that appears, and
+		// the granular Remedy one `--verbose` away already names the knob.
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — this machine is big enough, but the platform's own services have already claimed the room.",
+			fmt.Sprintf("Ask for less per training run, or give the machine more memory/CPU. Do NOT size runs to the machine here — that measures the machine's total, not what is free, so it would ask for MORE and leave the training stuck. `%s doctor --verbose` shows the exact numbers and the knob to turn.", launcher())}
 	case by["Pod health"].Status == doctor.StatusWarn && !strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
 		// Pods stuck Pending past the grace window (unschedulable / image can't
 		// pull) mean training can't actually schedule — so this is NOT ready, even
@@ -512,7 +544,8 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 			"Ready to run training — couldn't check your workloads (run with --verbose)", ""}
 	case by["Node capacity"].Status == doctor.StatusWarn &&
 		(strings.HasPrefix(by["Node capacity"].Detail, "couldn't read RESOURCE_REQUESTS") ||
-			strings.HasPrefix(by["Node capacity"].Detail, "could not list nodes")):
+			strings.HasPrefix(by["Node capacity"].Detail, "could not list nodes") ||
+			strings.HasPrefix(by["Node capacity"].Detail, doctor.CantVerifyFreeCompute)):
 		// checkNodeFit's Warn covers two different situations: a can't-check
 		// (RESOURCE_REQUESTS unreadable, nodes unlistable) and the soft GPU
 		// fallback. For a can't-check we simply don't know whether a node can fit

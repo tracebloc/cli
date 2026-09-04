@@ -623,7 +623,53 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	// A pod gets ALL its requested resources from ONE node, so evaluate each
 	// node as a whole — never OR cpu/mem and GPU across different nodes, which
 	// would pass even when no single node can run the job (Bugbot on PR #91).
-	var cpuMemFits, fullFits bool
+	// FREE, not allocatable (backend#2870). A node whose control plane already
+	// requests memory has less room than its allocatable advertises, and fitting
+	// the training envelope against allocatable is the blind spot that let every
+	// install go Pending unnoticed: the installer writes `allocatable − overhead`,
+	// and if the real control plane exceeds `overhead` the pod cannot schedule even
+	// though allocatable "fits". Sum the requests already on each node and evaluate
+	// the job against what is FREE. If the pod list cannot be read, free is UNKNOWN:
+	// say so and fall back to allocatable, never silently pass it off as free.
+	reqCPU := map[string]int64{} // node -> already-requested millicores
+	reqMem := map[string]int64{} // node -> already-requested bytes
+	freeKnown := true
+	if pods, perr := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); perr == nil {
+		for i := range pods.Items {
+			p := pods.Items[i]
+			// A pod with no node holds no node's memory yet; a terminal pod holds
+			// none at all -- counting either would understate free (mirrors
+			// requestedMemory's Succeeded/Failed skip).
+			if p.Spec.NodeName == "" ||
+				p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			// SKIP batch-Job pods (they carry the `job-name` label the batch/v1
+			// controller stamps -- see internal/submit/watch.go). A running
+			// training or ingestion job holds the envelope itself, so counting it
+			// would make doctor report "no room for a training job" on the exact
+			// healthy state it exists to bless -- a false negative that exits 2
+			// during training (Bugbot High). The question is whether the envelope
+			// fits beside the STEADY-STATE control plane (Deployments/DaemonSets),
+			// not beside a transient workload; those pods have no `job-name`.
+			if _, isJob := p.Labels["job-name"]; isJob {
+				continue
+			}
+			for j := range p.Spec.Containers {
+				r := p.Spec.Containers[j].Resources.Requests
+				if q, ok := r[corev1.ResourceCPU]; ok {
+					reqCPU[p.Spec.NodeName] += q.MilliValue()
+				}
+				if q, ok := r[corev1.ResourceMemory]; ok {
+					reqMem[p.Spec.NodeName] += q.Value()
+				}
+			}
+		}
+	} else {
+		freeKnown = false
+	}
+
+	var cpuMemFits, fullFits, allocOnlyFit, overCPU, overMem bool
 	// Largest Ready node for the drift nudge — CPU-major with memory as the
 	// tie-break, EXACTLY like resources.nodeLarger, so the advertised ceiling
 	// always matches what `resources set max` will actually apply (Bugbot).
@@ -633,6 +679,13 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	// to pick a node, so it must not perturb the drift nudge's tie-break.
 	var bestDisk resource.Quantity
 	var sawDisk bool
+	// The most cpu/memory actually FREE on any one Ready node. Tracked next to
+	// the allocatable-derived best above because the drift nudge must not
+	// advertise a ceiling the fit would refuse: the fit moved to free, the nudge
+	// did not, so on a large-but-claimed node it advised sizing UP to a figure
+	// that recreates the over-commit this very check now fails (Bugbot Medium,
+	// confirmed by @saqlainsyed007).
+	var bestFreeCPUm, bestFreeMemB int64
 	for i := range nodes.Items {
 		n := nodes.Items[i]
 		if !nodeReady(n) {
@@ -650,7 +703,37 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 				bestDisk = d
 			}
 		}
-		nodeCPUMem := alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0
+		// Allocatable minus what is already requested on THIS node (never below 0).
+		// When free is unknown, this is allocatable and the caveat is reported below.
+		freeCPUm := alloc.Cpu().MilliValue()
+		freeMemB := alloc.Memory().Value()
+		if freeKnown {
+			if freeCPUm -= reqCPU[n.Name]; freeCPUm < 0 {
+				freeCPUm = 0
+			}
+			if freeMemB -= reqMem[n.Name]; freeMemB < 0 {
+				freeMemB = 0
+			}
+		}
+		if freeCPUm > bestFreeCPUm ||
+			(freeCPUm == bestFreeCPUm && freeMemB > bestFreeMemB) {
+			bestFreeCPUm, bestFreeMemB = freeCPUm, freeMemB
+		}
+		nodeCPUMem := freeCPUm >= cpuReq.MilliValue() && freeMemB >= memReq.Value()
+		// Whether the node is big enough IGNORING neighbours -- the old, blind
+		// verdict. Kept only to tell "no node is big enough at all" apart from
+		// "a node is big enough but not beside its control plane" in the message.
+		if alloc.Cpu().Cmp(cpuReq) >= 0 && alloc.Memory().Cmp(memReq) >= 0 {
+			allocOnlyFit = true
+			// Which dimension the FREE fit falls short on, so the over-commit
+			// message names cpu vs memory instead of always blaming memory (Bugbot).
+			if freeCPUm < cpuReq.MilliValue() {
+				overCPU = true
+			}
+			if freeMemB < memReq.Value() {
+				overMem = true
+			}
+		}
 		// Disk joins cpu+memory as a WHOLE-NODE condition. A pod gets every
 		// resource it requests from ONE node, so this must be AND-ed into the
 		// same per-node verdict and never OR-ed across nodes (Bugbot on PR #91
@@ -678,14 +761,59 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	}
 
 	switch {
-	case !cpuMemFits:
+	case !cpuMemFits && allocOnlyFit && freeKnown && (overCPU || overMem):
+		// The #2870 case: a node IS big enough, but not beside the requests its own
+		// control plane already holds. Allocatable said yes; free says no. This is
+		// the shape that goes Pending/Insufficient memory after a clean install.
+		short := "memory"
+		switch {
+		case overCPU && overMem:
+			short = "cpu and memory"
+		case overCPU:
+			short = "cpu"
+		}
 		return Result{
 			Name:   name,
 			Status: StatusFail,
-			Detail: fmt.Sprintf("no Ready node can fit a training job (needs %s)", req),
+			Detail: fmt.Sprintf("%s for a training job (%s) but not beside what is already running on it — the envelope over-asks the node's FREE %s, so the pod schedules Pending", OverCommitted, req, short),
+			Remedy: "Lower RESOURCE_REQUESTS on jobs-manager to leave room for the platform's own pods, or move the control plane / add a node. The installer sizes the envelope from allocatable, not free, so a machine that is 'big enough' can still be over-committed (backend#2870).",
+		}
+	case !cpuMemFits:
+		detail := fmt.Sprintf("no Ready node can fit a training job (needs %s)", req)
+		if !freeKnown {
+			detail += " — checked against allocatable only; the pod list could not be read, so an over-committed control plane would be invisible here"
+		}
+		return Result{
+			Name:   name,
+			Status: StatusFail,
+			Detail: detail,
 			Remedy: "Add/resize a node to meet the job's requests, or lower RESOURCE_REQUESTS on jobs-manager.",
 		}
 	case gpuRequested && !fullFits:
+		// UNKNOWN FREE OUTRANKS THE SOFT GPU WARN (Bugbot High, #628).
+		//
+		// This case sits ABOVE the `!freeKnown` branch in the default arm, and its
+		// detail carries no `CantVerifyFreeCompute` prefix -- so when the pod list
+		// could not be read AND a GPU is requested, this Warn won, the can't-check
+		// was never emitted, and `summarizeDoctor` fell through to "Ready to run
+		// training" at exit 0. Doctor printed a clean bill over a cluster whose
+		// free compute it had not looked at.
+		//
+		// It is not an exotic path: the chart stamps `nvidia.com/gpu` on CPU-only
+		// installs too, so `gpuRequested` is commonly true where no node exposes a
+		// GPU -- which is exactly this case.
+		//
+		// The GPU fallback stays SOFT and stays reported; it just no longer
+		// suppresses the stronger statement. Both facts go in one Warn, with the
+		// can't-check FIRST because the rollup matches on the prefix.
+		if !freeKnown {
+			return Result{
+				Name:   name,
+				Status: StatusWarn,
+				Detail: fmt.Sprintf("%s, so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here. Also, no single Ready node satisfies cpu+memory AND %s, so GPU jobs would rely on the CPU fallback (needs %s)", CantVerifyFreeCompute, gpuName, req),
+				Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity. If GPU training is expected, also ensure one node has both the compute and the GPU capacity, with its device plugin.",
+			}
+		}
 		return Result{
 			Name:   name,
 			Status: StatusWarn,
@@ -705,16 +833,100 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		// stale when a machine GROWS. When the configured budget uses no more
 		// than half of what this machine could give one run (largest node −
 		// platform overhead), say so.
+		//
+		// BOUNDED BY FREE, NOT ALLOCATABLE. The ceiling is derived from the
+		// largest node, but the verdict above is derived from what is FREE on
+		// it. On a node that is big enough and already partly claimed those two
+		// disagree, and the nudge won: an operator who ran `resources set max`
+		// recreated the exact over-commit this check fails on, and the next
+		// `doctor` told them not to size to their own machine. Advice that
+		// contradicts the verdict printed beside it is worse than no advice.
+		//
+		// So the machine handed to `MaxRunCores`/`MaxRunGiB` is the smaller of
+		// allocatable and free, and when free is UNKNOWN the nudge is suppressed
+		// entirely -- there is nothing to bound it with, and this arm is already
+		// a Warn that says free could not be verified.
 		m := resources.Machine{CPU: bestCPU, Mem: bestMem}
+		if freeKnown {
+			freeCPU := *resource.NewMilliQuantity(bestFreeCPUm, resource.DecimalSI)
+			freeMem := *resource.NewQuantity(bestFreeMemB, resource.BinarySI)
+			if freeCPU.Cmp(m.CPU) < 0 {
+				m.CPU = freeCPU
+			}
+			if freeMem.Cmp(m.Mem) < 0 {
+				m.Mem = freeMem
+			}
+		}
 		maxCores, maxGiB := resources.MaxRunCores(m), resources.MaxRunGiB(m)
-		if maxCores >= 1 && maxGiB >= 2 &&
+		if freeKnown && maxCores >= 1 && maxGiB >= 2 &&
 			cpuReq.MilliValue()*2 <= int64(maxCores)*1000 &&
 			memReq.Value()*2 <= int64(maxGiB)<<30 {
-			detail += fmt.Sprintf(" — this machine could give a run up to cpu=%d,memory=%dGi ('tracebloc resources set max')", maxCores, maxGiB)
+			// NAME THE COMMAND THAT APPLIES THESE NUMBERS (Bugbot Medium).
+			// Bounding the ceiling by free fixed the figure and left the
+			// attribution behind: `resources set max` sizes from ALLOCATABLE via
+			// `LargestReadyNode`, so on a claimed node it applies more than the
+			// figure printed beside it -- and reapplies the over-commit this
+			// check just started refusing. The printed numbers and the suggested
+			// command have to be the same thing.
+			//
+			// So `set max` is named only when it would genuinely land on these
+			// numbers -- i.e. nothing meaningful is claimed and the free-bounded
+			// ceiling equals the allocatable one. Otherwise the explicit form is
+			// named, which applies exactly what is printed.
+			allocM := resources.Machine{CPU: bestCPU, Mem: bestMem}
+			how := fmt.Sprintf("'tracebloc resources set --cores %d --memory %dGi'", maxCores, maxGiB)
+			if maxCores == resources.MaxRunCores(allocM) && maxGiB == resources.MaxRunGiB(allocM) {
+				how = "'tracebloc resources set max'"
+			}
+			detail += fmt.Sprintf(" — this machine could give a run up to cpu=%d,memory=%dGi (%s)", maxCores, maxGiB, how)
+		}
+		// UNKNOWN free is not a clean pass (Bugbot High). When the pod list could
+		// not be read, this fit was against allocatable, not free -- so it cannot
+		// assert schedulability, and an over-committed control plane would be
+		// invisible. Warn and say so rather than greening node capacity.
+		if !freeKnown {
+			return Result{
+				Name: name,
+				// DISTINCT can't-check PREFIX so the rollup (summarizeDoctor in
+				// cli/doctor.go) classifies this as "couldn't check free compute"
+				// rather than greening it: it matches Node-capacity can't-checks by
+				// prefix, and "a Ready node can schedule..." would fall through to
+				// "Ready to run training" at exit 0 (Bugbot High). Keep the
+				// "allocatable only" phrase the caveat and its test rely on.
+				Status: StatusWarn,
+				Detail: CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here (the node fits the envelope on allocatable: " + req + ")",
+				Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity.",
+			}
 		}
 		return Result{Name: name, Status: StatusOK, Detail: detail}
 	}
 }
+
+// OverCommitted is the prefix of the #2870 Fail: a node IS big enough, but not
+// beside what its own control plane already holds. ONE definition, same reason
+// as CantVerifyFreeCompute below.
+//
+// The rollup needs to tell this Fail apart from the generic "no node is big
+// enough" one because the REMEDIES ARE OPPOSITE. `computeRemedy` ends every
+// variant with "size runs to this machine with `tracebloc resources set max`",
+// and `set max` sizes from ALLOCATABLE -- the exact figure this Fail rejected.
+// Following it raises the envelope and the pod stays Pending (Bugbot Medium,
+// #628). The generic arm is right for a too-small machine and wrong here.
+const OverCommitted = "a Ready node is large enough"
+
+// CantVerifyFreeCompute is the prefix every "we could not check free compute"
+// Node-capacity Warn must start with, and the ONE definition of it.
+//
+// `summarizeDoctor` in internal/cli/doctor.go classifies a Node-capacity Warn as
+// a can't-check by PREFIX, so the producer's wording is load-bearing: a Warn that
+// does not start with this string falls through to "Ready to run training" at
+// exit 0. That string was written out three times -- here, in the classifier, and
+// in the classifier's test -- which is a rule the checks held their own copy of.
+//
+// It is exported rather than duplicated because the two live in different
+// packages and internal/cli already imports this one. A third caller that needs
+// the same classification must reference this, not retype it.
+const CantVerifyFreeCompute = "could not read the pod list"
 
 // checkImagePull verifies that any registry pull secret the jobs-manager
 // references exists and is a well-formed dockerconfigjson — so private-image
