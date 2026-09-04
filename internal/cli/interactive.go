@@ -292,6 +292,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 		p.Hintf("Give the path to a file or a folder — whichever holds your data:")
 		p.Infof("Tabular   one CSV file                        e.g. %s", exTab)
 		p.Infof("Images    a folder with labels.csv + images/   e.g. %s", exImg)
+		p.Infof("          (object detection: images/ + annotations/, no labels.csv)")
 		p.Infof("Text      a folder with labels.csv + texts/     e.g. %s", exTxt)
 		p.Newline()
 		ans, err := pr.Input("Path:", fmt.Sprintf("e.g. %s or %s", exTab, exImg),
@@ -407,11 +408,11 @@ func resolveFamily(p *ui.Printer, pr prompter, path string) (push.Family, error)
 	}
 	p.Section("What kind of data is this?")
 	p.Newline()
-	p.Hintf("We couldn't tell from the layout — tabular = a CSV table; image = labels.csv + images/; text = labels.csv + texts/.")
+	p.Hintf("We couldn't tell from the layout — tabular = a CSV table; image = labels.csv + images/ (object detection: images/ + annotations/, no labels.csv); text = labels.csv + texts/.")
 	p.Newline()
 	opts := push.FamilyNouns()
 	ans, err := pr.Select("Data type:",
-		"tabular = a CSV table; image = labels.csv + images/; text = labels.csv + texts/",
+		"tabular = a CSV table; image = labels.csv + images/ (object detection: images/ + annotations/, no labels.csv); text = labels.csv + texts/",
 		opts, opts[0])
 	if err != nil {
 		return 0, err

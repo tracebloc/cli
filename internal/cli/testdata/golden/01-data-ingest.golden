@@ -37,6 +37,7 @@ $ tb data ingest   # guided · tabular classification
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  ·           (object detection: images/ + annotations/, no labels.csv)
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
 
 ? Path: ~/data/patients
@@ -92,6 +93,7 @@ $ tb data ingest   # guided · image classification
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  ·           (object detection: images/ + annotations/, no labels.csv)
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
 
 ? Path: ~/data/xray
@@ -146,6 +148,7 @@ $ tb data ingest   # guided · text classification
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  ·           (object detection: images/ + annotations/, no labels.csv)
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
 
 ? Path: ~/data/reviews

@@ -10,8 +10,8 @@
 # Format: the first non-comment, non-blank line is the ref (a full commit SHA
 # preferred; a branch name works but reintroduces floating drift).
 #
-# CURRENT PIN: data-ingestors fix/3076-od-layout-contract HEAD (backend#3076 —
-# completes the backend#1006 object_detection migration). The previous pin
+# CURRENT PIN: data-ingestors develop after the backend#3076 merge (#555 squash),
+# which completes the backend#1006 object_detection migration. The previous pin
 # (8f89aece, 2026-07-14) sat a full contract VERSION behind: its layout.v1.json
 # was v2 and its ingest.v1.json PREDATED backend#1006, so it still accepted a
 # `csv`/`label` for object_detection — the stale schema the CLI validated
@@ -20,13 +20,7 @@
 # deliberate re-vendor: layout contract v2 -> v4 (v3 `ordering` block,
 # backend#1870; v4 OD manifest kind="none", backend#3076), the di#360 dataset
 # alignment fields + `data_id` default flip (content_hash) in ingest.v1.json,
-# and the backend#1006 OD carve-out (csv/json + label rejected for OD).
-#
-# NOTE: this is an UNMERGED data-ingestors branch commit (the head of #555) —
-# raw.githubusercontent serves it by SHA so sync-schema.sh --check is green now.
-# The vendored bytes are identical across the #555 branch (its later commits add
-# only tests + template docs, not schema), so this pin tracks the branch HEAD.
-# Re-pin to the data-ingestors develop SHA once backend#3076 merges there
-# (identical bytes; a trivial follow-up). Do NOT force-push #555 — that would
-# make this SHA unreachable and red sync-schema.sh --check on cli@develop.
-af460a224f0daecd4a557aeac45785f4a321da2e
+# and the backend#1006 OD carve-out: `csv`/`json` are REJECTED for OD, and
+# `label` is dropped from OD's REQUIRED set (the schema still permits it; the
+# ingestor derives the per-image label from the XML and ignores any `label`).
+b6697c8c8843ec3cc409ebb499729d68484f3137
