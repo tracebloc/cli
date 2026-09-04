@@ -256,7 +256,16 @@ func (a SpecArgs) Build() map[string]any {
 		"category":   a.Category,
 		"table":      a.Table,
 		"intent":     a.Intent,
-		"csv":        path.Join(prefix, "labels.csv"),
+	}
+	// The labels/data CSV path — emitted for every category EXCEPT the
+	// manifest-less ones (object_detection: records enumerated from the
+	// annotations XML, no CSV — backend#1006). Gated on the vendored layout
+	// contract's manifest kind rather than a category id, so a future
+	// no-manifest category is handled by re-vendoring. Emitting a `csv` for OD
+	// is exactly what the ingestor's schema rejects (HTTP 400), so this must NOT
+	// leak into the base map that every category inherits.
+	if HasManifestCSV(a.Category) {
+		spec["csv"] = path.Join(prefix, "labels.csv")
 	}
 	switch {
 	case IsTabular(a.Category):
@@ -287,7 +296,11 @@ func (a SpecArgs) buildText(spec map[string]any, prefix string) {
 	// Trailing slash matches the directory-glob convention the
 	// ingestor uses for sidecar dirs.
 	spec[dir] = path.Join(prefix, dir) + "/"
-	if !SelfSupervisedText(a.Category) {
+	// Emit the label only when the manifest carries one — the SAME contract
+	// fact buildImage keys off (ManifestHasLabelColumn), so the two families
+	// can't drift. For text this is exactly the supervised-vs-self-supervised
+	// split (self-supervised text has has_label_column=false).
+	if ManifestHasLabelColumn(a.Category) {
 		spec["label"] = a.LabelColumn
 	}
 }
@@ -309,7 +322,14 @@ func (a SpecArgs) buildImage(spec map[string]any, prefix string) {
 	// (data-ingestors/examples/yaml/image_classification.yaml); the
 	// ingestor treats them as directory globs.
 	spec["images"] = path.Join(prefix, "images") + "/"
-	spec["label"] = a.LabelColumn
+	// The label column — emitted only when the category's manifest carries one.
+	// object_detection has none: its per-image label is derived from the XML
+	// <object><name>, not a user column (backend#1006, manifest has_label_column
+	// = false), so pointing `label` at a nonexistent CSV column would be
+	// misleading. Mirrors buildText's SelfSupervised gate for the same reason.
+	if ManifestHasLabelColumn(a.Category) {
+		spec["label"] = a.LabelColumn
+	}
 	if a.Category == "object_detection" {
 		spec["annotations"] = path.Join(prefix, "annotations") + "/"
 	}

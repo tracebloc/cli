@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -436,6 +437,60 @@ func TestWriteLayoutTar_LabelsCSVFirst(t *testing.T) {
 	}
 	if hdr.Name != "labels.csv" {
 		t.Errorf("first entry name = %q, want labels.csv (ordering pins this)", hdr.Name)
+	}
+}
+
+// TestWriteLayoutTar_ObjectDetection_NoLabelsCSV pins the backend#3076 fix at
+// the transfer boundary: object_detection has no manifest CSV (records come
+// from the annotations sidecar), so discover() leaves LabelsCSV empty and the
+// tar must be built from images/ + annotations/ ALONE. Before the fix,
+// writeLayoutTar called writeTarFile(tw, "", "labels.csv") → os.Lstat("") →
+// the whole OD upload failed. This walks the real discovery + tar path.
+func TestWriteLayoutTar_ObjectDetection_NoLabelsCSV(t *testing.T) {
+	root := t.TempDir()
+	imagesDir := filepath.Join(root, "images")
+	annDir := filepath.Join(root, "annotations")
+	for _, d := range []string{imagesDir, annDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(imagesDir, "a.jpg"), make([]byte, 100), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(annDir, "a.xml"),
+		[]byte("<annotation></annotation>\n"), 0o644); err != nil {
+		t.Fatalf("write annotation: %v", err)
+	}
+
+	layout, err := DiscoverObjectDetection(root)
+	if err != nil {
+		t.Fatalf("DiscoverObjectDetection: %v", err)
+	}
+	if layout.LabelsCSV != "" {
+		t.Fatalf("OD layout must carry no labels.csv, got %q", layout.LabelsCSV)
+	}
+
+	var buf bytes.Buffer
+	if err := writeLayoutTar(&buf, layout); err != nil {
+		t.Fatalf("writeLayoutTar (OD): %v", err) // the pre-fix failure landed here
+	}
+	tr := tar.NewReader(&buf)
+	var names []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading tar: %v", err)
+		}
+		names = append(names, hdr.Name)
+	}
+	sort.Strings(names)
+	want := []string{"annotations/a.xml", "images/a.jpg"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("tar entries = %v, want exactly %v (no labels.csv)", names, want)
 	}
 }
 

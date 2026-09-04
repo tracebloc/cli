@@ -64,14 +64,25 @@ type LocalLayout struct {
 	// Pre-computed during the walk so the size-cap check + the
 	// progress bar can read it without re-stat'ing.
 	TotalBytes int64
+
+	// Notes are advisory, non-fatal messages the walk surfaces about the
+	// layout — e.g. a stray labels.csv in an object_detection dataset that the
+	// CLI will walk past (backend#1006). The flow prints them alongside the
+	// preflight notes; empty for the common case.
+	Notes []string
 }
 
 // FileCount returns the total number of files this layout stages:
-// labels.csv, and every Images / Sidecars entry. Used for the
+// labels.csv (when present), and every Images / Sidecars entry. Used for the
 // "staging N files" messaging so it's accurate across all category
-// families.
+// families — including object_detection, which stages NO labels.csv (its
+// records come from the annotations sidecar, backend#1006), so LabelsCSV is
+// empty and must not be counted.
 func (l *LocalLayout) FileCount() int {
-	n := 1 // labels.csv
+	n := 0
+	if l.LabelsCSV != "" {
+		n++ // labels.csv
+	}
 	n += len(l.Images)
 	for _, files := range l.Sidecars {
 		n += len(files)
@@ -111,6 +122,33 @@ var imageExtensions = map[string]struct{}{
 // over-cap returns ErrTooBig with a pointer to the cloud-source
 // story.
 func Discover(rootDir string) (*LocalLayout, error) {
+	return discover(rootDir, true)
+}
+
+// DiscoverImages walks an image-family dataset, requiring the labels.csv
+// manifest ONLY when the category's layout contract declares one
+// (HasManifestCSV). This is the contract-driven entry point the push dispatch
+// uses for image categories with no dedicated sidecar discoverer
+// (image_classification, keypoint_detection): a future manifest-less image
+// category (kind="none") is then handled by re-vendoring the contract, not by
+// editing the walk — the same "no category if/else" property spec.go /
+// preflight.go / stream.go already have. Sidecar-bearing categories
+// (object_detection's annotations/, semantic_segmentation's masks/) still have
+// their own discoverers because sidecar discovery is category-specific.
+func DiscoverImages(category, rootDir string) (*LocalLayout, error) {
+	return discover(rootDir, HasManifestCSV(category))
+}
+
+// discover is the shared images-directory walk behind Discover and the
+// image-family sidecar discoverers. requireLabelsCSV gates the labels.csv
+// manifest: true for image_classification / keypoint_detection /
+// semantic_segmentation (a labels CSV lists per-row files); false for
+// object_detection, which has NO manifest CSV — its records are enumerated
+// from the annotations/*.xml sidecar and each label is derived from
+// <object><name> (backend#1006), mirrored by the vendored layout contract's
+// manifest kind="none". When false, layout.LabelsCSV stays empty and the CSV
+// is neither required on disk nor sized into the caps.
+func discover(rootDir string, requireLabelsCSV bool) (*LocalLayout, error) {
 	abs, err := filepath.Abs(rootDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolving %q: %w", rootDir, err)
@@ -123,54 +161,64 @@ func Discover(rootDir string) (*LocalLayout, error) {
 		// the underlying message which is already clear.
 		return nil, fmt.Errorf("reading dataset directory %q: %w", abs, err)
 	}
+	// A short description of the layout this walk expects, for the diagnostics
+	// below. object_detection (requireLabelsCSV=false) has NO labels.csv — its
+	// records come from annotations/*.xml (backend#1006) — so the messages must
+	// not tell an OD user to add a file the schema rejects.
+	expectHint := "labels.csv + images/"
+	if !requireLabelsCSV {
+		expectHint = "images/ + annotations/"
+	}
 	if !st.IsDir() {
 		return nil, fmt.Errorf(
-			"%q is not a directory; pass the directory containing labels.csv + images/",
-			abs)
+			"%q is not a directory; pass the directory containing %s", abs, expectHint)
 	}
 
 	layout := &LocalLayout{Root: abs}
 
-	// labels.csv (required). Use Lstat — NOT Stat — so a symlink
-	// shows up as a symlink (mode includes ModeSymlink) rather
-	// than being silently followed. v0.1 rejects symlinks entirely
-	// (see rejectSymlink); without Lstat the size cap below would
+	// labels.csv (required for the CSV-manifest image categories; skipped for
+	// object_detection, which has none — see discover's doc comment). Use
+	// Lstat — NOT Stat — so a symlink shows up as a symlink (mode includes
+	// ModeSymlink) rather than being silently followed. v0.1 rejects symlinks
+	// entirely (see rejectSymlink); without Lstat the size cap below would
 	// see the symlink's own ~100-byte size while writeTarFile
 	// (which uses os.Stat → follows symlinks) would happily stream
 	// the target's full contents — a size-cap bypass and an
 	// arbitrary-local-file disclosure to the cluster PVC. Bugbot
 	// flagged this as Medium-severity security on PR-b round 4.
-	labelsPath := filepath.Join(abs, "labels.csv")
-	labelsStat, err := os.Lstat(labelsPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf(
-				"missing labels.csv in %q. The CLI expects "+
-					"<dir>/labels.csv + <dir>/images/ for image_classification; "+
-					"see https://docs.tracebloc.io for the dataset layout.",
-				abs)
+	if requireLabelsCSV {
+		labelsPath := filepath.Join(abs, "labels.csv")
+		labelsStat, err := os.Lstat(labelsPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf(
+					"missing labels.csv in %q. The CLI expects "+
+						"<dir>/labels.csv + <dir>/images/ for image_classification; "+
+						"see https://docs.tracebloc.io for the dataset layout.",
+					abs)
+			}
+			return nil, fmt.Errorf("stat labels.csv: %w", err)
 		}
-		return nil, fmt.Errorf("stat labels.csv: %w", err)
+		if err := rejectSymlink(labelsStat, "labels.csv"); err != nil {
+			return nil, err
+		}
+		if labelsStat.IsDir() {
+			// A directory literally named "labels.csv" passes the
+			// os.Stat above — without this check the pre-flight would
+			// accept it, and PR-b's tar stream would fail confusingly
+			// trying to read a directory as a CSV. Symmetric with the
+			// imagesStat.IsDir() check below.
+			return nil, fmt.Errorf(
+				"%q is a directory, not a file. labels.csv must be the "+
+					"CSV file holding the filename,label rows.",
+				labelsPath)
+		}
+		if err := checkFileSize("labels.csv", labelsStat.Size()); err != nil {
+			return nil, err
+		}
+		layout.LabelsCSV = labelsPath
+		layout.TotalBytes += labelsStat.Size()
 	}
-	if err := rejectSymlink(labelsStat, "labels.csv"); err != nil {
-		return nil, err
-	}
-	if labelsStat.IsDir() {
-		// A directory literally named "labels.csv" passes the
-		// os.Stat above — without this check the pre-flight would
-		// accept it, and PR-b's tar stream would fail confusingly
-		// trying to read a directory as a CSV. Symmetric with the
-		// imagesStat.IsDir() check below.
-		return nil, fmt.Errorf(
-			"%q is a directory, not a file. labels.csv must be the "+
-				"CSV file holding the filename,label rows.",
-			labelsPath)
-	}
-	if err := checkFileSize("labels.csv", labelsStat.Size()); err != nil {
-		return nil, err
-	}
-	layout.LabelsCSV = labelsPath
-	layout.TotalBytes += labelsStat.Size()
 
 	// images/ subdir (required, must contain at least one
 	// image-extension file). Use os.Lstat — NOT Stat — so a
@@ -184,9 +232,9 @@ func Discover(rootDir string) (*LocalLayout, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf(
-				"missing images/ subdirectory in %q. The CLI expects "+
-					"<dir>/labels.csv + <dir>/images/*.{jpg,jpeg,png}.",
-				abs)
+				"missing images/ subdirectory in %q. The CLI expects <dir>/%s "+
+					"(images: *.{jpg,jpeg,png}).",
+				abs, expectHint)
 		}
 		return nil, fmt.Errorf("stat images/: %w", err)
 	}

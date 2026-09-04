@@ -115,6 +115,59 @@ type nopWriter struct{ b *strings.Builder }
 
 func (w *nopWriter) Write(p []byte) (int, error) { return w.b.Write(p) }
 
+// TestPreflightDataset_ObjectDetection_NoManifestCSV drives PreflightDataset
+// over the one layout DiscoverObjectDetection now returns — images/ +
+// annotations/ with an EMPTY LabelsCSV (backend#3076). The parity harness can't
+// exercise this (parity_golden_test always sets LabelsCSV), so without this the
+// HasManifestCSV gates would be untested and a regression to the CSV reads
+// (CheckCSVEncoding("") etc.) would pass CI. Accept the paired case; reject an
+// image with no annotation via the pairing preview.
+func TestPreflightDataset_ObjectDetection_NoManifestCSV(t *testing.T) {
+	newOD := func(t *testing.T, withOrphanImage bool) *LocalLayout {
+		t.Helper()
+		dir := t.TempDir()
+		imgs := filepath.Join(dir, "images")
+		anns := filepath.Join(dir, "annotations")
+		for _, d := range []string{imgs, anns} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(imgs, "a.png"), pngBytes(t, 8, 8), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(anns, "a.xml"), []byte("<annotation/>"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if withOrphanImage {
+			// b.png has no b.xml — FilePairingValidator rejects in-cluster;
+			// CheckAnnotationPairing previews the image-without-annotation side.
+			if err := os.WriteFile(filepath.Join(imgs, "b.png"), pngBytes(t, 8, 8), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		layout, err := DiscoverObjectDetection(dir)
+		if err != nil {
+			t.Fatalf("DiscoverObjectDetection: %v", err)
+		}
+		if layout.LabelsCSV != "" {
+			t.Fatalf("OD layout must carry no labels.csv, got %q", layout.LabelsCSV)
+		}
+		return layout
+	}
+
+	// Accept: paired images/annotations, no manifest CSV. This runs the gated
+	// path — a regression that un-gated CheckCSVEncoding/ReadCSVHeader on the
+	// empty LabelsCSV would fail here instead of only in production.
+	if _, problem := PreflightDataset(SpecArgs{Category: "object_detection"}, newOD(t, false)); problem != nil {
+		t.Fatalf("OD happy path must pass preflight, got: %v", problem.Err)
+	}
+	// Reject: an image with no annotation.
+	if _, problem := PreflightDataset(SpecArgs{Category: "object_detection"}, newOD(t, true)); problem == nil {
+		t.Fatal("OD with an unpaired image must be rejected by the annotation-pairing preview")
+	}
+}
+
 func TestValidateImages(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, body []byte) string {
