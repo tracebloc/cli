@@ -2,6 +2,7 @@ package push
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
@@ -50,6 +51,17 @@ func DiscoverObjectDetection(rootDir string) (*LocalLayout, error) {
 	}
 	layout.Sidecars["annotations"] = annotations
 	layout.TotalBytes += annoBytes
+
+	// A labels.csv in an OD dataset is a pre-#1006 leftover: OD enumerates
+	// records from annotations/*.xml, so the walk above never stat'd or staged
+	// it. Note it so a user upgrading from the old layout isn't surprised their
+	// label column silently stopped mattering. Lstat (not Stat) matches the
+	// walk's symlink-averse probing; a dir named labels.csv is not the file.
+	if st, serr := os.Lstat(filepath.Join(layout.Root, "labels.csv")); serr == nil && !st.IsDir() {
+		layout.Notes = append(layout.Notes,
+			"Note: a labels.csv is present but object_detection enumerates records from "+
+				"annotations/*.xml (backend#1006), so it is ignored and not staged.")
+	}
 
 	if layout.TotalBytes > MaxTotalBytes {
 		return nil, fmt.Errorf(

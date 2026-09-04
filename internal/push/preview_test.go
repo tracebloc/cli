@@ -182,6 +182,26 @@ func TestSniffFamily(t *testing.T) {
 		}
 	})
 
+	t.Run("images/ + annotations/ without labels.csv is confident image (object detection)", func(t *testing.T) {
+		// object_detection's post-#1006 layout: images/ + annotations/, no
+		// labels.csv (records come from the XML). The sniff must place the image
+		// FAMILY confidently off the annotations/ tell — the labels.csv-keyed
+		// image case can't see it (backend#3076). The task picker then offers OD.
+		dir := t.TempDir()
+		for _, d := range []string{"images", "annotations"} {
+			if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s := SniffFamily(dir)
+		if !s.Confident || s.Family != FamilyImage {
+			t.Fatalf("images/ + annotations/ (no labels.csv) should sniff confident image, got %+v", s)
+		}
+		if s.Echo == "" {
+			t.Error("confident OD sniff should carry an echo")
+		}
+	})
+
 	t.Run("texts/ without labels.csv is not confident text", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.Mkdir(filepath.Join(dir, "texts"), 0o755); err != nil {

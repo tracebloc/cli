@@ -532,7 +532,9 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 // flag), anything else exits 3 (fix the data).
 func runLocalPreflight(a runDataIngestArgs, layout *push.LocalLayout, errOut io.Writer) error {
 	notes, problem := push.PreflightDataset(a.Spec, layout)
-	for _, n := range notes {
+	// Discovery-time notes (e.g. a stray labels.csv in an object_detection
+	// dataset) print alongside the preflight notes.
+	for _, n := range append(append([]string(nil), layout.Notes...), notes...) {
 		_, _ = fmt.Fprintln(errOut, n)
 	}
 	if problem == nil {

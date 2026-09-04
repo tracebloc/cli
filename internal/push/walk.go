@@ -64,6 +64,12 @@ type LocalLayout struct {
 	// Pre-computed during the walk so the size-cap check + the
 	// progress bar can read it without re-stat'ing.
 	TotalBytes int64
+
+	// Notes are advisory, non-fatal messages the walk surfaces about the
+	// layout — e.g. a stray labels.csv in an object_detection dataset that the
+	// CLI will walk past (backend#1006). The flow prints them alongside the
+	// preflight notes; empty for the common case.
+	Notes []string
 }
 
 // FileCount returns the total number of files this layout stages:
