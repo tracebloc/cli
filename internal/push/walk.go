@@ -119,6 +119,20 @@ func Discover(rootDir string) (*LocalLayout, error) {
 	return discover(rootDir, true)
 }
 
+// DiscoverImages walks an image-family dataset, requiring the labels.csv
+// manifest ONLY when the category's layout contract declares one
+// (HasManifestCSV). This is the contract-driven entry point the push dispatch
+// uses for image categories with no dedicated sidecar discoverer
+// (image_classification, keypoint_detection): a future manifest-less image
+// category (kind="none") is then handled by re-vendoring the contract, not by
+// editing the walk — the same "no category if/else" property spec.go /
+// preflight.go / stream.go already have. Sidecar-bearing categories
+// (object_detection's annotations/, semantic_segmentation's masks/) still have
+// their own discoverers because sidecar discovery is category-specific.
+func DiscoverImages(category, rootDir string) (*LocalLayout, error) {
+	return discover(rootDir, HasManifestCSV(category))
+}
+
 // discover is the shared images-directory walk behind Discover and the
 // image-family sidecar discoverers. requireLabelsCSV gates the labels.csv
 // manifest: true for image_classification / keypoint_detection /
@@ -141,10 +155,17 @@ func discover(rootDir string, requireLabelsCSV bool) (*LocalLayout, error) {
 		// the underlying message which is already clear.
 		return nil, fmt.Errorf("reading dataset directory %q: %w", abs, err)
 	}
+	// A short description of the layout this walk expects, for the diagnostics
+	// below. object_detection (requireLabelsCSV=false) has NO labels.csv — its
+	// records come from annotations/*.xml (backend#1006) — so the messages must
+	// not tell an OD user to add a file the schema rejects.
+	expectHint := "labels.csv + images/"
+	if !requireLabelsCSV {
+		expectHint = "images/ + annotations/"
+	}
 	if !st.IsDir() {
 		return nil, fmt.Errorf(
-			"%q is not a directory; pass the directory containing labels.csv + images/",
-			abs)
+			"%q is not a directory; pass the directory containing %s", abs, expectHint)
 	}
 
 	layout := &LocalLayout{Root: abs}
@@ -205,9 +226,9 @@ func discover(rootDir string, requireLabelsCSV bool) (*LocalLayout, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf(
-				"missing images/ subdirectory in %q. The CLI expects "+
-					"<dir>/labels.csv + <dir>/images/*.{jpg,jpeg,png}.",
-				abs)
+				"missing images/ subdirectory in %q. The CLI expects <dir>/%s "+
+					"(images: *.{jpg,jpeg,png}).",
+				abs, expectHint)
 		}
 		return nil, fmt.Errorf("stat images/: %w", err)
 	}

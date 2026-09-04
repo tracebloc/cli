@@ -119,7 +119,7 @@ tabular / time-series families; pick one with --task.
       churn/
         data.csv               (the one .csv in the folder)
 
-  image (classification, object/keypoint detection) — a folder with
+  image classification / keypoint detection — a folder with
   labels.csv + an images/ subfolder:
 
       cats_dogs/
@@ -127,6 +127,16 @@ tabular / time-series families; pick one with --task.
         images/                (required)
           001.jpg
           ...
+
+  object detection — a folder with images/ + annotations/ and NO
+  labels.csv: records are enumerated from the Pascal-VOC XML, one per
+  image, so there is no manifest and no label column to declare.
+
+      visdrone/
+        images/                (required)
+          001.jpg
+        annotations/           (required — 001.xml pairs with 001.jpg)
+          001.xml
 
   text (classification, masked language modeling) — a folder with
   labels.csv + a %[2]s/ subfolder (masked language modeling uses %[3]s/):

@@ -22,8 +22,11 @@
 # alignment fields + `data_id` default flip (content_hash) in ingest.v1.json,
 # and the backend#1006 OD carve-out (csv/json + label rejected for OD).
 #
-# NOTE: this is an UNMERGED data-ingestors branch commit — raw.githubusercontent
-# serves it by SHA so sync-schema.sh --check is green now. Re-pin to the
-# data-ingestors develop SHA once backend#3076 merges there (identical bytes; a
-# trivial follow-up).
-624b798c246480b001f4aa692d966196696d7729
+# NOTE: this is an UNMERGED data-ingestors branch commit (the head of #555) —
+# raw.githubusercontent serves it by SHA so sync-schema.sh --check is green now.
+# The vendored bytes are identical across the #555 branch (its later commits add
+# only tests + template docs, not schema), so this pin tracks the branch HEAD.
+# Re-pin to the data-ingestors develop SHA once backend#3076 merges there
+# (identical bytes; a trivial follow-up). Do NOT force-push #555 — that would
+# make this SHA unreachable and red sync-schema.sh --check on cli@develop.
+af460a224f0daecd4a557aeac45785f4a321da2e

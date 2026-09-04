@@ -235,8 +235,12 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 	case a.Spec.Category == "semantic_segmentation":
 		layout, err = push.DiscoverSemanticSegmentation(a.LocalPath)
 	default:
-		// image_classification + keypoint_detection: labels.csv + images/.
-		layout, err = push.Discover(a.LocalPath)
+		// image_classification + keypoint_detection (and any future image
+		// category with no dedicated sidecar discoverer). Contract-driven:
+		// DiscoverImages requires labels.csv only when the category's manifest
+		// kind declares one, so a future kind="none" image category is handled
+		// by a re-vendor, not a code edit here.
+		layout, err = push.DiscoverImages(a.Spec.Category, a.LocalPath)
 	}
 	walkSpin.Stop()
 	if err != nil {

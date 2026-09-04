@@ -54,6 +54,14 @@ func TestRegistryMirrorsLayoutContract(t *testing.T) {
 			if layout.Manifest.HasLabelColumn {
 				t.Errorf("%s: manifest kind=%q must have has_label_column=false, got true", c.ID, manifestKindNone)
 			}
+			// Pin the REGISTRY side too, or this branch would only compare the
+			// contract against itself and leave OD untied to the Go registry
+			// (the tie the else-branch provides for every other category). A
+			// manifest-less category is NOT self-supervised — it has labels,
+			// just derived from the XML, not a user column (backend#1006).
+			if c.SelfSupervised {
+				t.Errorf("%s: manifest kind=%q is not self-supervised (labels are derived, not absent), but registry SelfSupervised=true", c.ID, manifestKindNone)
+			}
 		} else if c.SelfSupervised == layout.Manifest.HasLabelColumn {
 			t.Errorf("%s: registry SelfSupervised = %v but contract has_label_column = %v (must be opposite)",
 				c.ID, c.SelfSupervised, layout.Manifest.HasLabelColumn)
