@@ -2,6 +2,7 @@ package push
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
@@ -17,16 +18,20 @@ var pngExtensions = map[string]struct{}{".png": {}}
 
 // DiscoverObjectDetection validates a local object_detection dataset:
 //
-//   - <root>/labels.csv        (required)
 //   - <root>/images/*          (required)
 //   - <root>/annotations/*.xml (required; Pascal VOC)
 //
-// It builds on the image-classification layout (labels.csv + images/)
-// and adds the annotations/ sidecar via the shared sidecar walker, so
-// the existing tar/stream machinery stages annotations under
-// "annotations/".
+// There is NO labels.csv: since backend#1006 object_detection records are
+// enumerated from the Pascal-VOC XML (one per image) and each label is derived
+// from <object><name>, so there is no manifest CSV and no user label column
+// (the vendored layout contract declares manifest kind="none"). It walks
+// images/ WITHOUT requiring the CSV, then adds the annotations/ sidecar via the
+// shared sidecar walker, so the existing tar/stream machinery stages
+// annotations under "annotations/".
 func DiscoverObjectDetection(rootDir string) (*LocalLayout, error) {
-	layout, err := Discover(rootDir) // labels.csv + images/ (+ caps + symlink guards)
+	// requireLabelsCSV=false — OD has no manifest CSV (backend#1006). Requiring
+	// one here is exactly the stale layout the ingestor's schema rejects.
+	layout, err := discover(rootDir, false) // images/ only (+ caps + symlink guards)
 	if err != nil {
 		return nil, err
 	}
@@ -46,6 +51,17 @@ func DiscoverObjectDetection(rootDir string) (*LocalLayout, error) {
 	}
 	layout.Sidecars["annotations"] = annotations
 	layout.TotalBytes += annoBytes
+
+	// A labels.csv in an OD dataset is a pre-#1006 leftover: OD enumerates
+	// records from annotations/*.xml, so the walk above never stat'd or staged
+	// it. Note it so a user upgrading from the old layout isn't surprised their
+	// label column silently stopped mattering. Lstat (not Stat) matches the
+	// walk's symlink-averse probing; a dir named labels.csv is not the file.
+	if st, serr := os.Lstat(filepath.Join(layout.Root, "labels.csv")); serr == nil && !st.IsDir() {
+		layout.Notes = append(layout.Notes,
+			"Note: a labels.csv is present but object_detection enumerates records from "+
+				"annotations/*.xml (backend#1006), so it is ignored and not staged.")
+	}
 
 	if layout.TotalBytes > MaxTotalBytes {
 		return nil, fmt.Errorf(

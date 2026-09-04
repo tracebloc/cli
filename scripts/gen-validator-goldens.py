@@ -98,6 +98,12 @@ def read_label_values(case, csv_path, cfg, options):
         intent="train",
         category=case["category"],
         file_options=file_opts,
+        # This harness reads LABEL VALUES only (the #340 parity), never data_id.
+        # Force uuid so it needs no per-table salt: since the pin adopted the
+        # ingestor's data_id default flip to content_hash (which raises without
+        # a table_salt), the default would crash the generator. uuid is valid on
+        # every ingestor version and salt-free.
+        data_id_strategy="uuid",
     )
     if not hasattr(ing, "_resolve_label_column"):
         sys.exit(

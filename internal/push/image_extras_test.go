@@ -3,15 +3,17 @@ package push
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// mkODDir builds an object_detection dataset dir: labels.csv +
-// images/001.jpg, plus annotations/001.xml when withAnnotations.
+// mkODDir builds an object_detection dataset dir: images/001.jpg, plus
+// annotations/001.xml when withAnnotations. There is NO labels.csv — since
+// backend#1006 OD records are enumerated from the annotations XML, so the
+// layout carries no manifest CSV.
 func mkODDir(t *testing.T, withAnnotations bool) string {
 	t.Helper()
 	dir := t.TempDir()
-	writeFile(t, dir, "labels.csv", "image_label,filename\ncat,001.jpg\n")
 	imgs := filepath.Join(dir, "images")
 	if err := os.MkdirAll(imgs, 0o755); err != nil {
 		t.Fatal(err)
@@ -45,8 +47,13 @@ func TestDiscoverObjectDetection(t *testing.T) {
 	if len(layout.Sidecars["annotations"]) != 1 {
 		t.Errorf("annotations = %d, want 1", len(layout.Sidecars["annotations"]))
 	}
-	if got := layout.FileCount(); got != 3 { // labels.csv + image + xml
-		t.Errorf("FileCount = %d, want 3", got)
+	// No manifest CSV for OD (backend#1006) — LabelsCSV is empty and it is not
+	// staged, so FileCount is image + xml only.
+	if layout.LabelsCSV != "" {
+		t.Errorf("LabelsCSV = %q, want empty (OD has no manifest CSV)", layout.LabelsCSV)
+	}
+	if got := layout.FileCount(); got != 2 { // image + xml
+		t.Errorf("FileCount = %d, want 2", got)
 	}
 }
 
@@ -55,6 +62,34 @@ func TestDiscoverObjectDetection(t *testing.T) {
 func TestDiscoverObjectDetection_MissingAnnotations(t *testing.T) {
 	if _, err := DiscoverObjectDetection(mkODDir(t, false)); err == nil {
 		t.Error("DiscoverObjectDetection without annotations/ returned nil error")
+	}
+}
+
+// TestDiscoverObjectDetection_StrayLabelsCSVNoted: a labels.csv left over from
+// the pre-#1006 layout is walked past (not staged), but the user is told so —
+// otherwise an upgrader's label column silently stops mattering.
+func TestDiscoverObjectDetection_StrayLabelsCSVNoted(t *testing.T) {
+	// Clean OD dataset → no note.
+	clean, err := DiscoverObjectDetection(mkODDir(t, true))
+	if err != nil {
+		t.Fatalf("DiscoverObjectDetection: %v", err)
+	}
+	if len(clean.Notes) != 0 {
+		t.Errorf("clean OD dataset should carry no notes, got %v", clean.Notes)
+	}
+
+	// Same dataset with a stray labels.csv → one note; it is NOT staged.
+	dir := mkODDir(t, true)
+	writeFile(t, dir, "labels.csv", "image_label,filename\ncat,001.jpg\n")
+	layout, err := DiscoverObjectDetection(dir)
+	if err != nil {
+		t.Fatalf("DiscoverObjectDetection: %v", err)
+	}
+	if layout.LabelsCSV != "" {
+		t.Errorf("stray labels.csv must NOT be adopted as the manifest, got %q", layout.LabelsCSV)
+	}
+	if len(layout.Notes) != 1 || !strings.Contains(layout.Notes[0], "labels.csv") {
+		t.Errorf("stray labels.csv should produce a note mentioning it, got %v", layout.Notes)
 	}
 }
 

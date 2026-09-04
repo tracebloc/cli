@@ -63,6 +63,11 @@ label: image_label
 `,
 		},
 		{
+			// object_detection declares NEITHER csv/json NOR label: since
+			// backend#1006 its records are enumerated from the Pascal-VOC XML in
+			// annotations/ and each label is derived from <object><name>. The
+			// schema REJECTS a csv/json for it, so the happy path is the
+			// manifest-less shape.
 			name: "object_detection",
 			yaml: `
 apiVersion: tracebloc.io/v1
@@ -70,10 +75,8 @@ kind: IngestConfig
 table: visdrone_train
 intent: train
 category: object_detection
-csv: /data/labels.csv
 images: /data/images/
 annotations: /data/annotations/
-label: image_label
 `,
 		},
 		{

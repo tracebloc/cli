@@ -39,6 +39,7 @@ locally first.
 What a dataset looks like depends on the task:
   tabular / time-series — a .csv file, or a folder with one .csv
   image                  — a folder with labels.csv + images/
+                           (object detection: images/ + annotations/, no labels.csv)
   text                   — a folder with labels.csv + texts/
 
 ` + "`tracebloc cluster info`" + ` is the pre-flight you'd typically run

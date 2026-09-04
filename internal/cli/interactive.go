@@ -292,6 +292,7 @@ func runInteractive(p *ui.Printer, pr prompter, a *runDataIngestArgs) error {
 		p.Hintf("Give the path to a file or a folder — whichever holds your data:")
 		p.Infof("Tabular   one CSV file                        e.g. %s", exTab)
 		p.Infof("Images    a folder with labels.csv + images/   e.g. %s", exImg)
+		p.Infof("          (object detection: images/ + annotations/, no labels.csv)")
 		p.Infof("Text      a folder with labels.csv + texts/     e.g. %s", exTxt)
 		p.Newline()
 		ans, err := pr.Input("Path:", fmt.Sprintf("e.g. %s or %s", exTab, exImg),
@@ -407,11 +408,11 @@ func resolveFamily(p *ui.Printer, pr prompter, path string) (push.Family, error)
 	}
 	p.Section("What kind of data is this?")
 	p.Newline()
-	p.Hintf("We couldn't tell from the layout — tabular = a CSV table; image = labels.csv + images/; text = labels.csv + texts/.")
+	p.Hintf("We couldn't tell from the layout — tabular = a CSV table; image = labels.csv + images/ (object detection: images/ + annotations/, no labels.csv); text = labels.csv + texts/.")
 	p.Newline()
 	opts := push.FamilyNouns()
 	ans, err := pr.Select("Data type:",
-		"tabular = a CSV table; image = labels.csv + images/; text = labels.csv + texts/",
+		"tabular = a CSV table; image = labels.csv + images/ (object detection: images/ + annotations/, no labels.csv); text = labels.csv + texts/",
 		opts, opts[0])
 	if err != nil {
 		return 0, err
@@ -504,20 +505,22 @@ func promptCategorySpecific(p *ui.Printer, pr prompter, a *runDataIngestArgs) (b
 
 	// Label column — the answer the model learns to produce. The first
 	// task-specific refinement (unnumbered Section, like the extras below), not
-	// a numbered core step: it's skipped for self-supervised text (MLM/CLM: the
-	// target comes from the text itself, there's no label column), so numbering
-	// it "of N" would promise a step that flow never reaches. Interactive picks
-	// from the REAL CSV header row so the choice exact-matches a column that
-	// exists — killing the case-mismatch silent-null-label class
-	// (data-ingestors#340) that free-typing "Label" against a "label" header
-	// would cause. Wording is per-task: a class to sort into vs a numeric value
-	// to predict (§8).
+	// a numbered core step: it's skipped for the tasks whose manifest carries no
+	// label column (has_label_column=false) — self-supervised text (MLM/CLM: the
+	// target comes from the text itself) and object_detection (label derived from
+	// the annotation XML, not a column — backend#1006) — so numbering it "of N"
+	// would promise a step that flow never reaches. Interactive picks from the
+	// REAL CSV header row so the choice exact-matches a column that exists —
+	// killing the case-mismatch silent-null-label class (data-ingestors#340) that
+	// free-typing "Label" against a "label" header would cause. Wording is
+	// per-task: a class to sort into vs a numeric value to predict (§8).
 	//
 	// A supplied --label-column pre-fills the pick (like every other value under
 	// #509) — it no longer SKIPS the question, so a wrong or mistyped column can
-	// be corrected here the same way a stale path can. Only self-supervised text
-	// (no label at all) still bypasses it.
-	if !push.SelfSupervisedText(cat) {
+	// be corrected here the same way a stale path can. The label-less tasks
+	// bypass it entirely. Gated on the contract's has_label_column
+	// (ManifestHasLabelColumn) so it stays in lock-step with what the spec emits.
+	if push.ManifestHasLabelColumn(cat) {
 		// The prompt label tracks the wording: a class to sort into is a "Label",
 		// a numeric target is a "Target". Keeping them distinct is what lets the
 		// two branches be told apart on the prompt line as well as in the header.

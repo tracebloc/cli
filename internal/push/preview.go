@@ -111,6 +111,10 @@ func SniffFamily(path string) FamilySniff {
 	hasSequences := markerResolves(abs, "sequences")
 	hasText := hasTexts || hasSequences
 	hasLabels := regularFileResolves(abs, "labels.csv")
+	// object_detection's post-#1006 layout has an annotations/ sidecar and NO
+	// labels.csv (records come from the XML), so it needs its own image tell —
+	// the labels.csv-keyed image sniff below can't see it (backend#3076).
+	hasAnnotations := markerResolves(abs, "annotations")
 
 	// badMarker flags an entry whose name matches a media marker (exactly or
 	// case-insensitively) but which the walk can't use — a symlink, a mis-cased
@@ -163,6 +167,14 @@ func SniffFamily(path string) FamilySniff {
 	case hasImages && !hasText && hasLabels:
 		return FamilySniff{Family: FamilyImage, Confident: true,
 			Echo: "Found labels.csv and an images/ folder — this is image data."}
+	case hasImages && !hasText && !hasLabels && hasAnnotations:
+		// object_detection: images/ + annotations/ and NO labels.csv (records
+		// enumerated from the Pascal-VOC XML, backend#1006). The sniff picks the
+		// FAMILY; the task picker then offers object_detection within it. A stray
+		// annotations/ beside a labels.csv-based image dataset can't reach here —
+		// the labels case above wins — so this fires only on the OD shape.
+		return FamilySniff{Family: FamilyImage, Confident: true,
+			Echo: "Found images/ + annotations/ and no labels.csv — this is image data (object detection)."}
 	case hasText && !hasImages && hasLabels:
 		dir := "texts/"
 		if hasSequences {

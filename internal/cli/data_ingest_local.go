@@ -235,8 +235,12 @@ func resolveLocalInput(out, errOut io.Writer, a *runDataIngestArgs) (layout *pus
 	case a.Spec.Category == "semantic_segmentation":
 		layout, err = push.DiscoverSemanticSegmentation(a.LocalPath)
 	default:
-		// image_classification + keypoint_detection: labels.csv + images/.
-		layout, err = push.Discover(a.LocalPath)
+		// image_classification + keypoint_detection (and any future image
+		// category with no dedicated sidecar discoverer). Contract-driven:
+		// DiscoverImages requires labels.csv only when the category's manifest
+		// kind declares one, so a future kind="none" image category is handled
+		// by a re-vendor, not a code edit here.
+		layout, err = push.DiscoverImages(a.Spec.Category, a.LocalPath)
 	}
 	walkSpin.Stop()
 	if err != nil {
@@ -478,7 +482,12 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 		p.Field("labels.csv", layout.LabelsCSV)
 		p.Field(dir, fmt.Sprintf("%d files", len(layout.Sidecars[dir])))
 	default:
-		p.Field("labels.csv", layout.LabelsCSV)
+		// object_detection stages no labels.csv (records come from the
+		// annotations sidecar, backend#1006), so LabelsCSV is empty — don't echo
+		// an empty field for a file the CLI never stages.
+		if layout.LabelsCSV != "" {
+			p.Field("labels.csv", layout.LabelsCSV)
+		}
 		imagesVal := fmt.Sprintf("%d files", len(layout.Images))
 		if ext, _ := spec["spec"].(map[string]any); ext != nil {
 			if fo, _ := ext["file_options"].(map[string]any); fo != nil {
@@ -523,7 +532,9 @@ func printLocalSummary(p *ui.Printer, layout *push.LocalLayout, spec map[string]
 // flag), anything else exits 3 (fix the data).
 func runLocalPreflight(a runDataIngestArgs, layout *push.LocalLayout, errOut io.Writer) error {
 	notes, problem := push.PreflightDataset(a.Spec, layout)
-	for _, n := range notes {
+	// Discovery-time notes (e.g. a stray labels.csv in an object_detection
+	// dataset) print alongside the preflight notes.
+	for _, n := range append(append([]string(nil), layout.Notes...), notes...) {
 		_, _ = fmt.Fprintln(errOut, n)
 	}
 	if problem == nil {
