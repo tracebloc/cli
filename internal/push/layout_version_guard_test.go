@@ -2,6 +2,7 @@ package push
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -31,16 +32,65 @@ func TestEmbeddedContractVersionIsSupported(t *testing.T) {
 // DECISION, and `TestEmbeddedContractVersionIsSupported` above proves the
 // decision is applied to the real bytes.
 func TestUnsupportedVersionIsRefused(t *testing.T) {
-	for _, v := range []string{"3", "5", "", "4.0", "v4"} {
+	maxV := maxSupportedVersion(t)
+
+	// The first version PAST the supported set (max+1), DERIVED rather than the
+	// literal "5" this test used to carry (backend#3190). A hardcoded "5" is a
+	// standing claim that v5 is unsupported forever, so the deliberate v5
+	// re-vendor this whole guard exists to make safe would instead RED this
+	// test — the set widens to include "5", and the loop then asserts an
+	// accepted version is refused. Deriving it means the target moves to "6" on
+	// that re-vendor and the guard keeps meaning what it should: "the first
+	// version beyond what this code has been read against is refused."
+	//
+	// Alongside it, tokens the integer version field can never legitimately
+	// take — an empty version, a dotted float, a "v"-prefixed tag — which stay
+	// refused across any re-vendor and pin that the predicate does no fuzzy
+	// matching.
+	next := strconv.Itoa(maxV + 1)
+	for _, v := range []string{next, "", "4.0", "v4"} {
 		if SupportedLayoutVersions[v] {
 			t.Errorf("version %q is accepted; only the versions this code has "+
 				"been read against should be", v)
 		}
 	}
-	// ...and the one that must pass, or the test above is vacuous.
-	if !SupportedLayoutVersions["4"] {
-		t.Error(`version "4" is not accepted, so every rejection above proves nothing`)
+	// ...and the highest supported version IS accepted, or every rejection
+	// above proves nothing. Read back from the set (not the old literal "4")
+	// so a re-vendor that changes which versions ship can't leave this
+	// assertion pinned to a version that is no longer supported. The canonical
+	// string form is used deliberately: a non-canonical key like "04" would
+	// fail here, which is a shape worth catching.
+	if want := strconv.Itoa(maxV); !SupportedLayoutVersions[want] {
+		t.Errorf("highest supported version %q reads as not accepted, so every "+
+			"rejection above proves nothing", want)
 	}
+}
+
+// maxSupportedVersion returns the highest integer version in
+// SupportedLayoutVersions — the anchor TestUnsupportedVersionIsRefused derives
+// its "first unsupported version" from. Non-integer keys are skipped: the
+// contract version is a bare integer the ingestor bumps by one, so max+1 is
+// only meaningful against the integer keys. Fails the test if the set carries
+// no integer version at all, which would leave the guard nothing to anchor to
+// (and, since reaching this point proves the set is non-empty, is also what
+// keeps the rejections above non-vacuous).
+func maxSupportedVersion(t *testing.T) int {
+	t.Helper()
+	maxV, found := 0, false
+	for v := range SupportedLayoutVersions {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			continue
+		}
+		if !found || n > maxV {
+			maxV, found = n, true
+		}
+	}
+	if !found {
+		t.Fatalf("SupportedLayoutVersions %v has no integer version to derive "+
+			"an unsupported one from", sortedVersions())
+	}
+	return maxV
 }
 
 // TestTheGuardIsWiredIntoTheLoader: the predicate could be correct and unused.
