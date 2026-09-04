@@ -526,6 +526,7 @@ screen. %s/%d are runtime placeholders.
 "e.g. %s or %s"
 "e.g. 17 for COCO pose"
 "e.g. age:INT,price:FLOAT"
+"embedded layout.v1.json is version %q; this CLI reads %v. Refusing to guess: applying a contract shape we do not understand is how object_detection kept getting a labels.csv it no longer stages (backend#3146). Re-vendor with scripts/sync-schema.sh, read the diff, then add the version to SupportedLayoutVersions."
 "empty tag_name in release response"
 "enter a whole number between %d and %d"
 "exactly %d"

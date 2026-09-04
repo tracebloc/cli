@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/tracebloc/cli/internal/schema"
@@ -127,12 +128,64 @@ type RecordFormat struct {
 // catches via sync-schema.sh --check), so we fail loudly rather than limp on.
 var layoutContract = mustLoadLayoutContract()
 
+// SupportedLayoutVersions is every layout.v1.json version this CLI knows how
+// to read. A version outside it is refused at load rather than interpreted,
+// because the alternative is worse than a crash.
+//
+// WHY THIS EXISTS (backend#3146, found by @LukasWodka reviewing
+// data-ingestors#557). Until now `Version` was unmarshalled and never compared
+// to anything, so the version bump that carries a shape change was not
+// self-enforcing here at all. Measured on develop before this change:
+//
+//   - nothing compared `LayoutContract.Version` to a supported set
+//   - `mustLoadLayoutContract` panicked only on a PARSE failure
+//   - `scripts/sync-schema.sh --check` is a byte-drift check in CI, not a
+//     runtime gate
+//
+// The consequence was silent and customer-facing: a CLI that had not
+// re-vendored kept its embedded v3 bytes, kept `requires_filename_column: true`
+// for object_detection, and kept producing the 400 that data-ingestors#555's v4
+// bump exists to end -- with nothing anywhere saying so. `e2e-test-agent`'s
+// harness has had this guard from the start; the CLI is the consumer that
+// silently applied a stale shape instead.
+//
+// ADD A VERSION HERE ONLY AFTER READING THE CONTRACT DIFF. Widening this set
+// is a claim that the new shape is one this code handles, which is exactly the
+// question the bump is asking.
+var SupportedLayoutVersions = map[string]bool{
+	"4": true,
+}
+
 func mustLoadLayoutContract() *LayoutContract {
 	var c LayoutContract
 	if err := json.Unmarshal(schema.LayoutV1Bytes, &c); err != nil {
 		panic(fmt.Sprintf("parsing embedded layout.v1.json: %v", err))
 	}
+	if !SupportedLayoutVersions[c.Version] {
+		// PANIC, like the parse failure above, and for the same reason: the
+		// contract is embedded at build time, so an unsupported version is a
+		// build that must not ship rather than a runtime condition a user
+		// could hit or recover from. Failing at init makes it a CI failure on
+		// the re-vendor, which is where it belongs.
+		panic(fmt.Sprintf(
+			"embedded layout.v1.json is version %q; this CLI reads %v. "+
+				"Refusing to guess: applying a contract shape we do not "+
+				"understand is how object_detection kept getting a "+
+				"labels.csv it no longer stages (backend#3146). Re-vendor "+
+				"with scripts/sync-schema.sh, read the diff, then add the "+
+				"version to SupportedLayoutVersions.",
+			c.Version, sortedVersions()))
+	}
 	return &c
+}
+
+func sortedVersions() []string {
+	out := make([]string, 0, len(SupportedLayoutVersions))
+	for v := range SupportedLayoutVersions {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // LayoutFor returns the layout contract for a task category and whether it is
