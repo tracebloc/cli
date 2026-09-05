@@ -19,5 +19,5 @@ jobs:
     uses: tracebloc/.github/.github/workflows/version-bump-gate.yml@main
     with:
       version-file: "VERSION"
-      publish-paths: "cmd/* internal/* go.mod go.sum VERSION"
+      publish-paths: "cmd/* internal/* go.mod go.sum VERSION scripts/install.sh scripts/install.ps1"
       soft-fail: false
