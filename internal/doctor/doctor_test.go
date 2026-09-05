@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -809,13 +810,20 @@ func TestCheckNodeFitFreeMemory(t *testing.T) {
 	})
 
 	// A RUNNING training job (batch/v1 job-name label) holds the envelope itself.
-	// It must NOT count against free, or doctor fails on the exact healthy state it
-	// blesses (Bugbot High). Same 12Gi neighbour, but labelled a Job -> still ok.
-	t.Run("a running training job is excluded, not counted -> ok", func(t *testing.T) {
+	// It must NOT be counted as platform, or doctor FAILS (exit 2) on the exact
+	// healthy state it blesses (Bugbot High on #628). Same 12Gi neighbour, but
+	// labelled a Job -> the TRANSIENT Warn, never the Fail: the machine can run
+	// the envelope, a job simply holds the room now. Before this PR the job was
+	// dropped from the sum entirely and this read as an unqualified OK.
+	t.Run("a running training job is the transient Warn, never the Fail", func(t *testing.T) {
 		job := podOn("train-sim", "n1", "", "12Gi", map[string]string{"job-name": "exp-42"})
 		cs := fake.NewClientset(node("n1", "4", "16Gi"), job)
-		if r := checkNodeFit(bg(), cs, req); r.Status != StatusOK {
-			t.Fatalf("=> %v (%q), want ok (training job excluded)", r.Status, r.Detail)
+		r := checkNodeFit(bg(), cs, req)
+		if r.Status == StatusFail {
+			t.Fatalf("=> Fail (%q): a running job must never read as a capacity failure", r.Detail)
+		}
+		if r.Status != StatusWarn || !strings.HasPrefix(r.Detail, HeldByRunningJob) {
+			t.Fatalf("=> %v (%q), want the transient Warn with prefix %q", r.Status, r.Detail, HeldByRunningJob)
 		}
 	})
 
@@ -919,6 +927,178 @@ func TestCheckNodeFitFreeMemory(t *testing.T) {
 		}
 		if strings.HasPrefix(r.Detail, CantVerifyFreeCompute) {
 			t.Fatalf("free WAS readable; this must not report a can't-check: %q", r.Detail)
+		}
+	})
+}
+
+// backend#2870 DoD 3: the check compares the free figure and tells a PERMANENT
+// shortage (the envelope cannot fit beside the platform's own pods -- ever) from
+// a TRANSIENT one (it fits, but a running Job holds the room now). Fixtures use
+// the ticket's measured 8 GiB reproduction: a k3d node claiming 8126672Ki
+// (7.75 GiB), the installer's envelope of allocatable − 3 GiB, and a control
+// plane requesting 3008Mi beside 140Mi of k3s system pods -- 3148Mi against a
+// 3072Mi overhead constant, so the envelope over-asks by 76Mi.
+func TestCheckNodeFitPermanentVsTransient(t *testing.T) {
+	const (
+		nodeMem       = "8126672Ki"
+		nodeMemBytes  = int64(8126672) * 1024
+		envelopeBytes = nodeMemBytes - 3*(1<<30) // what the installer writes
+	)
+	envelope := map[string]string{"RESOURCE_REQUESTS": fmt.Sprintf("cpu=1,memory=%d", envelopeBytes)}
+	envelopeGPU := map[string]string{
+		"RESOURCE_REQUESTS": envelope["RESOURCE_REQUESTS"],
+		"GPU_REQUESTS":      "nvidia.com/gpu=1",
+	}
+	// Steady-state platform on the node: the chart's control plane + k3s system.
+	platform := func(n string) []runtime.Object {
+		return []runtime.Object{cpPod("control-plane", n, "3008Mi"), cpPod("k3s-system", n, "140Mi")}
+	}
+	// A smaller platform that leaves room for exactly one envelope.
+	smallPlatform := func(n string) []runtime.Object {
+		return []runtime.Object{cpPod("control-plane", n, "2000Mi")}
+	}
+	trainingJob := func(n, mem string) *corev1.Pod {
+		return podOn("train-sim", n, "1", mem, map[string]string{"job-name": "exp-42"})
+	}
+	// A running pod that holds the envelope but is NOT a Job -- e.g. a Deployment
+	// someone added. It is platform, not transient, and must read as permanent.
+	forbidden := func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("pods is forbidden")
+	}
+
+	cases := []struct {
+		name       string
+		objects    []runtime.Object
+		env        map[string]string
+		podsBroken bool
+		want       Status
+		prefix     string // Detail must START with this (the rollup classifies on it)
+		contains   []string
+		notContain []string
+	}{
+		{
+			name:    "fits beside the platform, nothing running -> ok",
+			objects: append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+			env:     envelope,
+			want:    StatusOK,
+		},
+		{
+			name:     "the ticket: 3148Mi platform beside an allocatable-3GiB envelope -> permanent Fail",
+			objects:  append([]runtime.Object{node("n1", "4", nodeMem)}, platform("n1")...),
+			env:      envelope,
+			want:     StatusFail,
+			prefix:   OverCommitted,
+			contains: []string{"FREE memory", "n1 has", "free beside the platform"},
+			// The permanent shape must not be blamed on a job that is not there.
+			notContain: []string{HeldByRunningJob},
+		},
+		{
+			name: "fits the machine, but a running job holds it -> transient Warn",
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+				trainingJob("n1", fmt.Sprintf("%d", envelopeBytes))),
+			env:      envelope,
+			want:     StatusWarn,
+			prefix:   HeldByRunningJob,
+			contains: []string{"running job(s) on n1 hold", "cpu=1", "waits Pending"},
+			// And the remedy must not be the permanent one.
+			notContain: []string{OverCommitted, "over-asks"},
+		},
+		{
+			name: "transient on cpu alone is still the transient Warn",
+			// Platform leaves 4 cpu; a job holds 3 of them; envelope wants 1 -> 1 free... make it 4.
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+				podOn("train-sim", "n1", "4", "", map[string]string{"job-name": "exp-42"})),
+			env:      envelope,
+			want:     StatusWarn,
+			prefix:   HeldByRunningJob,
+			contains: []string{"cpu=4"},
+		},
+		{
+			name: "a job on ANOTHER node leaves this one free -> ok",
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem), node("n2", "4", nodeMem)},
+				smallPlatform("n1")...), trainingJob("n2", fmt.Sprintf("%d", envelopeBytes))),
+			env:  envelope,
+			want: StatusOK,
+		},
+		{
+			name: "permanent and a running job together -> permanent wins, the job is not blamed",
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem)}, platform("n1")...),
+				trainingJob("n1", "500Mi")),
+			env:        envelope,
+			want:       StatusFail,
+			prefix:     OverCommitted,
+			notContain: []string{HeldByRunningJob},
+		},
+		{
+			name: "a non-Job pod holding the envelope is platform, so permanent",
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+				podOn("someones-deployment", "n1", "", fmt.Sprintf("%d", envelopeBytes), nil)),
+			env:    envelope,
+			want:   StatusFail,
+			prefix: OverCommitted,
+		},
+		{
+			name: "transient with a GPU requested and absent -> transient wins, GPU fact kept",
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+				trainingJob("n1", fmt.Sprintf("%d", envelopeBytes))),
+			env:      envelopeGPU,
+			want:     StatusWarn,
+			prefix:   HeldByRunningJob,
+			contains: []string{"nvidia.com/gpu", "CPU fallback"},
+		},
+		{
+			name:       "pod list unreadable -> not ok, and says free was not verified",
+			objects:    []runtime.Object{node("n1", "4", nodeMem)},
+			env:        envelope,
+			podsBroken: true,
+			want:       StatusWarn,
+			prefix:     CantVerifyFreeCompute,
+			contains:   []string{"allocatable only"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewClientset(tc.objects...)
+			if tc.podsBroken {
+				cs.PrependReactor("list", "pods", forbidden)
+			}
+			r := checkNodeFit(bg(), cs, tc.env)
+			if r.Status != tc.want {
+				t.Fatalf("=> %v (%q), want %v", r.Status, r.Detail, tc.want)
+			}
+			if tc.prefix != "" && !strings.HasPrefix(r.Detail, tc.prefix) {
+				t.Fatalf("detail must START with %q (the rollup classifies on it), got %q", tc.prefix, r.Detail)
+			}
+			for _, s := range tc.contains {
+				if !strings.Contains(r.Detail, s) {
+					t.Errorf("detail should contain %q, got %q", s, r.Detail)
+				}
+			}
+			for _, s := range tc.notContain {
+				if strings.Contains(r.Detail, s) {
+					t.Errorf("detail must not contain %q, got %q", s, r.Detail)
+				}
+			}
+			if r.Status != StatusOK && r.Remedy == "" {
+				t.Errorf("a non-OK verdict must carry a remedy: %q", r.Detail)
+			}
+		})
+	}
+
+	// The permanent and transient remedies point in OPPOSITE directions, so pin
+	// that they are not the same text and that each says its own thing.
+	t.Run("the two remedies are opposites", func(t *testing.T) {
+		perm := checkNodeFit(bg(), fake.NewClientset(append([]runtime.Object{node("n1", "4", nodeMem)}, platform("n1")...)...), envelope)
+		trans := checkNodeFit(bg(), fake.NewClientset(append(append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+			trainingJob("n1", fmt.Sprintf("%d", envelopeBytes)))...), envelope)
+		if perm.Remedy == trans.Remedy {
+			t.Fatalf("permanent and transient share a remedy: %q", perm.Remedy)
+		}
+		if !strings.Contains(perm.Remedy, "Lower RESOURCE_REQUESTS") {
+			t.Errorf("permanent remedy should say to shrink the envelope or grow the machine: %q", perm.Remedy)
+		}
+		if !strings.Contains(trans.Remedy, "let the running job finish") || !strings.Contains(trans.Remedy, "does not free room") {
+			t.Errorf("transient remedy should say wait/stop and that resizing does not help: %q", trans.Remedy)
 		}
 	})
 }
