@@ -444,6 +444,16 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 	// was actually detected (Bugbot on #561/#566: "Warn rollup shadowed by
 	// Unknown", backend#2438). StatusUnknown carries no signal, so it must be the
 	// last thing consulted — it may only win when nothing above it fired.
+	// Two signals that are read in more than one arm, named once so the arms
+	// cannot drift apart on the prefix (the same discipline as the producer
+	// constants they match). stuckPending is checkPods' Pending-past-grace Warn,
+	// with its "could not list pods" can't-check excluded; heldByJob is
+	// checkNodeFit's transient verdict (backend#2870).
+	stuckPending := by["Pod health"].Status == doctor.StatusWarn &&
+		!strings.HasPrefix(by["Pod health"].Detail, "could not list pods")
+	heldByJob := by["Node capacity"].Status == doctor.StatusWarn &&
+		strings.HasPrefix(by["Node capacity"].Detail, doctor.HeldByRunningJob)
+
 	switch {
 	// ── Fail: a real, training-blocking problem (worst wins) ──
 	case by["Pod health"].Status == doctor.StatusFail:
@@ -482,7 +492,34 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — this machine is big enough, but the platform's own services have already claimed the room.",
 			fmt.Sprintf("Ask for less per training run, or give the machine more memory/CPU. Do NOT size runs to the machine here — that measures the machine's total, not what is free, so it would ask for MORE and leave the training stuck. `%s doctor --verbose` shows the exact numbers and the knob to turn.", launcher())}
-	case by["Pod health"].Status == doctor.StatusWarn && !strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
+	case stuckPending && heldByJob:
+		// A PENDING POD WHOSE CAUSE HAS BEEN MEASURED (Bugbot High on #639,
+		// backend#2870). This is the transient shortage's own symptom: a job is
+		// running, the next training pod is Pending until it frees the room -- the
+		// `waiting_for_capacity` state the HeldByRunningJob Warn exists to name.
+		// Left to the arm below, the stuck-Pending Fail matched first and the top
+		// line read "Not ready ... not enough free compute" with `computeRemedy`
+		// (`resources set max`) at exit 2 -- in exactly the case this change was
+		// made for, the wait-for-the-job advice never appeared.
+		//
+		// A WARN ABOVE A FAIL, deliberately, and the reason has to be stated
+		// because the tiers below are ordered by severity: the stuck-Pending arm
+		// is not a measured failure but an INFERENCE ("Pending past grace, so it
+		// cannot schedule, so compute or image"). checkNodeFit has measured the
+		// cause -- the envelope fits this machine and a running job holds it --
+		// which refutes the inference, and a Fail here would exit 2 on healthy
+		// training (the Bugbot High on #628) while recommending a resize that
+		// changes nothing. The two arms that still outrank this one are measured:
+		// a Pod-health FAIL (crash-loop) and the OverCommitted Fail.
+		//
+		// checkPods does not know WHY a pod is Pending, so a pod stuck on an
+		// image pull beside a running job would land here too; the remedy names
+		// what to do if the wait outlives the job rather than pretending the
+		// attribution is certain.
+		ready = healthLine{doctor.StatusWarn,
+			"Ready to run training — a training is already running, and the next one is waiting for it to finish.",
+			fmt.Sprintf("A pod is waiting to start because a running job holds this machine's free compute. Let the job finish, or stop it if it is not needed; asking for less per run or resizing will not help — the room comes back when the job ends. If the pod is still waiting after that, something else is holding it: `%s doctor --verbose`.", launcher())}
+	case stuckPending:
 		// Pods stuck Pending past the grace window (unschedulable / image can't
 		// pull) mean training can't actually schedule — so this is NOT ready, even
 		// though the granular Pod-health check rates it a softer ⚠. Without this,
@@ -532,9 +569,9 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusWarn,
 			"Ready to run training — but your environment thinks this machine is bigger than it is.",
 			fmt.Sprintf("It reports more memory than the machine really has, so two trainings that each look like they fit can together run it out of memory and take the environment down. Run one training at a time; to fix it for good, recreate the environment as a single-node one. `%s doctor --verbose` shows the numbers and the exact flags.", launcher())}
-	case by["Node capacity"].Status == doctor.StatusWarn &&
-		strings.HasPrefix(by["Node capacity"].Detail, doctor.HeldByRunningJob):
-		// backend#2870, the TRANSIENT shortage. checkNodeFit found the envelope
+	case heldByJob:
+		// backend#2870, the TRANSIENT shortage with no pod Pending yet (the
+		// co-occurring case is the Warn in the Fail tier above). checkNodeFit found the envelope
 		// fits this machine beside the platform, but a job that is running holds
 		// the room now, so the next run waits. This arm exists because the two
 		// things an operator could otherwise be told are both wrong: the capacity
