@@ -508,6 +508,48 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	// backend#2870: the TRANSIENT shortage. The envelope fits the machine beside
+	// the platform, but a running job holds the room, so the next run waits. It
+	// must roll up as a Warn that says so -- not the green (which hides why a
+	// second run is waiting), not a Fail (training IS running: the Bugbot High on
+	// #628), and never the capacity Fail's "ask for less / grow the machine"
+	// advice, which changes nothing about a job already running.
+	t.Run("a running job holding the room → ready Warn that says to wait, not resize", func(t *testing.T) {
+		// DETAIL BUILT FROM THE PRODUCER'S CONSTANT, same discipline as the
+		// over-commit cases above: the arm classifies by prefix.
+		_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish"), tokenOK)
+		if r.status != doctor.StatusWarn {
+			t.Fatalf("want ready Warn, got %v (%q)", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "waits for it") {
+			t.Errorf("the top line should say the next run waits, got %q", r.text)
+		}
+		if strings.Contains(r.remedy, "resources set max") || strings.Contains(r.remedy, "Ask for less") {
+			t.Errorf("the transient remedy must not send the operator to resize or shrink: %q", r.remedy)
+		}
+		if !strings.Contains(r.remedy, "let the running job finish") {
+			t.Errorf("the remedy should say to wait for or stop the running job: %q", r.remedy)
+		}
+		c, _ := summarizeDoctor(allOK, tokenOK)
+		if v := doctorVerdict(c.status, r.status); v != doctor.StatusWarn {
+			t.Errorf("verdict must own the Warn (exit 0, no 'everything looks good'), got %v", v)
+		}
+	})
+
+	t.Run("a machine that lies about its size outranks a running job", func(t *testing.T) {
+		// Both are Warns; the over-commit is the more consequential finding and
+		// sits first. Pin the order so a later reshuffle cannot demote it.
+		results := withDetail(allOK, "Machine capacity", doctor.StatusWarn,
+			"Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has")
+		results = withDetail(results, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now")
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusWarn || !strings.Contains(r.text, "bigger than it is") {
+			t.Errorf("want the over-commit Warn first, got %v (%q)", r.status, r.text)
+		}
+	})
+
 	t.Run("node capacity GPU-soft warn → still ready", func(t *testing.T) {
 		_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn,
 			"no single Ready node satisfies cpu+memory AND nvidia.com/gpu — GPU jobs rely on the CPU fallback (needs cpu=2, memory=8Gi)"), tokenOK)

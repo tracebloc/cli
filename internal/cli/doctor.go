@@ -532,6 +532,22 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusWarn,
 			"Ready to run training — but your environment thinks this machine is bigger than it is.",
 			fmt.Sprintf("It reports more memory than the machine really has, so two trainings that each look like they fit can together run it out of memory and take the environment down. Run one training at a time; to fix it for good, recreate the environment as a single-node one. `%s doctor --verbose` shows the numbers and the exact flags.", launcher())}
+	case by["Node capacity"].Status == doctor.StatusWarn &&
+		strings.HasPrefix(by["Node capacity"].Detail, doctor.HeldByRunningJob):
+		// backend#2870, the TRANSIENT shortage. checkNodeFit found the envelope
+		// fits this machine beside the platform, but a job that is running holds
+		// the room now, so the next run waits. This arm exists because the two
+		// things an operator could otherwise be told are both wrong: the capacity
+		// Fail's advice (ask for less / grow the machine) changes nothing about a
+		// job already running, and the plain green hides why a second run is
+		// waiting. Warn keeps exit 0 -- training IS running -- while doctorVerdict
+		// withholds "everything looks good". Below the over-commit Warn: a machine
+		// that lies about its size is the more consequential finding.
+		//
+		// Plain terms, no Kubernetes vocabulary, like its neighbours.
+		ready = healthLine{doctor.StatusWarn,
+			"Ready to run training — but a job is already using this machine's free compute, so the next run waits for it.",
+			fmt.Sprintf("Nothing is wrong with the machine: let the running job finish, or stop it if it is not needed. Asking for less per run or resizing will not help here — the room comes back when the job ends. `%s doctor --verbose` shows the numbers.", launcher())}
 	// ── Unknown: a check couldn't complete — no signal, so it never shadows a
 	// Fail or Warn above and only surfaces when nothing real was found. ──
 	case by["Pod health"].Status == doctor.StatusWarn && strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
