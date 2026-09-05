@@ -37,6 +37,7 @@ $ tb data ingest   # guided · tabular classification
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  ·           (object detection: images/ + annotations/, no labels.csv)
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
 
 ? Path: ~/data/patients
@@ -92,6 +93,7 @@ $ tb data ingest   # guided · image classification
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  ·           (object detection: images/ + annotations/, no labels.csv)
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
 
 ? Path: ~/data/xray
@@ -146,6 +148,7 @@ $ tb data ingest   # guided · text classification
   Give the path to a file or a folder — whichever holds your data:
   · Tabular   one CSV file                        e.g. ~/data/patients.csv
   · Images    a folder with labels.csv + images/   e.g. ~/data/xray/
+  ·           (object detection: images/ + annotations/, no labels.csv)
   · Text      a folder with labels.csv + texts/     e.g. ~/data/reviews/
 
 ? Path: ~/data/reviews
@@ -228,7 +231,7 @@ tabular / time-series families; pick one with --task.
       churn/
         data.csv               (the one .csv in the folder)
 
-  image (classification, object/keypoint detection) — a folder with
+  image classification / keypoint detection — a folder with
   labels.csv + an images/ subfolder:
 
       cats_dogs/
@@ -236,6 +239,16 @@ tabular / time-series families; pick one with --task.
         images/                (required)
           001.jpg
           ...
+
+  object detection — a folder with images/ + annotations/ and NO
+  labels.csv: records are enumerated from the Pascal-VOC XML, one per
+  image, so there is no manifest and no label column to declare.
+
+      visdrone/
+        images/                (required)
+          001.jpg
+        annotations/           (required — 001.xml pairs with 001.jpg)
+          001.xml
 
   text (classification, masked language modeling) — a folder with
   labels.csv + a texts/ subfolder (masked language modeling uses sequences/):

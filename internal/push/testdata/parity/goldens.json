@@ -108,8 +108,10 @@
       "verdict": "accept"
     },
     "imgc-no-filename-col": {
-      "errors": [],
-      "verdict": "accept"
+      "errors": [
+        "IngestableRecordsValidator: No 'filename' column in the manifest (columns: ['image_id', 'label']) \u2014 file-bearing tasks match each row to its file by that column, and the cluster drops every row without it ('No filename found in record'). Rename your file column to 'filename' and re-run."
+      ],
+      "verdict": "reject"
     },
     "imgc-nonsquare": {
       "errors": [],
@@ -157,8 +159,10 @@
       "verdict": "reject"
     },
     "imgc-uppercase-filename-col": {
-      "errors": [],
-      "verdict": "accept"
+      "errors": [
+        "IngestableRecordsValidator: Column 'Filename' must be lowercase 'filename': the cluster reads each file with a case-sensitive record.get('filename') at transfer, so 'Filename' would upload, then fail with 'No filename found in record'. Rename it to 'filename' and re-run."
+      ],
+      "verdict": "reject"
     },
     "imgc-zero-byte": {
       "errors": [
@@ -228,6 +232,7 @@
       "errors": [
         "ImageResolutionValidator: Multiple image resolutions found: [(32, 32), (48, 48)]. All images must have the same resolution.",
         "ImageResolutionValidator: Expected resolution: [32, 32]",
+        "ImageResolutionValidator: Invalid files: []",
         "ImageResolutionValidator: Resolution errors: ['masks/b_mask.png: (48, 48) (expected: [32, 32])']"
       ],
       "verdict": "reject"
@@ -240,7 +245,7 @@
     },
     "semseg-missing-mask-id": {
       "errors": [
-        "MaskIdColumnValidator: Required column 'mask_id' not found in semantic-segmentation manifest CSV header (columns: filename). The training client reads 'mask_id' to locate each mask file (backend#816) \u2014 without it, every mask lookup raises FileNotFoundError at train time. Add a 'mask_id' column mapping each row to its mask filename. See templates/semantic_segmentation/ for the layout."
+        "MaskIdColumnValidator: Required column 'mask_id' not found in semantic-segmentation manifest CSV header (columns: ['filename']). The training client reads 'mask_id' to locate each mask file (backend#816) \u2014 without it, every mask lookup raises FileNotFoundError at train time. Add a 'mask_id' column mapping each row to its mask filename. See templates/semantic_segmentation/ for the layout."
       ],
       "verdict": "reject"
     },
@@ -319,7 +324,7 @@
     },
     "tabular-int-nonnumeric": {
       "errors": [
-        "DataValidator: Column 'age' contains 1 non-numeric value(s) at row 0."
+        "DataValidator: Column 'age' contains 1 non-numeric value(s) at rows [0]."
       ],
       "verdict": "reject"
     },
@@ -336,7 +341,7 @@
     "tabular-nonutf8": {
       "errors": [
         "csv-encoding: \u001b[91m'data.csv' is not valid UTF-8 \u2014 a non-UTF-8 byte was found at byte 19. Re-save the file as UTF-8 (in Excel: Save As \u2192 'CSV UTF-8 (Comma delimited)'), then re-ingest.\u001b[0m",
-        "IngestableRecordsValidator: Ingestable records validation error: 'utf-8' codec can't decode byte 0xfc in position 1: invalid start byte",
+        "IngestableRecordsValidator: Ingestable records validation error: 'utf-8' codec can't decode byte 0xfc in position 19: invalid start byte",
         "DataValidator: Data type validation error: 'utf-8' codec can't decode byte 0xfc in position 1: invalid start byte"
       ],
       "verdict": "reject"
