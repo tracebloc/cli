@@ -508,6 +508,106 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	// backend#2870: the TRANSIENT shortage. The envelope fits the machine beside
+	// the platform, but a running job holds the room, so the next run waits. It
+	// must roll up as a Warn that says so -- not the green (which hides why a
+	// second run is waiting), not a Fail (training IS running: the Bugbot High on
+	// #628), and never the capacity Fail's "ask for less / grow the machine"
+	// advice, which changes nothing about a job already running.
+	t.Run("a running job holding the room → ready Warn that says to wait, not resize", func(t *testing.T) {
+		// DETAIL BUILT FROM THE PRODUCER'S CONSTANT, same discipline as the
+		// over-commit cases above: the arm classifies by prefix.
+		_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish"), tokenOK)
+		if r.status != doctor.StatusWarn {
+			t.Fatalf("want ready Warn, got %v (%q)", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "waits for it") {
+			t.Errorf("the top line should say the next run waits, got %q", r.text)
+		}
+		if strings.Contains(r.remedy, "resources set max") || strings.Contains(r.remedy, "Ask for less") {
+			t.Errorf("the transient remedy must not send the operator to resize or shrink: %q", r.remedy)
+		}
+		if !strings.Contains(r.remedy, "let the running job finish") {
+			t.Errorf("the remedy should say to wait for or stop the running job: %q", r.remedy)
+		}
+		c, _ := summarizeDoctor(allOK, tokenOK)
+		if v := doctorVerdict(c.status, r.status); v != doctor.StatusWarn {
+			t.Errorf("verdict must own the Warn (exit 0, no 'everything looks good'), got %v", v)
+		}
+	})
+
+	// Bugbot High on #639. The transient shortage's own SYMPTOM is a second
+	// training pod sitting Pending until the running job frees the room -- the
+	// `waiting_for_capacity` case. With the stuck-Pending Fail arm first, that
+	// state rolled up to "Not ready ... not enough free compute" with
+	// `computeRemedy` (`resources set max`) at exit 2, and the wait-for-the-job
+	// line never appeared in exactly the case it was written for.
+	t.Run("a Pending pod AND a running job holding the room → the cause is named, not the generic stuck-Pending Fail", func(t *testing.T) {
+		results := withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish")
+		results = withDetail(results, "Pod health", doctor.StatusWarn,
+			"Pending > 5m0s: [train-second]")
+		c, r := summarizeDoctor(results, tokenOK)
+		if r.status == doctor.StatusFail {
+			t.Fatalf("the stuck-Pending arm shadowed the transient cause and failed the command on healthy training: %q / %q", r.text, r.remedy)
+		}
+		if r.status != doctor.StatusWarn {
+			t.Fatalf("want ready Warn, got %v (%q)", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "waiting for it") {
+			t.Errorf("the top line should say the next run waits for the running one, got %q", r.text)
+		}
+		if !strings.Contains(r.remedy, "running job holds") {
+			t.Errorf("the remedy should name the cause -- a running job -- got %q", r.remedy)
+		}
+		if strings.Contains(r.remedy, "resources set max") || strings.Contains(r.remedy, "Ask for less") {
+			t.Errorf("the remedy must not send the operator to resize or shrink: %q", r.remedy)
+		}
+		if !strings.Contains(r.remedy, "still waiting after") {
+			t.Errorf("checkPods cannot see WHY a pod is Pending, so the remedy must say what to do if the wait outlives the job: %q", r.remedy)
+		}
+		if v := doctorVerdict(c.status, r.status); v != doctor.StatusWarn {
+			t.Errorf("verdict must own the Warn (exit 0), got %v", v)
+		}
+	})
+
+	t.Run("a Pending pod with NO running job is still the stuck-Pending Fail", func(t *testing.T) {
+		// The other side: the arm above is scoped to the co-occurrence. A pod
+		// Pending on a machine where nothing holds the room is the generic,
+		// measured-nowhere case and keeps its Fail and its sizing advice.
+		_, r := summarizeDoctor(withDetail(allOK, "Pod health", doctor.StatusWarn,
+			"Pending > 5m0s: [trainer-x]"), tokenOK)
+		if r.status != doctor.StatusFail || !strings.Contains(r.remedy, "resources set max") {
+			t.Errorf("want the generic stuck-Pending Fail with the sizing remedy, got %v %q", r.status, r.remedy)
+		}
+	})
+
+	t.Run("a crash-looping pod still outranks the running-job explanation", func(t *testing.T) {
+		// The exception is scoped to the stuck-Pending WARN; a Pod-health FAIL is
+		// a measured failure with a different fix, and must keep winning.
+		results := withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now")
+		results = withDetail(results, "Pod health", doctor.StatusFail, "crash-looping: [jobs-manager]")
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail || !strings.Contains(r.text, "isn't running") {
+			t.Errorf("a Pod-health Fail must still win, got %v (%q)", r.status, r.text)
+		}
+	})
+
+	t.Run("a machine that lies about its size outranks a running job", func(t *testing.T) {
+		// Both are Warns; the over-commit is the more consequential finding and
+		// sits first. Pin the order so a later reshuffle cannot demote it.
+		results := withDetail(allOK, "Machine capacity", doctor.StatusWarn,
+			"Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has")
+		results = withDetail(results, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now")
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusWarn || !strings.Contains(r.text, "bigger than it is") {
+			t.Errorf("want the over-commit Warn first, got %v (%q)", r.status, r.text)
+		}
+	})
+
 	t.Run("node capacity GPU-soft warn → still ready", func(t *testing.T) {
 		_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn,
 			"no single Ready node satisfies cpu+memory AND nvidia.com/gpu — GPU jobs rely on the CPU fallback (needs cpu=2, memory=8Gi)"), tokenOK)

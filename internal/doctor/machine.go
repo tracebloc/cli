@@ -254,21 +254,37 @@ func checkMachineChain(ctx context.Context, cs kubernetes.Interface, serverURL s
 	// VM would be this check repeating the very lie it is here to expose — the
 	// fourth level inheriting the error from the third. min() is a no-op on an
 	// honest cluster, where the sum never exceeds the VM.
+	//
+	// This figure is DISPLAYED here and COMPARED in checkNodeFit, deliberately
+	// (backend#2870). A pod takes every resource it requests from ONE node, so the
+	// schedulability question is per node, not per VM: on a capped two-node
+	// cluster the VM can have 4 GiB unrequested while no single node has 2 free,
+	// and a VM-level "fits" would be wrong in the direction that goes Pending.
+	// checkNodeFit asks it per node, tells a permanent shortage from a transient
+	// one, and is what the rollup reads. What this level owes the operator is
+	// honesty about the number: when the pod list cannot be read, "unrequested"
+	// is not measured, and printing the whole VM as free -- which is what a
+	// silent 0 did -- is the same fail-open the ticket is about.
 	trueCeiling := sumMem
 	if vmMem < trueCeiling {
 		trueCeiling = vmMem
 	}
-	freeMem := trueCeiling - requestedMemory(ctx, cs)
+	requested, reqErr := requestedMemory(ctx, cs)
+	freeMem := trueCeiling - requested
 	if freeMem < 0 {
 		freeMem = 0
+	}
+	unrequested := gib(freeMem) + " unrequested"
+	if reqErr != nil {
+		unrequested = "unrequested: unknown (pod list unreadable)"
 	}
 
 	chain := ""
 	if _, hostMem, herr := host(ctx); herr == nil && hostMem > 0 {
 		chain = fmt.Sprintf("host %s → ", gib(hostMem))
 	}
-	chain += fmt.Sprintf("Docker VM %s (%d cpu) → %d node%s claiming %s → %s unrequested",
-		gib(vmMem), vmCores, len(ready), plural(len(ready)), gib(sumMem), gib(freeMem))
+	chain += fmt.Sprintf("Docker VM %s (%d cpu) → %d node%s claiming %s → %s",
+		gib(vmMem), vmCores, len(ready), plural(len(ready)), gib(sumMem), unrequested)
 
 	if float64(sumMem) > float64(vmMem)*overCommitTolerance {
 		ratio := float64(sumMem) / float64(vmMem)
@@ -277,6 +293,19 @@ func checkMachineChain(ctx context.Context, cs kubernetes.Interface, serverURL s
 			Status: StatusWarn,
 			Detail: fmt.Sprintf("%s — Kubernetes believes %.2f× the memory this machine has, because the k3d node containers are uncapped and each reports the whole VM", chain, ratio),
 			Remedy: fmt.Sprintf("Each node container reports the whole VM, so %d of them double-count it. Run a single-node environment, or cap the nodes (k3d --servers-memory/--agents-memory). Until then a job that fits a node may still OOM the VM.", len(ready)),
+		}
+	}
+
+	// The invariant held (nodes + VM needed no pod list), but the fourth level
+	// was not measured. A ✔ over a chain whose last figure is "unknown" would be
+	// a green this check cannot back -- the same rule checkNodeFit applies to
+	// the same unreadable list, one layer out.
+	if reqErr != nil {
+		return Result{
+			Name:   name,
+			Status: StatusUnknown,
+			Detail: chain + " — could not list pods: " + reqErr.Error(),
+			Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to measure what is unrequested.",
 		}
 	}
 
@@ -296,12 +325,13 @@ func allK3d(nodes []corev1.Node) bool {
 }
 
 // requestedMemory sums memory requests across pods that still hold resources.
-// Best-effort: on a read failure it returns 0, so the "unrequested" level
-// degrades to the full claim rather than reporting a negative remainder.
-func requestedMemory(ctx context.Context, cs kubernetes.Interface) int64 {
+// A read failure is returned, not swallowed: the old best-effort 0 made the
+// "unrequested" level print the whole VM as free on exactly the clusters where
+// nothing had been measured (backend#2870).
+func requestedMemory(ctx context.Context, cs kubernetes.Interface) (int64, error) {
 	pods, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	var total int64
 	for i := range pods.Items {
@@ -317,7 +347,7 @@ func requestedMemory(ctx context.Context, cs kubernetes.Interface) int64 {
 			}
 		}
 	}
-	return total
+	return total, nil
 }
 
 func gib(b int64) string {

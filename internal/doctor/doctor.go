@@ -585,9 +585,19 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 
 // checkNodeFit verifies at least one Ready node can satisfy the resource
 // requests the jobs-manager stamps on spawned training jobs (RESOURCE_REQUESTS
-// / GPU_REQUESTS env) — the "Pending forever, no node big enough" class. GPU is
-// soft: when a GPU is requested but no node exposes it, that's a ⚠ (jobs-manager
-// has a GPU→CPU fallback), not a hard failure.
+// / GPU_REQUESTS env) — the "Pending forever, no node big enough" class. The
+// fit is against what is FREE on a node, not its allocatable, and it tells two
+// shortages apart (backend#2870):
+//
+//   - PERMANENT (Fail, prefix OverCommitted): the envelope does not fit beside
+//     the platform's own steady-state pods. No run can ever schedule here until
+//     the envelope shrinks or the machine grows.
+//   - TRANSIENT (Warn, prefix HeldByRunningJob): it fits beside the platform,
+//     but a running batch Job holds the room right now. The next run waits;
+//     nothing on the machine needs changing.
+//
+// GPU is soft: when a GPU is requested but no node exposes it, that's a ⚠
+// (jobs-manager has a GPU→CPU fallback), not a hard failure.
 func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]string) Result {
 	const name = "Node capacity"
 	cpuReq, memReq, ok := parseCPUMem(env["RESOURCE_REQUESTS"])
@@ -633,6 +643,15 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	// say so and fall back to allocatable, never silently pass it off as free.
 	reqCPU := map[string]int64{} // node -> already-requested millicores
 	reqMem := map[string]int64{} // node -> already-requested bytes
+	// Requests held by RUNNING batch Jobs, per node, kept APART from the
+	// steady-state sums above. They answer a different question: "beside the
+	// platform" is about whether a run can ever schedule here, "beside the
+	// platform and the job that is running" is about whether one can schedule
+	// NOW. Folding them together produced a false Fail during healthy training
+	// (Bugbot High on #628); dropping them produced a green over a machine whose
+	// next run was going to wait. Two sums, two verdicts.
+	jobCPU := map[string]int64{} // node -> millicores held by running Jobs
+	jobMem := map[string]int64{} // node -> bytes held by running Jobs
 	freeKnown := true
 	if pods, perr := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); perr == nil {
 		for i := range pods.Items {
@@ -644,24 +663,26 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 				p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 				continue
 			}
-			// SKIP batch-Job pods (they carry the `job-name` label the batch/v1
-			// controller stamps -- see internal/submit/watch.go). A running
-			// training or ingestion job holds the envelope itself, so counting it
-			// would make doctor report "no room for a training job" on the exact
-			// healthy state it exists to bless -- a false negative that exits 2
-			// during training (Bugbot High). The question is whether the envelope
-			// fits beside the STEADY-STATE control plane (Deployments/DaemonSets),
-			// not beside a transient workload; those pods have no `job-name`.
+			// Batch-Job pods carry the `job-name` label the batch/v1 controller
+			// stamps (see internal/submit/watch.go) -- that label, not a name
+			// pattern, is how the CLI already recognises a training or ingestion
+			// pod, so it is the one used here. They go into the JOB sums, never the
+			// steady-state ones: a running job holds the envelope itself, so
+			// counting it as platform would make doctor Fail "no room for a training
+			// job" on the exact healthy state it exists to bless (Bugbot High). The
+			// steady state is the control plane (Deployments/DaemonSets), which has
+			// no `job-name`.
+			cpu, mem := reqCPU, reqMem
 			if _, isJob := p.Labels["job-name"]; isJob {
-				continue
+				cpu, mem = jobCPU, jobMem
 			}
 			for j := range p.Spec.Containers {
 				r := p.Spec.Containers[j].Resources.Requests
 				if q, ok := r[corev1.ResourceCPU]; ok {
-					reqCPU[p.Spec.NodeName] += q.MilliValue()
+					cpu[p.Spec.NodeName] += q.MilliValue()
 				}
 				if q, ok := r[corev1.ResourceMemory]; ok {
-					reqMem[p.Spec.NodeName] += q.Value()
+					mem[p.Spec.NodeName] += q.Value()
 				}
 			}
 		}
@@ -670,6 +691,20 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	}
 
 	var cpuMemFits, fullFits, allocOnlyFit, overCPU, overMem bool
+	// The first node that is big enough by allocatable but not by FREE, with the
+	// free figures it had -- so the permanent Fail can print the numbers the
+	// rollup's remedy promises ("--verbose shows the exact numbers") instead of
+	// only the request. Bounded to the node the verdict is about; the CPU-major
+	// bestFree* below may belong to a different node.
+	var overNode string
+	var overFreeCPUm, overFreeMemB int64
+	// Whether some node fits the envelope beside the platform AND the Jobs
+	// running on it -- i.e. can a run schedule NOW, not just ever. When it fits
+	// the steady state but not this, the first such node and what its Jobs hold
+	// are recorded for the transient Warn.
+	var nowFits bool
+	var heldNode string
+	var heldCPUm, heldMemB int64
 	// Largest Ready node for the drift nudge — CPU-major with memory as the
 	// tie-break, EXACTLY like resources.nodeLarger, so the advertised ceiling
 	// always matches what `resources set max` will actually apply (Bugbot).
@@ -733,6 +768,9 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			if freeMemB < memReq.Value() {
 				overMem = true
 			}
+			if (freeCPUm < cpuReq.MilliValue() || freeMemB < memReq.Value()) && overNode == "" {
+				overNode, overFreeCPUm, overFreeMemB = n.Name, freeCPUm, freeMemB
+			}
 		}
 		// Disk joins cpu+memory as a WHOLE-NODE condition. A pod gets every
 		// resource it requests from ONE node, so this must be AND-ed into the
@@ -758,6 +796,23 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		if nodeCPUMem && nodeGPU {
 			fullFits = true
 		}
+		// The same whole-node fit with the running Jobs subtracted as well: can a
+		// run schedule NOW? Asked only of a node that passed the steady-state fit
+		// -- on one that did not, the permanent shortage is the finding and the
+		// Job on it is not what is in the way. With free unknown there is no Job
+		// sum either, so this collapses to the steady-state answer and the
+		// `!freeKnown` arms below carry the caveat.
+		nodeNow := nodeCPUMem
+		if nodeCPUMem && freeKnown {
+			nodeNow = freeCPUm-jobCPU[n.Name] >= cpuReq.MilliValue() &&
+				freeMemB-jobMem[n.Name] >= memReq.Value()
+			if !nodeNow && heldNode == "" {
+				heldNode, heldCPUm, heldMemB = n.Name, jobCPU[n.Name], jobMem[n.Name]
+			}
+		}
+		if nodeNow {
+			nowFits = true
+		}
 	}
 
 	switch {
@@ -775,7 +830,7 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		return Result{
 			Name:   name,
 			Status: StatusFail,
-			Detail: fmt.Sprintf("%s for a training job (%s) but not beside what is already running on it — the envelope over-asks the node's FREE %s, so the pod schedules Pending", OverCommitted, req, short),
+			Detail: fmt.Sprintf("%s for a training job (%s) but not beside what is already running on it — the envelope over-asks the node's FREE %s (%s has %s free beside the platform's own pods), so the pod schedules Pending", OverCommitted, req, short, overNode, cpuMemString(overFreeCPUm, overFreeMemB)),
 			Remedy: "Lower RESOURCE_REQUESTS on jobs-manager to leave room for the platform's own pods, or move the control plane / add a node. The installer sizes the envelope from allocatable, not free, so a machine that is 'big enough' can still be over-committed (backend#2870).",
 		}
 	case !cpuMemFits:
@@ -788,6 +843,36 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			Status: StatusFail,
 			Detail: detail,
 			Remedy: "Add/resize a node to meet the job's requests, or lower RESOURCE_REQUESTS on jobs-manager.",
+		}
+	case freeKnown && !nowFits:
+		// The TRANSIENT shortage (backend#2870): every dimension fits beside the
+		// platform's own pods, so this machine CAN run the envelope -- but a batch
+		// Job holds the room at this moment, and the next run sits Pending until
+		// it finishes. Before this arm the running Job was dropped from the sum and
+		// this state read as an unqualified green, which is the doctor-side half of
+		// the ticket's "waiting_for_capacity forever looks identical to a permanent
+		// shortage".
+		//
+		// Warn, not Fail: training is genuinely running here, and failing the
+		// command on the healthy state it exists to bless was the Bugbot High on
+		// #628. Warn, not OK: the operator asking why a second run is waiting
+		// needs the answer on this line, not a ✔.
+		//
+		// Its remedy is the OPPOSITE of the permanent arm's -- lowering the
+		// envelope or resizing changes nothing about a Job that is already
+		// running -- which is why the prefix is a distinct constant that the
+		// rollup (summarizeDoctor) classifies on. It sits above the soft GPU Warn
+		// because it is the stronger statement about scheduling; the GPU fact is
+		// folded in rather than lost, as #628 did for the can't-check.
+		detail := fmt.Sprintf("%s: a Ready node fits a training job (%s) beside the platform's own pods, but running job(s) on %s hold %s right now, so the next run waits Pending until they finish", HeldByRunningJob, req, heldNode, cpuMemString(heldCPUm, heldMemB))
+		if gpuRequested && !fullFits {
+			detail += fmt.Sprintf(". Also, no single Ready node satisfies cpu+memory AND %s, so GPU jobs would rely on the CPU fallback", gpuName)
+		}
+		return Result{
+			Name:   name,
+			Status: StatusWarn,
+			Detail: detail,
+			Remedy: "Nothing on the machine needs changing: let the running job finish, or stop it if it is not needed (kubectl get jobs -A). Lowering RESOURCE_REQUESTS or resizing does not free room a running job holds.",
 		}
 	case gpuRequested && !fullFits:
 		// UNKNOWN FREE OUTRANKS THE SOFT GPU WARN (Bugbot High, #628).
@@ -913,6 +998,23 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 // Following it raises the envelope and the pod stays Pending (Bugbot Medium,
 // #628). The generic arm is right for a too-small machine and wrong here.
 const OverCommitted = "a Ready node is large enough"
+
+// HeldByRunningJob is the prefix of the #2870 TRANSIENT Warn: the envelope fits
+// this machine beside the platform, but a running batch Job holds the room now.
+// ONE definition, for the same reason as OverCommitted -- the rollup classifies
+// on it, and its remedy ("wait, or stop the job") is the opposite of both
+// capacity Fails' ("shrink the envelope" / "grow the machine"). A retyped copy
+// that drifted would send this state down the generic path again.
+const HeldByRunningJob = "a running job holds the room"
+
+// cpuMemString renders a millicore/byte pair the way RESOURCE_REQUESTS reads
+// ("cpu=2, memory=8Gi"), so the free/held figures in a Node-capacity verdict
+// line up with the request printed beside them.
+func cpuMemString(cpuMilli, memBytes int64) string {
+	return fmt.Sprintf("cpu=%s, memory=%s",
+		resource.NewMilliQuantity(cpuMilli, resource.DecimalSI).String(),
+		resource.NewQuantity(memBytes, resource.BinarySI).String())
+}
 
 // CantVerifyFreeCompute is the prefix every "we could not check free compute"
 // Node-capacity Warn must start with, and the ONE definition of it.
