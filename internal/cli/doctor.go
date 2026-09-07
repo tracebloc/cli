@@ -654,14 +654,18 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 			"Ready to run training — couldn't check free compute (run with --verbose)", ""}
 	case by["Image pull secret"].Status == doctor.StatusWarn &&
 		strings.HasPrefix(by["Image pull secret"].Detail, doctor.CantReadImagePullSecret):
-		// checkImagePull can't-check: the secret could not be READ (Forbidden /
-		// timeout), not read-and-found-missing. It carries no signal about whether
-		// images can be pulled, so it lands here in the Unknown tier — never the
-		// measured "images can't be pulled" Fail above, which is now promoted over
-		// the wait-for-capacity Warn and would flip a healthy environment to exit 2
-		// on an RBAC blip (backend#3248, LukasWodka on #643).
+		// checkImagePull can't-check: the secret (or the jobs-manager that names it)
+		// could not be READ, not read-and-found-missing. It carries no signal about
+		// whether images can be pulled, so it lands here in the Unknown tier — never
+		// the measured "images can't be pulled" Fail above, which is now promoted
+		// over the wait-for-capacity Warn and would flip a healthy environment to
+		// exit 2 on an RBAC blip (backend#3248, LukasWodka on #643).
+		//
+		// PLAIN TERMS, no Kubernetes vocabulary — "image pull secret" is jargon that
+		// belongs one --verbose away in renderDoctorDetails, so this line mirrors the
+		// Fail arm's "training images can't be pulled" wording (Bugbot on #643).
 		ready = healthLine{doctor.StatusUnknown,
-			"Ready to run training — couldn't check the image pull secret (run with --verbose)", ""}
+			"Ready to run training — couldn't check whether training images can be pulled (run with --verbose)", ""}
 	case by["Dataset volume (PVC)"].Status == doctor.StatusWarn &&
 		strings.HasPrefix(by["Dataset volume (PVC)"].Detail, cluster.PVCReadErrPrefix):
 		// checkPVC can't-check: the PVC could not be READ (Forbidden / network),

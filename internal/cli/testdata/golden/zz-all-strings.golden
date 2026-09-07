@@ -333,7 +333,7 @@ screen. %s/%d are runtime placeholders.
 "Ready to run training — can't check yet"
 "Ready to run training — couldn't check dataset storage (run with --verbose)"
 "Ready to run training — couldn't check free compute (run with --verbose)"
-"Ready to run training — couldn't check the image pull secret (run with --verbose)"
+"Ready to run training — couldn't check whether training images can be pulled (run with --verbose)"
 "Ready to run training — couldn't check your workloads (run with --verbose)"
 "Reclaimed %d tracebloc image%s."
 "Reclaiming the temporary copy"

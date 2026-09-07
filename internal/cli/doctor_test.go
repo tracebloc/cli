@@ -724,8 +724,8 @@ func TestSummarizeDoctor(t *testing.T) {
 	t.Run("a can't-READ image-pull or PVC is an honest can't-check, not the promoted Fail", func(t *testing.T) {
 		imgCantRead := append(append([]doctor.Result{}, allOK...),
 			doctor.Result{Name: "Image pull secret", Status: doctor.StatusWarn, Detail: doctor.CantReadImagePullSecret + ` "reg": secrets is forbidden`})
-		if _, r := summarizeDoctor(imgCantRead, tokenOK); r.status != doctor.StatusUnknown || !strings.Contains(r.text, "image pull secret") {
-			t.Errorf("a can't-read image-pull must roll up to a can't-check, got %v (%q)", r.status, r.text)
+		if _, r := summarizeDoctor(imgCantRead, tokenOK); r.status != doctor.StatusUnknown || !strings.Contains(r.text, "training images can be pulled") {
+			t.Errorf("a can't-read image-pull must roll up to a plain-terms can't-check, got %v (%q)", r.status, r.text)
 		}
 		pvcCantRead := withDetail(allOK, "Dataset volume (PVC)", doctor.StatusWarn,
 			cluster.PVCReadErrPrefix+"ns/client-pvc: is forbidden")
