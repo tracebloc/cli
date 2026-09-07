@@ -445,12 +445,13 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 	// Unknown", backend#2438). StatusUnknown carries no signal, so it must be the
 	// last thing consulted — it may only win when nothing above it fired.
 	// Two signals that are read in more than one arm, named once so the arms
-	// cannot drift apart on the prefix (the same discipline as the producer
-	// constants they match). stuckPending is checkPods' Pending-past-grace Warn,
-	// with its "could not list pods" can't-check excluded; heldByJob is
-	// checkNodeFit's transient verdict (backend#2870).
+	// cannot drift apart. stuckPending is checkPods' Pending-past-grace Warn, with
+	// its can't-check (pod-list-unreadable) excluded via the structural CantCheck
+	// marker rather than a Detail prefix (backend#3282); heldByJob is checkNodeFit's
+	// transient verdict, matched by the HeldByRunningJob prefix it is classified on
+	// (a real soft finding, not a can't-check — backend#2870).
 	stuckPending := by["Pod health"].Status == doctor.StatusWarn &&
-		!strings.HasPrefix(by["Pod health"].Detail, "could not list pods")
+		!by["Pod health"].CantCheck
 	heldByJob := by["Node capacity"].Status == doctor.StatusWarn &&
 		strings.HasPrefix(by["Node capacity"].Detail, doctor.HeldByRunningJob)
 
@@ -629,55 +630,50 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusWarn,
 			"Ready to run training — but a job is already using this machine's free compute, so the next run waits for it.",
 			fmt.Sprintf("Nothing is wrong with the machine: let the running job finish, or stop it if it is not needed. Asking for less per run or resizing will not help here — the room comes back when the job ends. `%s doctor --verbose` shows the numbers.", launcher())}
-	// ── Unknown: a check couldn't complete — no signal, so it never shadows a
-	// Fail or Warn above and only surfaces when nothing real was found. ──
-	case by["Pod health"].Status == doctor.StatusWarn && strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
-		// checkPods returns StatusWarn for TWO different situations: pods stuck
-		// Pending (the Fail arm above) AND a failure to list pods at all (e.g. RBAC,
-		// doctor.go checkPods). For the latter we simply can't tell whether training
-		// can run, so report an honest can't-check — never the stuck-pending/compute
-		// remedy, which would misdiagnose a permissions problem (Bugbot).
-		ready = healthLine{doctor.StatusUnknown,
-			"Ready to run training — couldn't check your workloads (run with --verbose)", ""}
-	case by["Node capacity"].Status == doctor.StatusWarn &&
-		(strings.HasPrefix(by["Node capacity"].Detail, "couldn't read RESOURCE_REQUESTS") ||
-			strings.HasPrefix(by["Node capacity"].Detail, "could not list nodes") ||
-			strings.HasPrefix(by["Node capacity"].Detail, doctor.CantVerifyFreeCompute)):
-		// checkNodeFit's Warn covers two different situations: a can't-check
-		// (RESOURCE_REQUESTS unreadable, nodes unlistable) and the soft GPU
-		// fallback. For a can't-check we simply don't know whether a node can fit
-		// a training job, so report an honest can't-check — mirroring the Pod-health
-		// list-failure case above — never a ✔ that skipped the capacity probe
-		// (Bugbot). The GPU-soft Warn intentionally stays Ready (falls through to
-		// the OK default): training still runs via the jobs-manager's CPU fallback.
-		ready = healthLine{doctor.StatusUnknown,
-			"Ready to run training — couldn't check free compute (run with --verbose)", ""}
-	case by["Image pull secret"].Status == doctor.StatusWarn &&
-		strings.HasPrefix(by["Image pull secret"].Detail, doctor.CantReadImagePullSecret):
-		// checkImagePull can't-check: the secret (or the jobs-manager that names it)
-		// could not be READ, not read-and-found-missing. It carries no signal about
-		// whether images can be pulled, so it lands here in the Unknown tier — never
-		// the measured "images can't be pulled" Fail above, which is now promoted
-		// over the wait-for-capacity Warn and would flip a healthy environment to
-		// exit 2 on an RBAC blip (backend#3248, LukasWodka on #643).
-		//
-		// PLAIN TERMS, no Kubernetes vocabulary — "image pull secret" is jargon that
-		// belongs one --verbose away in renderDoctorDetails, so this line mirrors the
-		// Fail arm's "training images can't be pulled" wording (Bugbot on #643).
-		ready = healthLine{doctor.StatusUnknown,
-			"Ready to run training — couldn't check whether training images can be pulled (run with --verbose)", ""}
-	case by["Dataset volume (PVC)"].Status == doctor.StatusWarn &&
-		strings.HasPrefix(by["Dataset volume (PVC)"].Detail, cluster.PVCReadErrPrefix):
-		// checkPVC can't-check: the PVC could not be READ (Forbidden / network),
-		// not read-and-found-unbound. Same reasoning as the image-pull arm — a
-		// can't-read is no signal, so it stays in the Unknown tier rather than the
-		// measured "dataset storage isn't available" Fail above (backend#3248).
-		ready = healthLine{doctor.StatusUnknown,
-			"Ready to run training — couldn't check dataset storage (run with --verbose)", ""}
+	// ── Unknown: a check couldn't COMPLETE — no signal, so it never shadows a
+	// Fail or Warn above and only surfaces when nothing real was found. ONE rule
+	// for every can't-read probe (backend#3282): a check that set Result.CantCheck
+	// rolls up to an honest "couldn't check …", picked by cantCheckReady, in place
+	// of a per-probe arm that matched the producer's Detail prefix across package
+	// boundaries. A soft finding (over-commit, held-by-job, GPU fallback) does NOT
+	// set CantCheck, so it kept its own arm above and never reaches here. ──
 	default:
-		ready = healthLine{doctor.StatusOK, "Ready to run training", ""}
+		ready = cantCheckReady(by)
 	}
 	return connected, ready
+}
+
+// cantCheckReady is the rollup's single can't-check rule (backend#3282), the one
+// arm that replaced four near-identical prefix-matched ones. When no real finding
+// fired, a check that could not READ its subject (Result.CantCheck, set by the
+// producer) carries no signal, so it surfaces as an honest Unknown "couldn't
+// check …" rather than a false green ✔ — with the classification a structural
+// marker rather than a Detail-prefix the CLI matches across package boundaries.
+//
+// The per-check line is CLI copy, in PLAIN TERMS (never the producer's Detail),
+// and the order is the severity of what could not be verified — the same order as
+// the arms this replaced, so a co-occurrence resolves identically. A check that
+// sets CantCheck but is absent from this table is not surfaced (falls through to
+// OK); add a row when a new probe should roll up — the only edit a new can't-read
+// probe needs here, no shared prefix constant.
+func cantCheckReady(by map[string]doctor.Result) healthLine {
+	// healthLine values, not bare strings, so the copy backstop (copy_catalog_test)
+	// harvests these lines the same way it did the arms they replaced — it scans
+	// healthLine{} literals for user-facing text.
+	for _, cc := range []struct {
+		check string
+		line  healthLine
+	}{
+		{"Pod health", healthLine{doctor.StatusUnknown, "Ready to run training — couldn't check your workloads (run with --verbose)", ""}},
+		{"Node capacity", healthLine{doctor.StatusUnknown, "Ready to run training — couldn't check free compute (run with --verbose)", ""}},
+		{"Image pull secret", healthLine{doctor.StatusUnknown, "Ready to run training — couldn't check whether training images can be pulled (run with --verbose)", ""}},
+		{"Dataset volume (PVC)", healthLine{doctor.StatusUnknown, "Ready to run training — couldn't check dataset storage (run with --verbose)", ""}},
+	} {
+		if by[cc.check].CantCheck {
+			return cc.line
+		}
+	}
+	return healthLine{doctor.StatusOK, "Ready to run training", ""}
 }
 
 // renderHealth prints one rolled-up line: ✔ for OK, ✖ + remedy for a problem,

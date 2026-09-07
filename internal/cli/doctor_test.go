@@ -250,6 +250,20 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 		return out
 	}
+	// cantCheck marks a named check as a can't-check the way its producer now does:
+	// StatusWarn + Result.CantCheck (backend#3282). The rollup classifies on the
+	// marker, not the Detail prefix, so withDetail alone no longer reads as a
+	// can't-check — these fixtures must set the marker, exactly as the checkX
+	// producers do.
+	cantCheck := func(base []doctor.Result, name, detail string) []doctor.Result {
+		out := withDetail(base, name, doctor.StatusWarn, detail)
+		for i := range out {
+			if out[i].Name == name {
+				out[i].CantCheck = true
+			}
+		}
+		return out
+	}
 
 	t.Run("all healthy → both OK", func(t *testing.T) {
 		c, r := summarizeDoctor(allOK, tokenOK)
@@ -311,11 +325,11 @@ func TestSummarizeDoctor(t *testing.T) {
 		base := withDetail(allOK, "Machine capacity", doctor.StatusWarn,
 			"Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has")
 		cases := map[string][]doctor.Result{
-			"pod-list RBAC failure": withDetail(base, "Pod health", doctor.StatusWarn,
+			"pod-list RBAC failure": cantCheck(base, "Pod health",
 				"could not list pods: pods is forbidden"),
-			"RESOURCE_REQUESTS unreadable": withDetail(base, "Node capacity", doctor.StatusWarn,
+			"RESOURCE_REQUESTS unreadable": cantCheck(base, "Node capacity",
 				"couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit"),
-			"nodes unlistable": withDetail(base, "Node capacity", doctor.StatusWarn,
+			"nodes unlistable": cantCheck(base, "Node capacity",
 				"could not list nodes: nodes is forbidden"),
 		}
 		// Per-case subtests: map iteration is randomized, so a shared loop with
@@ -339,7 +353,7 @@ func TestSummarizeDoctor(t *testing.T) {
 	// Node-capacity / dataset Fail arms and swallowed them (backend#2438) — the
 	// Warn variant above got the fix + a test; this pins the Fail variant too.
 	t.Run("Fail is not shadowed by a co-occurring Unknown", func(t *testing.T) {
-		base := withDetail(allOK, "Pod health", doctor.StatusWarn,
+		base := cantCheck(allOK, "Pod health",
 			"could not list pods: pods is forbidden")
 		cases := map[string][]doctor.Result{
 			"node capacity Fail": withDetail(base, "Node capacity", doctor.StatusFail,
@@ -392,10 +406,10 @@ func TestSummarizeDoctor(t *testing.T) {
 			// backend#2870: unreadable pod list -> free unverifiable -> can't-check,
 			// not a green pass (Bugbot High: this used to roll up to "Ready").
 			//
-			// BUILT FROM THE PRODUCER'S CONSTANT, not retyped. This string was a
-			// third copy of the prefix the classifier matches on -- so a producer
-			// that reworded it would leave this test passing against a phrase
-			// nothing emits any more.
+			// BUILT FROM THE PRODUCER'S CONSTANT, not retyped — it is the --verbose
+			// detail wording (the rollup now classifies on the CantCheck marker, not
+			// this prefix), so keeping it from the constant still guards the caveat
+			// text the producer emits.
 			doctor.CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here",
 			// Bugbot High on #628: the same can't-check ARRIVING WITH the soft GPU
 			// warn. The GPU case fires first in checkNodeFit, so this combined
@@ -403,7 +417,7 @@ func TestSummarizeDoctor(t *testing.T) {
 			// actually produces -- and it must roll up the same way.
 			doctor.CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here. Also, no single Ready node satisfies cpu+memory AND nvidia.com/gpu, so GPU jobs would rely on the CPU fallback (needs cpu=2, memory=8Gi)",
 		} {
-			_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn, detail), tokenOK)
+			_, r := summarizeDoctor(cantCheck(allOK, "Node capacity", detail), tokenOK)
 			if r.status != doctor.StatusUnknown {
 				t.Errorf("%q: ready should be Unknown, got %v", detail, r.status)
 			}
@@ -723,14 +737,35 @@ func TestSummarizeDoctor(t *testing.T) {
 	// measured Fail, which would flip a healthy environment to exit 2 on an RBAC blip.
 	t.Run("a can't-READ image-pull or PVC is an honest can't-check, not the promoted Fail", func(t *testing.T) {
 		imgCantRead := append(append([]doctor.Result{}, allOK...),
-			doctor.Result{Name: "Image pull secret", Status: doctor.StatusWarn, Detail: doctor.CantReadImagePullSecret + ` "reg": secrets is forbidden`})
+			doctor.Result{Name: "Image pull secret", Status: doctor.StatusWarn, CantCheck: true, Detail: doctor.CantReadImagePullSecret + ` "reg": secrets is forbidden`})
 		if _, r := summarizeDoctor(imgCantRead, tokenOK); r.status != doctor.StatusUnknown || !strings.Contains(r.text, "training images can be pulled") {
 			t.Errorf("a can't-read image-pull must roll up to a plain-terms can't-check, got %v (%q)", r.status, r.text)
 		}
-		pvcCantRead := withDetail(allOK, "Dataset volume (PVC)", doctor.StatusWarn,
+		pvcCantRead := cantCheck(allOK, "Dataset volume (PVC)",
 			cluster.PVCReadErrPrefix+"ns/client-pvc: is forbidden")
 		if _, r := summarizeDoctor(pvcCantRead, tokenOK); r.status != doctor.StatusUnknown || !strings.Contains(r.text, "dataset storage") {
 			t.Errorf("a can't-read PVC must roll up to a can't-check, got %v (%q)", r.status, r.text)
+		}
+	})
+
+	// backend#3282: the single can't-check rule (cantCheckReady). Two properties
+	// the four arms it replaced had implicitly, now pinned explicitly.
+	t.Run("the can't-check rollup rule keeps arm order and ignores unmapped checks", func(t *testing.T) {
+		// PRIORITY: multiple can't-checks co-occur → the first in the table (Pod
+		// health) wins, the same order as the arms this replaced.
+		both := cantCheck(cantCheck(allOK, "Pod health", "could not list pods: forbidden"),
+			"Dataset volume (PVC)", cluster.PVCReadErrPrefix+"ns/client-pvc: forbidden")
+		if _, r := summarizeDoctor(both, tokenOK); r.status != doctor.StatusUnknown || !strings.Contains(r.text, "your workloads") {
+			t.Errorf("Pod-health can't-check should win the co-occurrence, got %v (%q)", r.status, r.text)
+		}
+		// UNMAPPED: a CantCheck on a check the rollup table does not list (here
+		// "Restart history", which checkRestartHistory marks) is not surfaced — it
+		// falls through to OK. A new probe must add a table row to roll up; until
+		// then it stays inert rather than greening or crashing.
+		unmapped := append(append([]doctor.Result{}, allOK...),
+			doctor.Result{Name: "Restart history", Status: doctor.StatusWarn, CantCheck: true, Detail: "could not list pods: forbidden"})
+		if _, r := summarizeDoctor(unmapped, tokenOK); r.status != doctor.StatusOK {
+			t.Errorf("a CantCheck on an unmapped check must not surface (falls through to OK), got %v (%q)", r.status, r.text)
 		}
 	})
 
@@ -743,7 +778,7 @@ func TestSummarizeDoctor(t *testing.T) {
 		results := withDetail(allOK, "Node capacity", doctor.StatusWarn,
 			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish")
 		results = withDetail(results, "Pod health", doctor.StatusWarn, "Pending > 5m0s: [train-second]")
-		results = append(results, doctor.Result{Name: "Image pull secret", Status: doctor.StatusWarn, Detail: doctor.CantReadImagePullSecret + ` "reg": secrets is forbidden`})
+		results = append(results, doctor.Result{Name: "Image pull secret", Status: doctor.StatusWarn, CantCheck: true, Detail: doctor.CantReadImagePullSecret + ` "reg": secrets is forbidden`})
 		c, r := summarizeDoctor(results, tokenOK)
 		if r.status != doctor.StatusWarn || !strings.Contains(r.text, "waiting for it") {
 			t.Fatalf("a can't-read secret must not flip the wait-for-capacity Warn to a Fail, got %v (%q)", r.status, r.text)
@@ -892,7 +927,7 @@ func TestSummarizeDoctor(t *testing.T) {
 	// can't-check — it must NOT get the stuck-pending/compute (Docker Desktop)
 	// remedy (Bugbot follow-up).
 	t.Run("pod-health warn = could not list pods (RBAC) → can't-check, not stuck-pending", func(t *testing.T) {
-		_, r := summarizeDoctor(warnPods("could not list pods: pods is forbidden"), tokenOK)
+		_, r := summarizeDoctor(cantCheck(allOK, "Pod health", "could not list pods: pods is forbidden"), tokenOK)
 		if r.status == doctor.StatusFail {
 			t.Errorf("a can't-list-pods warn must not be a hard not-ready, got %v %q", r.status, r.text)
 		}
