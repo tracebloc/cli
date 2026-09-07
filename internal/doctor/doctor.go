@@ -405,6 +405,42 @@ func podCrashLooping(p corev1.Pod) bool {
 	return false
 }
 
+// podWaitingReason names why an assigned pod is still Pending -- the kubelet's
+// own Waiting.Reason from the first container that reports one, e.g.
+// "ImagePullBackOff", "ErrImagePull", "ContainerCreating". Init containers are
+// read first: an init container stalls startup before the app containers begin.
+// Falls back to the bare phase ("Pending") when no container has reported a
+// reason yet, so the caller always has something concrete to print.
+func podWaitingReason(p corev1.Pod) string {
+	for _, group := range [][]corev1.ContainerStatus{p.Status.InitContainerStatuses, p.Status.ContainerStatuses} {
+		for _, c := range group {
+			if c.State.Waiting != nil && c.State.Waiting.Reason != "" {
+				return c.State.Waiting.Reason
+			}
+		}
+	}
+	return string(p.Status.Phase)
+}
+
+// stuckReasonWedged reports whether a Pending pod's kubelet Waiting.Reason is a
+// genuinely-wedged pull/create FAILURE -- backing off or errored -- as opposed
+// to work still legitimately in progress. An allowlist, deliberately: a reason
+// we are not certain is a failure (ContainerCreating / Pulling / bare Pending,
+// or any future reason) is treated as still-progressing and left to checkPods'
+// age-based inference, so the measured "waiting will not clear it" Fail is only
+// ever asserted for a cause the kubelet has actually reported as failing. A
+// large first image pull on a cold node can exceed the grace window while still
+// making progress, so age alone must not escalate it (Bugbot on backend#3247).
+func stuckReasonWedged(reason string) bool {
+	switch reason {
+	case "ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull", "InvalidImageName",
+		"CreateContainerConfigError", "CreateContainerError":
+		return true
+	default:
+		return false
+	}
+}
+
 // checkRestartHistory surfaces containers that have restarted repeatedly even
 // though they are not crash-looping right now — the restart-*history* signal
 // backend#1028 asked for. checkPods reads only the current waiting reason, so a
@@ -583,6 +619,16 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 	}
 }
 
+// stuckJobPod is a training-Job pod the scheduler has placed on a node but that
+// is not Running yet -- carried out of checkNodeFit's resource sums so a wedged
+// pod is never mistaken for a running job holding the room (backend#3247).
+type stuckJobPod struct {
+	name      string
+	namespace string
+	node      string
+	reason    string // the kubelet's Waiting.Reason, e.g. ImagePullBackOff
+}
+
 // checkNodeFit verifies at least one Ready node can satisfy the resource
 // requests the jobs-manager stamps on spawned training jobs (RESOURCE_REQUESTS
 // / GPU_REQUESTS env) — the "Pending forever, no node big enough" class. The
@@ -652,6 +698,19 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	// next run was going to wait. Two sums, two verdicts.
 	jobCPU := map[string]int64{} // node -> millicores held by running Jobs
 	jobMem := map[string]int64{} // node -> bytes held by running Jobs
+	// Training-Job pods the scheduler has already PLACED on a node (they carry a
+	// NodeName) but that are Pending on a genuinely-wedged reason -- an image pull
+	// backing off, a create error (see stuckReasonWedged). Kept out of BOTH sums
+	// above: a pod that is not running holds no room in the "a running job will
+	// finish and free it" sense, and counting one as a running job is exactly what
+	// made doctor emit HeldByRunningJob and tell the operator to "wait for the job
+	// to finish" at exit 0 on a pod that is wedged and never will (backend#3247).
+	// Collected here (past the same grace window checkPods uses) so the verdict can
+	// name the real stuck state as an actionable finding instead. Recognised
+	// cluster-wide by the same `job-name` convention the running-job sum above uses
+	// -- a dedicated secure environment's batch Jobs are tracebloc's -- so "stuck"
+	// and "holds the room" agree on what a training/ingestion pod is.
+	var stuckJobs []stuckJobPod
 	freeKnown := true
 	if pods, perr := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); perr == nil {
 		for i := range pods.Items {
@@ -666,14 +725,44 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			// Batch-Job pods carry the `job-name` label the batch/v1 controller
 			// stamps (see internal/submit/watch.go) -- that label, not a name
 			// pattern, is how the CLI already recognises a training or ingestion
-			// pod, so it is the one used here. They go into the JOB sums, never the
-			// steady-state ones: a running job holds the envelope itself, so
-			// counting it as platform would make doctor Fail "no room for a training
-			// job" on the exact healthy state it exists to bless (Bugbot High). The
-			// steady state is the control plane (Deployments/DaemonSets), which has
-			// no `job-name`.
+			// pod, so it is the one used here. A running job goes into the JOB sums,
+			// never the steady-state ones: a running job holds the envelope itself,
+			// so counting it as platform would make doctor Fail "no room for a
+			// training job" on the exact healthy state it exists to bless (Bugbot
+			// High). The steady state is the control plane (Deployments/DaemonSets),
+			// which has no `job-name`.
 			cpu, mem := reqCPU, reqMem
 			if _, isJob := p.Labels["job-name"]; isJob {
+				// A Job pod holds the room ONLY when it is genuinely Running. An
+				// assigned-but-Pending one (it has a NodeName but its containers have
+				// not started) is NOT running: counting it as a running job made
+				// doctor emit HeldByRunningJob and tell the operator to wait for it to
+				// finish -- on a pod that may be wedged (backend#3247). So it feeds
+				// NEITHER sum. A pod merely WAITING for capacity has no NodeName yet
+				// and was skipped above, so this only ever sees pods the scheduler
+				// already placed.
+				//
+				// Whether it is WEDGED is a separate question from whether it holds
+				// the room. Only a genuinely-wedged reason -- an image pull backing
+				// off, or a create error -- is recorded here (past the same grace
+				// window checkPods uses) and escalated to the measured Fail below,
+				// where "waiting will not clear it" is exact. A pod still pulling or
+				// creating (ContainerCreating / Pulling / bare Pending) is left to
+				// checkPods' age-based inference instead: a large first pull on a cold
+				// node can legitimately exceed the grace, so asserting it is wedged
+				// would misfire (Bugbot on this PR).
+				if p.Status.Phase != corev1.PodRunning {
+					if reason := podWaitingReason(p); stuckReasonWedged(reason) &&
+						time.Since(p.CreationTimestamp.Time) > pendingGrace {
+						stuckJobs = append(stuckJobs, stuckJobPod{
+							name:      p.Name,
+							namespace: p.Namespace,
+							node:      p.Spec.NodeName,
+							reason:    reason,
+						})
+					}
+					continue
+				}
 				cpu, mem = jobCPU, jobMem
 			}
 			for j := range p.Spec.Containers {
@@ -844,6 +933,33 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			Detail: detail,
 			Remedy: "Add/resize a node to meet the job's requests, or lower RESOURCE_REQUESTS on jobs-manager.",
 		}
+	case len(stuckJobs) > 0:
+		// A training Job pod the scheduler already placed on a node is Pending on a
+		// genuinely-wedged reason -- an image pull backing off, a create error
+		// (stuckReasonWedged) -- NOT running (backend#3247). It used to be counted
+		// as a running job holding the room, so this state rolled up to the
+		// transient "a training is already running, wait for it to finish" Warn at
+		// exit 0 -- on a pod that is wedged and never will. It is a real,
+		// training-blocking problem whose remedy is the OPPOSITE of the transient
+		// Warn's (inspect the pod, do NOT wait), so it is a Fail with its own prefix
+		// the rollup (summarizeDoctor) classifies on. Ordering matters: it sits
+		// BELOW the two measured capacity Fails above -- when no node can fit the
+		// envelope that is the root cause -- and ABOVE the transient Warn, which a
+		// wedged pod must never be mistaken for. A run legitimately WAITING for a
+		// running job has no NodeName; one still pulling/creating is not wedged and
+		// was left to checkPods' inference -- neither is collected here.
+		sort.Slice(stuckJobs, func(a, b int) bool { return stuckJobs[a].name < stuckJobs[b].name })
+		descs := make([]string, len(stuckJobs))
+		for i, s := range stuckJobs {
+			descs[i] = fmt.Sprintf("%s/%s on %s (%s)", s.namespace, s.name, s.node, s.reason)
+		}
+		first := stuckJobs[0]
+		return Result{
+			Name:   name,
+			Status: StatusFail,
+			Detail: fmt.Sprintf("%s: %s. The next run does not wait on a pod that is not running", StuckJobPod, strings.Join(descs, ", ")),
+			Remedy: fmt.Sprintf("Inspect the stuck pod: kubectl describe pod -n %s %s — usually a training image that can't be pulled, or a container that can't be created. This is not a capacity shortage; lowering RESOURCE_REQUESTS or resizing will not clear it.", first.namespace, first.name),
+		}
 	case freeKnown && !nowFits:
 		// The TRANSIENT shortage (backend#2870): every dimension fits beside the
 		// platform's own pods, so this machine CAN run the envelope -- but a batch
@@ -1006,6 +1122,18 @@ const OverCommitted = "a Ready node is large enough"
 // capacity Fails' ("shrink the envelope" / "grow the machine"). A retyped copy
 // that drifted would send this state down the generic path again.
 const HeldByRunningJob = "a running job holds the room"
+
+// StuckJobPod is the prefix of the backend#3247 Fail: a training Job pod is
+// scheduled to a node (it has a NodeName) but is Pending on a genuinely-wedged
+// reason -- an image pull backing off, or a create error (stuckReasonWedged).
+// It used to be counted as a running job holding the room, so checkNodeFit emitted HeldByRunningJob
+// and the rollup told the operator to "wait for the job to finish" at exit 0 --
+// on a pod that is wedged and never will. DISTINCT prefix, same discipline as
+// HeldByRunningJob and OverCommitted: the rollup (summarizeDoctor) classifies on
+// it, and its remedy ("inspect the stuck pod, do not wait") is the opposite of
+// the transient Warn's ("wait for the running job to finish"). A retyped copy
+// that drifted would send a wedged pod back down the "just wait" path.
+const StuckJobPod = "a training pod is scheduled but not running"
 
 // cpuMemString renders a millicore/byte pair the way RESOURCE_REQUESTS reads
 // ("cpu=2, memory=8Gi"), so the free/held figures in a Node-capacity verdict
