@@ -572,6 +572,56 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	// backend#3248 (Bugbot Medium on #641). The Wait-Warn arm above is an
+	// INFERENCE that a Pending pod beside a running job is only waiting for the
+	// room. checkImagePull and checkPVC are MEASURED and independent of
+	// Pod health and Node capacity, so either can be Fail in that exact state — a
+	// missing pull secret, or a dataset volume that never bound, beside a running
+	// job. The Wait-Warn used to sit ABOVE those Fail arms, so the measured failure
+	// was shadowed and `doctor` exited 0 (Warn) instead of 2 (Fail). Pin that a
+	// measured Fail wins the precedence, while the Wait-Warn still applies when
+	// there is no measured Fail.
+	t.Run("a measured Fail beside a running job outranks the wait-for-capacity Warn", func(t *testing.T) {
+		// The full waiting_for_capacity state: a running job holds the room AND a
+		// pod is Pending past grace — together the arm that returns the Wait-Warn.
+		// Detail built from the producer's constant, same discipline as the arm.
+		waiting := withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish")
+		waiting = withDetail(waiting, "Pod health", doctor.StatusWarn,
+			"Pending > 5m0s: [train-second]")
+		// allOK omits "Image pull secret" (a fixture shortcut; Run() does emit it),
+		// and `with` only mutates an entry that already exists — so add it OK here,
+		// or the image-pull case below would silently stay unset and never flip.
+		waiting = append(waiting, res("Image pull secret", doctor.StatusOK))
+
+		// Precondition: with no measured Fail, that state is the exit-0 Wait-Warn.
+		if _, r := summarizeDoctor(waiting, tokenOK); r.status != doctor.StatusWarn {
+			t.Fatalf("precondition: the wait-for-capacity state should be a Warn, got %v (%q)", r.status, r.text)
+		}
+
+		// Each measured Fail, dropped into that same state, must win — top line and
+		// exit code both. Per-case subtests: map order is randomized, so a shared
+		// loop with t.Fatalf would report one nondeterministic case and hide the other.
+		measured := map[string]struct{ name, wantText string }{
+			"image pull secret Fail": {"Image pull secret", "images can't be pulled"},
+			"dataset volume Fail":    {"Dataset volume (PVC)", "dataset storage isn't available"},
+		}
+		for label, m := range measured {
+			t.Run(label, func(t *testing.T) {
+				c, r := summarizeDoctor(with(waiting, m.name, doctor.StatusFail), tokenOK)
+				if r.status != doctor.StatusFail {
+					t.Fatalf("a measured Fail beside a running job must win — the Wait-Warn shadowed it and doctor exited 0 over a real failure, got %v (%q)", r.status, r.text)
+				}
+				if !strings.Contains(r.text, m.wantText) {
+					t.Errorf("want the measured Fail's own top line %q, got %q", m.wantText, r.text)
+				}
+				if v := doctorVerdict(c.status, r.status); v != doctor.StatusFail {
+					t.Errorf("the verdict must own the Fail (exit 2), not the wait Warn (exit 0), got %v", v)
+				}
+			})
+		}
+	})
+
 	t.Run("a Pending pod with NO running job is still the stuck-Pending Fail", func(t *testing.T) {
 		// The other side: the arm above is scoped to the co-occurrence. A pod
 		// Pending on a machine where nothing holds the room is the generic,
@@ -580,6 +630,28 @@ func TestSummarizeDoctor(t *testing.T) {
 			"Pending > 5m0s: [trainer-x]"), tokenOK)
 		if r.status != doctor.StatusFail || !strings.Contains(r.remedy, "resources set max") {
 			t.Errorf("want the generic stuck-Pending Fail with the sizing remedy, got %v %q", r.status, r.remedy)
+		}
+	})
+
+	t.Run("a measured Fail with a Pending pod but NO running job still outranks the stuck-Pending inference", func(t *testing.T) {
+		// backend#3248, the no-heldByJob half of the reorder. Moving the measured
+		// Fails above the Wait-Warn necessarily moves them above the plain
+		// stuck-Pending Fail too (the Wait-Warn sits above stuck-Pending,
+		// backend#2870). Both are exit-2, so the observable change is which top
+		// line and remedy the operator sees — the measured image-pull cause, not
+		// the generic "usually not enough free compute" guess. Pin it, matching
+		// this file's discipline of nailing every ordering a reshuffle could undo.
+		results := withDetail(allOK, "Pod health", doctor.StatusWarn, "Pending > 5m0s: [trainer-x]")
+		results = append(results, res("Image pull secret", doctor.StatusFail))
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail {
+			t.Fatalf("a measured image-pull Fail must stay a Fail, got %v (%q)", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "images can't be pulled") {
+			t.Errorf("the measured image-pull cause must win over the generic stuck-Pending guess, got %q", r.text)
+		}
+		if strings.Contains(r.remedy, "resources set max") {
+			t.Errorf("a measured image-pull Fail must not send the operator to resize compute: %q", r.remedy)
 		}
 	})
 
