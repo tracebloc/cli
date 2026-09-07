@@ -41,6 +41,15 @@ const SharedPVCClaimName = "client-pvc"
 //	    mountPath: "/data/shared"
 const SharedPVCMountPath = "/data/shared"
 
+// PVCReadErrPrefix marks the errors DiscoverSharedPVC returns when the PVC
+// could not be READ at all (Forbidden / network / other), as opposed to a PVC
+// that was read and found missing or unbound. Callers that classify a read
+// failure differently from a measured verdict — e.g. doctor's checkPVC, which
+// reports a can't-read as a can't-check rather than a training-blocking Fail
+// (backend#3248) — match on this prefix, so it lives as one constant here
+// rather than being retyped where the error is produced or consumed.
+const PVCReadErrPrefix = "reading PVC "
+
 // SharedPVC describes the chart's shared-data PVC after discovery.
 // Carries enough metadata for Phase 3 PR-b to construct a stage Pod
 // that can mount the same claim.
@@ -101,8 +110,8 @@ func DiscoverSharedPVC(ctx context.Context, cs kubernetes.Interface, namespace s
 		// Forbidden / network / other — surface as-is so the
 		// customer can RBAC-debug. Wrapping rather than substituting
 		// because the underlying %w already carries the useful info.
-		return nil, fmt.Errorf("reading PVC %s/%s: %w",
-			namespace, SharedPVCClaimName, err)
+		return nil, fmt.Errorf("%s%s/%s: %w",
+			PVCReadErrPrefix, namespace, SharedPVCClaimName, err)
 	}
 
 	if pvc.Status.Phase != corev1.ClaimBound {

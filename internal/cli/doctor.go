@@ -444,6 +444,17 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 	// was actually detected (Bugbot on #561/#566: "Warn rollup shadowed by
 	// Unknown", backend#2438). StatusUnknown carries no signal, so it must be the
 	// last thing consulted — it may only win when nothing above it fired.
+	// Two signals that are read in more than one arm, named once so the arms
+	// cannot drift apart. stuckPending is checkPods' Pending-past-grace Warn, with
+	// its can't-check (pod-list-unreadable) excluded via the structural CantCheck
+	// marker rather than a Detail prefix (backend#3282); heldByJob is checkNodeFit's
+	// transient verdict, matched by the HeldByRunningJob prefix it is classified on
+	// (a real soft finding, not a can't-check — backend#2870).
+	stuckPending := by["Pod health"].Status == doctor.StatusWarn &&
+		!by["Pod health"].CantCheck
+	heldByJob := by["Node capacity"].Status == doctor.StatusWarn &&
+		strings.HasPrefix(by["Node capacity"].Detail, doctor.HeldByRunningJob)
+
 	switch {
 	// ── Fail: a real, training-blocking problem (worst wins) ──
 	case by["Pod health"].Status == doctor.StatusFail:
@@ -482,7 +493,86 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — this machine is big enough, but the platform's own services have already claimed the room.",
 			fmt.Sprintf("Ask for less per training run, or give the machine more memory/CPU. Do NOT size runs to the machine here — that measures the machine's total, not what is free, so it would ask for MORE and leave the training stuck. `%s doctor --verbose` shows the exact numbers and the knob to turn.", launcher())}
-	case by["Pod health"].Status == doctor.StatusWarn && !strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
+	// MEASURED training-blockers that can co-occur with a Pending pod held by a
+	// running job, so they are read BEFORE the Wait-Warn below (backend#3248,
+	// Bugbot Medium on #641). checkImagePull and checkPVC are
+	// INDEPENDENT of Pod health and Node capacity, so either can be Fail while
+	// `stuckPending && heldByJob` is also true — a pod Pending on an image it
+	// cannot pull, or beside a dataset volume that never bound, is a measured
+	// failure, not a wait. Below the Wait-Warn these Fails were shadowed: a node
+	// held by a job with any pod Pending past grace made `doctor` exit 0 (Warn)
+	// over an exit-2 failure. They sit above the stuck-Pending arm too — the same
+	// measured-beats-inferred rule that lets the Wait-Warn refute the Pending
+	// inference puts a measured cause ahead of it.
+	case by["Image pull secret"].Status == doctor.StatusFail:
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — the training images can't be pulled.",
+			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
+	case by["Dataset volume (PVC)"].Status == doctor.StatusFail:
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — dataset storage isn't available.",
+			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
+	case stuckPending && heldByJob:
+		// A PENDING POD WHOSE CAUSE HAS BEEN MEASURED (Bugbot High on #639,
+		// backend#2870). This is the transient shortage's own symptom: a job is
+		// running, the next training pod is Pending until it frees the room -- the
+		// `waiting_for_capacity` state the HeldByRunningJob Warn exists to name.
+		// Left to the arm below, the stuck-Pending Fail matched first and the top
+		// line read "Not ready ... not enough free compute" with `computeRemedy`
+		// (`resources set max`) at exit 2 -- in exactly the case this change was
+		// made for, the wait-for-the-job advice never appeared.
+		//
+		// A WARN ABOVE A FAIL, deliberately, and the reason has to be stated
+		// because the tiers below are ordered by severity: the stuck-Pending arm
+		// is not a measured failure but an INFERENCE ("Pending past grace, so it
+		// cannot schedule, so compute or image"). checkNodeFit has measured the
+		// cause -- the envelope fits this machine and a running job holds it --
+		// which refutes the inference, and a Fail here would exit 2 on healthy
+		// training (the Bugbot High on #628) while recommending a resize that
+		// changes nothing. The arms that still outrank this one are all MEASURED
+		// failures — a Pod-health FAIL (crash-loop), the OverCommitted Fail, and
+		// the image-pull-secret and dataset-volume Fails just above — because a
+		// measured training-blocker must not be hidden behind a wait (backend#3248:
+		// those two Fails used to sit BELOW this arm, so a Pending pod beside a
+		// running job made `doctor` exit 0 over a real, exit-2 failure).
+		//
+		// checkPods does not know WHY a pod is Pending, so a pod stuck on an
+		// image pull beside a running job could still reach this arm when the
+		// image-pull-secret probe itself is healthy (the secret exists, but the
+		// pull is slow or the registry is briefly unreachable); the remedy names
+		// what to do if the wait outlives the job rather than pretending the
+		// attribution is certain.
+		ready = healthLine{doctor.StatusWarn,
+			"Ready to run training — a training is already running, and the next one is waiting for it to finish.",
+			fmt.Sprintf("A pod is waiting to start because a running job holds this machine's free compute. Let the job finish, or stop it if it is not needed; asking for less per run or resizing will not help — the room comes back when the job ends. If the pod is still waiting after that, something else is holding it: `%s doctor --verbose`.", launcher())}
+	case by["Node capacity"].Status == doctor.StatusFail &&
+		strings.HasPrefix(by["Node capacity"].Detail, doctor.StuckJobPod):
+		// A training pod is scheduled to a node but stuck Pending -- an image pull
+		// backing off, or a container stuck creating -- NOT running (backend#3247).
+		// checkNodeFit used to count it as a running job holding the room, so with
+		// a pod also stuck Pending this rolled up through `stuckPending && heldByJob`
+		// to the transient "a training is already running, wait for it" Warn at
+		// exit 0 -- on a pod that is wedged and never will.
+		//
+		// IT SITS ABOVE THE STUCK-PENDING ARM by the same measured-beats-inferred
+		// rule that puts `stuckPending && heldByJob` there. checkNodeFit escalates
+		// to this Fail ONLY for a genuinely-wedged reason -- an image pull backing
+		// off or a create error -- so the cause is measured, not inferred: "waiting
+		// will not clear it" is exact. A pod merely still pulling/creating past the
+		// grace window is left to the stuck-Pending arm below, whose "usually not
+		// enough free compute, or an image that can't be pulled" wording is an
+		// honest age-based inference (a large first pull on a cold node CAN exceed
+		// the grace). The arms that outrank it are all measured: a Pod-health
+		// crash-loop Fail, the OverCommitted Fail, and the image-pull-secret and
+		// dataset-volume Fails above (backend#3248 — those two sit above the
+		// wait-for-capacity Warn, hence above this arm too). Its remedy is the
+		// OPPOSITE of the transient Warn's (inspect the pod, do NOT wait); the pod it names is one
+		// `--verbose` away -- and PLAIN TERMS, no Kubernetes vocabulary, like its
+		// neighbours (the granular checkNodeFit remedy carries the `kubectl` form).
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — a training pod is stuck starting and isn't running yet.",
+			fmt.Sprintf("A scheduled training pod is stuck (usually a training image that can't be pulled). Waiting will not clear it — `%s doctor --verbose` names the pod.", launcher())}
+	case stuckPending:
 		// Pods stuck Pending past the grace window (unschedulable / image can't
 		// pull) mean training can't actually schedule — so this is NOT ready, even
 		// though the granular Pod-health check rates it a softer ⚠. Without this,
@@ -493,14 +583,6 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — part of your secure environment can't start yet.",
 			fmt.Sprintf("Some pods are stuck starting — usually not enough free compute, or a training image that can't be pulled. %s Then re-run `%s doctor`; if it persists, email support@tracebloc.io with `%s doctor --diagnose`.", computeRemedy(runtime.GOOS), launcher(), launcher())}
-	case by["Image pull secret"].Status == doctor.StatusFail:
-		ready = healthLine{doctor.StatusFail,
-			"Not ready — the training images can't be pulled.",
-			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
-	case by["Dataset volume (PVC)"].Status == doctor.StatusFail:
-		ready = healthLine{doctor.StatusFail,
-			"Not ready — dataset storage isn't available.",
-			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
 	case by["Node capacity"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — not enough free compute to start a training.",
@@ -532,33 +614,66 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusWarn,
 			"Ready to run training — but your environment thinks this machine is bigger than it is.",
 			fmt.Sprintf("It reports more memory than the machine really has, so two trainings that each look like they fit can together run it out of memory and take the environment down. Run one training at a time; to fix it for good, recreate the environment as a single-node one. `%s doctor --verbose` shows the numbers and the exact flags.", launcher())}
-	// ── Unknown: a check couldn't complete — no signal, so it never shadows a
-	// Fail or Warn above and only surfaces when nothing real was found. ──
-	case by["Pod health"].Status == doctor.StatusWarn && strings.HasPrefix(by["Pod health"].Detail, "could not list pods"):
-		// checkPods returns StatusWarn for TWO different situations: pods stuck
-		// Pending (the Fail arm above) AND a failure to list pods at all (e.g. RBAC,
-		// doctor.go checkPods). For the latter we simply can't tell whether training
-		// can run, so report an honest can't-check — never the stuck-pending/compute
-		// remedy, which would misdiagnose a permissions problem (Bugbot).
-		ready = healthLine{doctor.StatusUnknown,
-			"Ready to run training — couldn't check your workloads (run with --verbose)", ""}
-	case by["Node capacity"].Status == doctor.StatusWarn &&
-		(strings.HasPrefix(by["Node capacity"].Detail, "couldn't read RESOURCE_REQUESTS") ||
-			strings.HasPrefix(by["Node capacity"].Detail, "could not list nodes") ||
-			strings.HasPrefix(by["Node capacity"].Detail, doctor.CantVerifyFreeCompute)):
-		// checkNodeFit's Warn covers two different situations: a can't-check
-		// (RESOURCE_REQUESTS unreadable, nodes unlistable) and the soft GPU
-		// fallback. For a can't-check we simply don't know whether a node can fit
-		// a training job, so report an honest can't-check — mirroring the Pod-health
-		// list-failure case above — never a ✔ that skipped the capacity probe
-		// (Bugbot). The GPU-soft Warn intentionally stays Ready (falls through to
-		// the OK default): training still runs via the jobs-manager's CPU fallback.
-		ready = healthLine{doctor.StatusUnknown,
-			"Ready to run training — couldn't check free compute (run with --verbose)", ""}
+	case heldByJob:
+		// backend#2870, the TRANSIENT shortage with no pod Pending yet (the
+		// co-occurring case is the Warn in the Fail tier above). checkNodeFit found the envelope
+		// fits this machine beside the platform, but a job that is running holds
+		// the room now, so the next run waits. This arm exists because the two
+		// things an operator could otherwise be told are both wrong: the capacity
+		// Fail's advice (ask for less / grow the machine) changes nothing about a
+		// job already running, and the plain green hides why a second run is
+		// waiting. Warn keeps exit 0 -- training IS running -- while doctorVerdict
+		// withholds "everything looks good". Below the over-commit Warn: a machine
+		// that lies about its size is the more consequential finding.
+		//
+		// Plain terms, no Kubernetes vocabulary, like its neighbours.
+		ready = healthLine{doctor.StatusWarn,
+			"Ready to run training — but a job is already using this machine's free compute, so the next run waits for it.",
+			fmt.Sprintf("Nothing is wrong with the machine: let the running job finish, or stop it if it is not needed. Asking for less per run or resizing will not help here — the room comes back when the job ends. `%s doctor --verbose` shows the numbers.", launcher())}
+	// ── Unknown: a check couldn't COMPLETE — no signal, so it never shadows a
+	// Fail or Warn above and only surfaces when nothing real was found. ONE rule
+	// for every can't-read probe (backend#3282): a check that set Result.CantCheck
+	// rolls up to an honest "couldn't check …", picked by cantCheckReady, in place
+	// of a per-probe arm that matched the producer's Detail prefix across package
+	// boundaries. A soft finding (over-commit, held-by-job, GPU fallback) does NOT
+	// set CantCheck, so it kept its own arm above and never reaches here. ──
 	default:
-		ready = healthLine{doctor.StatusOK, "Ready to run training", ""}
+		ready = cantCheckReady(by)
 	}
 	return connected, ready
+}
+
+// cantCheckReady is the rollup's single can't-check rule (backend#3282), the one
+// arm that replaced four near-identical prefix-matched ones. When no real finding
+// fired, a check that could not READ its subject (Result.CantCheck, set by the
+// producer) carries no signal, so it surfaces as an honest Unknown "couldn't
+// check …" rather than a false green ✔ — with the classification a structural
+// marker rather than a Detail-prefix the CLI matches across package boundaries.
+//
+// The per-check line is CLI copy, in PLAIN TERMS (never the producer's Detail),
+// and the order is the severity of what could not be verified — the same order as
+// the arms this replaced, so a co-occurrence resolves identically. A check that
+// sets CantCheck but is absent from this table is not surfaced (falls through to
+// OK); add a row when a new probe should roll up — the only edit a new can't-read
+// probe needs here, no shared prefix constant.
+func cantCheckReady(by map[string]doctor.Result) healthLine {
+	// healthLine values, not bare strings, so the copy backstop (copy_catalog_test)
+	// harvests these lines the same way it did the arms they replaced — it scans
+	// healthLine{} literals for user-facing text.
+	for _, cc := range []struct {
+		check string
+		line  healthLine
+	}{
+		{"Pod health", healthLine{doctor.StatusUnknown, "Ready to run training — couldn't check your workloads (run with --verbose)", ""}},
+		{"Node capacity", healthLine{doctor.StatusUnknown, "Ready to run training — couldn't check free compute (run with --verbose)", ""}},
+		{"Image pull secret", healthLine{doctor.StatusUnknown, "Ready to run training — couldn't check whether training images can be pulled (run with --verbose)", ""}},
+		{"Dataset volume (PVC)", healthLine{doctor.StatusUnknown, "Ready to run training — couldn't check dataset storage (run with --verbose)", ""}},
+	} {
+		if by[cc.check].CantCheck {
+			return cc.line
+		}
+	}
+	return healthLine{doctor.StatusOK, "Ready to run training", ""}
 }
 
 // renderHealth prints one rolled-up line: ✔ for OK, ✖ + remedy for a problem,

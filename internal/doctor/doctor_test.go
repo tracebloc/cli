@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -362,6 +363,18 @@ func TestCheckPVC(t *testing.T) {
 	}
 	if r := checkPVC(bg(), fake.NewClientset(), ns); r.Status != StatusFail {
 		t.Fatalf("missing PVC => %v, want fail", r.Status)
+	}
+	// backend#3248 (LukasWodka on #643): a PVC that could not be READ
+	// (Forbidden/network) is a can't-check, NOT a measured "unavailable" Fail.
+	// DiscoverSharedPVC wraps it with PVCReadErrPrefix; checkPVC must surface a
+	// StatusWarn so the rollup drops it to the Unknown tier rather than promoting
+	// a false Fail over the wait-for-capacity Warn.
+	unreadable := fake.NewClientset()
+	unreadable.PrependReactor("get", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("persistentvolumeclaims \"client-pvc\" is forbidden: RBAC")
+	})
+	if r := checkPVC(bg(), unreadable, ns); r.Status != StatusWarn || !r.CantCheck || !strings.HasPrefix(r.Detail, cluster.PVCReadErrPrefix) {
+		t.Fatalf("unreadable PVC => %v CantCheck=%v (%q), want a can't-check Warn (marker set) with the read-err prefix", r.Status, r.CantCheck, r.Detail)
 	}
 }
 
@@ -809,13 +822,26 @@ func TestCheckNodeFitFreeMemory(t *testing.T) {
 	})
 
 	// A RUNNING training job (batch/v1 job-name label) holds the envelope itself.
-	// It must NOT count against free, or doctor fails on the exact healthy state it
-	// blesses (Bugbot High). Same 12Gi neighbour, but labelled a Job -> still ok.
-	t.Run("a running training job is excluded, not counted -> ok", func(t *testing.T) {
+	// It must NOT be counted as platform, or doctor FAILS (exit 2) on the exact
+	// healthy state it blesses (Bugbot High on #628). Same 12Gi neighbour, but
+	// labelled a Job -> the TRANSIENT Warn, never the Fail: the machine can run
+	// the envelope, a job simply holds the room now. Before this PR the job was
+	// dropped from the sum entirely and this read as an unqualified OK.
+	t.Run("a running training job is the transient Warn, never the Fail", func(t *testing.T) {
 		job := podOn("train-sim", "n1", "", "12Gi", map[string]string{"job-name": "exp-42"})
 		cs := fake.NewClientset(node("n1", "4", "16Gi"), job)
-		if r := checkNodeFit(bg(), cs, req); r.Status != StatusOK {
-			t.Fatalf("=> %v (%q), want ok (training job excluded)", r.Status, r.Detail)
+		r := checkNodeFit(bg(), cs, req)
+		if r.Status == StatusFail {
+			t.Fatalf("=> Fail (%q): a running job must never read as a capacity failure", r.Detail)
+		}
+		if r.Status != StatusWarn || !strings.HasPrefix(r.Detail, HeldByRunningJob) {
+			t.Fatalf("=> %v (%q), want the transient Warn with prefix %q", r.Status, r.Detail, HeldByRunningJob)
+		}
+		// A running job holding the room is a real soft finding, NOT a can't-check —
+		// it must not set CantCheck, or the rollup would drop it to the Unknown tier
+		// instead of its own "waiting for it" Warn (backend#3282).
+		if r.CantCheck {
+			t.Errorf("a HeldByRunningJob Warn must not be marked CantCheck: %q", r.Detail)
 		}
 	})
 
@@ -889,13 +915,14 @@ func TestCheckNodeFitFreeMemory(t *testing.T) {
 			return true, nil, errors.New("pods is forbidden")
 		})
 		r := checkNodeFit(bg(), cs, gpu)
-		if r.Status != StatusWarn {
-			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
+		if r.Status != StatusWarn || !r.CantCheck {
+			t.Fatalf("=> %v CantCheck=%v (%q), want a can't-check warn (marker set)", r.Status, r.CantCheck, r.Detail)
 		}
-		// PREFIX, not Contains: that is what the rollup matches on, so a detail
-		// merely mentioning the phrase somewhere would still green the run.
+		// The prefix is now the --verbose detail wording (the rollup classifies on
+		// the CantCheck marker asserted above, not this string); keep asserting it so
+		// the "allocatable only" caveat text the producer emits does not drift.
 		if !strings.HasPrefix(r.Detail, CantVerifyFreeCompute) {
-			t.Fatalf("detail must START with %q so summarizeDoctor classifies it as a can't-check, got %q",
+			t.Fatalf("detail must START with %q for the --verbose breakdown, got %q",
 				CantVerifyFreeCompute, r.Detail)
 		}
 		// The soft GPU fact is not lost, it is just no longer the whole story.
@@ -919,6 +946,325 @@ func TestCheckNodeFitFreeMemory(t *testing.T) {
 		}
 		if strings.HasPrefix(r.Detail, CantVerifyFreeCompute) {
 			t.Fatalf("free WAS readable; this must not report a can't-check: %q", r.Detail)
+		}
+	})
+}
+
+// backend#2870 DoD 3: the check compares the free figure and tells a PERMANENT
+// shortage (the envelope cannot fit beside the platform's own pods -- ever) from
+// a TRANSIENT one (it fits, but a running Job holds the room now). Fixtures use
+// the ticket's measured 8 GiB reproduction: a k3d node claiming 8126672Ki
+// (7.75 GiB), the installer's envelope of allocatable − 3 GiB, and a control
+// plane requesting 3008Mi beside 140Mi of k3s system pods -- 3148Mi against a
+// 3072Mi overhead constant, so the envelope over-asks by 76Mi.
+func TestCheckNodeFitPermanentVsTransient(t *testing.T) {
+	const (
+		nodeMem       = "8126672Ki"
+		nodeMemBytes  = int64(8126672) * 1024
+		envelopeBytes = nodeMemBytes - 3*(1<<30) // what the installer writes
+	)
+	envelope := map[string]string{"RESOURCE_REQUESTS": fmt.Sprintf("cpu=1,memory=%d", envelopeBytes)}
+	envelopeGPU := map[string]string{
+		"RESOURCE_REQUESTS": envelope["RESOURCE_REQUESTS"],
+		"GPU_REQUESTS":      "nvidia.com/gpu=1",
+	}
+	// Steady-state platform on the node: the chart's control plane + k3s system.
+	platform := func(n string) []runtime.Object {
+		return []runtime.Object{cpPod("control-plane", n, "3008Mi"), cpPod("k3s-system", n, "140Mi")}
+	}
+	// A smaller platform that leaves room for exactly one envelope.
+	smallPlatform := func(n string) []runtime.Object {
+		return []runtime.Object{cpPod("control-plane", n, "2000Mi")}
+	}
+	trainingJob := func(n, mem string) *corev1.Pod {
+		return podOn("train-sim", n, "1", mem, map[string]string{"job-name": "exp-42"})
+	}
+	// A running pod that holds the envelope but is NOT a Job -- e.g. a Deployment
+	// someone added. It is platform, not transient, and must read as permanent.
+	forbidden := func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("pods is forbidden")
+	}
+
+	cases := []struct {
+		name       string
+		objects    []runtime.Object
+		env        map[string]string
+		podsBroken bool
+		want       Status
+		prefix     string // Detail must START with this (the rollup classifies on it)
+		contains   []string
+		notContain []string
+	}{
+		{
+			name:    "fits beside the platform, nothing running -> ok",
+			objects: append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+			env:     envelope,
+			want:    StatusOK,
+		},
+		{
+			name:     "the ticket: 3148Mi platform beside an allocatable-3GiB envelope -> permanent Fail",
+			objects:  append([]runtime.Object{node("n1", "4", nodeMem)}, platform("n1")...),
+			env:      envelope,
+			want:     StatusFail,
+			prefix:   OverCommitted,
+			contains: []string{"FREE memory", "n1 has", "free beside the platform"},
+			// The permanent shape must not be blamed on a job that is not there.
+			notContain: []string{HeldByRunningJob},
+		},
+		{
+			name: "fits the machine, but a running job holds it -> transient Warn",
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+				trainingJob("n1", fmt.Sprintf("%d", envelopeBytes))),
+			env:      envelope,
+			want:     StatusWarn,
+			prefix:   HeldByRunningJob,
+			contains: []string{"running job(s) on n1 hold", "cpu=1", "waits Pending"},
+			// And the remedy must not be the permanent one.
+			notContain: []string{OverCommitted, "over-asks"},
+		},
+		{
+			name: "transient on cpu alone is still the transient Warn",
+			// Platform leaves 4 cpu; a job holds 3 of them; envelope wants 1 -> 1 free... make it 4.
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+				podOn("train-sim", "n1", "4", "", map[string]string{"job-name": "exp-42"})),
+			env:      envelope,
+			want:     StatusWarn,
+			prefix:   HeldByRunningJob,
+			contains: []string{"cpu=4"},
+		},
+		{
+			name: "a job on ANOTHER node leaves this one free -> ok",
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem), node("n2", "4", nodeMem)},
+				smallPlatform("n1")...), trainingJob("n2", fmt.Sprintf("%d", envelopeBytes))),
+			env:  envelope,
+			want: StatusOK,
+		},
+		{
+			name: "permanent and a running job together -> permanent wins, the job is not blamed",
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem)}, platform("n1")...),
+				trainingJob("n1", "500Mi")),
+			env:        envelope,
+			want:       StatusFail,
+			prefix:     OverCommitted,
+			notContain: []string{HeldByRunningJob},
+		},
+		{
+			name: "a non-Job pod holding the envelope is platform, so permanent",
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+				podOn("someones-deployment", "n1", "", fmt.Sprintf("%d", envelopeBytes), nil)),
+			env:    envelope,
+			want:   StatusFail,
+			prefix: OverCommitted,
+		},
+		{
+			name: "transient with a GPU requested and absent -> transient wins, GPU fact kept",
+			objects: append(append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+				trainingJob("n1", fmt.Sprintf("%d", envelopeBytes))),
+			env:      envelopeGPU,
+			want:     StatusWarn,
+			prefix:   HeldByRunningJob,
+			contains: []string{"nvidia.com/gpu", "CPU fallback"},
+		},
+		{
+			name:       "pod list unreadable -> not ok, and says free was not verified",
+			objects:    []runtime.Object{node("n1", "4", nodeMem)},
+			env:        envelope,
+			podsBroken: true,
+			want:       StatusWarn,
+			prefix:     CantVerifyFreeCompute,
+			contains:   []string{"allocatable only"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewClientset(tc.objects...)
+			if tc.podsBroken {
+				cs.PrependReactor("list", "pods", forbidden)
+			}
+			r := checkNodeFit(bg(), cs, tc.env)
+			if r.Status != tc.want {
+				t.Fatalf("=> %v (%q), want %v", r.Status, r.Detail, tc.want)
+			}
+			if tc.prefix != "" && !strings.HasPrefix(r.Detail, tc.prefix) {
+				t.Fatalf("detail must START with %q (the rollup classifies on it), got %q", tc.prefix, r.Detail)
+			}
+			for _, s := range tc.contains {
+				if !strings.Contains(r.Detail, s) {
+					t.Errorf("detail should contain %q, got %q", s, r.Detail)
+				}
+			}
+			for _, s := range tc.notContain {
+				if strings.Contains(r.Detail, s) {
+					t.Errorf("detail must not contain %q, got %q", s, r.Detail)
+				}
+			}
+			if r.Status != StatusOK && r.Remedy == "" {
+				t.Errorf("a non-OK verdict must carry a remedy: %q", r.Detail)
+			}
+		})
+	}
+
+	// The permanent and transient remedies point in OPPOSITE directions, so pin
+	// that they are not the same text and that each says its own thing.
+	t.Run("the two remedies are opposites", func(t *testing.T) {
+		perm := checkNodeFit(bg(), fake.NewClientset(append([]runtime.Object{node("n1", "4", nodeMem)}, platform("n1")...)...), envelope)
+		trans := checkNodeFit(bg(), fake.NewClientset(append(append([]runtime.Object{node("n1", "4", nodeMem)}, smallPlatform("n1")...),
+			trainingJob("n1", fmt.Sprintf("%d", envelopeBytes)))...), envelope)
+		if perm.Remedy == trans.Remedy {
+			t.Fatalf("permanent and transient share a remedy: %q", perm.Remedy)
+		}
+		if !strings.Contains(perm.Remedy, "Lower RESOURCE_REQUESTS") {
+			t.Errorf("permanent remedy should say to shrink the envelope or grow the machine: %q", perm.Remedy)
+		}
+		if !strings.Contains(trans.Remedy, "let the running job finish") || !strings.Contains(trans.Remedy, "does not free room") {
+			t.Errorf("transient remedy should say wait/stop and that resizing does not help: %q", trans.Remedy)
+		}
+	})
+}
+
+// assignedPendingJobPod is a training-Job pod (the batch/v1 job-name label) the
+// scheduler has already PLACED on a node -- it has a NodeName -- but that is NOT
+// Running: still Pending, with the kubelet's Waiting.Reason on its container
+// (e.g. "ImagePullBackOff", "ContainerCreating"; empty means bare Pending). age
+// sets how long ago it was created so a test can sit inside or outside
+// checkNodeFit's grace window. It requests memory so a test can also prove that
+// request is never folded into the "held by a running job" sum.
+func assignedPendingJobPod(name, nodeName, reason, mem string, age time.Duration) *corev1.Pod {
+	reqs := corev1.ResourceList{}
+	if mem != "" {
+		reqs[corev1.ResourceMemory] = resource.MustParse(mem)
+	}
+	var statuses []corev1.ContainerStatus
+	if reason != "" {
+		statuses = []corev1.ContainerStatus{{
+			Name:  "c",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+		}}
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			Labels:            map[string]string{"job-name": "exp-42"},
+			CreationTimestamp: metav1.NewTime(time.Now().Add(age)),
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   nodeName,
+			Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: reqs}}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: statuses},
+	}
+}
+
+// backend#3247: an assigned-but-Pending training pod is NOT a running job.
+// checkNodeFit used to route every non-terminal job-name pod with a NodeName
+// into the "a running job holds the room" sum, so a pod wedged on an image pull
+// emitted HeldByRunningJob and the rollup told the operator to wait for a job
+// that was not running. Each pod STATE must land on its own verdict.
+func TestCheckNodeFitStuckJobPod(t *testing.T) {
+	req := map[string]string{"RESOURCE_REQUESTS": "cpu=2,memory=8Gi"}
+	// A node big enough that, with NOTHING holding the room, the envelope fits --
+	// so any non-OK verdict below is about the pod's STATE, not the machine.
+	fitNode := func() *corev1.Node { return node("n1", "4", "16Gi") }
+	const old = -10 * time.Minute  // older than the 5m grace window
+	const fresh = -1 * time.Minute // inside it
+
+	// A genuinely RUNNING job that fills the room is the transient Warn -- the
+	// pre-existing behaviour this fix must leave untouched.
+	t.Run("Running job filling the room -> HeldByRunningJob Warn (unchanged)", func(t *testing.T) {
+		job := podOn("train-run", "n1", "", "12Gi", map[string]string{"job-name": "exp-42"})
+		r := checkNodeFit(bg(), fake.NewClientset(fitNode(), job), req)
+		if r.Status != StatusWarn || !strings.HasPrefix(r.Detail, HeldByRunningJob) {
+			t.Fatalf("=> %v (%q), want the transient Warn %q", r.Status, r.Detail, HeldByRunningJob)
+		}
+	})
+
+	// The defect, one WEDGED waiting reason per row: assigned, Pending, past grace,
+	// on a reason the kubelet has reported as failing. Each must be a stuck Fail
+	// that NAMES its reason -- never HeldByRunningJob.
+	for _, tc := range []struct{ name, reason string }{
+		{"ImagePullBackOff", "ImagePullBackOff"},
+		{"ErrImagePull", "ErrImagePull"},
+		{"CreateContainerConfigError", "CreateContainerConfigError"},
+	} {
+		t.Run("assigned+Pending past grace, wedged ("+tc.name+") -> stuck Fail", func(t *testing.T) {
+			pod := assignedPendingJobPod("train-stuck", "n1", tc.reason, "12Gi", old)
+			r := checkNodeFit(bg(), fake.NewClientset(fitNode(), pod), req)
+			if r.Status != StatusFail {
+				t.Fatalf("=> %v (%q), want Fail: a wedged pod is not a running job", r.Status, r.Detail)
+			}
+			if !strings.HasPrefix(r.Detail, StuckJobPod) {
+				t.Fatalf("detail must START with %q so the rollup classifies it, got %q", StuckJobPod, r.Detail)
+			}
+			if strings.Contains(r.Detail, HeldByRunningJob) {
+				t.Fatalf("a wedged pod must never be reported as a running job: %q", r.Detail)
+			}
+			if !strings.Contains(r.Detail, tc.reason) {
+				t.Errorf("detail should name the real state %q, got %q", tc.reason, r.Detail)
+			}
+			if !strings.Contains(r.Remedy, "kubectl describe pod") {
+				t.Errorf("the remedy must be actionable (inspect the pod), got %q", r.Remedy)
+			}
+		})
+	}
+
+	// A still-PROGRESSING pod past grace (ContainerCreating / bare Pending, or a
+	// large first pull that has not backed off yet) is NOT wedged: asserting
+	// "waiting will not clear it" would misfire on a multi-GB image on a cold
+	// node. checkNodeFit leaves it to checkPods' age-based inference, so on its
+	// own it is neither the stuck Fail nor HeldByRunningJob -- the node reads OK
+	// (Bugbot on this PR, backend#3247).
+	for _, tc := range []struct{ name, reason string }{
+		{"ContainerCreating", "ContainerCreating"},
+		{"Pulling", "Pulling"},
+		{"bare Pending, no reason yet", ""},
+	} {
+		t.Run("assigned+Pending past grace, still progressing ("+tc.name+") -> not escalated", func(t *testing.T) {
+			pod := assignedPendingJobPod("train-pulling", "n1", tc.reason, "12Gi", old)
+			r := checkNodeFit(bg(), fake.NewClientset(fitNode(), pod), req)
+			if strings.HasPrefix(r.Detail, StuckJobPod) {
+				t.Fatalf("a still-progressing pod must not take the measured stuck Fail: %q", r.Detail)
+			}
+			if r.Status != StatusOK {
+				t.Fatalf("=> %v (%q), want OK: checkNodeFit defers a progressing pod to checkPods", r.Status, r.Detail)
+			}
+		})
+	}
+
+	// A pod the scheduler JUST placed and is normally starting (inside grace) is
+	// neither a running job nor stuck -- flagging it would false-positive on
+	// every training launch. Not counted as held either, so the node reads OK.
+	t.Run("assigned+Pending INSIDE grace -> not flagged, node still OK", func(t *testing.T) {
+		pod := assignedPendingJobPod("train-young", "n1", "ImagePullBackOff", "12Gi", fresh)
+		r := checkNodeFit(bg(), fake.NewClientset(fitNode(), pod), req)
+		if r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want OK: a freshly-scheduled pod is normal startup", r.Status, r.Detail)
+		}
+		if strings.Contains(r.Detail, StuckJobPod) || strings.Contains(r.Detail, HeldByRunningJob) {
+			t.Fatalf("a within-grace pod must be neither stuck nor held: %q", r.Detail)
+		}
+	})
+
+	// Scope guard: the fix keys on the job-name label. A non-Job pod (platform)
+	// that is Pending-assigned is steady state and must not take the stuck-pod arm.
+	t.Run("a non-Job Pending pod is not a stuck training pod", func(t *testing.T) {
+		plat := assignedPendingJobPod("some-deploy", "n1", "ImagePullBackOff", "12Gi", old)
+		plat.Labels = nil // not a job-name pod, though its reason IS wedged
+		r := checkNodeFit(bg(), fake.NewClientset(fitNode(), plat), req)
+		if strings.HasPrefix(r.Detail, StuckJobPod) {
+			t.Fatalf("the stuck-training-pod arm must be scoped to job-name pods, got %q", r.Detail)
+		}
+	})
+
+	// A running job holds the room AND a second training pod is wedged on an
+	// image pull: the wedged pod is the actionable problem and its Fail must win
+	// over the transient Warn (the stuck arm sits above it in the switch).
+	t.Run("a stuck pod outranks a genuinely running job", func(t *testing.T) {
+		running := podOn("train-run", "n1", "", "12Gi", map[string]string{"job-name": "exp-42"})
+		stuck := assignedPendingJobPod("train-stuck", "n1", "ImagePullBackOff", "1Gi", old)
+		r := checkNodeFit(bg(), fake.NewClientset(fitNode(), running, stuck), req)
+		if r.Status != StatusFail || !strings.HasPrefix(r.Detail, StuckJobPod) {
+			t.Fatalf("=> %v (%q), want the stuck Fail to win over the transient Warn", r.Status, r.Detail)
 		}
 	})
 }
@@ -970,6 +1316,37 @@ func TestCheckImagePull(t *testing.T) {
 		)
 		if r := checkImagePull(bg(), cs, ns, rel); r.Status != StatusFail {
 			t.Fatalf("=> %v (%q), want fail", r.Status, r.Detail)
+		}
+	})
+	// backend#3248 (LukasWodka on #643): a read failure (Forbidden/timeout) is a
+	// can't-check, NOT a measured "not found" Fail. Get returns the error but the
+	// secret's existence was never established — so this must be a StatusWarn with
+	// the can't-read prefix, or the rollup promotes a false Fail over the
+	// wait-for-capacity Warn and exits 2 on a healthy environment.
+	t.Run("secret unreadable (forbidden) -> can't-check Warn, not a false 'not found' Fail", func(t *testing.T) {
+		cs := fake.NewClientset(jmDepWithPullSecret("tb", "reg"))
+		cs.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("secrets \"reg\" is forbidden: RBAC")
+		})
+		r := checkImagePull(bg(), cs, ns, rel)
+		if r.Status != StatusWarn || !r.CantCheck {
+			t.Fatalf("=> %v CantCheck=%v (%q), want a can't-check Warn (marker set) on a read failure", r.Status, r.CantCheck, r.Detail)
+		}
+		if !strings.HasPrefix(r.Detail, CantReadImagePullSecret) {
+			t.Errorf("detail must carry the can't-read prefix for the --verbose breakdown, got %q", r.Detail)
+		}
+		if strings.Contains(r.Detail, "not found") {
+			t.Errorf("a read failure must not be reported as 'not found', got %q", r.Detail)
+		}
+	})
+	// backend#3248 (Saqlain on #643): the OTHER can't-read path — the jobs-manager
+	// Deployment itself is unreadable — is also a can't-check, and must carry the
+	// same prefix so the rollup drops it to the Unknown tier instead of falling
+	// through to a false green ✔.
+	t.Run("jobs-manager unreadable -> can't-check Warn with the read prefix", func(t *testing.T) {
+		r := checkImagePull(bg(), fake.NewClientset(), ns, rel) // no jobs-manager Deployment
+		if r.Status != StatusWarn || !r.CantCheck || !strings.HasPrefix(r.Detail, CantReadImagePullSecret) {
+			t.Fatalf("=> %v CantCheck=%v (%q), want a can't-check Warn (marker set) carrying the read prefix", r.Status, r.CantCheck, r.Detail)
 		}
 	})
 }

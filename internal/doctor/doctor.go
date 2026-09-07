@@ -88,6 +88,16 @@ type Result struct {
 	// container runtime / network) needs a different fix than a reachable cluster
 	// with no tracebloc installed. Zero (ReachOK) on every other check.
 	Reach ReachState
+
+	// CantCheck marks a StatusWarn that is a CAN'T-CHECK — the check could not
+	// READ its subject (RBAC/timeout/unlistable), so its Warn carries no signal
+	// about whether training can run. It is the structural signal the rollup
+	// (summarizeDoctor) keys on to drop such a result into the Unknown tier, in
+	// place of matching a per-probe prefix in Detail across package boundaries
+	// (backend#3282). A StatusWarn that is a real soft finding — an over-committed
+	// machine, a running job holding the room, the GPU CPU-fallback — leaves this
+	// false, so it keeps its own rollup arm rather than reading as a can't-check.
+	CantCheck bool
 }
 
 // ReachState classifies the "Cluster reachable" outcome so the cli summary can
@@ -338,10 +348,11 @@ func checkPods(ctx context.Context, cs kubernetes.Interface, ns string) Result {
 	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return Result{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "could not list pods: " + err.Error(),
-			Remedy: "Ensure your kubeconfig user can list pods in " + ns + ".",
+			Name:      name,
+			Status:    StatusWarn,
+			Detail:    "could not list pods: " + err.Error(),
+			Remedy:    "Ensure your kubeconfig user can list pods in " + ns + ".",
+			CantCheck: true,
 		}
 	}
 
@@ -405,6 +416,42 @@ func podCrashLooping(p corev1.Pod) bool {
 	return false
 }
 
+// podWaitingReason names why an assigned pod is still Pending -- the kubelet's
+// own Waiting.Reason from the first container that reports one, e.g.
+// "ImagePullBackOff", "ErrImagePull", "ContainerCreating". Init containers are
+// read first: an init container stalls startup before the app containers begin.
+// Falls back to the bare phase ("Pending") when no container has reported a
+// reason yet, so the caller always has something concrete to print.
+func podWaitingReason(p corev1.Pod) string {
+	for _, group := range [][]corev1.ContainerStatus{p.Status.InitContainerStatuses, p.Status.ContainerStatuses} {
+		for _, c := range group {
+			if c.State.Waiting != nil && c.State.Waiting.Reason != "" {
+				return c.State.Waiting.Reason
+			}
+		}
+	}
+	return string(p.Status.Phase)
+}
+
+// stuckReasonWedged reports whether a Pending pod's kubelet Waiting.Reason is a
+// genuinely-wedged pull/create FAILURE -- backing off or errored -- as opposed
+// to work still legitimately in progress. An allowlist, deliberately: a reason
+// we are not certain is a failure (ContainerCreating / Pulling / bare Pending,
+// or any future reason) is treated as still-progressing and left to checkPods'
+// age-based inference, so the measured "waiting will not clear it" Fail is only
+// ever asserted for a cause the kubelet has actually reported as failing. A
+// large first image pull on a cold node can exceed the grace window while still
+// making progress, so age alone must not escalate it (Bugbot on backend#3247).
+func stuckReasonWedged(reason string) bool {
+	switch reason {
+	case "ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull", "InvalidImageName",
+		"CreateContainerConfigError", "CreateContainerError":
+		return true
+	default:
+		return false
+	}
+}
+
 // checkRestartHistory surfaces containers that have restarted repeatedly even
 // though they are not crash-looping right now — the restart-*history* signal
 // backend#1028 asked for. checkPods reads only the current waiting reason, so a
@@ -418,10 +465,11 @@ func checkRestartHistory(ctx context.Context, cs kubernetes.Interface, ns string
 	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return Result{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "could not list pods: " + err.Error(),
-			Remedy: "Ensure your kubeconfig user can list pods in " + ns + ".",
+			Name:      name,
+			Status:    StatusWarn,
+			Detail:    "could not list pods: " + err.Error(),
+			Remedy:    "Ensure your kubeconfig user can list pods in " + ns + ".",
+			CantCheck: true,
 		}
 	}
 
@@ -454,6 +502,22 @@ func checkPVC(ctx context.Context, cs kubernetes.Interface, ns string) Result {
 	const name = "Dataset volume (PVC)"
 	pvc, err := cluster.DiscoverSharedPVC(ctx, cs, ns)
 	if err != nil {
+		if strings.HasPrefix(err.Error(), cluster.PVCReadErrPrefix) {
+			// DiscoverSharedPVC separates a Forbidden/network/other READ failure
+			// (this prefix) from a PVC it read and found missing or unbound. A
+			// can't-read is not a measured "storage isn't available": reporting it
+			// as a Fail (and promoting that Fail over the wait-for-capacity Warn --
+			// backend#3248) would flip a healthy environment to exit 2 on an RBAC or
+			// timeout blip. Surface an honest can't-check the rollup drops to the
+			// Unknown tier instead.
+			return Result{
+				Name:      name,
+				Status:    StatusWarn,
+				Detail:    err.Error(),
+				Remedy:    "Check the CLI can read PersistentVolumeClaims in " + ns + " (kubectl auth can-i get pvc -n " + ns + ").",
+				CantCheck: true,
+			}
+		}
 		return Result{
 			Name:   name,
 			Status: StatusFail,
@@ -583,20 +647,41 @@ func checkRequestsProxy(ctx context.Context, cs kubernetes.Interface, ns string,
 	}
 }
 
+// stuckJobPod is a training-Job pod the scheduler has placed on a node but that
+// is not Running yet -- carried out of checkNodeFit's resource sums so a wedged
+// pod is never mistaken for a running job holding the room (backend#3247).
+type stuckJobPod struct {
+	name      string
+	namespace string
+	node      string
+	reason    string // the kubelet's Waiting.Reason, e.g. ImagePullBackOff
+}
+
 // checkNodeFit verifies at least one Ready node can satisfy the resource
 // requests the jobs-manager stamps on spawned training jobs (RESOURCE_REQUESTS
-// / GPU_REQUESTS env) — the "Pending forever, no node big enough" class. GPU is
-// soft: when a GPU is requested but no node exposes it, that's a ⚠ (jobs-manager
-// has a GPU→CPU fallback), not a hard failure.
+// / GPU_REQUESTS env) — the "Pending forever, no node big enough" class. The
+// fit is against what is FREE on a node, not its allocatable, and it tells two
+// shortages apart (backend#2870):
+//
+//   - PERMANENT (Fail, prefix OverCommitted): the envelope does not fit beside
+//     the platform's own steady-state pods. No run can ever schedule here until
+//     the envelope shrinks or the machine grows.
+//   - TRANSIENT (Warn, prefix HeldByRunningJob): it fits beside the platform,
+//     but a running batch Job holds the room right now. The next run waits;
+//     nothing on the machine needs changing.
+//
+// GPU is soft: when a GPU is requested but no node exposes it, that's a ⚠
+// (jobs-manager has a GPU→CPU fallback), not a hard failure.
 func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]string) Result {
 	const name = "Node capacity"
 	cpuReq, memReq, ok := parseCPUMem(env["RESOURCE_REQUESTS"])
 	if !ok {
 		return Result{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit",
-			Remedy: "kubectl set env deploy/<release>-jobs-manager --list | grep RESOURCE_REQUESTS",
+			Name:      name,
+			Status:    StatusWarn,
+			Detail:    "couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit",
+			Remedy:    "kubectl set env deploy/<release>-jobs-manager --list | grep RESOURCE_REQUESTS",
+			CantCheck: true,
 		}
 	}
 	gpuName, gpuReq, gpuRequested := parseGPU(env["GPU_REQUESTS"])
@@ -605,10 +690,11 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return Result{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "could not list nodes: " + err.Error(),
-			Remedy: "Ensure your kubeconfig user can list nodes.",
+			Name:      name,
+			Status:    StatusWarn,
+			Detail:    "could not list nodes: " + err.Error(),
+			Remedy:    "Ensure your kubeconfig user can list nodes.",
+			CantCheck: true,
 		}
 	}
 
@@ -633,6 +719,28 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	// say so and fall back to allocatable, never silently pass it off as free.
 	reqCPU := map[string]int64{} // node -> already-requested millicores
 	reqMem := map[string]int64{} // node -> already-requested bytes
+	// Requests held by RUNNING batch Jobs, per node, kept APART from the
+	// steady-state sums above. They answer a different question: "beside the
+	// platform" is about whether a run can ever schedule here, "beside the
+	// platform and the job that is running" is about whether one can schedule
+	// NOW. Folding them together produced a false Fail during healthy training
+	// (Bugbot High on #628); dropping them produced a green over a machine whose
+	// next run was going to wait. Two sums, two verdicts.
+	jobCPU := map[string]int64{} // node -> millicores held by running Jobs
+	jobMem := map[string]int64{} // node -> bytes held by running Jobs
+	// Training-Job pods the scheduler has already PLACED on a node (they carry a
+	// NodeName) but that are Pending on a genuinely-wedged reason -- an image pull
+	// backing off, a create error (see stuckReasonWedged). Kept out of BOTH sums
+	// above: a pod that is not running holds no room in the "a running job will
+	// finish and free it" sense, and counting one as a running job is exactly what
+	// made doctor emit HeldByRunningJob and tell the operator to "wait for the job
+	// to finish" at exit 0 on a pod that is wedged and never will (backend#3247).
+	// Collected here (past the same grace window checkPods uses) so the verdict can
+	// name the real stuck state as an actionable finding instead. Recognised
+	// cluster-wide by the same `job-name` convention the running-job sum above uses
+	// -- a dedicated secure environment's batch Jobs are tracebloc's -- so "stuck"
+	// and "holds the room" agree on what a training/ingestion pod is.
+	var stuckJobs []stuckJobPod
 	freeKnown := true
 	if pods, perr := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); perr == nil {
 		for i := range pods.Items {
@@ -644,24 +752,56 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 				p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 				continue
 			}
-			// SKIP batch-Job pods (they carry the `job-name` label the batch/v1
-			// controller stamps -- see internal/submit/watch.go). A running
-			// training or ingestion job holds the envelope itself, so counting it
-			// would make doctor report "no room for a training job" on the exact
-			// healthy state it exists to bless -- a false negative that exits 2
-			// during training (Bugbot High). The question is whether the envelope
-			// fits beside the STEADY-STATE control plane (Deployments/DaemonSets),
-			// not beside a transient workload; those pods have no `job-name`.
+			// Batch-Job pods carry the `job-name` label the batch/v1 controller
+			// stamps (see internal/submit/watch.go) -- that label, not a name
+			// pattern, is how the CLI already recognises a training or ingestion
+			// pod, so it is the one used here. A running job goes into the JOB sums,
+			// never the steady-state ones: a running job holds the envelope itself,
+			// so counting it as platform would make doctor Fail "no room for a
+			// training job" on the exact healthy state it exists to bless (Bugbot
+			// High). The steady state is the control plane (Deployments/DaemonSets),
+			// which has no `job-name`.
+			cpu, mem := reqCPU, reqMem
 			if _, isJob := p.Labels["job-name"]; isJob {
-				continue
+				// A Job pod holds the room ONLY when it is genuinely Running. An
+				// assigned-but-Pending one (it has a NodeName but its containers have
+				// not started) is NOT running: counting it as a running job made
+				// doctor emit HeldByRunningJob and tell the operator to wait for it to
+				// finish -- on a pod that may be wedged (backend#3247). So it feeds
+				// NEITHER sum. A pod merely WAITING for capacity has no NodeName yet
+				// and was skipped above, so this only ever sees pods the scheduler
+				// already placed.
+				//
+				// Whether it is WEDGED is a separate question from whether it holds
+				// the room. Only a genuinely-wedged reason -- an image pull backing
+				// off, or a create error -- is recorded here (past the same grace
+				// window checkPods uses) and escalated to the measured Fail below,
+				// where "waiting will not clear it" is exact. A pod still pulling or
+				// creating (ContainerCreating / Pulling / bare Pending) is left to
+				// checkPods' age-based inference instead: a large first pull on a cold
+				// node can legitimately exceed the grace, so asserting it is wedged
+				// would misfire (Bugbot on this PR).
+				if p.Status.Phase != corev1.PodRunning {
+					if reason := podWaitingReason(p); stuckReasonWedged(reason) &&
+						time.Since(p.CreationTimestamp.Time) > pendingGrace {
+						stuckJobs = append(stuckJobs, stuckJobPod{
+							name:      p.Name,
+							namespace: p.Namespace,
+							node:      p.Spec.NodeName,
+							reason:    reason,
+						})
+					}
+					continue
+				}
+				cpu, mem = jobCPU, jobMem
 			}
 			for j := range p.Spec.Containers {
 				r := p.Spec.Containers[j].Resources.Requests
 				if q, ok := r[corev1.ResourceCPU]; ok {
-					reqCPU[p.Spec.NodeName] += q.MilliValue()
+					cpu[p.Spec.NodeName] += q.MilliValue()
 				}
 				if q, ok := r[corev1.ResourceMemory]; ok {
-					reqMem[p.Spec.NodeName] += q.Value()
+					mem[p.Spec.NodeName] += q.Value()
 				}
 			}
 		}
@@ -670,6 +810,20 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	}
 
 	var cpuMemFits, fullFits, allocOnlyFit, overCPU, overMem bool
+	// The first node that is big enough by allocatable but not by FREE, with the
+	// free figures it had -- so the permanent Fail can print the numbers the
+	// rollup's remedy promises ("--verbose shows the exact numbers") instead of
+	// only the request. Bounded to the node the verdict is about; the CPU-major
+	// bestFree* below may belong to a different node.
+	var overNode string
+	var overFreeCPUm, overFreeMemB int64
+	// Whether some node fits the envelope beside the platform AND the Jobs
+	// running on it -- i.e. can a run schedule NOW, not just ever. When it fits
+	// the steady state but not this, the first such node and what its Jobs hold
+	// are recorded for the transient Warn.
+	var nowFits bool
+	var heldNode string
+	var heldCPUm, heldMemB int64
 	// Largest Ready node for the drift nudge — CPU-major with memory as the
 	// tie-break, EXACTLY like resources.nodeLarger, so the advertised ceiling
 	// always matches what `resources set max` will actually apply (Bugbot).
@@ -733,6 +887,9 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			if freeMemB < memReq.Value() {
 				overMem = true
 			}
+			if (freeCPUm < cpuReq.MilliValue() || freeMemB < memReq.Value()) && overNode == "" {
+				overNode, overFreeCPUm, overFreeMemB = n.Name, freeCPUm, freeMemB
+			}
 		}
 		// Disk joins cpu+memory as a WHOLE-NODE condition. A pod gets every
 		// resource it requests from ONE node, so this must be AND-ed into the
@@ -758,6 +915,23 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		if nodeCPUMem && nodeGPU {
 			fullFits = true
 		}
+		// The same whole-node fit with the running Jobs subtracted as well: can a
+		// run schedule NOW? Asked only of a node that passed the steady-state fit
+		// -- on one that did not, the permanent shortage is the finding and the
+		// Job on it is not what is in the way. With free unknown there is no Job
+		// sum either, so this collapses to the steady-state answer and the
+		// `!freeKnown` arms below carry the caveat.
+		nodeNow := nodeCPUMem
+		if nodeCPUMem && freeKnown {
+			nodeNow = freeCPUm-jobCPU[n.Name] >= cpuReq.MilliValue() &&
+				freeMemB-jobMem[n.Name] >= memReq.Value()
+			if !nodeNow && heldNode == "" {
+				heldNode, heldCPUm, heldMemB = n.Name, jobCPU[n.Name], jobMem[n.Name]
+			}
+		}
+		if nodeNow {
+			nowFits = true
+		}
 	}
 
 	switch {
@@ -775,7 +949,7 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		return Result{
 			Name:   name,
 			Status: StatusFail,
-			Detail: fmt.Sprintf("%s for a training job (%s) but not beside what is already running on it — the envelope over-asks the node's FREE %s, so the pod schedules Pending", OverCommitted, req, short),
+			Detail: fmt.Sprintf("%s for a training job (%s) but not beside what is already running on it — the envelope over-asks the node's FREE %s (%s has %s free beside the platform's own pods), so the pod schedules Pending", OverCommitted, req, short, overNode, cpuMemString(overFreeCPUm, overFreeMemB)),
 			Remedy: "Lower RESOURCE_REQUESTS on jobs-manager to leave room for the platform's own pods, or move the control plane / add a node. The installer sizes the envelope from allocatable, not free, so a machine that is 'big enough' can still be over-committed (backend#2870).",
 		}
 	case !cpuMemFits:
@@ -788,6 +962,63 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 			Status: StatusFail,
 			Detail: detail,
 			Remedy: "Add/resize a node to meet the job's requests, or lower RESOURCE_REQUESTS on jobs-manager.",
+		}
+	case len(stuckJobs) > 0:
+		// A training Job pod the scheduler already placed on a node is Pending on a
+		// genuinely-wedged reason -- an image pull backing off, a create error
+		// (stuckReasonWedged) -- NOT running (backend#3247). It used to be counted
+		// as a running job holding the room, so this state rolled up to the
+		// transient "a training is already running, wait for it to finish" Warn at
+		// exit 0 -- on a pod that is wedged and never will. It is a real,
+		// training-blocking problem whose remedy is the OPPOSITE of the transient
+		// Warn's (inspect the pod, do NOT wait), so it is a Fail with its own prefix
+		// the rollup (summarizeDoctor) classifies on. Ordering matters: it sits
+		// BELOW the two measured capacity Fails above -- when no node can fit the
+		// envelope that is the root cause -- and ABOVE the transient Warn, which a
+		// wedged pod must never be mistaken for. A run legitimately WAITING for a
+		// running job has no NodeName; one still pulling/creating is not wedged and
+		// was left to checkPods' inference -- neither is collected here.
+		sort.Slice(stuckJobs, func(a, b int) bool { return stuckJobs[a].name < stuckJobs[b].name })
+		descs := make([]string, len(stuckJobs))
+		for i, s := range stuckJobs {
+			descs[i] = fmt.Sprintf("%s/%s on %s (%s)", s.namespace, s.name, s.node, s.reason)
+		}
+		first := stuckJobs[0]
+		return Result{
+			Name:   name,
+			Status: StatusFail,
+			Detail: fmt.Sprintf("%s: %s. The next run does not wait on a pod that is not running", StuckJobPod, strings.Join(descs, ", ")),
+			Remedy: fmt.Sprintf("Inspect the stuck pod: kubectl describe pod -n %s %s — usually a training image that can't be pulled, or a container that can't be created. This is not a capacity shortage; lowering RESOURCE_REQUESTS or resizing will not clear it.", first.namespace, first.name),
+		}
+	case freeKnown && !nowFits:
+		// The TRANSIENT shortage (backend#2870): every dimension fits beside the
+		// platform's own pods, so this machine CAN run the envelope -- but a batch
+		// Job holds the room at this moment, and the next run sits Pending until
+		// it finishes. Before this arm the running Job was dropped from the sum and
+		// this state read as an unqualified green, which is the doctor-side half of
+		// the ticket's "waiting_for_capacity forever looks identical to a permanent
+		// shortage".
+		//
+		// Warn, not Fail: training is genuinely running here, and failing the
+		// command on the healthy state it exists to bless was the Bugbot High on
+		// #628. Warn, not OK: the operator asking why a second run is waiting
+		// needs the answer on this line, not a ✔.
+		//
+		// Its remedy is the OPPOSITE of the permanent arm's -- lowering the
+		// envelope or resizing changes nothing about a Job that is already
+		// running -- which is why the prefix is a distinct constant that the
+		// rollup (summarizeDoctor) classifies on. It sits above the soft GPU Warn
+		// because it is the stronger statement about scheduling; the GPU fact is
+		// folded in rather than lost, as #628 did for the can't-check.
+		detail := fmt.Sprintf("%s: a Ready node fits a training job (%s) beside the platform's own pods, but running job(s) on %s hold %s right now, so the next run waits Pending until they finish", HeldByRunningJob, req, heldNode, cpuMemString(heldCPUm, heldMemB))
+		if gpuRequested && !fullFits {
+			detail += fmt.Sprintf(". Also, no single Ready node satisfies cpu+memory AND %s, so GPU jobs would rely on the CPU fallback", gpuName)
+		}
+		return Result{
+			Name:   name,
+			Status: StatusWarn,
+			Detail: detail,
+			Remedy: "Nothing on the machine needs changing: let the running job finish, or stop it if it is not needed (kubectl get jobs -A). Lowering RESOURCE_REQUESTS or resizing does not free room a running job holds.",
 		}
 	case gpuRequested && !fullFits:
 		// UNKNOWN FREE OUTRANKS THE SOFT GPU WARN (Bugbot High, #628).
@@ -808,10 +1039,11 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		// can't-check FIRST because the rollup matches on the prefix.
 		if !freeKnown {
 			return Result{
-				Name:   name,
-				Status: StatusWarn,
-				Detail: fmt.Sprintf("%s, so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here. Also, no single Ready node satisfies cpu+memory AND %s, so GPU jobs would rely on the CPU fallback (needs %s)", CantVerifyFreeCompute, gpuName, req),
-				Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity. If GPU training is expected, also ensure one node has both the compute and the GPU capacity, with its device plugin.",
+				Name:      name,
+				Status:    StatusWarn,
+				Detail:    fmt.Sprintf("%s, so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here. Also, no single Ready node satisfies cpu+memory AND %s, so GPU jobs would rely on the CPU fallback (needs %s)", CantVerifyFreeCompute, gpuName, req),
+				Remedy:    "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity. If GPU training is expected, also ensure one node has both the compute and the GPU capacity, with its device plugin.",
+				CantCheck: true,
 			}
 		}
 		return Result{
@@ -887,15 +1119,17 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		if !freeKnown {
 			return Result{
 				Name: name,
-				// DISTINCT can't-check PREFIX so the rollup (summarizeDoctor in
-				// cli/doctor.go) classifies this as "couldn't check free compute"
-				// rather than greening it: it matches Node-capacity can't-checks by
-				// prefix, and "a Ready node can schedule..." would fall through to
-				// "Ready to run training" at exit 0 (Bugbot High). Keep the
-				// "allocatable only" phrase the caveat and its test rely on.
-				Status: StatusWarn,
-				Detail: CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here (the node fits the envelope on allocatable: " + req + ")",
-				Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity.",
+				// CAN'T-CHECK: the pod list was unreadable, so the fit above was
+				// against allocatable, not free. CantCheck routes this to the
+				// rollup's Unknown tier (summarizeDoctor, backend#3282); without it
+				// "a Ready node can schedule..." would green at exit 0 (Bugbot High).
+				// The CantVerifyFreeCompute prefix and the "allocatable only" phrase
+				// stay for the --verbose detail the caveat and its test rely on — they
+				// are no longer what the rollup classifies on.
+				Status:    StatusWarn,
+				Detail:    CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here (the node fits the envelope on allocatable: " + req + ")",
+				Remedy:    "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity.",
+				CantCheck: true,
 			}
 		}
 		return Result{Name: name, Status: StatusOK, Detail: detail}
@@ -913,6 +1147,43 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 // Following it raises the envelope and the pod stays Pending (Bugbot Medium,
 // #628). The generic arm is right for a too-small machine and wrong here.
 const OverCommitted = "a Ready node is large enough"
+
+// HeldByRunningJob is the prefix of the #2870 TRANSIENT Warn: the envelope fits
+// this machine beside the platform, but a running batch Job holds the room now.
+// ONE definition, for the same reason as OverCommitted -- the rollup classifies
+// on it, and its remedy ("wait, or stop the job") is the opposite of both
+// capacity Fails' ("shrink the envelope" / "grow the machine"). A retyped copy
+// that drifted would send this state down the generic path again.
+const HeldByRunningJob = "a running job holds the room"
+
+// StuckJobPod is the prefix of the backend#3247 Fail: a training Job pod is
+// scheduled to a node (it has a NodeName) but is Pending on a genuinely-wedged
+// reason -- an image pull backing off, or a create error (stuckReasonWedged).
+// It used to be counted as a running job holding the room, so checkNodeFit emitted HeldByRunningJob
+// and the rollup told the operator to "wait for the job to finish" at exit 0 --
+// on a pod that is wedged and never will. DISTINCT prefix, same discipline as
+// HeldByRunningJob and OverCommitted: the rollup (summarizeDoctor) classifies on
+// it, and its remedy ("inspect the stuck pod, do not wait") is the opposite of
+// the transient Warn's ("wait for the running job to finish"). A retyped copy
+// that drifted would send a wedged pod back down the "just wait" path.
+const StuckJobPod = "a training pod is scheduled but not running"
+
+// CantReadImagePullSecret is the prefix of checkImagePull's can't-check Warn: the
+// image pull secret could not be READ (Forbidden / timeout / transient), as
+// opposed to read and found missing or malformed. Same discipline as the
+// prefixes above -- the rollup (summarizeDoctor) classifies on it to drop a
+// can't-read to the Unknown tier rather than a measured Fail promoted over the
+// wait-for-capacity Warn (backend#3248).
+const CantReadImagePullSecret = "could not read image pull secret"
+
+// cpuMemString renders a millicore/byte pair the way RESOURCE_REQUESTS reads
+// ("cpu=2, memory=8Gi"), so the free/held figures in a Node-capacity verdict
+// line up with the request printed beside them.
+func cpuMemString(cpuMilli, memBytes int64) string {
+	return fmt.Sprintf("cpu=%s, memory=%s",
+		resource.NewMilliQuantity(cpuMilli, resource.DecimalSI).String(),
+		resource.NewQuantity(memBytes, resource.BinarySI).String())
+}
 
 // CantVerifyFreeCompute is the prefix every "we could not check free compute"
 // Node-capacity Warn must start with, and the ONE definition of it.
@@ -937,11 +1208,18 @@ func checkImagePull(ctx context.Context, cs kubernetes.Interface, ns string, rel
 	const name = "Image pull secret"
 	dep := findDeployment(ctx, cs, ns, release, "jobs-manager")
 	if dep == nil {
+		// The jobs-manager Deployment could not be read, so the pull secret can't
+		// be resolved — a can't-check, not a clean result. Like the unreadable-secret
+		// path below it sets CantCheck, so the rollup drops BOTH to the Unknown tier;
+		// without it this Warn fell through to the OK default and reported a false
+		// green ✔ (Saqlain + LukasWodka on #643 — fix the class, not just the
+		// secret-read instance).
 		return Result{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "couldn't read jobs-manager to resolve image pull secrets — skipping",
-			Remedy: "Check a tracebloc client is installed in " + ns + ".",
+			Name:      name,
+			Status:    StatusWarn,
+			Detail:    CantReadImagePullSecret + ": couldn't read jobs-manager to resolve it — skipping",
+			Remedy:    "Check a tracebloc client is installed in " + ns + ".",
+			CantCheck: true,
 		}
 	}
 	secrets := dep.Spec.Template.Spec.ImagePullSecrets
@@ -951,6 +1229,22 @@ func checkImagePull(ctx context.Context, cs kubernetes.Interface, ns string, rel
 	for _, ref := range secrets {
 		sec, err := cs.CoreV1().Secrets(ns).Get(ctx, ref.Name, metav1.GetOptions{})
 		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				// Forbidden / timeout / transient API error — the secret was NOT
+				// READ, not proven absent. Reporting it as a measured Fail (and, in
+				// the rollup, promoting that Fail over the wait-for-capacity Warn --
+				// backend#3248) would flip a healthy environment to exit 2 on an RBAC
+				// or timeout blip, with a detail that falsely says "not found". A
+				// can't-check is honest: a StatusWarn that sets CantCheck so the rollup
+				// drops it to the Unknown tier, never a training-blocking verdict.
+				return Result{
+					Name:      name,
+					Status:    StatusWarn,
+					Detail:    fmt.Sprintf("%s %q: %v", CantReadImagePullSecret, ref.Name, err),
+					Remedy:    "Check the CLI can read secrets in " + ns + " (kubectl auth can-i get secrets -n " + ns + ").",
+					CantCheck: true,
+				}
+			}
 			return Result{
 				Name:   name,
 				Status: StatusFail,

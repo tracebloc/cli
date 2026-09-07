@@ -250,6 +250,20 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 		return out
 	}
+	// cantCheck marks a named check as a can't-check the way its producer now does:
+	// StatusWarn + Result.CantCheck (backend#3282). The rollup classifies on the
+	// marker, not the Detail prefix, so withDetail alone no longer reads as a
+	// can't-check — these fixtures must set the marker, exactly as the checkX
+	// producers do.
+	cantCheck := func(base []doctor.Result, name, detail string) []doctor.Result {
+		out := withDetail(base, name, doctor.StatusWarn, detail)
+		for i := range out {
+			if out[i].Name == name {
+				out[i].CantCheck = true
+			}
+		}
+		return out
+	}
 
 	t.Run("all healthy → both OK", func(t *testing.T) {
 		c, r := summarizeDoctor(allOK, tokenOK)
@@ -311,11 +325,11 @@ func TestSummarizeDoctor(t *testing.T) {
 		base := withDetail(allOK, "Machine capacity", doctor.StatusWarn,
 			"Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has")
 		cases := map[string][]doctor.Result{
-			"pod-list RBAC failure": withDetail(base, "Pod health", doctor.StatusWarn,
+			"pod-list RBAC failure": cantCheck(base, "Pod health",
 				"could not list pods: pods is forbidden"),
-			"RESOURCE_REQUESTS unreadable": withDetail(base, "Node capacity", doctor.StatusWarn,
+			"RESOURCE_REQUESTS unreadable": cantCheck(base, "Node capacity",
 				"couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit"),
-			"nodes unlistable": withDetail(base, "Node capacity", doctor.StatusWarn,
+			"nodes unlistable": cantCheck(base, "Node capacity",
 				"could not list nodes: nodes is forbidden"),
 		}
 		// Per-case subtests: map iteration is randomized, so a shared loop with
@@ -339,7 +353,7 @@ func TestSummarizeDoctor(t *testing.T) {
 	// Node-capacity / dataset Fail arms and swallowed them (backend#2438) — the
 	// Warn variant above got the fix + a test; this pins the Fail variant too.
 	t.Run("Fail is not shadowed by a co-occurring Unknown", func(t *testing.T) {
-		base := withDetail(allOK, "Pod health", doctor.StatusWarn,
+		base := cantCheck(allOK, "Pod health",
 			"could not list pods: pods is forbidden")
 		cases := map[string][]doctor.Result{
 			"node capacity Fail": withDetail(base, "Node capacity", doctor.StatusFail,
@@ -392,10 +406,10 @@ func TestSummarizeDoctor(t *testing.T) {
 			// backend#2870: unreadable pod list -> free unverifiable -> can't-check,
 			// not a green pass (Bugbot High: this used to roll up to "Ready").
 			//
-			// BUILT FROM THE PRODUCER'S CONSTANT, not retyped. This string was a
-			// third copy of the prefix the classifier matches on -- so a producer
-			// that reworded it would leave this test passing against a phrase
-			// nothing emits any more.
+			// BUILT FROM THE PRODUCER'S CONSTANT, not retyped — it is the --verbose
+			// detail wording (the rollup now classifies on the CantCheck marker, not
+			// this prefix), so keeping it from the constant still guards the caveat
+			// text the producer emits.
 			doctor.CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here",
 			// Bugbot High on #628: the same can't-check ARRIVING WITH the soft GPU
 			// warn. The GPU case fires first in checkNodeFit, so this combined
@@ -403,7 +417,7 @@ func TestSummarizeDoctor(t *testing.T) {
 			// actually produces -- and it must roll up the same way.
 			doctor.CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here. Also, no single Ready node satisfies cpu+memory AND nvidia.com/gpu, so GPU jobs would rely on the CPU fallback (needs cpu=2, memory=8Gi)",
 		} {
-			_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn, detail), tokenOK)
+			_, r := summarizeDoctor(cantCheck(allOK, "Node capacity", detail), tokenOK)
 			if r.status != doctor.StatusUnknown {
 				t.Errorf("%q: ready should be Unknown, got %v", detail, r.status)
 			}
@@ -508,6 +522,321 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	// backend#2870: the TRANSIENT shortage. The envelope fits the machine beside
+	// the platform, but a running job holds the room, so the next run waits. It
+	// must roll up as a Warn that says so -- not the green (which hides why a
+	// second run is waiting), not a Fail (training IS running: the Bugbot High on
+	// #628), and never the capacity Fail's "ask for less / grow the machine"
+	// advice, which changes nothing about a job already running.
+	t.Run("a running job holding the room → ready Warn that says to wait, not resize", func(t *testing.T) {
+		// DETAIL BUILT FROM THE PRODUCER'S CONSTANT, same discipline as the
+		// over-commit cases above: the arm classifies by prefix.
+		_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish"), tokenOK)
+		if r.status != doctor.StatusWarn {
+			t.Fatalf("want ready Warn, got %v (%q)", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "waits for it") {
+			t.Errorf("the top line should say the next run waits, got %q", r.text)
+		}
+		if strings.Contains(r.remedy, "resources set max") || strings.Contains(r.remedy, "Ask for less") {
+			t.Errorf("the transient remedy must not send the operator to resize or shrink: %q", r.remedy)
+		}
+		if !strings.Contains(r.remedy, "let the running job finish") {
+			t.Errorf("the remedy should say to wait for or stop the running job: %q", r.remedy)
+		}
+		c, _ := summarizeDoctor(allOK, tokenOK)
+		if v := doctorVerdict(c.status, r.status); v != doctor.StatusWarn {
+			t.Errorf("verdict must own the Warn (exit 0, no 'everything looks good'), got %v", v)
+		}
+	})
+
+	// Bugbot High on #639. The transient shortage's own SYMPTOM is a second
+	// training pod sitting Pending until the running job frees the room -- the
+	// `waiting_for_capacity` case. With the stuck-Pending Fail arm first, that
+	// state rolled up to "Not ready ... not enough free compute" with
+	// `computeRemedy` (`resources set max`) at exit 2, and the wait-for-the-job
+	// line never appeared in exactly the case it was written for.
+	t.Run("a Pending pod AND a running job holding the room → the cause is named, not the generic stuck-Pending Fail", func(t *testing.T) {
+		results := withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish")
+		results = withDetail(results, "Pod health", doctor.StatusWarn,
+			"Pending > 5m0s: [train-second]")
+		c, r := summarizeDoctor(results, tokenOK)
+		if r.status == doctor.StatusFail {
+			t.Fatalf("the stuck-Pending arm shadowed the transient cause and failed the command on healthy training: %q / %q", r.text, r.remedy)
+		}
+		if r.status != doctor.StatusWarn {
+			t.Fatalf("want ready Warn, got %v (%q)", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "waiting for it") {
+			t.Errorf("the top line should say the next run waits for the running one, got %q", r.text)
+		}
+		if !strings.Contains(r.remedy, "running job holds") {
+			t.Errorf("the remedy should name the cause -- a running job -- got %q", r.remedy)
+		}
+		if strings.Contains(r.remedy, "resources set max") || strings.Contains(r.remedy, "Ask for less") {
+			t.Errorf("the remedy must not send the operator to resize or shrink: %q", r.remedy)
+		}
+		if !strings.Contains(r.remedy, "still waiting after") {
+			t.Errorf("checkPods cannot see WHY a pod is Pending, so the remedy must say what to do if the wait outlives the job: %q", r.remedy)
+		}
+		if v := doctorVerdict(c.status, r.status); v != doctor.StatusWarn {
+			t.Errorf("verdict must own the Warn (exit 0), got %v", v)
+		}
+	})
+
+	// backend#3248 (Bugbot Medium on #641). The Wait-Warn arm above is an
+	// INFERENCE that a Pending pod beside a running job is only waiting for the
+	// room. checkImagePull and checkPVC are MEASURED and independent of
+	// Pod health and Node capacity, so either can be Fail in that exact state — a
+	// missing pull secret, or a dataset volume that never bound, beside a running
+	// job. The Wait-Warn used to sit ABOVE those Fail arms, so the measured failure
+	// was shadowed and `doctor` exited 0 (Warn) instead of 2 (Fail). Pin that a
+	// measured Fail wins the precedence, while the Wait-Warn still applies when
+	// there is no measured Fail.
+	t.Run("a measured Fail beside a running job outranks the wait-for-capacity Warn", func(t *testing.T) {
+		// The full waiting_for_capacity state: a running job holds the room AND a
+		// pod is Pending past grace — together the arm that returns the Wait-Warn.
+		// Detail built from the producer's constant, same discipline as the arm.
+		waiting := withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish")
+		waiting = withDetail(waiting, "Pod health", doctor.StatusWarn,
+			"Pending > 5m0s: [train-second]")
+		// allOK omits "Image pull secret" (a fixture shortcut; Run() does emit it),
+		// and `with` only mutates an entry that already exists — so add it OK here,
+		// or the image-pull case below would silently stay unset and never flip.
+		waiting = append(waiting, res("Image pull secret", doctor.StatusOK))
+
+		// Precondition: with no measured Fail, that state is the exit-0 Wait-Warn.
+		// Assert the Wait-Warn's OWN top line, not merely "a Warn" (LukasWodka on
+		// #643): the bare heldByJob arm below is also a Warn, so a status-only check
+		// would still pass if the reorder were undone and the state fell through to
+		// it — leaving the exit-0 → exit-2 claim this test exists for unpinned.
+		if _, r := summarizeDoctor(waiting, tokenOK); r.status != doctor.StatusWarn ||
+			!strings.Contains(r.text, "the next one is waiting for it to finish") {
+			t.Fatalf("precondition: the wait-for-capacity state should be the Wait-Warn, got %v (%q)", r.status, r.text)
+		}
+
+		// Each measured Fail, dropped into that same state, must win — top line and
+		// exit code both. Per-case subtests: map order is randomized, so a shared
+		// loop with t.Fatalf would report one nondeterministic case and hide the other.
+		measured := map[string]struct{ name, wantText string }{
+			"image pull secret Fail": {"Image pull secret", "images can't be pulled"},
+			"dataset volume Fail":    {"Dataset volume (PVC)", "dataset storage isn't available"},
+		}
+		for label, m := range measured {
+			t.Run(label, func(t *testing.T) {
+				c, r := summarizeDoctor(with(waiting, m.name, doctor.StatusFail), tokenOK)
+				if r.status != doctor.StatusFail {
+					t.Fatalf("a measured Fail beside a running job must win — the Wait-Warn shadowed it and doctor exited 0 over a real failure, got %v (%q)", r.status, r.text)
+				}
+				if !strings.Contains(r.text, m.wantText) {
+					t.Errorf("want the measured Fail's own top line %q, got %q", m.wantText, r.text)
+				}
+				if v := doctorVerdict(c.status, r.status); v != doctor.StatusFail {
+					t.Errorf("the verdict must own the Fail (exit 2), not the wait Warn (exit 0), got %v", v)
+				}
+			})
+		}
+	})
+
+	t.Run("a Pending pod with NO running job is still the stuck-Pending Fail", func(t *testing.T) {
+		// The other side: the arm above is scoped to the co-occurrence. A pod
+		// Pending on a machine where nothing holds the room is the generic,
+		// measured-nowhere case and keeps its Fail and its sizing advice.
+		_, r := summarizeDoctor(withDetail(allOK, "Pod health", doctor.StatusWarn,
+			"Pending > 5m0s: [trainer-x]"), tokenOK)
+		if r.status != doctor.StatusFail || !strings.Contains(r.remedy, "resources set max") {
+			t.Errorf("want the generic stuck-Pending Fail with the sizing remedy, got %v %q", r.status, r.remedy)
+		}
+	})
+
+	t.Run("a measured Fail with a Pending pod but NO running job still outranks the stuck-Pending inference", func(t *testing.T) {
+		// backend#3248, the no-heldByJob half of the reorder. Moving the measured
+		// Fails above the Wait-Warn necessarily moves them above the plain
+		// stuck-Pending Fail too (the Wait-Warn sits above stuck-Pending,
+		// backend#2870). Both are exit-2, so the observable change is which top
+		// line and remedy the operator sees — the measured image-pull cause, not
+		// the generic "usually not enough free compute" guess. Pin it, matching
+		// this file's discipline of nailing every ordering a reshuffle could undo.
+		results := withDetail(allOK, "Pod health", doctor.StatusWarn, "Pending > 5m0s: [trainer-x]")
+		results = append(results, res("Image pull secret", doctor.StatusFail))
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail {
+			t.Fatalf("a measured image-pull Fail must stay a Fail, got %v (%q)", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "images can't be pulled") {
+			t.Errorf("the measured image-pull cause must win over the generic stuck-Pending guess, got %q", r.text)
+		}
+		if strings.Contains(r.remedy, "resources set max") {
+			t.Errorf("a measured image-pull Fail must not send the operator to resize compute: %q", r.remedy)
+		}
+	})
+
+	// backend#3247: the defect combination. A training pod is scheduled but
+	// wedged on an image pull (Node capacity Fail, StuckJobPod) and Pod health
+	// also sees it Pending past grace (stuckPending). This used to roll up through
+	// `stuckPending && heldByJob` to "a training is already running, wait for it
+	// to finish" at exit 0 -- because checkNodeFit mislabelled the wedged pod a
+	// running job. Now the Node-capacity Fail is a MEASURED cause and outranks the
+	// inferred stuck-Pending arm: a Fail that says the pod is stuck, whose remedy
+	// is to inspect the pod, not to wait or resize.
+	t.Run("a scheduled-but-stuck training pod is a Fail, not the wait-for-a-running-job Warn", func(t *testing.T) {
+		results := withDetail(allOK, "Node capacity", doctor.StatusFail,
+			doctor.StuckJobPod+": tracebloc/train-stuck on n1 (ImagePullBackOff). The next run does not wait on a pod that is not running")
+		results = withDetail(results, "Pod health", doctor.StatusWarn,
+			"Pending > 5m0s: [train-stuck]")
+		c, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail {
+			t.Fatalf("a wedged training pod must fail the rollup, got %v (%q)", r.status, r.text)
+		}
+		if strings.Contains(r.text, "already running") || strings.Contains(r.text, "waiting for it") {
+			t.Errorf("must not tell the operator to wait on a job that is not running: %q", r.text)
+		}
+		if !strings.Contains(r.text, "stuck starting") {
+			t.Errorf("the top line should say the pod is stuck starting, got %q", r.text)
+		}
+		if strings.Contains(r.remedy, "resources set max") || strings.Contains(r.remedy, "Ask for less") {
+			t.Errorf("resizing does not clear an image-pull stall; the remedy must not send them there: %q", r.remedy)
+		}
+		// PLAIN TERMS: this rolled-up line must carry no Kubernetes vocabulary --
+		// the `kubectl` form lives in the granular checkNodeFit remedy, one
+		// `--verbose` away (the invariant summarizeDoctor documents three times).
+		if strings.Contains(r.remedy, "kubectl") {
+			t.Errorf("the rolled-up remedy must stay plain-terms, no `kubectl`: %q", r.remedy)
+		}
+		if !strings.Contains(r.remedy, "--verbose") {
+			t.Errorf("the remedy should point at --verbose to name the pod, got %q", r.remedy)
+		}
+		if v := doctorVerdict(c.status, r.status); v != doctor.StatusFail {
+			t.Errorf("verdict must be a Fail (exit 2), not a clean pass, got %v", v)
+		}
+	})
+
+	// The same measured Fail with Pod health NOT flagging it (checkPods could be
+	// scoped to a namespace that missed it, or unable to list). The dedicated arm
+	// must still fire on the Node-capacity signal alone -- never falling through
+	// to a green.
+	t.Run("a scheduled-but-stuck training pod fails even when Pod health is silent", func(t *testing.T) {
+		results := withDetail(allOK, "Node capacity", doctor.StatusFail,
+			doctor.StuckJobPod+": tracebloc/train-stuck on n1 (ErrImagePull). The next run does not wait on a pod that is not running")
+		c, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail || !strings.Contains(r.text, "stuck starting") {
+			t.Fatalf("want the stuck-pod Fail on the Node-capacity signal alone, got %v (%q)", r.status, r.text)
+		}
+		if v := doctorVerdict(c.status, r.status); v != doctor.StatusFail {
+			t.Errorf("verdict must be a Fail (exit 2), got %v", v)
+		}
+	})
+
+	// backend#3248 (LukasWodka on #643): checkImagePull / checkPVC now return a
+	// can't-check Warn (with a distinct prefix) when the secret / PVC could not be
+	// READ, distinct from a measured missing / unbound Fail. A can't-read carries
+	// no signal, so it must roll up to the Unknown tier — never the promoted
+	// measured Fail, which would flip a healthy environment to exit 2 on an RBAC blip.
+	t.Run("a can't-READ image-pull or PVC is an honest can't-check, not the promoted Fail", func(t *testing.T) {
+		imgCantRead := append(append([]doctor.Result{}, allOK...),
+			doctor.Result{Name: "Image pull secret", Status: doctor.StatusWarn, CantCheck: true, Detail: doctor.CantReadImagePullSecret + ` "reg": secrets is forbidden`})
+		if _, r := summarizeDoctor(imgCantRead, tokenOK); r.status != doctor.StatusUnknown || !strings.Contains(r.text, "training images can be pulled") {
+			t.Errorf("a can't-read image-pull must roll up to a plain-terms can't-check, got %v (%q)", r.status, r.text)
+		}
+		pvcCantRead := cantCheck(allOK, "Dataset volume (PVC)",
+			cluster.PVCReadErrPrefix+"ns/client-pvc: is forbidden")
+		if _, r := summarizeDoctor(pvcCantRead, tokenOK); r.status != doctor.StatusUnknown || !strings.Contains(r.text, "dataset storage") {
+			t.Errorf("a can't-read PVC must roll up to a can't-check, got %v (%q)", r.status, r.text)
+		}
+	})
+
+	// backend#3282: the single can't-check rule (cantCheckReady). Two properties
+	// the four arms it replaced had implicitly, now pinned explicitly.
+	t.Run("the can't-check rollup rule keeps arm order and ignores unmapped checks", func(t *testing.T) {
+		// PRIORITY: multiple can't-checks co-occur → the first in the table (Pod
+		// health) wins, the same order as the arms this replaced.
+		both := cantCheck(cantCheck(allOK, "Pod health", "could not list pods: forbidden"),
+			"Dataset volume (PVC)", cluster.PVCReadErrPrefix+"ns/client-pvc: forbidden")
+		if _, r := summarizeDoctor(both, tokenOK); r.status != doctor.StatusUnknown || !strings.Contains(r.text, "your workloads") {
+			t.Errorf("Pod-health can't-check should win the co-occurrence, got %v (%q)", r.status, r.text)
+		}
+		// UNMAPPED: a CantCheck on a check the rollup table does not list (here
+		// "Restart history", which checkRestartHistory marks) is not surfaced — it
+		// falls through to OK. A new probe must add a table row to roll up; until
+		// then it stays inert rather than greening or crashing.
+		unmapped := append(append([]doctor.Result{}, allOK...),
+			doctor.Result{Name: "Restart history", Status: doctor.StatusWarn, CantCheck: true, Detail: "could not list pods: forbidden"})
+		if _, r := summarizeDoctor(unmapped, tokenOK); r.status != doctor.StatusOK {
+			t.Errorf("a CantCheck on an unmapped check must not surface (falls through to OK), got %v (%q)", r.status, r.text)
+		}
+	})
+
+	// The exact regression from thread 1: a running job holds the room, the next
+	// pod is Pending (the wait-for-capacity state), AND the pull secret could not
+	// be read. Because that read failure is now a can't-check (not a Fail), it no
+	// longer promotes over the Wait-Warn — the operator is told to wait, not handed
+	// a false "images can't be pulled" exit 2 on a healthy environment.
+	t.Run("a can't-READ secret beside a running job stays the wait Warn, not a false exit-2", func(t *testing.T) {
+		results := withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish")
+		results = withDetail(results, "Pod health", doctor.StatusWarn, "Pending > 5m0s: [train-second]")
+		results = append(results, doctor.Result{Name: "Image pull secret", Status: doctor.StatusWarn, CantCheck: true, Detail: doctor.CantReadImagePullSecret + ` "reg": secrets is forbidden`})
+		c, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusWarn || !strings.Contains(r.text, "waiting for it") {
+			t.Fatalf("a can't-read secret must not flip the wait-for-capacity Warn to a Fail, got %v (%q)", r.status, r.text)
+		}
+		if v := doctorVerdict(c.status, r.status); v == doctor.StatusFail {
+			t.Errorf("a read blip must not make doctor exit 2 on a healthy environment, got verdict %v", v)
+		}
+	})
+
+	// backend#3248 thread 3 (LukasWodka on #643). When the machine over-commits AND
+	// a running job holds the room AND the next pod is Pending, both findings are
+	// Warns (exit 0). The plain-heldByJob case puts the over-commit Warn first
+	// ("a machine that lies about its size outranks a running job"), but the
+	// Pending variant cannot: the Wait-Warn sits above the stuck-Pending Fail
+	// (backend#2870) and the over-commit Warn must stay below that Fail (a Warn may
+	// not shadow a Fail), so by transitivity the Wait-Warn wins here. It is
+	// message-only (both exit 0) and pre-existing; lifting it would need a dedicated
+	// arm, not a reorder. Pin the current behavior so the gap is recorded, not implied.
+	t.Run("over-commit Warn is shadowed by the wait-for-capacity Warn in the Pending variant (known, message-only)", func(t *testing.T) {
+		results := withDetail(allOK, "Machine capacity", doctor.StatusWarn,
+			"Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has")
+		results = withDetail(results, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish")
+		results = withDetail(results, "Pod health", doctor.StatusWarn, "Pending > 5m0s: [train-second]")
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusWarn {
+			t.Fatalf("both findings are Warns → exit 0, got %v (%q)", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "waiting for it") {
+			t.Errorf("known message-only gap: the Pending variant shows the wait-for-capacity Warn, not the over-commit Warn — if a dedicated arm is added, update this pin, got %q", r.text)
+		}
+	})
+
+	t.Run("a crash-looping pod still outranks the running-job explanation", func(t *testing.T) {
+		// The exception is scoped to the stuck-Pending WARN; a Pod-health FAIL is
+		// a measured failure with a different fix, and must keep winning.
+		results := withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now")
+		results = withDetail(results, "Pod health", doctor.StatusFail, "crash-looping: [jobs-manager]")
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail || !strings.Contains(r.text, "isn't running") {
+			t.Errorf("a Pod-health Fail must still win, got %v (%q)", r.status, r.text)
+		}
+	})
+
+	t.Run("a machine that lies about its size outranks a running job", func(t *testing.T) {
+		// Both are Warns; the over-commit is the more consequential finding and
+		// sits first. Pin the order so a later reshuffle cannot demote it.
+		results := withDetail(allOK, "Machine capacity", doctor.StatusWarn,
+			"Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has")
+		results = withDetail(results, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now")
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusWarn || !strings.Contains(r.text, "bigger than it is") {
+			t.Errorf("want the over-commit Warn first, got %v (%q)", r.status, r.text)
+		}
+	})
+
 	t.Run("node capacity GPU-soft warn → still ready", func(t *testing.T) {
 		_, r := summarizeDoctor(withDetail(allOK, "Node capacity", doctor.StatusWarn,
 			"no single Ready node satisfies cpu+memory AND nvidia.com/gpu — GPU jobs rely on the CPU fallback (needs cpu=2, memory=8Gi)"), tokenOK)
@@ -598,7 +927,7 @@ func TestSummarizeDoctor(t *testing.T) {
 	// can't-check — it must NOT get the stuck-pending/compute (Docker Desktop)
 	// remedy (Bugbot follow-up).
 	t.Run("pod-health warn = could not list pods (RBAC) → can't-check, not stuck-pending", func(t *testing.T) {
-		_, r := summarizeDoctor(warnPods("could not list pods: pods is forbidden"), tokenOK)
+		_, r := summarizeDoctor(cantCheck(allOK, "Pod health", "could not list pods: pods is forbidden"), tokenOK)
 		if r.status == doctor.StatusFail {
 			t.Errorf("a can't-list-pods warn must not be a hard not-ready, got %v %q", r.status, r.text)
 		}
