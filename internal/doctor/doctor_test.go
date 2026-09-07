@@ -1103,6 +1103,153 @@ func TestCheckNodeFitPermanentVsTransient(t *testing.T) {
 	})
 }
 
+// assignedPendingJobPod is a training-Job pod (the batch/v1 job-name label) the
+// scheduler has already PLACED on a node -- it has a NodeName -- but that is NOT
+// Running: still Pending, with the kubelet's Waiting.Reason on its container
+// (e.g. "ImagePullBackOff", "ContainerCreating"; empty means bare Pending). age
+// sets how long ago it was created so a test can sit inside or outside
+// checkNodeFit's grace window. It requests memory so a test can also prove that
+// request is never folded into the "held by a running job" sum.
+func assignedPendingJobPod(name, nodeName, reason, mem string, age time.Duration) *corev1.Pod {
+	reqs := corev1.ResourceList{}
+	if mem != "" {
+		reqs[corev1.ResourceMemory] = resource.MustParse(mem)
+	}
+	var statuses []corev1.ContainerStatus
+	if reason != "" {
+		statuses = []corev1.ContainerStatus{{
+			Name:  "c",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+		}}
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			Labels:            map[string]string{"job-name": "exp-42"},
+			CreationTimestamp: metav1.NewTime(time.Now().Add(age)),
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   nodeName,
+			Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: reqs}}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: statuses},
+	}
+}
+
+// backend#3247: an assigned-but-Pending training pod is NOT a running job.
+// checkNodeFit used to route every non-terminal job-name pod with a NodeName
+// into the "a running job holds the room" sum, so a pod wedged on an image pull
+// emitted HeldByRunningJob and the rollup told the operator to wait for a job
+// that was not running. Each pod STATE must land on its own verdict.
+func TestCheckNodeFitStuckJobPod(t *testing.T) {
+	req := map[string]string{"RESOURCE_REQUESTS": "cpu=2,memory=8Gi"}
+	// A node big enough that, with NOTHING holding the room, the envelope fits --
+	// so any non-OK verdict below is about the pod's STATE, not the machine.
+	fitNode := func() *corev1.Node { return node("n1", "4", "16Gi") }
+	const old = -10 * time.Minute  // older than the 5m grace window
+	const fresh = -1 * time.Minute // inside it
+
+	// A genuinely RUNNING job that fills the room is the transient Warn -- the
+	// pre-existing behaviour this fix must leave untouched.
+	t.Run("Running job filling the room -> HeldByRunningJob Warn (unchanged)", func(t *testing.T) {
+		job := podOn("train-run", "n1", "", "12Gi", map[string]string{"job-name": "exp-42"})
+		r := checkNodeFit(bg(), fake.NewClientset(fitNode(), job), req)
+		if r.Status != StatusWarn || !strings.HasPrefix(r.Detail, HeldByRunningJob) {
+			t.Fatalf("=> %v (%q), want the transient Warn %q", r.Status, r.Detail, HeldByRunningJob)
+		}
+	})
+
+	// The defect, one WEDGED waiting reason per row: assigned, Pending, past grace,
+	// on a reason the kubelet has reported as failing. Each must be a stuck Fail
+	// that NAMES its reason -- never HeldByRunningJob.
+	for _, tc := range []struct{ name, reason string }{
+		{"ImagePullBackOff", "ImagePullBackOff"},
+		{"ErrImagePull", "ErrImagePull"},
+		{"CreateContainerConfigError", "CreateContainerConfigError"},
+	} {
+		t.Run("assigned+Pending past grace, wedged ("+tc.name+") -> stuck Fail", func(t *testing.T) {
+			pod := assignedPendingJobPod("train-stuck", "n1", tc.reason, "12Gi", old)
+			r := checkNodeFit(bg(), fake.NewClientset(fitNode(), pod), req)
+			if r.Status != StatusFail {
+				t.Fatalf("=> %v (%q), want Fail: a wedged pod is not a running job", r.Status, r.Detail)
+			}
+			if !strings.HasPrefix(r.Detail, StuckJobPod) {
+				t.Fatalf("detail must START with %q so the rollup classifies it, got %q", StuckJobPod, r.Detail)
+			}
+			if strings.Contains(r.Detail, HeldByRunningJob) {
+				t.Fatalf("a wedged pod must never be reported as a running job: %q", r.Detail)
+			}
+			if !strings.Contains(r.Detail, tc.reason) {
+				t.Errorf("detail should name the real state %q, got %q", tc.reason, r.Detail)
+			}
+			if !strings.Contains(r.Remedy, "kubectl describe pod") {
+				t.Errorf("the remedy must be actionable (inspect the pod), got %q", r.Remedy)
+			}
+		})
+	}
+
+	// A still-PROGRESSING pod past grace (ContainerCreating / bare Pending, or a
+	// large first pull that has not backed off yet) is NOT wedged: asserting
+	// "waiting will not clear it" would misfire on a multi-GB image on a cold
+	// node. checkNodeFit leaves it to checkPods' age-based inference, so on its
+	// own it is neither the stuck Fail nor HeldByRunningJob -- the node reads OK
+	// (Bugbot on this PR, backend#3247).
+	for _, tc := range []struct{ name, reason string }{
+		{"ContainerCreating", "ContainerCreating"},
+		{"Pulling", "Pulling"},
+		{"bare Pending, no reason yet", ""},
+	} {
+		t.Run("assigned+Pending past grace, still progressing ("+tc.name+") -> not escalated", func(t *testing.T) {
+			pod := assignedPendingJobPod("train-pulling", "n1", tc.reason, "12Gi", old)
+			r := checkNodeFit(bg(), fake.NewClientset(fitNode(), pod), req)
+			if strings.HasPrefix(r.Detail, StuckJobPod) {
+				t.Fatalf("a still-progressing pod must not take the measured stuck Fail: %q", r.Detail)
+			}
+			if r.Status != StatusOK {
+				t.Fatalf("=> %v (%q), want OK: checkNodeFit defers a progressing pod to checkPods", r.Status, r.Detail)
+			}
+		})
+	}
+
+	// A pod the scheduler JUST placed and is normally starting (inside grace) is
+	// neither a running job nor stuck -- flagging it would false-positive on
+	// every training launch. Not counted as held either, so the node reads OK.
+	t.Run("assigned+Pending INSIDE grace -> not flagged, node still OK", func(t *testing.T) {
+		pod := assignedPendingJobPod("train-young", "n1", "ImagePullBackOff", "12Gi", fresh)
+		r := checkNodeFit(bg(), fake.NewClientset(fitNode(), pod), req)
+		if r.Status != StatusOK {
+			t.Fatalf("=> %v (%q), want OK: a freshly-scheduled pod is normal startup", r.Status, r.Detail)
+		}
+		if strings.Contains(r.Detail, StuckJobPod) || strings.Contains(r.Detail, HeldByRunningJob) {
+			t.Fatalf("a within-grace pod must be neither stuck nor held: %q", r.Detail)
+		}
+	})
+
+	// Scope guard: the fix keys on the job-name label. A non-Job pod (platform)
+	// that is Pending-assigned is steady state and must not take the stuck-pod arm.
+	t.Run("a non-Job Pending pod is not a stuck training pod", func(t *testing.T) {
+		plat := assignedPendingJobPod("some-deploy", "n1", "ImagePullBackOff", "12Gi", old)
+		plat.Labels = nil // not a job-name pod, though its reason IS wedged
+		r := checkNodeFit(bg(), fake.NewClientset(fitNode(), plat), req)
+		if strings.HasPrefix(r.Detail, StuckJobPod) {
+			t.Fatalf("the stuck-training-pod arm must be scoped to job-name pods, got %q", r.Detail)
+		}
+	})
+
+	// A running job holds the room AND a second training pod is wedged on an
+	// image pull: the wedged pod is the actionable problem and its Fail must win
+	// over the transient Warn (the stuck arm sits above it in the switch).
+	t.Run("a stuck pod outranks a genuinely running job", func(t *testing.T) {
+		running := podOn("train-run", "n1", "", "12Gi", map[string]string{"job-name": "exp-42"})
+		stuck := assignedPendingJobPod("train-stuck", "n1", "ImagePullBackOff", "1Gi", old)
+		r := checkNodeFit(bg(), fake.NewClientset(fitNode(), running, stuck), req)
+		if r.Status != StatusFail || !strings.HasPrefix(r.Detail, StuckJobPod) {
+			t.Fatalf("=> %v (%q), want the stuck Fail to win over the transient Warn", r.Status, r.Detail)
+		}
+	})
+}
+
 func dockerSecret(name string, data []byte) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},

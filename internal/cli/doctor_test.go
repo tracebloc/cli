@@ -583,6 +583,62 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	// backend#3247: the defect combination. A training pod is scheduled but
+	// wedged on an image pull (Node capacity Fail, StuckJobPod) and Pod health
+	// also sees it Pending past grace (stuckPending). This used to roll up through
+	// `stuckPending && heldByJob` to "a training is already running, wait for it
+	// to finish" at exit 0 -- because checkNodeFit mislabelled the wedged pod a
+	// running job. Now the Node-capacity Fail is a MEASURED cause and outranks the
+	// inferred stuck-Pending arm: a Fail that says the pod is stuck, whose remedy
+	// is to inspect the pod, not to wait or resize.
+	t.Run("a scheduled-but-stuck training pod is a Fail, not the wait-for-a-running-job Warn", func(t *testing.T) {
+		results := withDetail(allOK, "Node capacity", doctor.StatusFail,
+			doctor.StuckJobPod+": tracebloc/train-stuck on n1 (ImagePullBackOff). The next run does not wait on a pod that is not running")
+		results = withDetail(results, "Pod health", doctor.StatusWarn,
+			"Pending > 5m0s: [train-stuck]")
+		c, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail {
+			t.Fatalf("a wedged training pod must fail the rollup, got %v (%q)", r.status, r.text)
+		}
+		if strings.Contains(r.text, "already running") || strings.Contains(r.text, "waiting for it") {
+			t.Errorf("must not tell the operator to wait on a job that is not running: %q", r.text)
+		}
+		if !strings.Contains(r.text, "stuck starting") {
+			t.Errorf("the top line should say the pod is stuck starting, got %q", r.text)
+		}
+		if strings.Contains(r.remedy, "resources set max") || strings.Contains(r.remedy, "Ask for less") {
+			t.Errorf("resizing does not clear an image-pull stall; the remedy must not send them there: %q", r.remedy)
+		}
+		// PLAIN TERMS: this rolled-up line must carry no Kubernetes vocabulary --
+		// the `kubectl` form lives in the granular checkNodeFit remedy, one
+		// `--verbose` away (the invariant summarizeDoctor documents three times).
+		if strings.Contains(r.remedy, "kubectl") {
+			t.Errorf("the rolled-up remedy must stay plain-terms, no `kubectl`: %q", r.remedy)
+		}
+		if !strings.Contains(r.remedy, "--verbose") {
+			t.Errorf("the remedy should point at --verbose to name the pod, got %q", r.remedy)
+		}
+		if v := doctorVerdict(c.status, r.status); v != doctor.StatusFail {
+			t.Errorf("verdict must be a Fail (exit 2), not a clean pass, got %v", v)
+		}
+	})
+
+	// The same measured Fail with Pod health NOT flagging it (checkPods could be
+	// scoped to a namespace that missed it, or unable to list). The dedicated arm
+	// must still fire on the Node-capacity signal alone -- never falling through
+	// to a green.
+	t.Run("a scheduled-but-stuck training pod fails even when Pod health is silent", func(t *testing.T) {
+		results := withDetail(allOK, "Node capacity", doctor.StatusFail,
+			doctor.StuckJobPod+": tracebloc/train-stuck on n1 (ErrImagePull). The next run does not wait on a pod that is not running")
+		c, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail || !strings.Contains(r.text, "stuck starting") {
+			t.Fatalf("want the stuck-pod Fail on the Node-capacity signal alone, got %v (%q)", r.status, r.text)
+		}
+		if v := doctorVerdict(c.status, r.status); v != doctor.StatusFail {
+			t.Errorf("verdict must be a Fail (exit 2), got %v", v)
+		}
+	})
+
 	t.Run("a crash-looping pod still outranks the running-job explanation", func(t *testing.T) {
 		// The exception is scoped to the stuck-Pending WARN; a Pod-health FAIL is
 		// a measured failure with a different fix, and must keep winning.
