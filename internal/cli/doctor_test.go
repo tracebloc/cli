@@ -595,8 +595,13 @@ func TestSummarizeDoctor(t *testing.T) {
 		waiting = append(waiting, res("Image pull secret", doctor.StatusOK))
 
 		// Precondition: with no measured Fail, that state is the exit-0 Wait-Warn.
-		if _, r := summarizeDoctor(waiting, tokenOK); r.status != doctor.StatusWarn {
-			t.Fatalf("precondition: the wait-for-capacity state should be a Warn, got %v (%q)", r.status, r.text)
+		// Assert the Wait-Warn's OWN top line, not merely "a Warn" (LukasWodka on
+		// #643): the bare heldByJob arm below is also a Warn, so a status-only check
+		// would still pass if the reorder were undone and the state fell through to
+		// it — leaving the exit-0 → exit-2 claim this test exists for unpinned.
+		if _, r := summarizeDoctor(waiting, tokenOK); r.status != doctor.StatusWarn ||
+			!strings.Contains(r.text, "the next one is waiting for it to finish") {
+			t.Fatalf("precondition: the wait-for-capacity state should be the Wait-Warn, got %v (%q)", r.status, r.text)
 		}
 
 		// Each measured Fail, dropped into that same state, must win — top line and

@@ -506,7 +506,6 @@ screen. %s/%d are runtime placeholders.
 "couldn't reach the backend to finish signing in — %d attempts failed in a row (check your network / HTTPS_PROXY): %w"
 "couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit"
 "couldn't read capacity: %v"
-"couldn't read jobs-manager to resolve image pull secrets — skipping"
 "couldn't read the account's client list to tell whether this cluster is new or already registered (%v) — retry when the backend is reachable (a re-run adopts an existing client), or pass --yes/--credential-file to provision now"
 "couldn't read the chart's conformance checks: %w"
 "couldn't read this machine's capacity: %w"

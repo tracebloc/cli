@@ -1190,10 +1190,16 @@ func checkImagePull(ctx context.Context, cs kubernetes.Interface, ns string, rel
 	const name = "Image pull secret"
 	dep := findDeployment(ctx, cs, ns, release, "jobs-manager")
 	if dep == nil {
+		// The jobs-manager Deployment could not be read, so the pull secret can't
+		// be resolved — a can't-check, not a clean result. It carries the same
+		// CantReadImagePullSecret prefix as the unreadable-secret path below so the
+		// rollup drops BOTH to the Unknown tier; without the prefix this Warn fell
+		// through to the OK default and reported a false green ✔ (Saqlain + LukasWodka
+		// on #643 — fix the class, not just the secret-read instance).
 		return Result{
 			Name:   name,
 			Status: StatusWarn,
-			Detail: "couldn't read jobs-manager to resolve image pull secrets — skipping",
+			Detail: CantReadImagePullSecret + ": couldn't read jobs-manager to resolve it — skipping",
 			Remedy: "Check a tracebloc client is installed in " + ns + ".",
 		}
 	}

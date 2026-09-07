@@ -1332,6 +1332,16 @@ func TestCheckImagePull(t *testing.T) {
 			t.Errorf("a read failure must not be reported as 'not found', got %q", r.Detail)
 		}
 	})
+	// backend#3248 (Saqlain on #643): the OTHER can't-read path — the jobs-manager
+	// Deployment itself is unreadable — is also a can't-check, and must carry the
+	// same prefix so the rollup drops it to the Unknown tier instead of falling
+	// through to a false green ✔.
+	t.Run("jobs-manager unreadable -> can't-check Warn with the read prefix", func(t *testing.T) {
+		r := checkImagePull(bg(), fake.NewClientset(), ns, rel) // no jobs-manager Deployment
+		if r.Status != StatusWarn || !strings.HasPrefix(r.Detail, CantReadImagePullSecret) {
+			t.Fatalf("=> %v (%q), want a can't-check Warn carrying the read prefix", r.Status, r.Detail)
+		}
+	})
 }
 
 // nodeWithDisk is `node` plus an ephemeral-storage allocatable. Separate helper
