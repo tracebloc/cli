@@ -1160,14 +1160,15 @@ func TestCheckNodeFitStuckJobPod(t *testing.T) {
 		}
 	})
 
-	// The defect, one waiting reason per row: assigned, Pending, past grace. Each
-	// must be a stuck Fail that NAMES its reason -- never HeldByRunningJob.
-	for _, tc := range []struct{ name, reason, wantInDetail string }{
-		{"ImagePullBackOff", "ImagePullBackOff", "ImagePullBackOff"},
-		{"ContainerCreating", "ContainerCreating", "ContainerCreating"},
-		{"bare Pending, no reason yet", "", "Pending"},
+	// The defect, one WEDGED waiting reason per row: assigned, Pending, past grace,
+	// on a reason the kubelet has reported as failing. Each must be a stuck Fail
+	// that NAMES its reason -- never HeldByRunningJob.
+	for _, tc := range []struct{ name, reason string }{
+		{"ImagePullBackOff", "ImagePullBackOff"},
+		{"ErrImagePull", "ErrImagePull"},
+		{"CreateContainerConfigError", "CreateContainerConfigError"},
 	} {
-		t.Run("assigned+Pending past grace ("+tc.name+") -> stuck Fail", func(t *testing.T) {
+		t.Run("assigned+Pending past grace, wedged ("+tc.name+") -> stuck Fail", func(t *testing.T) {
 			pod := assignedPendingJobPod("train-stuck", "n1", tc.reason, "12Gi", old)
 			r := checkNodeFit(bg(), fake.NewClientset(fitNode(), pod), req)
 			if r.Status != StatusFail {
@@ -1179,11 +1180,34 @@ func TestCheckNodeFitStuckJobPod(t *testing.T) {
 			if strings.Contains(r.Detail, HeldByRunningJob) {
 				t.Fatalf("a wedged pod must never be reported as a running job: %q", r.Detail)
 			}
-			if !strings.Contains(r.Detail, tc.wantInDetail) {
-				t.Errorf("detail should name the real state %q, got %q", tc.wantInDetail, r.Detail)
+			if !strings.Contains(r.Detail, tc.reason) {
+				t.Errorf("detail should name the real state %q, got %q", tc.reason, r.Detail)
 			}
 			if !strings.Contains(r.Remedy, "kubectl describe pod") {
 				t.Errorf("the remedy must be actionable (inspect the pod), got %q", r.Remedy)
+			}
+		})
+	}
+
+	// A still-PROGRESSING pod past grace (ContainerCreating / bare Pending, or a
+	// large first pull that has not backed off yet) is NOT wedged: asserting
+	// "waiting will not clear it" would misfire on a multi-GB image on a cold
+	// node. checkNodeFit leaves it to checkPods' age-based inference, so on its
+	// own it is neither the stuck Fail nor HeldByRunningJob -- the node reads OK
+	// (Bugbot on this PR, backend#3247).
+	for _, tc := range []struct{ name, reason string }{
+		{"ContainerCreating", "ContainerCreating"},
+		{"Pulling", "Pulling"},
+		{"bare Pending, no reason yet", ""},
+	} {
+		t.Run("assigned+Pending past grace, still progressing ("+tc.name+") -> not escalated", func(t *testing.T) {
+			pod := assignedPendingJobPod("train-pulling", "n1", tc.reason, "12Gi", old)
+			r := checkNodeFit(bg(), fake.NewClientset(fitNode(), pod), req)
+			if strings.HasPrefix(r.Detail, StuckJobPod) {
+				t.Fatalf("a still-progressing pod must not take the measured stuck Fail: %q", r.Detail)
+			}
+			if r.Status != StatusOK {
+				t.Fatalf("=> %v (%q), want OK: checkNodeFit defers a progressing pod to checkPods", r.Status, r.Detail)
 			}
 		})
 	}
@@ -1192,7 +1216,7 @@ func TestCheckNodeFitStuckJobPod(t *testing.T) {
 	// neither a running job nor stuck -- flagging it would false-positive on
 	// every training launch. Not counted as held either, so the node reads OK.
 	t.Run("assigned+Pending INSIDE grace -> not flagged, node still OK", func(t *testing.T) {
-		pod := assignedPendingJobPod("train-young", "n1", "ContainerCreating", "12Gi", fresh)
+		pod := assignedPendingJobPod("train-young", "n1", "ImagePullBackOff", "12Gi", fresh)
 		r := checkNodeFit(bg(), fake.NewClientset(fitNode(), pod), req)
 		if r.Status != StatusOK {
 			t.Fatalf("=> %v (%q), want OK: a freshly-scheduled pod is normal startup", r.Status, r.Detail)
@@ -1205,8 +1229,8 @@ func TestCheckNodeFitStuckJobPod(t *testing.T) {
 	// Scope guard: the fix keys on the job-name label. A non-Job pod (platform)
 	// that is Pending-assigned is steady state and must not take the stuck-pod arm.
 	t.Run("a non-Job Pending pod is not a stuck training pod", func(t *testing.T) {
-		plat := assignedPendingJobPod("some-deploy", "n1", "ContainerCreating", "12Gi", old)
-		plat.Labels = nil // not a job-name pod
+		plat := assignedPendingJobPod("some-deploy", "n1", "ImagePullBackOff", "12Gi", old)
+		plat.Labels = nil // not a job-name pod, though its reason IS wedged
 		r := checkNodeFit(bg(), fake.NewClientset(fitNode(), plat), req)
 		if strings.HasPrefix(r.Detail, StuckJobPod) {
 			t.Fatalf("the stuck-training-pod arm must be scoped to job-name pods, got %q", r.Detail)

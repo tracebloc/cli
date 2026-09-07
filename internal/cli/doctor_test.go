@@ -609,8 +609,14 @@ func TestSummarizeDoctor(t *testing.T) {
 		if strings.Contains(r.remedy, "resources set max") || strings.Contains(r.remedy, "Ask for less") {
 			t.Errorf("resizing does not clear an image-pull stall; the remedy must not send them there: %q", r.remedy)
 		}
-		if !strings.Contains(r.remedy, "kubectl describe pod") {
-			t.Errorf("the remedy should point at inspecting the stuck pod, got %q", r.remedy)
+		// PLAIN TERMS: this rolled-up line must carry no Kubernetes vocabulary --
+		// the `kubectl` form lives in the granular checkNodeFit remedy, one
+		// `--verbose` away (the invariant summarizeDoctor documents three times).
+		if strings.Contains(r.remedy, "kubectl") {
+			t.Errorf("the rolled-up remedy must stay plain-terms, no `kubectl`: %q", r.remedy)
+		}
+		if !strings.Contains(r.remedy, "--verbose") {
+			t.Errorf("the remedy should point at --verbose to name the pod, got %q", r.remedy)
 		}
 		if v := doctorVerdict(c.status, r.status); v != doctor.StatusFail {
 			t.Errorf("verdict must be a Fail (exit 2), not a clean pass, got %v", v)
@@ -623,7 +629,7 @@ func TestSummarizeDoctor(t *testing.T) {
 	// to a green.
 	t.Run("a scheduled-but-stuck training pod fails even when Pod health is silent", func(t *testing.T) {
 		results := withDetail(allOK, "Node capacity", doctor.StatusFail,
-			doctor.StuckJobPod+": tracebloc/train-stuck on n1 (ContainerCreating). The next run does not wait on a pod that is not running")
+			doctor.StuckJobPod+": tracebloc/train-stuck on n1 (ErrImagePull). The next run does not wait on a pod that is not running")
 		c, r := summarizeDoctor(results, tokenOK)
 		if r.status != doctor.StatusFail || !strings.Contains(r.text, "stuck starting") {
 			t.Fatalf("want the stuck-pod Fail on the Node-capacity signal alone, got %v (%q)", r.status, r.text)

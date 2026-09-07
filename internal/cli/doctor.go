@@ -529,20 +529,21 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		// exit 0 -- on a pod that is wedged and never will.
 		//
 		// IT SITS ABOVE THE STUCK-PENDING ARM by the same measured-beats-inferred
-		// rule that puts `stuckPending && heldByJob` there: the stuck-Pending arm is
-		// an INFERENCE ("Pending past grace, so compute or image"), while
-		// checkNodeFit has MEASURED the cause -- the pod is scheduled but its
-		// containers are not running. The two co-occur (a wedged pod is also Pending
-		// past grace), and below that arm this precise, correct remedy would be
-		// shadowed by the generic "usually not enough free compute" one, putting
-		// `resources set max` in front of an operator whose image simply will not
-		// pull. Only the measured capacity Fails (OverCommitted) and a hard
-		// Pod-health crash-loop Fail outrank it, exactly as they outrank the generic
-		// stuck-Pending arm. Its remedy is the OPPOSITE of the transient Warn's
-		// (inspect the pod, do NOT wait); the pod it names is one `--verbose` away.
+		// rule that puts `stuckPending && heldByJob` there. checkNodeFit escalates
+		// to this Fail ONLY for a genuinely-wedged reason -- an image pull backing
+		// off or a create error -- so the cause is measured, not inferred: "waiting
+		// will not clear it" is exact. A pod merely still pulling/creating past the
+		// grace window is left to the stuck-Pending arm below, whose "usually not
+		// enough free compute, or an image that can't be pulled" wording is an
+		// honest age-based inference (a large first pull on a cold node CAN exceed
+		// the grace). Only the measured capacity Fails (OverCommitted) and a hard
+		// Pod-health crash-loop Fail outrank it. Its remedy is the OPPOSITE of the
+		// transient Warn's (inspect the pod, do NOT wait); the pod it names is one
+		// `--verbose` away -- and PLAIN TERMS, no Kubernetes vocabulary, like its
+		// neighbours (the granular checkNodeFit remedy carries the `kubectl` form).
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — a training pod is stuck starting and isn't running yet.",
-			fmt.Sprintf("A scheduled training pod is stuck (usually a training image that can't be pulled). Waiting will not clear it — `%s doctor --verbose` names the pod, then `kubectl describe pod` it. Asking for less per run or resizing will not help.", launcher())}
+			fmt.Sprintf("A scheduled training pod is stuck (usually a training image that can't be pulled). Waiting will not clear it — `%s doctor --verbose` names the pod.", launcher())}
 	case stuckPending:
 		// Pods stuck Pending past the grace window (unschedulable / image can't
 		// pull) mean training can't actually schedule — so this is NOT ready, even
