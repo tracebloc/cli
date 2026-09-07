@@ -561,9 +561,11 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		// grace window is left to the stuck-Pending arm below, whose "usually not
 		// enough free compute, or an image that can't be pulled" wording is an
 		// honest age-based inference (a large first pull on a cold node CAN exceed
-		// the grace). Only the measured capacity Fails (OverCommitted) and a hard
-		// Pod-health crash-loop Fail outrank it. Its remedy is the OPPOSITE of the
-		// transient Warn's (inspect the pod, do NOT wait); the pod it names is one
+		// the grace). The arms that outrank it are all measured: a Pod-health
+		// crash-loop Fail, the OverCommitted Fail, and the image-pull-secret and
+		// dataset-volume Fails above (backend#3248 — those two sit above the
+		// wait-for-capacity Warn, hence above this arm too). Its remedy is the
+		// OPPOSITE of the transient Warn's (inspect the pod, do NOT wait); the pod it names is one
 		// `--verbose` away -- and PLAIN TERMS, no Kubernetes vocabulary, like its
 		// neighbours (the granular checkNodeFit remedy carries the `kubectl` form).
 		ready = healthLine{doctor.StatusFail,
@@ -650,6 +652,24 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		// the OK default): training still runs via the jobs-manager's CPU fallback.
 		ready = healthLine{doctor.StatusUnknown,
 			"Ready to run training — couldn't check free compute (run with --verbose)", ""}
+	case by["Image pull secret"].Status == doctor.StatusWarn &&
+		strings.HasPrefix(by["Image pull secret"].Detail, doctor.CantReadImagePullSecret):
+		// checkImagePull can't-check: the secret could not be READ (Forbidden /
+		// timeout), not read-and-found-missing. It carries no signal about whether
+		// images can be pulled, so it lands here in the Unknown tier — never the
+		// measured "images can't be pulled" Fail above, which is now promoted over
+		// the wait-for-capacity Warn and would flip a healthy environment to exit 2
+		// on an RBAC blip (backend#3248, LukasWodka on #643).
+		ready = healthLine{doctor.StatusUnknown,
+			"Ready to run training — couldn't check the image pull secret (run with --verbose)", ""}
+	case by["Dataset volume (PVC)"].Status == doctor.StatusWarn &&
+		strings.HasPrefix(by["Dataset volume (PVC)"].Detail, cluster.PVCReadErrPrefix):
+		// checkPVC can't-check: the PVC could not be READ (Forbidden / network),
+		// not read-and-found-unbound. Same reasoning as the image-pull arm — a
+		// can't-read is no signal, so it stays in the Unknown tier rather than the
+		// measured "dataset storage isn't available" Fail above (backend#3248).
+		ready = healthLine{doctor.StatusUnknown,
+			"Ready to run training — couldn't check dataset storage (run with --verbose)", ""}
 	default:
 		ready = healthLine{doctor.StatusOK, "Ready to run training", ""}
 	}

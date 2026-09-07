@@ -490,6 +490,21 @@ func checkPVC(ctx context.Context, cs kubernetes.Interface, ns string) Result {
 	const name = "Dataset volume (PVC)"
 	pvc, err := cluster.DiscoverSharedPVC(ctx, cs, ns)
 	if err != nil {
+		if strings.HasPrefix(err.Error(), cluster.PVCReadErrPrefix) {
+			// DiscoverSharedPVC separates a Forbidden/network/other READ failure
+			// (this prefix) from a PVC it read and found missing or unbound. A
+			// can't-read is not a measured "storage isn't available": reporting it
+			// as a Fail (and promoting that Fail over the wait-for-capacity Warn --
+			// backend#3248) would flip a healthy environment to exit 2 on an RBAC or
+			// timeout blip. Surface an honest can't-check the rollup drops to the
+			// Unknown tier instead.
+			return Result{
+				Name:   name,
+				Status: StatusWarn,
+				Detail: err.Error(),
+				Remedy: "Check the CLI can read PersistentVolumeClaims in " + ns + " (kubectl auth can-i get pvc -n " + ns + ").",
+			}
+		}
 		return Result{
 			Name:   name,
 			Status: StatusFail,
@@ -1135,6 +1150,14 @@ const HeldByRunningJob = "a running job holds the room"
 // that drifted would send a wedged pod back down the "just wait" path.
 const StuckJobPod = "a training pod is scheduled but not running"
 
+// CantReadImagePullSecret is the prefix of checkImagePull's can't-check Warn: the
+// image pull secret could not be READ (Forbidden / timeout / transient), as
+// opposed to read and found missing or malformed. Same discipline as the
+// prefixes above -- the rollup (summarizeDoctor) classifies on it to drop a
+// can't-read to the Unknown tier rather than a measured Fail promoted over the
+// wait-for-capacity Warn (backend#3248).
+const CantReadImagePullSecret = "could not read image pull secret"
+
 // cpuMemString renders a millicore/byte pair the way RESOURCE_REQUESTS reads
 // ("cpu=2, memory=8Gi"), so the free/held figures in a Node-capacity verdict
 // line up with the request printed beside them.
@@ -1181,6 +1204,21 @@ func checkImagePull(ctx context.Context, cs kubernetes.Interface, ns string, rel
 	for _, ref := range secrets {
 		sec, err := cs.CoreV1().Secrets(ns).Get(ctx, ref.Name, metav1.GetOptions{})
 		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				// Forbidden / timeout / transient API error — the secret was NOT
+				// READ, not proven absent. Reporting it as a measured Fail (and, in
+				// the rollup, promoting that Fail over the wait-for-capacity Warn --
+				// backend#3248) would flip a healthy environment to exit 2 on an RBAC
+				// or timeout blip, with a detail that falsely says "not found". A
+				// can't-check is honest: StatusWarn with a distinct prefix the rollup
+				// drops to the Unknown tier, never a training-blocking verdict.
+				return Result{
+					Name:   name,
+					Status: StatusWarn,
+					Detail: fmt.Sprintf("%s %q: %v", CantReadImagePullSecret, ref.Name, err),
+					Remedy: "Check the CLI can read secrets in " + ns + " (kubectl auth can-i get secrets -n " + ns + ").",
+				}
+			}
 			return Result{
 				Name:   name,
 				Status: StatusFail,
