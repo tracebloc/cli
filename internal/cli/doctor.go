@@ -492,6 +492,25 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — this machine is big enough, but the platform's own services have already claimed the room.",
 			fmt.Sprintf("Ask for less per training run, or give the machine more memory/CPU. Do NOT size runs to the machine here — that measures the machine's total, not what is free, so it would ask for MORE and leave the training stuck. `%s doctor --verbose` shows the exact numbers and the knob to turn.", launcher())}
+	// MEASURED training-blockers that can co-occur with a Pending pod held by a
+	// running job, so they are read BEFORE the Wait-Warn below (backend#3248,
+	// Bugbot Medium on #641). checkImagePull and checkPVC are
+	// INDEPENDENT of Pod health and Node capacity, so either can be Fail while
+	// `stuckPending && heldByJob` is also true — a pod Pending on an image it
+	// cannot pull, or beside a dataset volume that never bound, is a measured
+	// failure, not a wait. Below the Wait-Warn these Fails were shadowed: a node
+	// held by a job with any pod Pending past grace made `doctor` exit 0 (Warn)
+	// over an exit-2 failure. They sit above the stuck-Pending arm too — the same
+	// measured-beats-inferred rule that lets the Wait-Warn refute the Pending
+	// inference puts a measured cause ahead of it.
+	case by["Image pull secret"].Status == doctor.StatusFail:
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — the training images can't be pulled.",
+			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
+	case by["Dataset volume (PVC)"].Status == doctor.StatusFail:
+		ready = healthLine{doctor.StatusFail,
+			"Not ready — dataset storage isn't available.",
+			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
 	case stuckPending && heldByJob:
 		// A PENDING POD WHOSE CAUSE HAS BEEN MEASURED (Bugbot High on #639,
 		// backend#2870). This is the transient shortage's own symptom: a job is
@@ -509,11 +528,17 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		// cause -- the envelope fits this machine and a running job holds it --
 		// which refutes the inference, and a Fail here would exit 2 on healthy
 		// training (the Bugbot High on #628) while recommending a resize that
-		// changes nothing. The two arms that still outrank this one are measured:
-		// a Pod-health FAIL (crash-loop) and the OverCommitted Fail.
+		// changes nothing. The arms that still outrank this one are all MEASURED
+		// failures — a Pod-health FAIL (crash-loop), the OverCommitted Fail, and
+		// the image-pull-secret and dataset-volume Fails just above — because a
+		// measured training-blocker must not be hidden behind a wait (backend#3248:
+		// those two Fails used to sit BELOW this arm, so a Pending pod beside a
+		// running job made `doctor` exit 0 over a real, exit-2 failure).
 		//
 		// checkPods does not know WHY a pod is Pending, so a pod stuck on an
-		// image pull beside a running job would land here too; the remedy names
+		// image pull beside a running job could still reach this arm when the
+		// image-pull-secret probe itself is healthy (the secret exists, but the
+		// pull is slow or the registry is briefly unreachable); the remedy names
 		// what to do if the wait outlives the job rather than pretending the
 		// attribution is certain.
 		ready = healthLine{doctor.StatusWarn,
@@ -536,9 +561,11 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		// grace window is left to the stuck-Pending arm below, whose "usually not
 		// enough free compute, or an image that can't be pulled" wording is an
 		// honest age-based inference (a large first pull on a cold node CAN exceed
-		// the grace). Only the measured capacity Fails (OverCommitted) and a hard
-		// Pod-health crash-loop Fail outrank it. Its remedy is the OPPOSITE of the
-		// transient Warn's (inspect the pod, do NOT wait); the pod it names is one
+		// the grace). The arms that outrank it are all measured: a Pod-health
+		// crash-loop Fail, the OverCommitted Fail, and the image-pull-secret and
+		// dataset-volume Fails above (backend#3248 — those two sit above the
+		// wait-for-capacity Warn, hence above this arm too). Its remedy is the
+		// OPPOSITE of the transient Warn's (inspect the pod, do NOT wait); the pod it names is one
 		// `--verbose` away -- and PLAIN TERMS, no Kubernetes vocabulary, like its
 		// neighbours (the granular checkNodeFit remedy carries the `kubectl` form).
 		ready = healthLine{doctor.StatusFail,
@@ -555,14 +582,6 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — part of your secure environment can't start yet.",
 			fmt.Sprintf("Some pods are stuck starting — usually not enough free compute, or a training image that can't be pulled. %s Then re-run `%s doctor`; if it persists, email support@tracebloc.io with `%s doctor --diagnose`.", computeRemedy(runtime.GOOS), launcher(), launcher())}
-	case by["Image pull secret"].Status == doctor.StatusFail:
-		ready = healthLine{doctor.StatusFail,
-			"Not ready — the training images can't be pulled.",
-			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
-	case by["Dataset volume (PVC)"].Status == doctor.StatusFail:
-		ready = healthLine{doctor.StatusFail,
-			"Not ready — dataset storage isn't available.",
-			fmt.Sprintf("Email support@tracebloc.io with the output of `%s doctor --diagnose`.", launcher())}
 	case by["Node capacity"].Status == doctor.StatusFail:
 		ready = healthLine{doctor.StatusFail,
 			"Not ready — not enough free compute to start a training.",
@@ -633,6 +652,28 @@ func summarizeDoctor(results []doctor.Result, tok tokenState) (connected, ready 
 		// the OK default): training still runs via the jobs-manager's CPU fallback.
 		ready = healthLine{doctor.StatusUnknown,
 			"Ready to run training — couldn't check free compute (run with --verbose)", ""}
+	case by["Image pull secret"].Status == doctor.StatusWarn &&
+		strings.HasPrefix(by["Image pull secret"].Detail, doctor.CantReadImagePullSecret):
+		// checkImagePull can't-check: the secret (or the jobs-manager that names it)
+		// could not be READ, not read-and-found-missing. It carries no signal about
+		// whether images can be pulled, so it lands here in the Unknown tier — never
+		// the measured "images can't be pulled" Fail above, which is now promoted
+		// over the wait-for-capacity Warn and would flip a healthy environment to
+		// exit 2 on an RBAC blip (backend#3248, LukasWodka on #643).
+		//
+		// PLAIN TERMS, no Kubernetes vocabulary — "image pull secret" is jargon that
+		// belongs one --verbose away in renderDoctorDetails, so this line mirrors the
+		// Fail arm's "training images can't be pulled" wording (Bugbot on #643).
+		ready = healthLine{doctor.StatusUnknown,
+			"Ready to run training — couldn't check whether training images can be pulled (run with --verbose)", ""}
+	case by["Dataset volume (PVC)"].Status == doctor.StatusWarn &&
+		strings.HasPrefix(by["Dataset volume (PVC)"].Detail, cluster.PVCReadErrPrefix):
+		// checkPVC can't-check: the PVC could not be READ (Forbidden / network),
+		// not read-and-found-unbound. Same reasoning as the image-pull arm — a
+		// can't-read is no signal, so it stays in the Unknown tier rather than the
+		// measured "dataset storage isn't available" Fail above (backend#3248).
+		ready = healthLine{doctor.StatusUnknown,
+			"Ready to run training — couldn't check dataset storage (run with --verbose)", ""}
 	default:
 		ready = healthLine{doctor.StatusOK, "Ready to run training", ""}
 	}

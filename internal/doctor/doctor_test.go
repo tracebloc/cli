@@ -364,6 +364,18 @@ func TestCheckPVC(t *testing.T) {
 	if r := checkPVC(bg(), fake.NewClientset(), ns); r.Status != StatusFail {
 		t.Fatalf("missing PVC => %v, want fail", r.Status)
 	}
+	// backend#3248 (LukasWodka on #643): a PVC that could not be READ
+	// (Forbidden/network) is a can't-check, NOT a measured "unavailable" Fail.
+	// DiscoverSharedPVC wraps it with PVCReadErrPrefix; checkPVC must surface a
+	// StatusWarn so the rollup drops it to the Unknown tier rather than promoting
+	// a false Fail over the wait-for-capacity Warn.
+	unreadable := fake.NewClientset()
+	unreadable.PrependReactor("get", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("persistentvolumeclaims \"client-pvc\" is forbidden: RBAC")
+	})
+	if r := checkPVC(bg(), unreadable, ns); r.Status != StatusWarn || !strings.HasPrefix(r.Detail, cluster.PVCReadErrPrefix) {
+		t.Fatalf("unreadable PVC => %v (%q), want a can't-check Warn with the read-err prefix", r.Status, r.Detail)
+	}
 }
 
 func TestCheckProxy(t *testing.T) {
@@ -1297,6 +1309,37 @@ func TestCheckImagePull(t *testing.T) {
 		)
 		if r := checkImagePull(bg(), cs, ns, rel); r.Status != StatusFail {
 			t.Fatalf("=> %v (%q), want fail", r.Status, r.Detail)
+		}
+	})
+	// backend#3248 (LukasWodka on #643): a read failure (Forbidden/timeout) is a
+	// can't-check, NOT a measured "not found" Fail. Get returns the error but the
+	// secret's existence was never established — so this must be a StatusWarn with
+	// the can't-read prefix, or the rollup promotes a false Fail over the
+	// wait-for-capacity Warn and exits 2 on a healthy environment.
+	t.Run("secret unreadable (forbidden) -> can't-check Warn, not a false 'not found' Fail", func(t *testing.T) {
+		cs := fake.NewClientset(jmDepWithPullSecret("tb", "reg"))
+		cs.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("secrets \"reg\" is forbidden: RBAC")
+		})
+		r := checkImagePull(bg(), cs, ns, rel)
+		if r.Status != StatusWarn {
+			t.Fatalf("=> %v (%q), want a can't-check Warn on a read failure", r.Status, r.Detail)
+		}
+		if !strings.HasPrefix(r.Detail, CantReadImagePullSecret) {
+			t.Errorf("detail must carry the can't-read prefix so summarizeDoctor can classify it, got %q", r.Detail)
+		}
+		if strings.Contains(r.Detail, "not found") {
+			t.Errorf("a read failure must not be reported as 'not found', got %q", r.Detail)
+		}
+	})
+	// backend#3248 (Saqlain on #643): the OTHER can't-read path — the jobs-manager
+	// Deployment itself is unreadable — is also a can't-check, and must carry the
+	// same prefix so the rollup drops it to the Unknown tier instead of falling
+	// through to a false green ✔.
+	t.Run("jobs-manager unreadable -> can't-check Warn with the read prefix", func(t *testing.T) {
+		r := checkImagePull(bg(), fake.NewClientset(), ns, rel) // no jobs-manager Deployment
+		if r.Status != StatusWarn || !strings.HasPrefix(r.Detail, CantReadImagePullSecret) {
+			t.Fatalf("=> %v (%q), want a can't-check Warn carrying the read prefix", r.Status, r.Detail)
 		}
 	})
 }

@@ -572,6 +572,61 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 	})
 
+	// backend#3248 (Bugbot Medium on #641). The Wait-Warn arm above is an
+	// INFERENCE that a Pending pod beside a running job is only waiting for the
+	// room. checkImagePull and checkPVC are MEASURED and independent of
+	// Pod health and Node capacity, so either can be Fail in that exact state — a
+	// missing pull secret, or a dataset volume that never bound, beside a running
+	// job. The Wait-Warn used to sit ABOVE those Fail arms, so the measured failure
+	// was shadowed and `doctor` exited 0 (Warn) instead of 2 (Fail). Pin that a
+	// measured Fail wins the precedence, while the Wait-Warn still applies when
+	// there is no measured Fail.
+	t.Run("a measured Fail beside a running job outranks the wait-for-capacity Warn", func(t *testing.T) {
+		// The full waiting_for_capacity state: a running job holds the room AND a
+		// pod is Pending past grace — together the arm that returns the Wait-Warn.
+		// Detail built from the producer's constant, same discipline as the arm.
+		waiting := withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish")
+		waiting = withDetail(waiting, "Pod health", doctor.StatusWarn,
+			"Pending > 5m0s: [train-second]")
+		// allOK omits "Image pull secret" (a fixture shortcut; Run() does emit it),
+		// and `with` only mutates an entry that already exists — so add it OK here,
+		// or the image-pull case below would silently stay unset and never flip.
+		waiting = append(waiting, res("Image pull secret", doctor.StatusOK))
+
+		// Precondition: with no measured Fail, that state is the exit-0 Wait-Warn.
+		// Assert the Wait-Warn's OWN top line, not merely "a Warn" (LukasWodka on
+		// #643): the bare heldByJob arm below is also a Warn, so a status-only check
+		// would still pass if the reorder were undone and the state fell through to
+		// it — leaving the exit-0 → exit-2 claim this test exists for unpinned.
+		if _, r := summarizeDoctor(waiting, tokenOK); r.status != doctor.StatusWarn ||
+			!strings.Contains(r.text, "the next one is waiting for it to finish") {
+			t.Fatalf("precondition: the wait-for-capacity state should be the Wait-Warn, got %v (%q)", r.status, r.text)
+		}
+
+		// Each measured Fail, dropped into that same state, must win — top line and
+		// exit code both. Per-case subtests: map order is randomized, so a shared
+		// loop with t.Fatalf would report one nondeterministic case and hide the other.
+		measured := map[string]struct{ name, wantText string }{
+			"image pull secret Fail": {"Image pull secret", "images can't be pulled"},
+			"dataset volume Fail":    {"Dataset volume (PVC)", "dataset storage isn't available"},
+		}
+		for label, m := range measured {
+			t.Run(label, func(t *testing.T) {
+				c, r := summarizeDoctor(with(waiting, m.name, doctor.StatusFail), tokenOK)
+				if r.status != doctor.StatusFail {
+					t.Fatalf("a measured Fail beside a running job must win — the Wait-Warn shadowed it and doctor exited 0 over a real failure, got %v (%q)", r.status, r.text)
+				}
+				if !strings.Contains(r.text, m.wantText) {
+					t.Errorf("want the measured Fail's own top line %q, got %q", m.wantText, r.text)
+				}
+				if v := doctorVerdict(c.status, r.status); v != doctor.StatusFail {
+					t.Errorf("the verdict must own the Fail (exit 2), not the wait Warn (exit 0), got %v", v)
+				}
+			})
+		}
+	})
+
 	t.Run("a Pending pod with NO running job is still the stuck-Pending Fail", func(t *testing.T) {
 		// The other side: the arm above is scoped to the co-occurrence. A pod
 		// Pending on a machine where nothing holds the room is the generic,
@@ -580,6 +635,28 @@ func TestSummarizeDoctor(t *testing.T) {
 			"Pending > 5m0s: [trainer-x]"), tokenOK)
 		if r.status != doctor.StatusFail || !strings.Contains(r.remedy, "resources set max") {
 			t.Errorf("want the generic stuck-Pending Fail with the sizing remedy, got %v %q", r.status, r.remedy)
+		}
+	})
+
+	t.Run("a measured Fail with a Pending pod but NO running job still outranks the stuck-Pending inference", func(t *testing.T) {
+		// backend#3248, the no-heldByJob half of the reorder. Moving the measured
+		// Fails above the Wait-Warn necessarily moves them above the plain
+		// stuck-Pending Fail too (the Wait-Warn sits above stuck-Pending,
+		// backend#2870). Both are exit-2, so the observable change is which top
+		// line and remedy the operator sees — the measured image-pull cause, not
+		// the generic "usually not enough free compute" guess. Pin it, matching
+		// this file's discipline of nailing every ordering a reshuffle could undo.
+		results := withDetail(allOK, "Pod health", doctor.StatusWarn, "Pending > 5m0s: [trainer-x]")
+		results = append(results, res("Image pull secret", doctor.StatusFail))
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusFail {
+			t.Fatalf("a measured image-pull Fail must stay a Fail, got %v (%q)", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "images can't be pulled") {
+			t.Errorf("the measured image-pull cause must win over the generic stuck-Pending guess, got %q", r.text)
+		}
+		if strings.Contains(r.remedy, "resources set max") {
+			t.Errorf("a measured image-pull Fail must not send the operator to resize compute: %q", r.remedy)
 		}
 	})
 
@@ -636,6 +713,67 @@ func TestSummarizeDoctor(t *testing.T) {
 		}
 		if v := doctorVerdict(c.status, r.status); v != doctor.StatusFail {
 			t.Errorf("verdict must be a Fail (exit 2), got %v", v)
+		}
+	})
+
+	// backend#3248 (LukasWodka on #643): checkImagePull / checkPVC now return a
+	// can't-check Warn (with a distinct prefix) when the secret / PVC could not be
+	// READ, distinct from a measured missing / unbound Fail. A can't-read carries
+	// no signal, so it must roll up to the Unknown tier — never the promoted
+	// measured Fail, which would flip a healthy environment to exit 2 on an RBAC blip.
+	t.Run("a can't-READ image-pull or PVC is an honest can't-check, not the promoted Fail", func(t *testing.T) {
+		imgCantRead := append(append([]doctor.Result{}, allOK...),
+			doctor.Result{Name: "Image pull secret", Status: doctor.StatusWarn, Detail: doctor.CantReadImagePullSecret + ` "reg": secrets is forbidden`})
+		if _, r := summarizeDoctor(imgCantRead, tokenOK); r.status != doctor.StatusUnknown || !strings.Contains(r.text, "training images can be pulled") {
+			t.Errorf("a can't-read image-pull must roll up to a plain-terms can't-check, got %v (%q)", r.status, r.text)
+		}
+		pvcCantRead := withDetail(allOK, "Dataset volume (PVC)", doctor.StatusWarn,
+			cluster.PVCReadErrPrefix+"ns/client-pvc: is forbidden")
+		if _, r := summarizeDoctor(pvcCantRead, tokenOK); r.status != doctor.StatusUnknown || !strings.Contains(r.text, "dataset storage") {
+			t.Errorf("a can't-read PVC must roll up to a can't-check, got %v (%q)", r.status, r.text)
+		}
+	})
+
+	// The exact regression from thread 1: a running job holds the room, the next
+	// pod is Pending (the wait-for-capacity state), AND the pull secret could not
+	// be read. Because that read failure is now a can't-check (not a Fail), it no
+	// longer promotes over the Wait-Warn — the operator is told to wait, not handed
+	// a false "images can't be pulled" exit 2 on a healthy environment.
+	t.Run("a can't-READ secret beside a running job stays the wait Warn, not a false exit-2", func(t *testing.T) {
+		results := withDetail(allOK, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish")
+		results = withDetail(results, "Pod health", doctor.StatusWarn, "Pending > 5m0s: [train-second]")
+		results = append(results, doctor.Result{Name: "Image pull secret", Status: doctor.StatusWarn, Detail: doctor.CantReadImagePullSecret + ` "reg": secrets is forbidden`})
+		c, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusWarn || !strings.Contains(r.text, "waiting for it") {
+			t.Fatalf("a can't-read secret must not flip the wait-for-capacity Warn to a Fail, got %v (%q)", r.status, r.text)
+		}
+		if v := doctorVerdict(c.status, r.status); v == doctor.StatusFail {
+			t.Errorf("a read blip must not make doctor exit 2 on a healthy environment, got verdict %v", v)
+		}
+	})
+
+	// backend#3248 thread 3 (LukasWodka on #643). When the machine over-commits AND
+	// a running job holds the room AND the next pod is Pending, both findings are
+	// Warns (exit 0). The plain-heldByJob case puts the over-commit Warn first
+	// ("a machine that lies about its size outranks a running job"), but the
+	// Pending variant cannot: the Wait-Warn sits above the stuck-Pending Fail
+	// (backend#2870) and the over-commit Warn must stay below that Fail (a Warn may
+	// not shadow a Fail), so by transitivity the Wait-Warn wins here. It is
+	// message-only (both exit 0) and pre-existing; lifting it would need a dedicated
+	// arm, not a reorder. Pin the current behavior so the gap is recorded, not implied.
+	t.Run("over-commit Warn is shadowed by the wait-for-capacity Warn in the Pending variant (known, message-only)", func(t *testing.T) {
+		results := withDetail(allOK, "Machine capacity", doctor.StatusWarn,
+			"Docker VM 7.75 GiB → 2 nodes claiming 15.50 GiB — Kubernetes believes 2.00× the memory this machine has")
+		results = withDetail(results, "Node capacity", doctor.StatusWarn,
+			doctor.HeldByRunningJob+": a Ready node fits a training job (cpu=1, memory=4864Mi) beside the platform's own pods, but running job(s) on n1 hold cpu=1, memory=4864Mi right now, so the next run waits Pending until they finish")
+		results = withDetail(results, "Pod health", doctor.StatusWarn, "Pending > 5m0s: [train-second]")
+		_, r := summarizeDoctor(results, tokenOK)
+		if r.status != doctor.StatusWarn {
+			t.Fatalf("both findings are Warns → exit 0, got %v (%q)", r.status, r.text)
+		}
+		if !strings.Contains(r.text, "waiting for it") {
+			t.Errorf("known message-only gap: the Pending variant shows the wait-for-capacity Warn, not the over-commit Warn — if a dedicated arm is added, update this pin, got %q", r.text)
 		}
 	})
 
