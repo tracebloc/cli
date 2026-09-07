@@ -373,8 +373,8 @@ func TestCheckPVC(t *testing.T) {
 	unreadable.PrependReactor("get", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("persistentvolumeclaims \"client-pvc\" is forbidden: RBAC")
 	})
-	if r := checkPVC(bg(), unreadable, ns); r.Status != StatusWarn || !strings.HasPrefix(r.Detail, cluster.PVCReadErrPrefix) {
-		t.Fatalf("unreadable PVC => %v (%q), want a can't-check Warn with the read-err prefix", r.Status, r.Detail)
+	if r := checkPVC(bg(), unreadable, ns); r.Status != StatusWarn || !r.CantCheck || !strings.HasPrefix(r.Detail, cluster.PVCReadErrPrefix) {
+		t.Fatalf("unreadable PVC => %v CantCheck=%v (%q), want a can't-check Warn (marker set) with the read-err prefix", r.Status, r.CantCheck, r.Detail)
 	}
 }
 
@@ -837,6 +837,12 @@ func TestCheckNodeFitFreeMemory(t *testing.T) {
 		if r.Status != StatusWarn || !strings.HasPrefix(r.Detail, HeldByRunningJob) {
 			t.Fatalf("=> %v (%q), want the transient Warn with prefix %q", r.Status, r.Detail, HeldByRunningJob)
 		}
+		// A running job holding the room is a real soft finding, NOT a can't-check —
+		// it must not set CantCheck, or the rollup would drop it to the Unknown tier
+		// instead of its own "waiting for it" Warn (backend#3282).
+		if r.CantCheck {
+			t.Errorf("a HeldByRunningJob Warn must not be marked CantCheck: %q", r.Detail)
+		}
 	})
 
 	// The over-commit message names the SHORT dimension, not always memory (Bugbot).
@@ -909,13 +915,14 @@ func TestCheckNodeFitFreeMemory(t *testing.T) {
 			return true, nil, errors.New("pods is forbidden")
 		})
 		r := checkNodeFit(bg(), cs, gpu)
-		if r.Status != StatusWarn {
-			t.Fatalf("=> %v (%q), want warn", r.Status, r.Detail)
+		if r.Status != StatusWarn || !r.CantCheck {
+			t.Fatalf("=> %v CantCheck=%v (%q), want a can't-check warn (marker set)", r.Status, r.CantCheck, r.Detail)
 		}
-		// PREFIX, not Contains: that is what the rollup matches on, so a detail
-		// merely mentioning the phrase somewhere would still green the run.
+		// The prefix is now the --verbose detail wording (the rollup classifies on
+		// the CantCheck marker asserted above, not this string); keep asserting it so
+		// the "allocatable only" caveat text the producer emits does not drift.
 		if !strings.HasPrefix(r.Detail, CantVerifyFreeCompute) {
-			t.Fatalf("detail must START with %q so summarizeDoctor classifies it as a can't-check, got %q",
+			t.Fatalf("detail must START with %q for the --verbose breakdown, got %q",
 				CantVerifyFreeCompute, r.Detail)
 		}
 		// The soft GPU fact is not lost, it is just no longer the whole story.
@@ -1322,11 +1329,11 @@ func TestCheckImagePull(t *testing.T) {
 			return true, nil, errors.New("secrets \"reg\" is forbidden: RBAC")
 		})
 		r := checkImagePull(bg(), cs, ns, rel)
-		if r.Status != StatusWarn {
-			t.Fatalf("=> %v (%q), want a can't-check Warn on a read failure", r.Status, r.Detail)
+		if r.Status != StatusWarn || !r.CantCheck {
+			t.Fatalf("=> %v CantCheck=%v (%q), want a can't-check Warn (marker set) on a read failure", r.Status, r.CantCheck, r.Detail)
 		}
 		if !strings.HasPrefix(r.Detail, CantReadImagePullSecret) {
-			t.Errorf("detail must carry the can't-read prefix so summarizeDoctor can classify it, got %q", r.Detail)
+			t.Errorf("detail must carry the can't-read prefix for the --verbose breakdown, got %q", r.Detail)
 		}
 		if strings.Contains(r.Detail, "not found") {
 			t.Errorf("a read failure must not be reported as 'not found', got %q", r.Detail)
@@ -1338,8 +1345,8 @@ func TestCheckImagePull(t *testing.T) {
 	// through to a false green ✔.
 	t.Run("jobs-manager unreadable -> can't-check Warn with the read prefix", func(t *testing.T) {
 		r := checkImagePull(bg(), fake.NewClientset(), ns, rel) // no jobs-manager Deployment
-		if r.Status != StatusWarn || !strings.HasPrefix(r.Detail, CantReadImagePullSecret) {
-			t.Fatalf("=> %v (%q), want a can't-check Warn carrying the read prefix", r.Status, r.Detail)
+		if r.Status != StatusWarn || !r.CantCheck || !strings.HasPrefix(r.Detail, CantReadImagePullSecret) {
+			t.Fatalf("=> %v CantCheck=%v (%q), want a can't-check Warn (marker set) carrying the read prefix", r.Status, r.CantCheck, r.Detail)
 		}
 	})
 }

@@ -88,6 +88,16 @@ type Result struct {
 	// container runtime / network) needs a different fix than a reachable cluster
 	// with no tracebloc installed. Zero (ReachOK) on every other check.
 	Reach ReachState
+
+	// CantCheck marks a StatusWarn that is a CAN'T-CHECK — the check could not
+	// READ its subject (RBAC/timeout/unlistable), so its Warn carries no signal
+	// about whether training can run. It is the structural signal the rollup
+	// (summarizeDoctor) keys on to drop such a result into the Unknown tier, in
+	// place of matching a per-probe prefix in Detail across package boundaries
+	// (backend#3282). A StatusWarn that is a real soft finding — an over-committed
+	// machine, a running job holding the room, the GPU CPU-fallback — leaves this
+	// false, so it keeps its own rollup arm rather than reading as a can't-check.
+	CantCheck bool
 }
 
 // ReachState classifies the "Cluster reachable" outcome so the cli summary can
@@ -338,10 +348,11 @@ func checkPods(ctx context.Context, cs kubernetes.Interface, ns string) Result {
 	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return Result{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "could not list pods: " + err.Error(),
-			Remedy: "Ensure your kubeconfig user can list pods in " + ns + ".",
+			Name:      name,
+			Status:    StatusWarn,
+			Detail:    "could not list pods: " + err.Error(),
+			Remedy:    "Ensure your kubeconfig user can list pods in " + ns + ".",
+			CantCheck: true,
 		}
 	}
 
@@ -454,10 +465,11 @@ func checkRestartHistory(ctx context.Context, cs kubernetes.Interface, ns string
 	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return Result{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "could not list pods: " + err.Error(),
-			Remedy: "Ensure your kubeconfig user can list pods in " + ns + ".",
+			Name:      name,
+			Status:    StatusWarn,
+			Detail:    "could not list pods: " + err.Error(),
+			Remedy:    "Ensure your kubeconfig user can list pods in " + ns + ".",
+			CantCheck: true,
 		}
 	}
 
@@ -499,10 +511,11 @@ func checkPVC(ctx context.Context, cs kubernetes.Interface, ns string) Result {
 			// timeout blip. Surface an honest can't-check the rollup drops to the
 			// Unknown tier instead.
 			return Result{
-				Name:   name,
-				Status: StatusWarn,
-				Detail: err.Error(),
-				Remedy: "Check the CLI can read PersistentVolumeClaims in " + ns + " (kubectl auth can-i get pvc -n " + ns + ").",
+				Name:      name,
+				Status:    StatusWarn,
+				Detail:    err.Error(),
+				Remedy:    "Check the CLI can read PersistentVolumeClaims in " + ns + " (kubectl auth can-i get pvc -n " + ns + ").",
+				CantCheck: true,
 			}
 		}
 		return Result{
@@ -664,10 +677,11 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	cpuReq, memReq, ok := parseCPUMem(env["RESOURCE_REQUESTS"])
 	if !ok {
 		return Result{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit",
-			Remedy: "kubectl set env deploy/<release>-jobs-manager --list | grep RESOURCE_REQUESTS",
+			Name:      name,
+			Status:    StatusWarn,
+			Detail:    "couldn't read RESOURCE_REQUESTS from jobs-manager — skipping node-fit",
+			Remedy:    "kubectl set env deploy/<release>-jobs-manager --list | grep RESOURCE_REQUESTS",
+			CantCheck: true,
 		}
 	}
 	gpuName, gpuReq, gpuRequested := parseGPU(env["GPU_REQUESTS"])
@@ -676,10 +690,11 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return Result{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "could not list nodes: " + err.Error(),
-			Remedy: "Ensure your kubeconfig user can list nodes.",
+			Name:      name,
+			Status:    StatusWarn,
+			Detail:    "could not list nodes: " + err.Error(),
+			Remedy:    "Ensure your kubeconfig user can list nodes.",
+			CantCheck: true,
 		}
 	}
 
@@ -1024,10 +1039,11 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		// can't-check FIRST because the rollup matches on the prefix.
 		if !freeKnown {
 			return Result{
-				Name:   name,
-				Status: StatusWarn,
-				Detail: fmt.Sprintf("%s, so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here. Also, no single Ready node satisfies cpu+memory AND %s, so GPU jobs would rely on the CPU fallback (needs %s)", CantVerifyFreeCompute, gpuName, req),
-				Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity. If GPU training is expected, also ensure one node has both the compute and the GPU capacity, with its device plugin.",
+				Name:      name,
+				Status:    StatusWarn,
+				Detail:    fmt.Sprintf("%s, so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here. Also, no single Ready node satisfies cpu+memory AND %s, so GPU jobs would rely on the CPU fallback (needs %s)", CantVerifyFreeCompute, gpuName, req),
+				Remedy:    "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity. If GPU training is expected, also ensure one node has both the compute and the GPU capacity, with its device plugin.",
+				CantCheck: true,
 			}
 		}
 		return Result{
@@ -1103,15 +1119,17 @@ func checkNodeFit(ctx context.Context, cs kubernetes.Interface, env map[string]s
 		if !freeKnown {
 			return Result{
 				Name: name,
-				// DISTINCT can't-check PREFIX so the rollup (summarizeDoctor in
-				// cli/doctor.go) classifies this as "couldn't check free compute"
-				// rather than greening it: it matches Node-capacity can't-checks by
-				// prefix, and "a Ready node can schedule..." would fall through to
-				// "Ready to run training" at exit 0 (Bugbot High). Keep the
-				// "allocatable only" phrase the caveat and its test rely on.
-				Status: StatusWarn,
-				Detail: CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here (the node fits the envelope on allocatable: " + req + ")",
-				Remedy: "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity.",
+				// CAN'T-CHECK: the pod list was unreadable, so the fit above was
+				// against allocatable, not free. CantCheck routes this to the
+				// rollup's Unknown tier (summarizeDoctor, backend#3282); without it
+				// "a Ready node can schedule..." would green at exit 0 (Bugbot High).
+				// The CantVerifyFreeCompute prefix and the "allocatable only" phrase
+				// stay for the --verbose detail the caveat and its test rely on — they
+				// are no longer what the rollup classifies on.
+				Status:    StatusWarn,
+				Detail:    CantVerifyFreeCompute + ", so free compute could not be verified — checked against allocatable only; an over-committed control plane would be invisible here (the node fits the envelope on allocatable: " + req + ")",
+				Remedy:    "Ensure your kubeconfig user can list pods cluster-wide, then re-run doctor to verify free capacity.",
+				CantCheck: true,
 			}
 		}
 		return Result{Name: name, Status: StatusOK, Detail: detail}
@@ -1191,16 +1209,17 @@ func checkImagePull(ctx context.Context, cs kubernetes.Interface, ns string, rel
 	dep := findDeployment(ctx, cs, ns, release, "jobs-manager")
 	if dep == nil {
 		// The jobs-manager Deployment could not be read, so the pull secret can't
-		// be resolved — a can't-check, not a clean result. It carries the same
-		// CantReadImagePullSecret prefix as the unreadable-secret path below so the
-		// rollup drops BOTH to the Unknown tier; without the prefix this Warn fell
-		// through to the OK default and reported a false green ✔ (Saqlain + LukasWodka
-		// on #643 — fix the class, not just the secret-read instance).
+		// be resolved — a can't-check, not a clean result. Like the unreadable-secret
+		// path below it sets CantCheck, so the rollup drops BOTH to the Unknown tier;
+		// without it this Warn fell through to the OK default and reported a false
+		// green ✔ (Saqlain + LukasWodka on #643 — fix the class, not just the
+		// secret-read instance).
 		return Result{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: CantReadImagePullSecret + ": couldn't read jobs-manager to resolve it — skipping",
-			Remedy: "Check a tracebloc client is installed in " + ns + ".",
+			Name:      name,
+			Status:    StatusWarn,
+			Detail:    CantReadImagePullSecret + ": couldn't read jobs-manager to resolve it — skipping",
+			Remedy:    "Check a tracebloc client is installed in " + ns + ".",
+			CantCheck: true,
 		}
 	}
 	secrets := dep.Spec.Template.Spec.ImagePullSecrets
@@ -1216,13 +1235,14 @@ func checkImagePull(ctx context.Context, cs kubernetes.Interface, ns string, rel
 				// the rollup, promoting that Fail over the wait-for-capacity Warn --
 				// backend#3248) would flip a healthy environment to exit 2 on an RBAC
 				// or timeout blip, with a detail that falsely says "not found". A
-				// can't-check is honest: StatusWarn with a distinct prefix the rollup
-				// drops to the Unknown tier, never a training-blocking verdict.
+				// can't-check is honest: a StatusWarn that sets CantCheck so the rollup
+				// drops it to the Unknown tier, never a training-blocking verdict.
 				return Result{
-					Name:   name,
-					Status: StatusWarn,
-					Detail: fmt.Sprintf("%s %q: %v", CantReadImagePullSecret, ref.Name, err),
-					Remedy: "Check the CLI can read secrets in " + ns + " (kubectl auth can-i get secrets -n " + ns + ").",
+					Name:      name,
+					Status:    StatusWarn,
+					Detail:    fmt.Sprintf("%s %q: %v", CantReadImagePullSecret, ref.Name, err),
+					Remedy:    "Check the CLI can read secrets in " + ns + " (kubectl auth can-i get secrets -n " + ns + ").",
+					CantCheck: true,
 				}
 			}
 			return Result{
