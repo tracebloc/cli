@@ -290,8 +290,11 @@ func TestCopyCatalog(t *testing.T) {
 		}
 	}
 	// Connected + readiness unknown: Pod health warns with a list failure, which
-	// summarizeDoctor maps to an honest "couldn't check your workloads".
-	cantCheck := []doctor.Result{{Name: "Pod health", Status: doctor.StatusWarn, Detail: "could not list pods: forbidden"}}
+	// summarizeDoctor maps to an honest "couldn't check your workloads". CantCheck
+	// is the marker the producer (checkPods) now sets on a can't-read Warn, and the
+	// rollup classifies on it (backend#3282) — without it this fixture reads as a
+	// stuck-Pending Fail.
+	cantCheck := []doctor.Result{{Name: "Pod health", Status: doctor.StatusWarn, CantCheck: true, Detail: "could not list pods: forbidden"}}
 	doctorFile := doc(
 		"tb doctor — is my secure environment healthy?",
 		"What you see when you run `tb doctor`. The two rollup lines (Connected, Ready)\nplus a verdict are shown below for the healthy and the can't-fully-check cases.\nThe failure variants (Not connected — …, Not ready — …) and their remedies vary\nwith the reachability classification and embed the launcher name, so the full set\nis indexed in zz-all-strings.golden. --verbose adds a Kubernetes breakdown\n(context/server/namespace + each granular check); those strings are in the\nbackstop too.",

@@ -10,7 +10,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // The numbers this ticket was measured on: k3d v5.9.0 / k3s v1.35.5 / Docker
@@ -325,6 +327,59 @@ func TestMachineChain_OverRequestedNeverGoesNegative(t *testing.T) {
 	got := checkMachineChain(bg(), cs, localAPI, fixedVM(10, 8*(1<<30)), noHost())
 	if !strings.Contains(got.Detail, "0 GiB unrequested") {
 		t.Fatalf("over-requested should floor at 0, got %q", got.Detail)
+	}
+}
+
+// ── backend#2870: the fourth level must not print a figure it did not measure ─
+
+func podsForbidden(k8stesting.Action) (bool, runtime.Object, error) {
+	return true, nil, errors.New("pods is forbidden")
+}
+
+func TestMachineChain_UnreadablePodListIsNotAGreen(t *testing.T) {
+	// requestedMemory used to swallow a list failure into 0, so the chain
+	// printed the WHOLE VM as "unrequested" -- the most optimistic figure
+	// possible -- on exactly the clusters where nothing had been measured, and
+	// the check went ✔. The ticket is about a computed-and-not-compared free
+	// figure; a computed-from-nothing one is the same fail-open.
+	cs := fake.NewClientset(k3dNode("k3d-t-server-0", "10", measuredNodeMem))
+	cs.PrependReactor("list", "pods", podsForbidden)
+	got := checkMachineChain(bg(), cs, localAPI, fixedVM(measuredVMCores, measuredVMMem), noHost())
+	if got.Status == StatusOK {
+		t.Fatalf("unreadable pod list => OK (%q); the free level was not measured", got.Detail)
+	}
+	if got.Status != StatusUnknown {
+		t.Fatalf("unreadable pod list => %v (%q), want unknown", got.Status, got.Detail)
+	}
+	if !strings.Contains(got.Detail, "pods is forbidden") {
+		t.Errorf("detail should carry the read error, got %q", got.Detail)
+	}
+	if strings.Contains(got.Detail, "7.75 GiB unrequested") {
+		t.Errorf("the whole VM was printed as free without a measurement: %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "unknown") {
+		t.Errorf("the fourth level should read as unknown, got %q", got.Detail)
+	}
+	if got.Remedy == "" {
+		t.Error("an unmeasured level should say how to make it measurable")
+	}
+}
+
+func TestMachineChain_OverCommitStillWarnsWithoutAPodList(t *testing.T) {
+	// The invariant this check exists for (sum(node capacity) <= VM) needs no
+	// pod list. An unreadable one must not demote a found double-count to
+	// "unknown" -- the same no-shadowing rule the rollup follows.
+	cs := fake.NewClientset(
+		k3dNode("k3d-tracebloc-server-0", "10", measuredNodeMem),
+		k3dNode("k3d-tracebloc-agent-0", "10", measuredNodeMem),
+	)
+	cs.PrependReactor("list", "pods", podsForbidden)
+	got := checkMachineChain(bg(), cs, localAPI, fixedVM(measuredVMCores, measuredVMMem), noHost())
+	if got.Status != StatusWarn {
+		t.Fatalf("double-count with unreadable pods => %v (%q), want warn", got.Status, got.Detail)
+	}
+	if !strings.Contains(got.Detail, "2.00×") || !strings.Contains(got.Detail, "unknown") {
+		t.Errorf("want the ratio AND the unknown fourth level, got %q", got.Detail)
 	}
 }
 
