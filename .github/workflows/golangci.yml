@@ -40,8 +40,8 @@ jobs:
     # ride the same exit path. History of the advisory era (the
     # --issues-exit-code=0 flag, why job-level continue-on-error was
     # not the tool) is in the #423/#426 discussions if you need it.
-    # Final step of the flip = marking this check required in branch
-    # protection (backend#1305 / epic #930).
+    # The flip is complete: `golangci-lint` is listed in develop's required
+    # status checks (branch protection, read via the API on 2026-09-09).
     # ==================================================================
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,15 +52,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Both versions pinned for reproducibility, same policy as the
-      # standalone tools in build.yml (#127). golangci-lint v2.12.2 is
-      # built with Go 1.26 (required: go.mod says `go 1.26.0`; v1-era
-      # binaries can't typecheck this module). Bump deliberately, and
-      # keep the version in step with the format expectations noted in
-      # .golangci.yml AND with GOLANGCI_LINT_VERSION in the Makefile
-      # (make lint-full runs the same pinned version -- the local/CI
-      # mirror depends on the two never drifting).
+      # The golangci-lint version is NOT restated here. It is declared once,
+      # as GOLANGCI_LINT_VERSION in the Makefile (`make lint-full` runs that
+      # same version locally), read by the step below and fed to the action.
+      # The two used to be held in step by a comment asking people to bump
+      # both; scripts/check-tool-pins.sh now reddens the Lint job if a
+      # literal `version:` comes back on this action. The action is kept
+      # (rather than `make lint-full`) for its result cache and annotations.
+      #
+      # Whatever version the Makefile names must be a v2-era build (go.mod
+      # says `go 1.26.0`; v1-era binaries can't typecheck this module) and
+      # match the format expectations noted in .golangci.yml. Bump deliberately.
+      - name: Read GOLANGCI_LINT_VERSION from the Makefile
+        id: pin
+        run: |
+          v="$(make -s print-GOLANGCI_LINT_VERSION)"
+          if [ -z "$v" ]; then
+            echo "::error::GOLANGCI_LINT_VERSION is empty in the Makefile — refusing to run an unpinned golangci-lint."
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "golangci-lint $v (from Makefile)"
+
       - name: golangci-lint run (.golangci.yml)
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.12.2
+          version: ${{ steps.pin.outputs.version }}

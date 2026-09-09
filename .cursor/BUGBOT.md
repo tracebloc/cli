@@ -13,8 +13,10 @@ Two things make this repo unusual and should shape every finding:
 1. **Its exit codes are a scripting contract** — customers branch on them
    (`internal/cli/exitcodes.go`: "the numeric values are FROZEN").
 2. **`make ci` mirrors CI exactly.** The `Makefile` header states it outright: "divergence
-   between local and CI is the bug this file exists to prevent." Tool versions are pinned in
-   lockstep with `.github/workflows/build.yml`.
+   between local and CI is the bug this file exists to prevent." Tool versions are declared
+   once, in the `Makefile`; the workflows call `make lint` / `make fmt-check` /
+   `make vulncheck` and `golangci.yml` reads its pin via `make print-GOLANGCI_LINT_VERSION`.
+   `scripts/check-tool-pins.sh` fails the Lint job if a workflow restates one.
 
 ## Always flag
 
@@ -128,11 +130,18 @@ Two things make this repo unusual and should shape every finding:
 
 ## Known non-issues — do not flag
 
-- **`.golangci.yml` does not gate CI.** `golangci-lint` is never invoked in a workflow (its
-  `staticcheck`/`unused` are disabled there for runner OOM reasons); the blocking Lint job runs
-  pinned standalone binaries — `errcheck`, `gofmt -s`, `goimports`, `ineffassign`, `misspell`,
-  `staticcheck`, plus `deadcode-check.sh`, `file-budget.sh`, `check-style.sh`. Don't infer
-  coverage from that file.
+- **`.golangci.yml` is one of two lint gates, not the only one.** `golangci.yml` runs it
+  (blocking exit-code check `golangci-lint`; `staticcheck`/`unused` are disabled there for
+  runner OOM reasons). The blocking Lint job in `build.yml` runs the standalone set via
+  `make lint` — `errcheck`, `ineffassign`, `misspell`, `staticcheck` — plus `make fmt-check`
+  (`gofmt -s`, `goimports`), `deadcode-check.sh`, `file-budget.sh`, `check-style.sh`,
+  `check-tool-pins.sh`.
+  Don't infer the full lint coverage from either file alone.
+- **`build.yml`'s Build job is three legs (linux/amd64 + windows/amd64 + darwin/arm64) on
+  purpose.** The 8-target cross-compile lives only in `release.yml`; do not flag the smaller
+  matrix as a missing platform, and do not propose re-adding legs "to keep in lock-step" —
+  there is deliberately no second copy. The job comment names what each of the three tells
+  us per commit; read it before proposing a fourth.
 - **The two formatters run via `make fmt-check`, not inline in the workflow** (cli#549), and
   they scope to `git ls-files '*.go'` rather than `.`. Both are deliberate: `.` walked untracked
   scratch directories, and one definition of the file set is what stops local and CI
