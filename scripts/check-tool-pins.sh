@@ -117,15 +117,33 @@ for row in "${TOOLS[@]}"; do
   fi
 
   # Shape 2: a literal `version:` input on the tool's GitHub action. The state
-  # machine is one step wide: a `uses:` of the action arms it, the next step
-  # (`- name:` / `- uses:` at any indent) disarms it, and a `version:` whose
-  # value starts with a digit (optionally `v`-prefixed) while armed is a copy.
-  # `${{ ... }}` values do not start with a digit and so are not copies.
+  # machine is one step wide and indentation-aware:
+  #
+  #   - a `uses:` of the action ARMS it and records the column of the `uses:`
+  #     key (the same column for `- uses:` and for `uses:` under `- name:`,
+  #     which is where the step's sibling keys `with:`/`id:`/`name:` sit);
+  #   - any later non-blank, non-comment line SHALLOWER than that column is a
+  #     sibling step (`- name:` / `- uses:`) or a parent key and DISARMS it.
+  #     YAML list items inside the step's own `with:` block (`args:` items) are
+  #     deeper and do not — disarming on any `- ` line let a literal `version:`
+  #     after such a list pass clean;
+  #   - state resets at every file boundary (FNR == 1), so a file that ends on
+  #     the action's `uses:` line cannot arm the next file in sort order;
+  #   - while armed, a `version:` whose value is not a `${{ ... }}` expression
+  #     is a copy — any literal, not just a digit-leading one. `latest` is both
+  #     an un-pinning and a restatement the action honors.
   if [[ -n "$action" ]]; then
     action_offenders="$(awk -v action="$action" '
-      /^[[:space:]]*-[[:space:]]/ { armed = 0 }
-      index($0, "uses:") && index($0, action "@") { armed = 1; next }
-      armed && /^[[:space:]]*version:[[:space:]]*v?[0-9]/ { printf "%s:%d:%s\n", FILENAME, FNR, $0 }
+      FNR == 1 { armed = 0 }
+      /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+      { match($0, /^[[:space:]]*/); ind = RLENGTH }
+      armed && ind < key { armed = 0 }
+      index($0, "uses:") && index($0, action "@") { armed = 1; key = index($0, "uses:") - 1; next }
+      armed && /^[[:space:]]*version:/ {
+        v = $0
+        sub(/^[[:space:]]*version:[[:space:]]*["]?/, "", v)
+        if (index(v, "${{") != 1) printf "%s:%d:%s\n", FILENAME, FNR, $0
+      }
     ' "${workflows[@]}")"
     rc=$?
     if (( rc != 0 )); then

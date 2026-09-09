@@ -40,8 +40,8 @@ jobs:
     # ride the same exit path. History of the advisory era (the
     # --issues-exit-code=0 flag, why job-level continue-on-error was
     # not the tool) is in the #423/#426 discussions if you need it.
-    # Final step of the flip = marking this check required in branch
-    # protection (backend#1305 / epic #930).
+    # The flip is complete: `golangci-lint` is listed in develop's required
+    # status checks (branch protection, read via the API on 2026-09-09).
     # ==================================================================
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

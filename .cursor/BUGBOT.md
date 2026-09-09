@@ -131,10 +131,11 @@ Two things make this repo unusual and should shape every finding:
 ## Known non-issues — do not flag
 
 - **`.golangci.yml` is one of two lint gates, not the only one.** `golangci.yml` runs it
-  (required check `golangci-lint`; `staticcheck`/`unused` are disabled there for runner OOM
-  reasons). The blocking Lint job in `build.yml` runs the standalone set via `make lint` —
-  `errcheck`, `ineffassign`, `misspell`, `staticcheck` — plus `make fmt-check` (`gofmt -s`,
-  `goimports`), `deadcode-check.sh`, `file-budget.sh`, `check-style.sh`, `check-tool-pins.sh`.
+  (blocking exit-code check `golangci-lint`; `staticcheck`/`unused` are disabled there for
+  runner OOM reasons). The blocking Lint job in `build.yml` runs the standalone set via
+  `make lint` — `errcheck`, `ineffassign`, `misspell`, `staticcheck` — plus `make fmt-check`
+  (`gofmt -s`, `goimports`), `deadcode-check.sh`, `file-budget.sh`, `check-style.sh`,
+  `check-tool-pins.sh`.
   Don't infer the full lint coverage from either file alone.
 - **`build.yml`'s Build job is two legs (linux/amd64 + windows/amd64) on purpose.** The
   8-target cross-compile lives only in `release.yml`; do not flag the smaller matrix as a

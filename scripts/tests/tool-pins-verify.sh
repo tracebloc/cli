@@ -13,6 +13,12 @@
 #    4. literal `version:` on an UNRELATED action  -> exit 0 (no false positive)
 #    5. Makefile missing a declared tool           -> exit 2 (fail closed)
 #    6. no workflow files at all                   -> exit 2 (fail closed)
+#    7. a YAML list inside the action's own `with:` before a literal `version:`
+#       (e.g. `args:` items)                          -> exit 1 (list items do not disarm)
+#    8. one file ends on the action's `uses:` line, the next begins with a
+#       `version:` line                               -> exit 0 (state resets per file)
+#    9. `version: latest` on the tool's action        -> exit 1 (any literal is a copy,
+#                                                       not just digit-leading values)
 #
 #  The tool rows are DERIVED from the guard's own TOOLS array, so this file holds
 #  no module path or make variable of its own to drift from it.
@@ -50,6 +56,7 @@ done
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 fails=0
+passes=0
 
 # fixture: a fresh tree with the real guard at scripts/, a Makefile declaring
 # every row, and an empty workflows dir. Callers append workflow files.
@@ -82,6 +89,7 @@ run() {
     return
   fi
   echo "ok    $label (exit $rc)"
+  passes=$((passes + 1))
 }
 
 mod_var="${module_row%%:*}"
@@ -146,6 +154,58 @@ jobs:
 YML
 run 0 "literal version: on an unrelated action passes"
 
+# 7. shape 2 with a `with:` list before the literal version:. The list items are
+#    deeper than the step, so they must NOT disarm the state machine; only a
+#    sibling step or a parent key may.
+fixture; clean_workflow
+cat > "$tmp/repo/.github/workflows/extra.yml" <<YML
+name: fixture-4
+jobs:
+  x:
+    steps:
+      - uses: ${act_action}@0000000000000000000000000000000000000000 # v1.0.0
+        with:
+          args:
+            - --timeout
+            - 5m
+          version: v1.2.3
+      - name: after
+        run: true
+YML
+run 1 "literal version: after a with: list on ${act_action} reddens" "extra.yml"
+
+# 8. per-file reset: a.yml ends while armed (its last line is the action's
+#    uses:), b.yml opens with a version: line. The version: is indented deeper
+#    than the arming key on purpose, so indentation alone cannot clear the state
+#    and only the file-boundary reset can: this case pins that reset.
+fixture; clean_workflow
+cat > "$tmp/repo/.github/workflows/a.yml" <<YML
+name: fixture-5a
+jobs:
+  x:
+    steps:
+      - uses: ${act_action}@0000000000000000000000000000000000000000 # v1.0.0
+YML
+cat > "$tmp/repo/.github/workflows/b.yml" <<YML
+          version: v1.2.3
+name: fixture-5b
+YML
+run 0 "armed state does not leak from a.yml into b.yml"
+
+# 9. shape 2 with a non-numeric literal: `latest` is both an un-pinning and a
+#    restatement the action honors; anything not read from the Makefile is a copy.
+fixture; clean_workflow
+cat > "$tmp/repo/.github/workflows/extra.yml" <<YML
+name: fixture-6
+jobs:
+  x:
+    steps:
+      - uses: ${act_action}@0000000000000000000000000000000000000000 # v1.0.0
+        with:
+          version: latest
+YML
+run 1 "version: latest on ${act_action} reddens" "extra.yml"
+
 # 5. fail closed: a declared tool missing from the Makefile
 fixture; clean_workflow
 sed -i.bak "/^${mod_var} /d" "$tmp/repo/Makefile" && rm -f "$tmp/repo/Makefile.bak"
@@ -159,4 +219,4 @@ if (( fails )); then
   echo "tool-pins-verify: ${fails} propert(y/ies) lost" >&2
   exit 1
 fi
-echo "tool-pins-verify: all 6 properties hold"
+echo "tool-pins-verify: all ${passes} properties hold"
