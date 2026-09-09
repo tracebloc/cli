@@ -268,8 +268,8 @@ jobs:
   build:
     timeout-minutes: 20
     name: Build (${{ matrix.os }}/${{ matrix.arch }})
-    # Two legs, not the eight release targets. This job is advisory (it is not a
-    # required check) and the other six legs were 506 s of a 920 s run — 55 % of
+    # Three legs, not the eight release targets. This job is advisory (it is not a
+    # required check) and the other five legs were most of a 920 s run — 55 % of
     # every push and PR — for compile-only confirmation of platforms that
     # release.yml builds, signs and publishes anyway at every tag. What is kept
     # is what tells us something per commit:
@@ -280,6 +280,9 @@ jobs:
     #                   and the OS-conditional parts of client-go compile only
     #                   under GOOS=windows, and a Linux-only dev loop would not
     #                   notice a break there until the release.
+    #   darwin/arm64  — the team's own machines. The per-PR artifact is how a
+    #                   reviewer tries a PR's binary locally before it merges;
+    #                   release download counts say nothing about that use.
     #
     # The 8-target matrix has ONE home now, release.yml — there is no second copy
     # here to keep in lock-step. A cross-compile break on any other target
@@ -287,7 +290,7 @@ jobs:
     # in one run and `publish` refuses to ship a partial release.
     runs-on: ubuntu-latest
     strategy:
-      # Don't fail-fast — surface BOTH legs' verdicts in one run.
+      # Don't fail-fast — surface every leg's verdict in one run.
       fail-fast: false
       matrix:
         include:
@@ -296,6 +299,8 @@ jobs:
           - os: windows
             arch: amd64
             ext: .exe
+          - os: darwin
+            arch: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
