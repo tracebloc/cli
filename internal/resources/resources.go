@@ -13,9 +13,11 @@
 //     training pod comes out Guaranteed. Two caveats this comment used to elide
 //     (backend#2872): the built-in fallback is the contract floor
 //     cpu=1,memory=2Gi since backend#2254, not the "cpu=2,memory=8Gi" named
-//     here before; and a GPU pod is BestEffort whatever this writes, because
-//     client-runtime's GPU path sets only nvidia.com/gpu and ephemeral-storage
-//     and neither counts toward QoS (backend#2871). This is the
+//     here before; and a GPU pod does not carry this value as written: once
+//     client-runtime bounds it, it carries this envelope TIMES its nvidia.com/gpu
+//     limit (see DefaultTraining), and until then it is BestEffort, because the
+//     GPU path set only nvidia.com/gpu and ephemeral-storage and neither counts
+//     toward QoS (backend#2871). For a CPU pod this is the
 //     exact value client-runtime's jobs_manager.py stamps on spawned jobs and
 //     the same value `cluster doctor`'s checkNodeFit already parses — so the two
 //     read it identically (di#358 lesson: a reader must mirror the writer).
@@ -48,18 +50,29 @@ import (
 // in exactly one place (the contract), and nothing should be able to shadow it
 // with a second literal.
 //
-// SIZED FOR ONE RANK, and nothing divides it (backend#2543). Recorded here
-// because this is where the number lives and the constraint is invisible from
-// the value. Under replication (TRACEBLOC_DDP, backend#2224) N ranks run as N
-// processes inside ONE pod sharing this envelope, and its two halves are treated
-// differently: the CPU quota IS divided across ranks (tracebloc-engine#732 sizes
-// the thread pools from quota/world_size), memory is NOT divided by anything.
+// SIZED FOR ONE RANK (backend#2543). Recorded here because this is where the
+// number lives and the constraint is invisible from the value. Under
+// replication (TRACEBLOC_DDP, backend#2224) N ranks run as N processes inside
+// ONE pod, and every rank holds a full replica -- parameters, its own gradients,
+// its own optimizer state -- so what the pod needs grows with N while this value
+// does not. Nothing here divides or multiplies it; that is the runtime's job,
+// and it does it differently per pod class:
 //
-// So the floor is correct for world_size == 1 and quietly wrong above it -- and
-// not by a uniform factor, which is why no single scaling of "the envelope" fixes
-// it. This is a STATEMENT, not a fix: per-job vs per-rank is backend#2543's open
-// question and belongs with whoever owns sizing. Replication is default-off, so
-// nothing is wrong today.
+//   - A CPU pod carries exactly this value. It runs the CPU image, whose torch
+//     has no CUDA, so its world_size is always 1 and the question never binds.
+//   - A GPU pod's rank count is its nvidia.com/gpu limit, and client-runtime's
+//     jobs_manager.py stamps THIS PER-RANK BASE TIMES THAT COUNT, capped so the
+//     node's GPU pods still pack, and refuses admission on a single-node edge
+//     when the scaled envelope can never be placed (client-runtime#483).
+//     Unconditional for limits above one; a single-GPU pod is bounded only
+//     behind the runtime's GPU_POD_ENVELOPE opt-in and is BestEffort otherwise.
+//   - The CPU quota is then divided the other way inside the pod:
+//     tracebloc-engine#732 sizes each rank's thread pools from
+//     quota/world_size. Consistent, not contradictory -- N times one rank's
+//     cpu, split N ways, is one rank's cpu each.
+//
+// So the number `show` reports is the per-rank base a CPU run carries as-is,
+// not what a multi-GPU pod is stamped with.
 func DefaultTraining() string {
 	f := mustContract().Floor
 	cpu := resource.NewMilliQuantity(f.CPUMilli, resource.DecimalSI)

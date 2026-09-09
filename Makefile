@@ -34,7 +34,7 @@ help:
 	@echo "  install     go install ./cmd/tracebloc"
 	@echo
 	@echo "  individual: vet test lint lint-full fmt fmt-check fmt-selftest"
-	@echo "              schema-check"
+	@echo "              schema-check check-tool-pins tool-pins-selftest"
 	@echo "              vulncheck deadcode file-budget check-style clean"
 	@echo "              cover cover-integration cover-merge test-integration"
 
@@ -51,7 +51,7 @@ help:
 #   * schema-check   — fetches data-ingestors at the pinned ref.
 #   * deadcode       — another `go run tool@version` fetch.
 .PHONY: check
-check: vet test-fast fmt-check fmt-selftest file-budget check-style check-tool-pins
+check: vet test-fast fmt-check fmt-selftest file-budget check-style check-tool-pins tool-pins-selftest
 	@echo "==> check: green (run 'make check-all' for the full CI set)"
 
 # check-all: the full PR gate. `ci` is the original name and stays —
@@ -116,8 +116,10 @@ GO            ?= go
 PKGS          := ./...
 
 # Pinned lint/analysis tool versions (reproducibility — no more @latest drift).
-# Keep these in lockstep with .github/workflows/build.yml — and
-# GOLANGCI_LINT_VERSION with .github/workflows/golangci.yml. Bump deliberately.
+# These are the ONLY declarations: build.yml runs `make lint` / `make fmt-check`
+# / `make vulncheck`, golangci.yml reads GOLANGCI_LINT_VERSION via
+# `make print-GOLANGCI_LINT_VERSION`, and scripts/check-tool-pins.sh reddens the
+# Lint job if a workflow restates any of them. Bump here, once, deliberately.
 GOLANGCI_LINT_VERSION ?= v2.12.2
 ERRCHECK_VERSION    ?= v1.20.0
 INEFFASSIGN_VERSION ?= v0.2.0
@@ -133,7 +135,7 @@ GOIMPORTS_VERSION   ?= v0.48.0
 # which fails on findings since #430. A green `make ci` must imply a green
 # PR; lint-full's own guard tells you how to install the tool if missing.
 .PHONY: ci
-ci: vet test lint lint-full fmt-check fmt-selftest schema-check vulncheck file-budget deadcode check-style check-tool-pins
+ci: vet test lint lint-full fmt-check fmt-selftest schema-check vulncheck file-budget deadcode check-style check-tool-pins tool-pins-selftest
 	@echo "==> ci: all green"
 
 .PHONY: build
@@ -207,10 +209,10 @@ cover-merge:
 	echo "==> overall (unit union integration):"; \
 	$(GO) tool cover -func=$(COVERDIR)/merged.txt | tail -1
 
-# Lint set matched to .github/workflows/build.yml's lint job: errcheck +
-# ineffassign + misspell + staticcheck (gofmt -s is `fmt-check`, go vet
-# is `vet`). CI runs the SAME pinned standalone tools, keeping the
-# "make ci green => CI green" invariant this Makefile exists to protect.
+# Lint set: errcheck + ineffassign + misspell + staticcheck (gofmt -s is
+# `fmt-check`, go vet is `vet`). build.yml's Lint job calls THIS target
+# rather than restating the four tools, so the "make ci green => CI green"
+# invariant this Makefile exists to protect has one definition to drift from.
 # `make lint-full` keeps golangci-lint available for a richer local pass.
 #
 # staticcheck runs `-checks all,-ST1005`: ST1005 (error-string style) is
@@ -243,6 +245,22 @@ deadcode:
 .PHONY: check-tool-pins
 check-tool-pins:
 	bash scripts/check-tool-pins.sh
+
+# tool-pins-selftest: the properties check-tool-pins.sh must not lose — both
+# restatement shapes redden, an unrelated action's `version:` does not, missing
+# inputs fail closed. Hermetic (no Go, no network); the real guard runs against
+# a fixture tree. Same rationale as fmt-selftest: a guard that stops reddening
+# looks exactly like one with nothing to find.
+.PHONY: tool-pins-selftest
+tool-pins-selftest:
+	@bash scripts/tests/tool-pins-verify.sh
+
+# print-<VAR>: echo one Makefile variable. For a workflow that has to feed a
+# pinned version into a GitHub action input (golangci.yml) — it reads the
+# declaration instead of holding a copy, which is what lets check-tool-pins.sh
+# treat any literal version on that action as a defect.
+print-%:
+	@echo '$($*)'
 
 .PHONY: vulncheck
 vulncheck:
