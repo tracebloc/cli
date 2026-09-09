@@ -137,10 +137,11 @@ Two things make this repo unusual and should shape every finding:
   (`gofmt -s`, `goimports`), `deadcode-check.sh`, `file-budget.sh`, `check-style.sh`,
   `check-tool-pins.sh`.
   Don't infer the full lint coverage from either file alone.
-- **`build.yml`'s Build job is two legs (linux/amd64 + windows/amd64) on purpose.** The
-  8-target cross-compile lives only in `release.yml`; do not flag the smaller matrix as a
-  missing platform, and do not propose re-adding legs "to keep in lock-step" — there is
-  deliberately no second copy.
+- **`build.yml`'s Build job is three legs (linux/amd64 + windows/amd64 + darwin/arm64) on
+  purpose.** The 8-target cross-compile lives only in `release.yml`; do not flag the smaller
+  matrix as a missing platform, and do not propose re-adding legs "to keep in lock-step" —
+  there is deliberately no second copy. The job comment names what each of the three tells
+  us per commit; read it before proposing a fourth.
 - **The two formatters run via `make fmt-check`, not inline in the workflow** (cli#549), and
   they scope to `git ls-files '*.go'` rather than `.`. Both are deliberate: `.` walked untracked
   scratch directories, and one definition of the file set is what stops local and CI

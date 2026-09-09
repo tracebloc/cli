@@ -1,7 +1,7 @@
 name: Build
 
 # Runs on every PR + every push to develop/main. Validates the binary
-# builds on the two platforms that tell us something per commit (see the
+# builds on the three platforms that tell us something per commit (see the
 # `build` job), the tests pass, and the linter is green. The full 8-target
 # cross-compile, signing and tag artifacts live in release.yml (Phase 5).
 
