@@ -14,9 +14,15 @@
 #  repository over file://.
 #
 #  Pinned, and the review finding each answers:
-#    * a prerelease sets publish_tree=false and says why; a stable release sets
-#      it true — and every step that pushes a tree is gated on that output, the
-#      release step is not ("prerelease overwrites public default branch")
+#    * a prerelease sets publish_tree=false and says why; the newest stable
+#      release sets it true — and every step that pushes a tree is gated on
+#      that output, the release step is not ("prerelease overwrites public
+#      default branch")
+#    * a stable tag that is NOT the newest stable release (a Release re-run, a
+#      dispatch of an old tag) sets publish_tree=false too, and a run that
+#      cannot read the newest release refuses; disarming the comparison is a
+#      mutation the older-tag case catches ("older stable tags replace mirror
+#      docs")
 #    * no actions/checkout step takes a `ref:` — the tooling runs from this
 #      workflow's own commit; the release tag is fetched into a detached
 #      worktree and refused unless it resolves to the commit the plan step
@@ -48,8 +54,9 @@ ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mirror-publish-workflow-verify.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT
 SHIM="$ROOT/shim"; WORK="$ROOT/work"; mkdir -p "$SHIM" "$WORK" "$ROOT/runner-temp"
 # gh shim: `release view` prints GH_RELEASE_JSON (or fails with GH_RELEASE_RC);
-# `api ... --jq .sha` prints GH_API_SHA (or fails with GH_API_RC). Every call is
-# logged so a case can assert WHICH question the step asked.
+# `api .../releases/latest` prints GH_LATEST_TAG (or fails with GH_LATEST_RC);
+# any other `api ... --jq .sha` prints GH_API_SHA (or fails with GH_API_RC).
+# Every call is logged so a case can assert WHICH question the step asked.
 cat >"$SHIM/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${GH_LOG:?}"
@@ -58,8 +65,14 @@ case "${1:-} ${2:-}" in
     [ "${GH_RELEASE_RC:-0}" -eq 0 ] || { echo "release not found" >&2; exit "$GH_RELEASE_RC"; }
     printf '%s\n' "${GH_RELEASE_JSON:?}" ;;
   "api "*)
-    [ "${GH_API_RC:-0}" -eq 0 ] || { echo "HTTP 409: Git Repository is empty" >&2; exit "$GH_API_RC"; }
-    printf '%s\n' "${GH_API_SHA:?}" ;;
+    case "${2:-}" in
+      *releases/latest)
+        [ "${GH_LATEST_RC:-0}" -eq 0 ] || { echo "HTTP 404: Not Found" >&2; exit "$GH_LATEST_RC"; }
+        printf '%s\n' "${GH_LATEST_TAG:?}" ;;
+      *)
+        [ "${GH_API_RC:-0}" -eq 0 ] || { echo "HTTP 409: Git Repository is empty" >&2; exit "$GH_API_RC"; }
+        printf '%s\n' "${GH_API_SHA:?}" ;;
+    esac ;;
 esac
 exit 0
 EOF
@@ -78,7 +91,7 @@ reset_env() {
   export EVENT_NAME=workflow_run INPUT_TAG="" INPUT_DRY_RUN="" INPUT_MIRROR="" INPUT_STRICT=""
   export RUN_HEAD_BRANCH="" RUN_HEAD_SHA="" VAR_MIRROR="" VAR_STRICT=""
   export TAG="" EXPECT_SHA="" BRANCH="" REPO=""
-  unset GH_RELEASE_JSON GH_RELEASE_RC GH_API_SHA GH_API_RC
+  unset GH_RELEASE_JSON GH_RELEASE_RC GH_API_SHA GH_API_RC GH_LATEST_TAG GH_LATEST_RC
   : >"$GITHUB_OUTPUT"; : >"$GH_LOG"
   rm -rf "$RUNNER_TEMP"; mkdir -p "$RUNNER_TEMP"
 }
@@ -108,14 +121,16 @@ sys.exit("FAIL: no step with id %r in %s" % (want, path))
 PY
 }
 
-# run_step <step id> [cwd] — execute the step body as Actions would: its own
-# bash, the exported env, the gh shim first on PATH. Sets OUTPUT and RC.
-run_step() {
-  local body="$ROOT/step-$1.sh"
-  if ! step_run "$WF" "$1" >"$body"; then OUTPUT="$(cat "$body")"; RC=2; return; fi
-  local dir="${2:-$WORK}"
+# run_step_in <workflow> <step id> [cwd] — execute the step body as Actions
+# would: its own bash, the exported env, the gh shim first on PATH. Sets OUTPUT
+# and RC. run_step runs the real workflow; run_step_in a mutated copy of it.
+run_step_in() {
+  local body="$ROOT/step-$2.sh"
+  if ! step_run "$1" "$2" >"$body"; then OUTPUT="$(cat "$body")"; RC=2; return; fi
+  local dir="${3:-$WORK}"
   OUTPUT="$(PATH="$SHIM:$PATH" bash -c "cd '$dir' && bash '$body'" 2>&1)"; RC=$?
 }
+run_step() { run_step_in "$WF" "$@"; }
 out() { grep -E "^$1=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-; }
 has() { [[ "$OUTPUT" == *"$1"* ]]; }
 release_json() { printf '{"tagName":"%s","isDraft":false,"isPrerelease":%s}' "$1" "$2"; }
@@ -123,18 +138,33 @@ release_json() { printf '{"tagName":"%s","isDraft":false,"isPrerelease":%s}' "$1
 echo "== mirror-publish.yml step bodies =="
 
 # ---- plan ---------------------------------------------------------------------------
-reset_env; export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A"; GH_RELEASE_JSON="$(release_json v1.2.3 false)"; export GH_RELEASE_JSON
+reset_env; export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A" GH_LATEST_TAG=v1.2.3; GH_RELEASE_JSON="$(release_json v1.2.3 false)"; export GH_RELEASE_JSON
 run_step plan
 if [ "$RC" -eq 0 ] && [ "$(out tag)" = v1.2.3 ] && [ "$(out dry_run)" = false ] && [ "$(out prerelease)" = false ] && [ "$(out publish_tree)" = true ] && [ "$(out expect_sha)" = "$SHA_A" ] \
-   && grep -q '^release view v1.2.3 --repo example/source --json tagName,isDraft,isPrerelease$' "$GH_LOG" && ! has "::notice::"; then
-  ok "plan: a stable release from workflow_run publishes tree and release, pinned to head_sha"
+   && grep -q '^release view v1.2.3 --repo example/source --json tagName,isDraft,isPrerelease$' "$GH_LOG" && grep -q '^api repos/example/source/releases/latest --jq .tag_name$' "$GH_LOG" && ! has "::notice::"; then
+  ok "plan: the newest stable release from workflow_run publishes tree and release, pinned to head_sha"
 else bad "plan stable (rc=$RC): $OUTPUT / $(cat "$GITHUB_OUTPUT")"; fi
+
+# An older stable tag (a Release re-run, or a dispatch of it) must not roll the
+# mirror's default branch back to its tree; the release alone is mirrored.
+reset_env; export RUN_HEAD_BRANCH=v1.2.2 RUN_HEAD_SHA="$SHA_A" GH_LATEST_TAG=v1.2.3; GH_RELEASE_JSON="$(release_json v1.2.2 false)"; export GH_RELEASE_JSON
+run_step plan
+if [ "$RC" -eq 0 ] && [ "$(out tag)" = v1.2.2 ] && [ "$(out prerelease)" = false ] && [ "$(out publish_tree)" = false ] && [ "$(out expect_sha)" = "$SHA_A" ] \
+   && has "::notice::'v1.2.2' is not the newest stable release (v1.2.3 is): only its GitHub release is mirrored. The mirror's default branch is not pushed"; then
+  ok "plan: an older stable release mirrors only its release — publish_tree=false, and the log says why"
+else bad "plan older stable (rc=$RC): $OUTPUT / $(cat "$GITHUB_OUTPUT")"; fi
+
+reset_env; export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A" GH_LATEST_RC=1; GH_RELEASE_JSON="$(release_json v1.2.3 false)"; export GH_RELEASE_JSON
+run_step plan
+if [ "$RC" -eq 1 ] && has "::error::cannot determine the newest stable release of example/source — refusing to decide whether 'v1.2.3' may replace the mirror's default branch." && [ ! -s "$GITHUB_OUTPUT" ]; then
+  ok "plan: when the newest stable release cannot be read, a stable tag is refused rather than guessed newest"
+else bad "plan latest unreadable (rc=$RC): $OUTPUT / $(cat "$GITHUB_OUTPUT")"; fi
 
 reset_env; export RUN_HEAD_BRANCH=v1.2.3-rc.1 RUN_HEAD_SHA="$SHA_A"; GH_RELEASE_JSON="$(release_json v1.2.3-rc.1 true)"; export GH_RELEASE_JSON
 run_step plan
-if [ "$RC" -eq 0 ] && [ "$(out prerelease)" = true ] && [ "$(out publish_tree)" = false ] && [ "$(out expect_sha)" = "$SHA_A" ] \
+if [ "$RC" -eq 0 ] && [ "$(out prerelease)" = true ] && [ "$(out publish_tree)" = false ] && [ "$(out expect_sha)" = "$SHA_A" ] && ! grep -q 'releases/latest' "$GH_LOG" \
    && has "::notice::'v1.2.3-rc.1' is a prerelease: only its GitHub release is mirrored (marked prerelease). The mirror's default branch is not pushed"; then
-  ok "plan: a prerelease mirrors only its release — publish_tree=false, and the log says why"
+  ok "plan: a prerelease mirrors only its release — publish_tree=false, the newest stable release is not consulted, and the log says why"
 else bad "plan prerelease (rc=$RC): $OUTPUT / $(cat "$GITHUB_OUTPUT")"; fi
 
 reset_env; export RUN_HEAD_BRANCH=develop RUN_HEAD_SHA="$SHA_A"
@@ -149,7 +179,7 @@ reset_env; export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA=abc123; GH_RELEASE_JSON="$
 run_step plan
 if [ "$RC" -eq 1 ] && has "::error::cannot determine the commit release 'v1.2.3' was cut from (got 'abc123')" && [ ! -s "$GITHUB_OUTPUT" ]; then ok "plan: a workflow_run without a full head_sha to pin the tag to is refused"; else bad "plan bad head_sha (rc=$RC): $OUTPUT"; fi
 
-reset_env; export EVENT_NAME=workflow_dispatch INPUT_TAG=v1.2.3 INPUT_DRY_RUN=true GH_API_SHA="$SHA_B"; GH_RELEASE_JSON="$(release_json v1.2.3 false)"; export GH_RELEASE_JSON
+reset_env; export EVENT_NAME=workflow_dispatch INPUT_TAG=v1.2.3 INPUT_DRY_RUN=true GH_API_SHA="$SHA_B" GH_LATEST_TAG=v1.2.3; GH_RELEASE_JSON="$(release_json v1.2.3 false)"; export GH_RELEASE_JSON
 run_step plan; a="$RC"; dry="$(out dry_run)"; exp="$(out expect_sha)"; asked=0; grep -q '^api repos/example/source/commits/v1.2.3 --jq .sha$' "$GH_LOG" && asked=1
 : >"$GITHUB_OUTPUT"; export GH_API_RC=1; run_step plan
 if [ "$a" -eq 0 ] && [ "$dry" = true ] && [ "$exp" = "$SHA_B" ] && [ "$asked" -eq 1 ] && [ "$RC" -eq 1 ] && has "::error::cannot determine the commit release 'v1.2.3' was cut from (got '<empty>')"; then
@@ -204,9 +234,9 @@ if [ "$RC" -eq 0 ] && [ "$(out repo)" = example/source-public ] && [ "$(out name
 reset_env; export REPO=example/source-public BRANCH=main TAG=v1.2.3-rc.1 GH_API_SHA="$SHA_B"
 run_step keep; a="$RC"; got="$(out sha)"; asked=0; grep -q '^api repos/example/source-public/commits/main --jq .sha$' "$GH_LOG" && asked=1; o1="$OUTPUT"
 : >"$GITHUB_OUTPUT"; export GH_API_RC=1; run_step keep
-if [ "$a" -eq 0 ] && [ "$got" = "$SHA_B" ] && [ "$asked" -eq 1 ] && [[ "$o1" == *"prerelease v1.2.3-rc.1: default branch 'main' left untouched"* ]] \
-   && [ "$RC" -eq 1 ] && has "::error::'v1.2.3-rc.1' is a prerelease and the mirror has no commit on 'main' to pin it to — a prerelease cannot be the first publish to an empty mirror" && [ ! -s "$GITHUB_OUTPUT" ]; then
-  ok "keep: a prerelease is pinned to the mirror's default-branch head; an empty mirror is refused"
+if [ "$a" -eq 0 ] && [ "$got" = "$SHA_B" ] && [ "$asked" -eq 1 ] && [[ "$o1" == *"release v1.2.3-rc.1: default branch 'main' left untouched"* ]] \
+   && [ "$RC" -eq 1 ] && has "::error::'v1.2.3-rc.1' does not replace the mirror's default branch (a prerelease, or not the newest stable release) and the mirror has no commit on 'main' to pin it to — it cannot be the first publish to an empty mirror" && [ ! -s "$GITHUB_OUTPUT" ]; then
+  ok "keep: a release that does not push the tree is pinned to the mirror's default-branch head; an empty mirror is refused"
 else bad "keep (a=$a got=$got asked=$asked rc=$RC): $o1 / $OUTPUT"; fi
 
 # ---- shape: derived from the workflow, one implementation for real and mutated ---------
@@ -333,6 +363,15 @@ if m="$(mutate "s = [s for s in steps if s.get('id') == 'src'][0]; s['run'] = s[
   if [ "$RC" -eq 1 ] && has "FAIL: the tag fetch step does not compare against EXPECT_SHA"; then ok "shape mutation: a tag fetch that skips the EXPECT_SHA comparison reddens"; else bad "shape mutation unpinned fetch (rc=$RC): $OUTPUT"; fi
 else bad "shape mutation unpinned fetch: mutation did not apply: $m"; fi
 
+# ---- plan body mutation: the newest-release comparison is what the older-tag case tests --
+# With the comparison disarmed the older tag WOULD set publish_tree=true, so the
+# older-stable case above is the assertion that catches a workflow without it.
+if m="$(mutate "s = [s for s in steps if s.get('id') == 'plan'][0]; s['run'] = s['run'].replace('[ \"\$LATEST_TAG\" != \"\$TAG\" ]', '[ \"\$LATEST_TAG\" != \"\$LATEST_TAG\" ]')")"; then
+  reset_env; export RUN_HEAD_BRANCH=v1.2.2 RUN_HEAD_SHA="$SHA_A" GH_LATEST_TAG=v1.2.3; GH_RELEASE_JSON="$(release_json v1.2.2 false)"; export GH_RELEASE_JSON
+  run_step_in "$m" plan
+  if [ "$RC" -eq 0 ] && [ "$(out publish_tree)" = true ] && ! has "is not the newest stable release"; then ok "plan mutation: dropping the newest-release comparison lets an older tag publish the tree — the older-stable case catches it"; else bad "plan mutation newest-release (rc=$RC): $OUTPUT / $(cat "$GITHUB_OUTPUT")"; fi
+else bad "plan mutation newest-release: mutation did not apply: $m"; fi
+
 echo
 printf 'mirror-publish-workflow-verify: %d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] && [ "$PASS" -ge 17 ]
+[ "$FAIL" -eq 0 ] && [ "$PASS" -ge 20 ]
