@@ -17,7 +17,8 @@
 #                      attached — a mirror cut then would copy a release with
 #                      half its assets. The completed release workflow is the
 #                      moment every asset exists. head_branch of a tag-push run
-#                      is the tag (measured on v0.10.25 / -rc.2).
+#                      is the tag (measured on v0.10.25 / -rc.2), head_sha the
+#                      commit it points at; both are checked below.
 #   workflow_dispatch  `dry-run` (default TRUE) runs every guard, prints the
 #                      staged file list and stops. `tag` names a published
 #                      release whose assets are staged too (empty = tree only).
@@ -35,6 +36,25 @@
 #   PUBLISH_STRICT is "true"; the variable is what arms the workflow_run path,
 #   which has no inputs. Flip the variable the day the decision to strip the
 #   report tier from the deliverable is taken.
+#
+# What runs and what is data
+#   The guard, the publisher and the policy lists (.publish-include,
+#   .publish-forbidden) are read from THIS workflow's own commit (github.sha:
+#   the default branch for workflow_run, the dispatched branch for
+#   workflow_dispatch) — the one checkout with a trusted ref. The release tag
+#   is fetched separately as DATA: its tree is staged and scanned, never
+#   executed, and it is fetched only after two checks — the tag must be the
+#   release's own tag_name, and it must resolve to the commit the release run
+#   ran on (workflow_run.head_sha; for a dispatch, the commit GitHub reports
+#   for the tag). A tag that names a branch, a moved tag, or a release whose
+#   tag differs from the run's are all refused before anything is read.
+#
+# Prereleases
+#   A prerelease (-rc.N) mirrors ONLY its GitHub release, marked prerelease,
+#   pinned to the mirror's current default-branch head. The default branch is
+#   NOT pushed: it is what the README and the installer point at, and it keeps
+#   the last stable release. A prerelease therefore cannot be the first thing
+#   published to an empty mirror — the run refuses and says so.
 #
 # Target
 #   The mirror is named by the Actions VARIABLE `MIRROR_REPO` (a bare repo name
@@ -102,9 +122,17 @@ jobs:
       INPUT_MIRROR: ${{ inputs.mirror-repo }}
       INPUT_STRICT: ${{ inputs.strict }}
       RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
       VAR_MIRROR: ${{ vars.MIRROR_REPO }}
       VAR_STRICT: ${{ vars.PUBLISH_STRICT }}
     steps:
+      - name: Check out the publishing tooling (this workflow's own commit)
+        # No `ref:` — github.sha, the commit this workflow file came from. The
+        # guard, the publisher and the policy lists run from here and only
+        # here; the release tag is fetched below into its own directory as
+        # data.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Resolve what to publish
         id: plan
         env:
@@ -122,15 +150,22 @@ jobs:
           # alone arms it, and only the exact string "true" counts.
           STRICT=false
           if [ "$INPUT_STRICT" = "true" ] || [ "$VAR_STRICT" = "true" ]; then STRICT=true; fi
-          PRERELEASE=false
+          PRERELEASE=false; PUBLISH_TREE=true; EXPECT_SHA=""
           if [ -n "$TAG" ]; then
             if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
               echo "::error::'$TAG' is not a release tag — refusing to mirror it (a workflow_run whose head is a branch, or a mistyped dispatch)."
               exit 1
             fi
-            # The release must be PUBLISHED here before it can be mirrored.
-            if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease >"$RUNNER_TEMP/release.json"; then
+            # The release must be PUBLISHED here before it can be mirrored, and
+            # it must be the release OF this tag: a run whose head_branch names
+            # one tag while the release object carries another is refused.
+            if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease >"$RUNNER_TEMP/release.json"; then
               echo "::error::no release '$TAG' on $GITHUB_REPOSITORY — nothing to mirror."
+              exit 1
+            fi
+            RELEASE_TAG="$(jq -r .tagName "$RUNNER_TEMP/release.json")"
+            if [ "$RELEASE_TAG" != "$TAG" ]; then
+              echo "::error::release '$TAG' reports tag_name '$RELEASE_TAG' — the tag and the release disagree, refusing."
               exit 1
             fi
             if [ "$(jq -r .isDraft "$RUNNER_TEMP/release.json")" != "false" ]; then
@@ -138,27 +173,64 @@ jobs:
               exit 1
             fi
             PRERELEASE="$(jq -r .isPrerelease "$RUNNER_TEMP/release.json")"
-            REF="$TAG"
+            # The commit the tag MUST resolve to when it is fetched below. From
+            # a workflow_run that is the commit the release run ran on; from a
+            # dispatch it is the commit GitHub reports for the tag right now.
+            if [ "$EVENT_NAME" = "workflow_run" ]; then
+              EXPECT_SHA="$RUN_HEAD_SHA"
+            else
+              EXPECT_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" || EXPECT_SHA=""
+            fi
+            if [[ ! "$EXPECT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::cannot determine the commit release '$TAG' was cut from (got '${EXPECT_SHA:-<empty>}') — refusing to fetch the tag."
+              exit 1
+            fi
+            if [ "$PRERELEASE" = "true" ]; then
+              PUBLISH_TREE=false
+              echo "::notice::'$TAG' is a prerelease: only its GitHub release is mirrored (marked prerelease). The mirror's default branch is not pushed — it keeps the last stable release."
+            fi
           else
             if [ "$DRY_RUN" != "true" ]; then
               echo "::error::a real publish needs a release tag; a tree-only run is dry-run only."
               exit 1
             fi
-            REF="$GITHUB_SHA"
           fi
           {
             echo "tag=$TAG"
             echo "dry_run=$DRY_RUN"
-            echo "ref=$REF"
+            echo "expect_sha=$EXPECT_SHA"
             echo "prerelease=$PRERELEASE"
+            echo "publish_tree=$PUBLISH_TREE"
             echo "strict=$STRICT"
           } >>"$GITHUB_OUTPUT"
-          echo "plan: event=$EVENT_NAME tag='${TAG:-<none>}' ref=$REF dry_run=$DRY_RUN prerelease=$PRERELEASE strict=$STRICT"
+          echo "plan: event=$EVENT_NAME tag='${TAG:-<none>}' expect_sha=${EXPECT_SHA:-<tree only>} dry_run=$DRY_RUN prerelease=$PRERELEASE publish_tree=$PUBLISH_TREE strict=$STRICT"
 
-      - name: Check out the source at the release tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ steps.plan.outputs.ref }}
+      - name: Fetch the release tag as data
+        # Into a detached worktree under RUNNER_TEMP, outside the tooling
+        # checkout. Nothing in it is executed: the guard reads it and copies
+        # the allowlisted files out. The fetched tag must resolve to exactly
+        # the commit the plan step expects, or the run refuses — a tag moved
+        # after the release, or a release run on a different commit, does not
+        # get mirrored. `--no-tags` so only the one named ref arrives.
+        if: steps.plan.outputs.tag != ''
+        id: src
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          EXPECT_SHA: ${{ steps.plan.outputs.expect_sha }}
+        run: |
+          set -euo pipefail
+          if ! git fetch --no-tags --depth 1 origin "refs/tags/$TAG"; then
+            echo "::error::could not fetch tag '$TAG' from origin — refusing to mirror a release whose tag is not here."
+            exit 1
+          fi
+          SHA="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          if [ "$SHA" != "$EXPECT_SHA" ]; then
+            echo "::error::tag '$TAG' resolves to $SHA but the release was cut at $EXPECT_SHA — the tag has moved or the run is not this release's; refusing."
+            exit 1
+          fi
+          git worktree add --detach "$RUNNER_TEMP/release-src" "$SHA"
+          echo "dir=$RUNNER_TEMP/release-src" >>"$GITHUB_OUTPUT"
+          echo "release source: $TAG at $SHA (data only) in $RUNNER_TEMP/release-src"
 
       - name: Install gitleaks (pinned, checksum-verified)
         # Not preinstalled on ubuntu-latest. One pinned release, verified against
@@ -171,7 +243,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bin"
-          curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 \
+          curl -fsSL --tlsv1.2 --retry 3 --connect-timeout 10 --max-time 120 \
             -o "$RUNNER_TEMP/gitleaks.tgz" \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
@@ -202,12 +274,18 @@ jobs:
           ls -l "$RUNNER_TEMP/assets"
 
       - name: Guard the tree and the release assets
+        # --source is the release worktree (the tooling checkout itself for a
+        # tree-only dry run); the allowlist and the forbidden list are always
+        # the tooling checkout's, so the policy that runs is the one reviewed
+        # on this branch, whatever the tag carries.
         env:
           TAG: ${{ steps.plan.outputs.tag }}
           STRICT: ${{ steps.plan.outputs.strict }}
+          SRC_DIR: ${{ steps.src.outputs.dir }}
         run: |
           set -uo pipefail
-          args=(--source . --out "$RUNNER_TEMP/stage" --extra-forbidden "$RUNNER_TEMP/tenants.txt")
+          args=(--source "${SRC_DIR:-.}" --include "$GITHUB_WORKSPACE/.publish-include" --forbidden "$GITHUB_WORKSPACE/.publish-forbidden"
+                --out "$RUNNER_TEMP/stage" --extra-forbidden "$RUNNER_TEMP/tenants.txt")
           [ -z "$TAG" ] || args+=(--assets "$RUNNER_TEMP/assets")
           [ "$STRICT" != "true" ] || args+=(--strict)
           bash scripts/publish-guard.sh "${args[@]}" | tee "$RUNNER_TEMP/guard-tree.log"
@@ -234,14 +312,14 @@ jobs:
           fi
 
       - name: Resolve the mirror repository
+        # Run directly, never through `$(...)`: a refusal is a `::error::` line
+        # on stdout, and a capture would swallow it before `set -e` exits. The
+        # result (repo=, name=) is written by the script to $GITHUB_OUTPUT.
         if: steps.plan.outputs.dry_run != 'true'
         id: target
         run: |
           set -euo pipefail
-          REPO="$(bash scripts/publish-mirror.sh target --mirror "${INPUT_MIRROR:-$VAR_MIRROR}" --source-repo "$GITHUB_REPOSITORY")"
-          echo "repo=$REPO" >>"$GITHUB_OUTPUT"
-          echo "name=${REPO#*/}" >>"$GITHUB_OUTPUT"
-          echo "mirror: $REPO"
+          bash scripts/publish-mirror.sh target --mirror "${INPUT_MIRROR:-$VAR_MIRROR}" --source-repo "$GITHUB_REPOSITORY" --output "$GITHUB_OUTPUT"
 
       - name: Mint a token scoped to the mirror
         if: steps.plan.outputs.dry_run != 'true'
@@ -272,7 +350,9 @@ jobs:
           cat "$RUNNER_TEMP/mirror.json"
 
       - name: Push the tree to the mirror's default branch
-        if: steps.plan.outputs.dry_run != 'true'
+        # Stable releases only: a prerelease never replaces what customers
+        # install from (publish_tree=false, see the plan step).
+        if: steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree == 'true'
         id: push
         env:
           MIRROR_TOKEN: ${{ steps.token.outputs.token }}
@@ -286,9 +366,30 @@ jobs:
           # are the point: $MIRROR_TOKEN expands when git runs the helper.
           # shellcheck disable=SC2016
           git config --global credential.helper '!f() { printf "username=x-access-token\npassword=%s\n" "$MIRROR_TOKEN"; }; f'
-          OUT="$(bash scripts/publish-mirror.sh tree --stage "$RUNNER_TEMP/stage/tree" --repo "$REPO" --branch "$BRANCH" --message "Publish $TAG")"
-          echo "$OUT"
-          echo "sha=${OUT#* }" >>"$GITHUB_OUTPUT"
+          # Direct, not captured: a rejected push or a refused stage annotates
+          # the log; the result (result=, sha=) lands in $GITHUB_OUTPUT.
+          bash scripts/publish-mirror.sh tree --stage "$RUNNER_TEMP/stage/tree" --repo "$REPO" --branch "$BRANCH" --message "Publish $TAG" --output "$GITHUB_OUTPUT"
+
+      - name: Prerelease — keep the mirror's default branch, pin the release to its head
+        # Nothing was pushed, so the release is created at the commit the
+        # mirror's default branch already has (the last stable publish). An
+        # empty mirror has no such commit: a prerelease cannot be the first
+        # publish, and the run says so instead of inventing a target.
+        if: steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree != 'true'
+        id: keep
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ steps.target.outputs.repo }}
+          BRANCH: ${{ steps.mirror.outputs.default_branch }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! SHA="$(gh api "repos/$REPO/commits/$BRANCH" --jq .sha)" || [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::'$TAG' is a prerelease and the mirror has no commit on '$BRANCH' to pin it to — a prerelease cannot be the first publish to an empty mirror; publish a stable release first."
+            exit 1
+          fi
+          echo "sha=$SHA" >>"$GITHUB_OUTPUT"
+          echo "prerelease $TAG: default branch '$BRANCH' left untouched; release will be pinned to $SHA"
 
       - name: Create the release on the mirror
         if: steps.plan.outputs.dry_run != 'true'
@@ -296,7 +397,7 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ steps.target.outputs.repo }}
           TAG: ${{ steps.plan.outputs.tag }}
-          SHA: ${{ steps.push.outputs.sha }}
+          SHA: ${{ steps.push.outputs.sha || steps.keep.outputs.sha }}
           PRERELEASE: ${{ steps.plan.outputs.prerelease }}
         run: |
           set -euo pipefail

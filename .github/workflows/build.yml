@@ -97,6 +97,8 @@ jobs:
           shellcheck --shell=bash --severity=warning scripts/publish-mirror.sh
           shellcheck --shell=bash --severity=error scripts/tests/publish-guard-verify.sh
           shellcheck --shell=bash --severity=error scripts/tests/publish-mirror-verify.sh
+          shellcheck --shell=bash --severity=error scripts/tests/mirror-publish-workflow-verify.sh
+          bash -n scripts/tests/mirror-publish-workflow-verify.sh
           bash -n scripts/publish-guard.sh
           bash -n scripts/publish-mirror.sh
       # format.sh's own fail-closed properties. Formatters are stubbed, so this is
@@ -143,6 +145,13 @@ jobs:
         run: bash scripts/tests/publish-guard-verify.sh
       - name: Mirror-publish publisher harness (target / tree / release)
         run: bash scripts/tests/publish-mirror-verify.sh
+      # The decisions mirror-publish.yml takes in its own step bodies — a
+      # prerelease keeps the mirror's default branch, the release tag is fetched
+      # as data only at the expected commit, no checkout takes an untrusted
+      # ref, a publisher refusal reaches the step log. The step bodies are read
+      # out of the YAML and executed with `gh` shimmed, so this is hermetic.
+      - name: Mirror-publish workflow harness (step bodies / shape / mutations)
+        run: bash scripts/tests/mirror-publish-workflow-verify.sh
 
   test:
     timeout-minutes: 15

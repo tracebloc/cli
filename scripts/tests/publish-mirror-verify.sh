@@ -60,6 +60,17 @@ if [ "$RC" -eq 0 ] && [ "$OUTPUT" = "tracebloc/cli-public" ]; then ok "target: a
 pub target --mirror cli-public
 if [ "$RC" -eq 2 ] && has "COULD NOT TELL — target: --source-repo is required"; then ok "target: a missing --source-repo is could-not-tell"; else bad "target no source (rc=$RC): $OUTPUT"; fi
 
+# --output: the workflow runs the publisher DIRECTLY and reads results from a
+# file, so a refusal's ::error:: line is on stdout where Actions annotates it —
+# captured through $(...) it would be swallowed by set -e (Bugbot on the PR).
+OUTF="$ROOT/out"
+pub target --mirror cli-public --source-repo tracebloc/cli --output "$OUTF"
+if [ "$RC" -eq 0 ] && [ "$OUTPUT" = "tracebloc/cli-public" ] && [ "$(cat "$OUTF")" = $'repo=tracebloc/cli-public\nname=cli-public' ]; then ok "target: --output writes repo= and name=; stdout still names the mirror"; else bad "target output (rc=$RC): $OUTPUT / $(cat "$OUTF" 2>&1)"; fi
+rm -f "$OUTF"
+pub target --mirror '' --source-repo tracebloc/cli --output "$OUTF"; a="$RC"; o1="$OUTPUT"
+pub target --mirror cli --source-repo tracebloc/cli --output "$OUTF"
+if [ "$a" -eq 1 ] && [[ "$o1" == "::error::publish-mirror: REFUSED — no mirror repository is configured"* ]] && [ "$RC" -eq 1 ] && [ ! -e "$OUTF" ]; then ok "target: a refusal puts the ::error:: line on stdout and writes nothing to --output"; else bad "target refusal output (a=$a rc=$RC, out exists=$([ -e "$OUTF" ] && echo yes || echo no)): $o1"; fi
+
 # ---- tree ---------------------------------------------------------------------------
 STAGE="$ROOT/stage"; mkdir -p "$STAGE/docs"
 printf 'readme\n' >"$STAGE/README.md"; printf 'license\n' >"$STAGE/LICENSE"; printf 'doc\n' >"$STAGE/docs/a.md"
@@ -90,6 +101,22 @@ mkdir -p "$STAGE/.git"; tree; rm -r "$STAGE/.git"
 if [ "$a" -eq 2 ] && [[ "$o1" == *"holds no files"* ]] && [ "$RC" -eq 2 ] && has "contains a .git entry"; then ok "tree: an empty stage, or one that is a checkout, is could-not-tell"; else bad "tree stage shape (a=$a rc=$RC): $o1 / $OUTPUT"; fi
 
 if ! grep -qE -- '--force|\+refs/|-f[[:space:]]' "$PUB"; then ok "tree: the script never forces a push"; else bad "a force-push spelling is present in $PUB"; fi
+
+BARE2="$ROOT/mirror2.git"; git init -q --bare "$BARE2"
+tree2() { pub tree --stage "$STAGE" --repo tracebloc/mirror --branch main --message "Publish v1.0.0" --remote "file://$BARE2" "$@"; }
+rm -f "$OUTF"; tree2 --output "$OUTF"; a="$RC"; l1="$(sed -n 1p "$OUTF" 2>/dev/null)"; l2="$(sed -n 2p "$OUTF" 2>/dev/null)"
+rm -f "$OUTF"; tree2 --output "$OUTF"; b="$RC"; m1="$(sed -n 1p "$OUTF" 2>/dev/null)"; m2="$(sed -n 2p "$OUTF" 2>/dev/null)"
+head2="$(git -C "$BARE2" rev-parse main)"
+if [ "$a" -eq 0 ] && [ "$l1" = "result=pushed" ] && [ "$l2" = "sha=$head2" ] && [ "$b" -eq 0 ] && [ "$m1" = "result=unchanged" ] && [ "$m2" = "sha=$head2" ]; then
+  ok "tree: --output writes result= and sha= (pushed, then unchanged)"
+else bad "tree output (a=$a b=$b): '$l1' '$l2' / '$m1' '$m2' head=$head2"; fi
+
+rm -f "$OUTF"
+pub tree --stage "$STAGE" --repo tracebloc/mirror --branch main --message m --remote "file://$ROOT/no-such.git" --output "$OUTF"
+if [ "$RC" -eq 2 ] && [[ "$OUTPUT" == "::error::publish-mirror: COULD NOT TELL — tree: the mirror remote did not answer"* ]] && [ ! -e "$OUTF" ]; then ok "tree: a refusal annotates stdout and writes nothing to --output"; else bad "tree refusal output (rc=$RC, out exists=$([ -e "$OUTF" ] && echo yes || echo no)): $OUTPUT"; fi
+
+tree2 --output "$ROOT/no-such-dir/out"
+if [ "$RC" -eq 2 ] && has "COULD NOT TELL — could not write results to"; then ok "tree: an unwritable --output is could-not-tell — a result the caller never receives is not a publish"; else bad "tree unwritable output (rc=$RC): $OUTPUT"; fi
 
 # ---- release ------------------------------------------------------------------------
 NOTES="$ROOT/notes.md"; printf 'Release notes\n' >"$NOTES"
@@ -125,4 +152,4 @@ else bad "release inputs (a=$a b=$b c=$c d=$d): $o1 / $o2 / $o3 / $o4"; fi
 
 echo
 printf 'publish-mirror-verify: %d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] && [ "$PASS" -ge 14 ]
+[ "$FAIL" -eq 0 ] && [ "$PASS" -ge 19 ]

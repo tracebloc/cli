@@ -6,18 +6,27 @@
 #  Three subcommands, each one step of the workflow, each refusing on its own:
 #
 #    target   --mirror NAME --source-repo OWNER/REPO [--owner OWNER]
+#             [--output FILE]
 #             Validate the mirror name and print OWNER/NAME. Refuses an empty
 #             name (the mirror is unset until it exists — there is no default),
 #             a name with characters GitHub does not allow, and a target equal
 #             to the source repository: publishing onto the source would
 #             replace the default branch of the repo you are standing in.
+#             --output appends `repo=OWNER/NAME` and `name=NAME` to FILE (the
+#             workflow passes $GITHUB_OUTPUT).
 #
 #    tree     --stage DIR --repo OWNER/NAME --branch NAME --message TEXT
-#             [--remote URL]
+#             [--remote URL] [--output FILE]
 #             Clone the mirror branch (or start it when the mirror has none),
 #             replace its content with DIR, commit, PLAIN push. A diverged
 #             remote rejects the push; nothing here ever forces. Prints
-#             `pushed <sha>` or `unchanged <sha>`.
+#             `pushed <sha>` or `unchanged <sha>`; --output appends
+#             `result=pushed|unchanged` and `sha=<sha>` to FILE.
+#
+#  Results go to --output, refusals go to stdout: a caller that captured stdout
+#  with `$(...)` to read the result would swallow the `::error::` line of a
+#  refusal, so the workflow runs these commands directly and reads the file.
+#  Nothing is written to --output on a refusal.
 #
 #    release  --tag TAG --repo OWNER/NAME --target SHA --assets DIR
 #             --notes FILE [--prerelease]
@@ -43,13 +52,23 @@ die2() { echo "::error::publish-mirror: COULD NOT TELL — $1 (never publishes)"
 REPO_RE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 NAME_RE='^[A-Za-z0-9_.-]+$'
 
+# emit_output FILE KEY=VALUE... — append results for the caller (the workflow's
+# $GITHUB_OUTPUT). An unwritable file is "could not tell": a result the caller
+# never receives is a publish it cannot finish or account for.
+emit_output() {
+  local file="$1"; shift
+  [ -n "$file" ] || return 0
+  printf '%s\n' "$@" >>"$file" || die2 "could not write results to '$file'"
+}
+
 cmd_target() {
-  local mirror="" source_repo="" owner=""
+  local mirror="" source_repo="" owner="" output=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --mirror)      mirror="${2:-}"; shift 2 ;;
       --source-repo) source_repo="${2:-}"; shift 2 ;;
       --owner)       owner="${2:-}"; shift 2 ;;
+      --output)      output="${2:-}"; shift 2 ;;
       *) die2 "target: unknown argument '$1'" ;;
     esac
   done
@@ -63,11 +82,12 @@ cmd_target() {
   if [ "$(printf '%s' "$full" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$source_repo" | tr '[:upper:]' '[:lower:]')" ]; then
     die1 "mirror '$full' is this repository — publishing onto the source would replace its default branch"
   fi
+  emit_output "$output" "repo=$full" "name=$mirror"
   printf '%s\n' "$full"
 }
 
 cmd_tree() {
-  local stage="" repo="" branch="" message="" remote=""
+  local stage="" repo="" branch="" message="" remote="" output=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --stage)   stage="${2:-}"; shift 2 ;;
@@ -75,6 +95,7 @@ cmd_tree() {
       --branch)  branch="${2:-}"; shift 2 ;;
       --message) message="${2:-}"; shift 2 ;;
       --remote)  remote="${2:-}"; shift 2 ;;
+      --output)  output="${2:-}"; shift 2 ;;
       *) die2 "tree: unknown argument '$1'" ;;
     esac
   done
@@ -113,15 +134,20 @@ cmd_tree() {
   fi
   cp -Rp "$stage"/. "$work"/ || die2 "tree: could not copy the stage into the checkout"
   git -C "$work" add -A || die2 "tree: git add failed"
+  local sha
   if [ "$existed" -eq 1 ] && git -C "$work" diff --cached --quiet; then
-    echo "unchanged $(git -C "$work" rev-parse HEAD)"
+    sha="$(git -C "$work" rev-parse HEAD)"
+    emit_output "$output" "result=unchanged" "sha=$sha"
+    echo "unchanged $sha"
     return 0
   fi
   git -C "$work" -c user.name="$name" -c user.email="$email" commit -q -m "$message" || die2 "tree: git commit failed"
   # A PLAIN push. If the mirror moved underneath us the push is rejected and
   # this exits 2; the answer is to re-run, never to force.
   git -C "$work" push -q origin "HEAD:refs/heads/$branch" 2>"$scratch/push.err" || die2 "tree: push to '$repo' '$branch' was rejected: $(tr '\n' ' ' <"$scratch/push.err")"
-  echo "pushed $(git -C "$work" rev-parse HEAD)"
+  sha="$(git -C "$work" rev-parse HEAD)"
+  emit_output "$output" "result=pushed" "sha=$sha"
+  echo "pushed $sha"
 }
 
 cmd_release() {

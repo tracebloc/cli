@@ -41,6 +41,12 @@ have to reverse-engineer the surface area on release day.
    (internal ticket references, non-production hostnames) are counted
    and printed with the most-hit files, and refuse only under the
    `strict` input or the `PUBLISH_STRICT=true` repository variable.
+   The guard and publisher run from the workflow's own commit; the
+   release tag is fetched separately as data and refused unless it
+   resolves to the commit the Release run ran on. A prerelease
+   (`-rc.N`) mirrors only its GitHub release, marked prerelease and
+   pinned to the mirror's current default-branch head — the mirror's
+   default branch keeps the last stable release.
 
 GitHub Releases plus the cosign-verified `install.sh` are the
 install path — a Homebrew tap and the `install.tracebloc.io`
