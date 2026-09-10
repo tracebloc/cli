@@ -36,7 +36,11 @@ have to reverse-engineer the surface area on release day.
    a copy of the release, to the public mirror named by the
    `MIRROR_REPO` variable. Until that variable is set the job refuses
    to publish; `Actions → Mirror publish → Run workflow` with
-   `dry-run: true` shows what would ship.
+   `dry-run: true` shows what would ship. The string scan has two
+   tiers: `[strings-refuse]` hits refuse; `[strings-report]` hits
+   (internal ticket references, non-production hostnames) are counted
+   and printed with the most-hit files, and refuse only under the
+   `strict` input or the `PUBLISH_STRICT=true` repository variable.
 
 GitHub Releases plus the cosign-verified `install.sh` are the
 install path — a Homebrew tap and the `install.tracebloc.io`

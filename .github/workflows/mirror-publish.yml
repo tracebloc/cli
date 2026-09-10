@@ -22,7 +22,19 @@
 #                      staged file list and stops. `tag` names a published
 #                      release whose assets are staged too (empty = tree only).
 #                      `dry-run: false` with a tag publishes; it still refuses
-#                      while no mirror is configured.
+#                      while no mirror is configured. `strict` (default FALSE)
+#                      promotes the guard's report tier to refusal (below).
+#
+# String tiers
+#   .publish-forbidden splits its needles in two. [strings-refuse] (mailboxes,
+#   cloud account identifiers, the private tenant needles) refuses on a hit.
+#   [strings-report] (internal ticket references, non-production hostnames) is
+#   COUNTED and printed — per-needle totals, ten most-hit files — but refuses
+#   only when the guard runs with --strict. This workflow passes --strict when
+#   the dispatch input `strict` is true OR the repository variable
+#   PUBLISH_STRICT is "true"; the variable is what arms the workflow_run path,
+#   which has no inputs. Flip the variable the day the decision to strip the
+#   report tier from the deliverable is taken.
 #
 # Target
 #   The mirror is named by the Actions VARIABLE `MIRROR_REPO` (a bare repo name
@@ -58,6 +70,10 @@ on:
         description: "Mirror repository name in this organisation (overrides the MIRROR_REPO variable)"
         type: string
         default: ""
+      strict:
+        description: "Promote the guard's [strings-report] tier to refusal (--strict); the PUBLISH_STRICT variable does the same for every run"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -84,8 +100,10 @@ jobs:
       INPUT_TAG: ${{ inputs.tag }}
       INPUT_DRY_RUN: ${{ inputs.dry-run }}
       INPUT_MIRROR: ${{ inputs.mirror-repo }}
+      INPUT_STRICT: ${{ inputs.strict }}
       RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
       VAR_MIRROR: ${{ vars.MIRROR_REPO }}
+      VAR_STRICT: ${{ vars.PUBLISH_STRICT }}
     steps:
       - name: Resolve what to publish
         id: plan
@@ -100,6 +118,10 @@ jobs:
           fi
           # Anything that is not exactly "false" is a dry run: fail closed.
           [ "$DRY_RUN" = "false" ] || DRY_RUN=true
+          # --strict from the dispatch input or the repository variable; either
+          # alone arms it, and only the exact string "true" counts.
+          STRICT=false
+          if [ "$INPUT_STRICT" = "true" ] || [ "$VAR_STRICT" = "true" ]; then STRICT=true; fi
           PRERELEASE=false
           if [ -n "$TAG" ]; then
             if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
@@ -129,8 +151,9 @@ jobs:
             echo "dry_run=$DRY_RUN"
             echo "ref=$REF"
             echo "prerelease=$PRERELEASE"
+            echo "strict=$STRICT"
           } >>"$GITHUB_OUTPUT"
-          echo "plan: event=$EVENT_NAME tag='${TAG:-<none>}' ref=$REF dry_run=$DRY_RUN prerelease=$PRERELEASE"
+          echo "plan: event=$EVENT_NAME tag='${TAG:-<none>}' ref=$REF dry_run=$DRY_RUN prerelease=$PRERELEASE strict=$STRICT"
 
       - name: Check out the source at the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -181,10 +204,12 @@ jobs:
       - name: Guard the tree and the release assets
         env:
           TAG: ${{ steps.plan.outputs.tag }}
+          STRICT: ${{ steps.plan.outputs.strict }}
         run: |
           set -uo pipefail
           args=(--source . --out "$RUNNER_TEMP/stage" --extra-forbidden "$RUNNER_TEMP/tenants.txt")
           [ -z "$TAG" ] || args+=(--assets "$RUNNER_TEMP/assets")
+          [ "$STRICT" != "true" ] || args+=(--strict)
           bash scripts/publish-guard.sh "${args[@]}" | tee "$RUNNER_TEMP/guard-tree.log"
           rc=${PIPESTATUS[0]}
           {
