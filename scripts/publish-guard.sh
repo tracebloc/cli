@@ -22,7 +22,11 @@
 #                                                (mailboxes, cloud account
 #                                                identifiers; the private
 #                                                needles from --extra-forbidden
-#                                                join this tier).
+#                                                join this tier and are named
+#                                                `private needle #N` in every
+#                                                line this script prints or
+#                                                writes — the pattern itself
+#                                                never reaches a log).
 #                              [strings-report]  hits are COUNTED and printed —
 #                                                per-needle totals and the ten
 #                                                most-hit files — but refuse
@@ -34,7 +38,10 @@
 #                                                arms that decision.
 #                            `[allow]` entries are exact tokens spared before a
 #                            needle is re-tested (a public support mailbox
-#                            beside a rule that bans every other mailbox).
+#                            beside a rule that bans every other mailbox): a
+#                            token is stripped only as a whole word, case-
+#                            insensitively like the scan — `devsupport@…` is
+#                            not spared by `support@…`.
 #                            A needle may sit in one tier only, [strings-refuse]
 #                            may not be empty, and a section header the guard
 #                            does not know is refused: each of those is a list
@@ -330,9 +337,10 @@ guard_forbidden_strings() {
   for extra in "${EXTRA_FORBIDDEN[@]+"${EXTRA_FORBIDDEN[@]}"}"; do
     if [ ! -r "$extra" ]; then cant_tell "$g" "extra forbidden list '$extra' is missing or unreadable"; RAN=$((RAN + 1)); return; fi
     if [ "$(read_list "$extra" "" | grep -c .)" -eq 0 ]; then cant_tell "$g" "extra forbidden list '$extra' is empty — the private needles were not supplied, so this scan cannot vouch for them"; RAN=$((RAN + 1)); return; fi
-    read_list "$extra" "" >>"$TMP/needles-refuse.txt"
+    read_list "$extra" "" >>"$TMP/needles-private.txt"
   done
-  n_refuse="$(grep -c . "$TMP/needles-refuse.txt" || true)"
+  : >>"$TMP/needles-private.txt"
+  n_refuse="$(( $(grep -c . "$TMP/needles-refuse.txt" || true) + $(grep -c . "$TMP/needles-private.txt" || true) ))"
   n_report="$(grep -c . "$TMP/needles-report.txt" || true)"
   n_allow="$(grep -c . "$TMP/allow.txt" || true)"
 
@@ -347,51 +355,65 @@ guard_forbidden_strings() {
   [ -d "$OUT/assets" ] && scan_dirs+=("$OUT/assets")
   local allow_expr
   allow_expr="$(paste -sd'|' "$TMP/allow.txt")"
-  # needle_hits NEEDLE — write the `area/file:line` locations NEEDLE matches,
-  # after [allow] stripping, to $TMP/hits.txt. Returns 2 when grep itself
-  # failed, with the reason in $GREP_ERR; the caller reports could-not-tell.
+  # needle_hits NEEDLE SHOWN — write the `area/file:line` locations NEEDLE
+  # matches, after [allow] stripping, to $TMP/hits.txt. Returns 2 when grep
+  # itself failed, with the reason in $GREP_ERR; the caller reports
+  # could-not-tell. SHOWN is how the needle is named in any message: the
+  # pattern for a committed needle, `private needle #N` for one that came from
+  # --extra-forbidden — those are the identifiers kept out of the public list,
+  # and this log is public too.
   needle_hits() {
-    local needle="$1" rc
+    local needle="$1" shown="$2" rc
     # Hits go through a FILE, never `producer | grep -q`: a closed pipe would
     # turn a real finding into "clean" via SIGPIPE.
     grep -rIinE -e "$needle" "${scan_dirs[@]}" >"$TMP/hits.txt" 2>"$TMP/grep.err"; rc=$?
-    if [ "$rc" -ge 2 ]; then GREP_ERR="grep exited $rc on needle '$needle': $(tr '\n' ' ' <"$TMP/grep.err")"; return 2; fi
+    if [ "$rc" -ge 2 ]; then GREP_ERR="grep exited $rc on $shown: $(tr '\n' ' ' <"$TMP/grep.err")"; return 2; fi
     if [ "$rc" -ne 0 ]; then : >"$TMP/hits.txt"; return 0; fi
     # [allow] tokens are removed from each hit line and the needle re-tested, so
     # a line is spared only when the allowed token was the whole reason it hit.
+    # A token is removed only as a WHOLE word — not when it is the tail of a
+    # longer mailbox (`devsupport@…`) or the head of a longer domain — and
+    # case-insensitively, as the scan itself matches. A sentence-ending `.`
+    # after the token is still a boundary.
     # Split each hit into its location and its text; only the TEXT is re-tested,
     # so the `file:line` prefix can never be what matches.
     awk -F: '{ print $1 ":" $2 }' "$TMP/hits.txt" >"$TMP/locs.txt"
     sed -E 's/^[^:]*:[^:]*://' "$TMP/hits.txt" >"$TMP/texts.txt"
     if [ "$n_allow" -gt 0 ]; then
-      sed -E "s#$allow_expr# #g" "$TMP/texts.txt" >"$TMP/texts2.txt" && mv "$TMP/texts2.txt" "$TMP/texts.txt"
+      sed -E "s#(^|[^[:alnum:]._%+-])($allow_expr)($|[^[:alnum:]._%+-]|\.([^[:alnum:]]|$))#\1 \3#gI" "$TMP/texts.txt" >"$TMP/texts2.txt" && mv "$TMP/texts2.txt" "$TMP/texts.txt"
     fi
     grep -inE -e "$needle" "$TMP/texts.txt" | cut -d: -f1 >"$TMP/kept.txt"; rc=${PIPESTATUS[0]}
-    if [ "$rc" -ge 2 ]; then GREP_ERR="re-test after [allow] stripping exited $rc on needle '$needle'"; return 2; fi
+    if [ "$rc" -ge 2 ]; then GREP_ERR="re-test after [allow] stripping exited $rc on $shown"; return 2; fi
     awk 'NR == FNR { keep[$1] = 1; next } (FNR in keep)' "$TMP/kept.txt" "$TMP/locs.txt" | sed "s|^$OUT/||" >"$TMP/hits.txt"
     return 0
   }
 
-  local tier label n_refused=0 n_reported=0
+  # Three passes: the committed refuse tier, the private needles (refuse tier,
+  # named by number only), the report tier.
+  local tier label shown k n_refused=0 n_reported=0
   : >"$TMP/report-locs.txt"
-  for tier in refuse report; do
+  for tier in refuse private report; do
+    k=0
     while IFS= read -r needle; do
-      needle_hits "$needle" || { cant_tell "$g" "$GREP_ERR"; RAN=$((RAN + 1)); return; }
+      k=$((k + 1))
+      if [ "$tier" = private ]; then shown="private needle #$k"; else shown="needle '$needle'"; fi
+      needle_hits "$needle" "$shown" || { cant_tell "$g" "$GREP_ERR"; RAN=$((RAN + 1)); return; }
       hits="$(grep -c . "$TMP/hits.txt" || true)"
       [ "$hits" -gt 0 ] || continue
-      { echo "[strings-$tier] needle '$needle':"; cat "$TMP/hits.txt"; } >>"$REPORT"
-      if [ "$tier" = refuse ]; then
+      if [ "$tier" != report ]; then
+        { echo "[strings-refuse] $shown:"; cat "$TMP/hits.txt"; } >>"$REPORT"
         n_refused=$((n_refused + hits)); label="strings-refuse"
       else
+        { echo "[strings-report] $shown:"; cat "$TMP/hits.txt"; } >>"$REPORT"
         n_reported=$((n_reported + hits)); cat "$TMP/hits.txt" >>"$TMP/report-locs.txt"
         if [ "$STRICT" -eq 1 ]; then
           label="strings-report (strict)"
         else
-          note "$g" "[strings-report] needle '$needle' found in $hits staged line(s) — counted, not refused (--strict refuses)"
+          note "$g" "[strings-report] $shown found in $hits staged line(s) — counted, not refused (--strict refuses)"
           continue
         fi
       fi
-      refuse "$g" "[$label] needle '$needle' found in $hits staged line(s):"
+      refuse "$g" "[$label] $shown found in $hits staged line(s):"
       head -20 "$TMP/hits.txt" | sed 's/^/    /'
       [ "$hits" -le 20 ] || echo "    … and $((hits - 20)) more (full list in publish-guard-report.txt)"
     done <"$TMP/needles-$tier.txt"

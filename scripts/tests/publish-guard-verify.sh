@@ -145,9 +145,22 @@ if [ "$a" -eq 0 ] && [ "$RC" -eq 1 ] && has "[strings-refuse] needle '[A-Za-z0-9
   ok "[allow] spares the support mailbox alone, not a personal mailbox beside it"
 else bad "allow (first rc=$a, second rc=$RC): $OUTPUT"; fi
 
+# The unanchored strip this replaces left `dev` behind and the mailbox rule no
+# longer matched, so an internal address ending in the public one shipped.
+fresh allow-tail; plant README.md 'escalate to devsupport@tracebloc.io' && guard
+if [ "$RC" -eq 1 ] && has "[strings-refuse] needle '[A-Za-z0-9._%+-]+@tracebloc\.io' found in 1 staged line(s):" && has "tree/README.md:2"; then
+  ok "mutation: an [allow] token is stripped as a whole word only — a mailbox that merely ends in it is refused"
+else bad "allow tail (rc=$RC): $OUTPUT"; fi
+
+fresh allow-case; plant README.md 'Questions? Write to Support@Tracebloc.io.' && guard
+if [ "$RC" -eq 0 ] && has "[forbidden-strings] clean ("; then ok "an [allow] token matches case-insensitively, like the scan, and a sentence-ending dot is still a boundary"; else bad "allow case (rc=$RC): $OUTPUT"; fi
+
 fresh extra; printf 'planted-tenant\n' >"$ROOT/extra/tenants.txt"; plant docs/usage.md 'for Planted-Tenant' && guard --extra-forbidden "$ROOT/extra/tenants.txt"
-if [ "$RC" -eq 1 ] && has "[strings-refuse] needle 'planted-tenant' found in 1 staged line(s):" && has "tree/docs/usage.md:2" && has "(3 refuse + 3 report needle(s)"; then
-  ok "mutation: a private needle from --extra-forbidden joins the refuse tier"
+# The private pattern is the identifier kept out of the public list; it must not
+# surface in the log (teed into the public run summary) or in the report.
+if [ "$RC" -eq 1 ] && has "[strings-refuse] private needle #1 found in 1 staged line(s):" && has "tree/docs/usage.md:2" && has "(3 refuse + 3 report needle(s)" \
+   && ! grep -qi 'planted-tenant' <<<"$OUTPUT" && ! grep -qi 'planted-tenant' "$OUT/publish-guard-report.txt"; then
+  ok "mutation: a private needle from --extra-forbidden joins the refuse tier, named by number only"
 else bad "extra needle (rc=$RC): $OUTPUT"; fi
 
 fresh extra-empty; printf '# none\n\n' >"$ROOT/extra-empty/tenants.txt"; guard --extra-forbidden "$ROOT/extra-empty/tenants.txt"
@@ -321,4 +334,4 @@ else bad "real allowlist (rc=$RC, missing:$missing, staged-but-forbidden:$presen
 
 echo
 printf 'publish-guard-verify: %d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] && [ "$PASS" -ge 40 ]
+[ "$FAIL" -eq 0 ] && [ "$PASS" -ge 42 ]
