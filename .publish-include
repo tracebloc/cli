@@ -1,0 +1,16 @@
+# .publish-include — what the public mirror of this repo MAY carry.
+#
+# Read by scripts/publish-guard.sh. One glob per line; `#` starts a comment.
+# `*` and `?` do not cross `/`, `**` does; a leading `!` takes matching files
+# back out. Only tracked files are considered. Anything not matched here is
+# excluded by construction — .publish-forbidden is the second lock.
+#
+# The mirror is README + releases. The binaries, SHA256SUMS, signatures and
+# the two installers travel as RELEASE ASSETS (copied from this repo's release
+# by the publish workflow and scanned by the same guard), never as tree files.
+# No Go source, no Makefile, no workflows: the forbidden list refuses each of
+# those by name should a line here ever widen.
+README.md
+LICENSE
+# The user docs README links to. One level only: docs/rfcs/ stays home.
+docs/*.md

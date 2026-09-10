@@ -28,6 +28,16 @@ have to reverse-engineer the surface area on release day.
    and all artifacts attached. `prerelease=true` if the tag
    contains a `-` (e.g. `v0.1.0-rc1`).
 
+7. `.github/workflows/mirror-publish.yml` fires when the Release
+   workflow completes. It stages the public deliverable (README,
+   LICENSE, `docs/*.md` per `.publish-include`; the release assets)
+   through `scripts/publish-guard.sh` — allowlist, forbidden paths,
+   forbidden strings, gitleaks, all fail-closed — and pushes it, plus
+   a copy of the release, to the public mirror named by the
+   `MIRROR_REPO` variable. Until that variable is set the job refuses
+   to publish; `Actions → Mirror publish → Run workflow` with
+   `dry-run: true` shows what would ship.
+
 GitHub Releases plus the cosign-verified `install.sh` are the
 install path — a Homebrew tap and the `install.tracebloc.io`
 vanity URL were considered and dropped
