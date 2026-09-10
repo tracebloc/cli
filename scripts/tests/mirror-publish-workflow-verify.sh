@@ -23,6 +23,14 @@
 #      cannot read the newest release refuses; disarming the comparison is a
 #      mutation the older-tag case catches ("older stable tags replace mirror
 #      docs")
+#    * isPrerelease must be an explicit boolean: a release whose isPrerelease
+#      is missing or malformed (`null`) is refused, never read as "stable";
+#      accepting any value is a mutation the null case catches ("a null
+#      isPrerelease fails open into the tree push")
+#    * a guard refusal reaches $GITHUB_STEP_SUMMARY and the step exits with the
+#      guard's status: the body runs under Actions' `bash -e`, so the guard's
+#      exit is caught with `|| rc=$?`; dropping that is a mutation the guard
+#      case catches ("errexit skips the summary on refusal")
 #    * no actions/checkout step takes a `ref:` — the tooling runs from this
 #      workflow's own commit; the release tag is fetched into a detached
 #      worktree and refused unless it resolves to the commit the plan step
@@ -124,11 +132,14 @@ PY
 # run_step_in <workflow> <step id> [cwd] — execute the step body as Actions
 # would: its own bash, the exported env, the gh shim first on PATH. Sets OUTPUT
 # and RC. run_step runs the real workflow; run_step_in a mutated copy of it.
+# `bash -e`: what Actions runs a `run:` body with. A body that relies on
+# surviving a failing command (the guard step's tee pipeline) is tested under
+# the same errexit it gets in CI, or the test proves nothing about the step.
 run_step_in() {
   local body="$ROOT/step-$2.sh"
   if ! step_run "$1" "$2" >"$body"; then OUTPUT="$(cat "$body")"; RC=2; return; fi
   local dir="${3:-$WORK}"
-  OUTPUT="$(PATH="$SHIM:$PATH" bash -c "cd '$dir' && bash '$body'" 2>&1)"; RC=$?
+  OUTPUT="$(PATH="$SHIM:$PATH" bash -c "cd '$dir' && bash -e '$body'" 2>&1)"; RC=$?
 }
 run_step() { run_step_in "$WF" "$@"; }
 out() { grep -E "^$1=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-; }
@@ -166,6 +177,14 @@ if [ "$RC" -eq 0 ] && [ "$(out prerelease)" = true ] && [ "$(out publish_tree)" 
    && has "::notice::'v1.2.3-rc.1' is a prerelease: only its GitHub release is mirrored (marked prerelease). The mirror's default branch is not pushed"; then
   ok "plan: a prerelease mirrors only its release — publish_tree=false, the newest stable release is not consulted, and the log says why"
 else bad "plan prerelease (rc=$RC): $OUTPUT / $(cat "$GITHUB_OUTPUT")"; fi
+
+# A release object without isPrerelease (`jq -r` prints `null`) must not fall
+# through into the stable path: only an explicit false arms the tree push.
+reset_env; export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A" GH_LATEST_TAG=v1.2.3 GH_RELEASE_JSON='{"tagName":"v1.2.3","isDraft":false}'
+run_step plan
+if [ "$RC" -eq 1 ] && has "::error::release 'v1.2.3' reports isPrerelease 'null' — not a boolean, refusing: only an explicit false may replace the mirror's default branch." && [ ! -s "$GITHUB_OUTPUT" ] && ! grep -q 'releases/latest' "$GH_LOG"; then
+  ok "plan: a release whose isPrerelease is not a boolean is refused before the newest-release question is asked"
+else bad "plan isPrerelease null (rc=$RC): $OUTPUT / $(cat "$GITHUB_OUTPUT")"; fi
 
 reset_env; export RUN_HEAD_BRANCH=develop RUN_HEAD_SHA="$SHA_A"
 run_step plan
@@ -238,6 +257,26 @@ if [ "$a" -eq 0 ] && [ "$got" = "$SHA_B" ] && [ "$asked" -eq 1 ] && [[ "$o1" == 
    && [ "$RC" -eq 1 ] && has "::error::'v1.2.3-rc.1' does not replace the mirror's default branch (a prerelease, or not the newest stable release) and the mirror has no commit on 'main' to pin it to — it cannot be the first publish to an empty mirror" && [ ! -s "$GITHUB_OUTPUT" ]; then
   ok "keep: a release that does not push the tree is pinned to the mirror's default-branch head; an empty mirror is refused"
 else bad "keep (a=$a got=$got asked=$asked rc=$RC): $o1 / $OUTPUT"; fi
+
+# ---- guard-tree: a refusal reaches the step summary, the step exits with it -----------
+# fake_guard <dir> — a cwd holding a scripts/publish-guard.sh that refuses
+# (prints a guard line, exits 1) whatever it is asked; the guard itself has its
+# own suite, this is about what the STEP does with a refusal under errexit.
+fake_guard() {
+  rm -rf "$1"; mkdir -p "$1/scripts"
+  cat >"$1/scripts/publish-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "::error::publish-guard: [forbidden-strings] REFUSED — planted refusal"
+exit 1
+EOF
+}
+
+reset_env; fake_guard "$WORK"; export GITHUB_STEP_SUMMARY="$ROOT/summary.md" STRICT="" SRC_DIR=""; : >"$GITHUB_STEP_SUMMARY"
+run_step guard-tree
+if [ "$RC" -eq 1 ] && has "REFUSED — planted refusal" && grep -q '^## Mirror publish — tree$' "$GITHUB_STEP_SUMMARY" && grep -q 'REFUSED — planted refusal' "$GITHUB_STEP_SUMMARY"; then
+  ok "guard-tree: a guard refusal is written to the step summary and the step exits with the guard's status"
+else bad "guard-tree refusal (rc=$RC): $OUTPUT / summary: $(cat "$GITHUB_STEP_SUMMARY")"; fi
+unset GITHUB_STEP_SUMMARY
 
 # ---- shape: derived from the workflow, one implementation for real and mutated ---------
 # shape <workflow.yml> — OK lines / one FAIL line. Every rule is derived from the
@@ -372,6 +411,25 @@ if m="$(mutate "s = [s for s in steps if s.get('id') == 'plan'][0]; s['run'] = s
   if [ "$RC" -eq 0 ] && [ "$(out publish_tree)" = true ] && ! has "is not the newest stable release"; then ok "plan mutation: dropping the newest-release comparison lets an older tag publish the tree — the older-stable case catches it"; else bad "plan mutation newest-release (rc=$RC): $OUTPUT / $(cat "$GITHUB_OUTPUT")"; fi
 else bad "plan mutation newest-release: mutation did not apply: $m"; fi
 
+# ---- plan body mutation: the boolean check is what the null case tests -----------------
+# With the check accepting any value, `null` is not "true" and falls into the
+# stable path — publish_tree=true for a release nobody marked stable.
+if m="$(mutate "s = [s for s in steps if s.get('id') == 'plan'][0]; s['run'] = s['run'].replace('true|false) ;;', '*) ;;')")"; then
+  reset_env; export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A" GH_LATEST_TAG=v1.2.3 GH_RELEASE_JSON='{"tagName":"v1.2.3","isDraft":false}'
+  run_step_in "$m" plan
+  if [ "$RC" -eq 0 ] && [ "$(out prerelease)" = null ] && [ "$(out publish_tree)" = true ]; then ok "plan mutation: accepting a non-boolean isPrerelease lets a null release publish the tree — the null case catches it"; else bad "plan mutation isPrerelease (rc=$RC): $OUTPUT / $(cat "$GITHUB_OUTPUT")"; fi
+else bad "plan mutation isPrerelease: mutation did not apply: $m"; fi
+
+# ---- guard-tree body mutation: `|| rc=$?` is what the refusal case tests ---------------
+# Without it, errexit ends the body at the failed pipeline: the step still
+# reddens, but the refusal never reaches the summary.
+if m="$(mutate "s = [s for s in steps if s.get('id') == 'guard-tree'][0]; s['run'] = s['run'].replace(' || rc=\$?', '')")"; then
+  reset_env; fake_guard "$WORK"; export GITHUB_STEP_SUMMARY="$ROOT/summary.md" STRICT="" SRC_DIR=""; : >"$GITHUB_STEP_SUMMARY"
+  run_step_in "$m" guard-tree
+  if [ "$RC" -eq 1 ] && has "REFUSED — planted refusal" && [ ! -s "$GITHUB_STEP_SUMMARY" ]; then ok "guard-tree mutation: without catching the guard's status, errexit skips the summary — the refusal case catches it"; else bad "guard-tree mutation (rc=$RC): $OUTPUT / summary: $(cat "$GITHUB_STEP_SUMMARY")"; fi
+  unset GITHUB_STEP_SUMMARY
+else bad "guard-tree mutation: mutation did not apply: $m"; fi
+
 echo
 printf 'mirror-publish-workflow-verify: %d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] && [ "$PASS" -ge 20 ]
+[ "$FAIL" -eq 0 ] && [ "$PASS" -ge 24 ]

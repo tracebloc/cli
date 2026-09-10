@@ -184,6 +184,12 @@ jobs:
               exit 1
             fi
             PRERELEASE="$(jq -r .isPrerelease "$RUNNER_TEMP/release.json")"
+            # The tree push is armed only by an explicit `false`: a missing or
+            # malformed isPrerelease is refused, never read as "stable".
+            case "$PRERELEASE" in
+              true|false) ;;
+              *) echo "::error::release '$TAG' reports isPrerelease '$PRERELEASE' — not a boolean, refusing: only an explicit false may replace the mirror's default branch."; exit 1 ;;
+            esac
             # The commit the tag MUST resolve to when it is fetched below. From
             # a workflow_run that is the commit the release run ran on; from a
             # dispatch it is the commit GitHub reports for the tag right now.
@@ -303,6 +309,10 @@ jobs:
         # tree-only dry run); the allowlist and the forbidden list are always
         # the tooling checkout's, so the policy that runs is the one reviewed
         # on this branch, whatever the tag carries.
+        # Actions runs this body with -e; the guard's exit status is caught
+        # with `|| rc=$?` so a refusal still reaches the step summary and the
+        # step then exits with the guard's own status.
+        id: guard-tree
         env:
           TAG: ${{ steps.plan.outputs.tag }}
           STRICT: ${{ steps.plan.outputs.strict }}
@@ -313,8 +323,8 @@ jobs:
                 --out "$RUNNER_TEMP/stage" --extra-forbidden "$RUNNER_TEMP/tenants.txt")
           [ -z "$TAG" ] || args+=(--assets "$RUNNER_TEMP/assets")
           [ "$STRICT" != "true" ] || args+=(--strict)
-          bash scripts/publish-guard.sh "${args[@]}" | tee "$RUNNER_TEMP/guard-tree.log"
-          rc=${PIPESTATUS[0]}
+          rc=0
+          bash scripts/publish-guard.sh "${args[@]}" | tee "$RUNNER_TEMP/guard-tree.log" || rc=$?
           {
             echo "## Mirror publish — tree${TAG:+ + release $TAG}"
             echo
