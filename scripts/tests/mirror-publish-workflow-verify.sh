@@ -161,6 +161,11 @@ make_origin() { # a bare origin with one commit tagged v1.2.3 (annotated); WORK 
   local seed="$ROOT/seed" bare="$ROOT/origin.git"
   rm -rf "$seed" "$bare" "$WORK"
   git init -q --bare "$bare"
+  # The bare HEAD is pinned to `main` explicitly: with init.defaultBranch unset
+  # (a fresh runner) it would point at a `master` that never receives a push,
+  # the clone would have an unborn HEAD, and `rev-parse HEAD` would print the
+  # literal word HEAD as the expected sha (measured on the first CI run).
+  git -C "$bare" symbolic-ref HEAD refs/heads/main
   git init -q "$seed"
   printf 'readme\n' >"$seed/README.md"
   git -C "$seed" -c user.name=t -c user.email=t@example.invalid add README.md
@@ -168,7 +173,7 @@ make_origin() { # a bare origin with one commit tagged v1.2.3 (annotated); WORK 
   git -C "$seed" -c user.name=t -c user.email=t@example.invalid tag -a v1.2.3 -m v1.2.3
   git -C "$seed" push -q "file://$bare" HEAD:refs/heads/main refs/tags/v1.2.3
   git clone -q "file://$bare" "$WORK" 2>/dev/null
-  git -C "$WORK" rev-parse HEAD
+  git -C "$seed" rev-parse --verify HEAD
 }
 
 reset_env; sha="$(make_origin)"; export TAG=v1.2.3 EXPECT_SHA="$sha"
