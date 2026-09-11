@@ -93,6 +93,14 @@ jobs:
           shellcheck --shell=bash --severity=error scripts/tests/pin-version-verify.sh
           bash -n scripts/check-pin-version.sh
           bash -n scripts/tests/pin-version-verify.sh
+          shellcheck --shell=bash --severity=warning scripts/publish-guard.sh
+          shellcheck --shell=bash --severity=warning scripts/publish-mirror.sh
+          shellcheck --shell=bash --severity=error scripts/tests/publish-guard-verify.sh
+          shellcheck --shell=bash --severity=error scripts/tests/publish-mirror-verify.sh
+          shellcheck --shell=bash --severity=error scripts/tests/mirror-publish-workflow-verify.sh
+          bash -n scripts/tests/mirror-publish-workflow-verify.sh
+          bash -n scripts/publish-guard.sh
+          bash -n scripts/publish-mirror.sh
       # format.sh's own fail-closed properties. Formatters are stubbed, so this is
       # hermetic and needs no Go toolchain — which is why it lives in this job
       # rather than Lint. It exists because the first cut of format.sh reported
@@ -127,6 +135,23 @@ jobs:
       # pin-version-drift.yml, which must never gate a PR (backend#2704 / #1009).
       - name: Pin-version watcher harness (drift reddens / fail-closed)
         run: bash scripts/tests/pin-version-verify.sh
+      # The mirror-publish guard (scripts/publish-guard.sh) and publisher
+      # (scripts/publish-mirror.sh): each guard reddens on the thing it claims
+      # to catch (a forbidden path, a forbidden string, a missing scanner), an
+      # empty or unreadable list is "could not tell", and the publisher refuses
+      # an unset or self-pointing mirror. gitleaks is a PATH shim here, so this
+      # is hermetic; the workflow installs the real, pinned binary.
+      - name: Mirror-publish guard harness (refusals named / fail-closed)
+        run: bash scripts/tests/publish-guard-verify.sh
+      - name: Mirror-publish publisher harness (target / tree / release)
+        run: bash scripts/tests/publish-mirror-verify.sh
+      # The decisions mirror-publish.yml takes in its own step bodies — a
+      # prerelease keeps the mirror's default branch, the release tag is fetched
+      # as data only at the expected commit, no checkout takes an untrusted
+      # ref, a publisher refusal reaches the step log. The step bodies are read
+      # out of the YAML and executed with `gh` shimmed, so this is hermetic.
+      - name: Mirror-publish workflow harness (step bodies / shape / mutations)
+        run: bash scripts/tests/mirror-publish-workflow-verify.sh
 
   test:
     timeout-minutes: 15
