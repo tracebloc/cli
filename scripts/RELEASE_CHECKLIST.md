@@ -48,6 +48,38 @@ have to reverse-engineer the surface area on release day.
    pinned to the mirror's current default-branch head — the mirror's
    default branch keeps the last stable release.
 
+8. Releases that predate the mirror are carried over ONCE, by hand, with
+   `scripts/backfill-releases.sh` (the workflow only publishes releases
+   cut after it exists). The decision it implements: every published
+   release gets its tag, its GitHub release and its text assets
+   (`install.sh`, `install.ps1`, `SHA256SUMS`, anything else SHA256SUMS
+   does not list); the binaries and their `.sig`/`.cert` only for the
+   newest `BINARY_KEEP` releases (default 10) — older pinned binary
+   URLs 404 on the mirror, and the answer is "re-run the installer".
+   Prereleases are skipped unless `--include-prerelease`. Mirror tags
+   are annotated RELEASE MARKERS on the mirror's default-branch head,
+   carrying the original date and message — the mirror has no source
+   commit to point at, and the annotation says so. Every text asset and
+   every release body goes through `publish-guard.sh` first; every
+   binary is checked against the source's `SHA256SUMS`; anything
+   already on the mirror with the same SHA256 is skipped, so a re-run
+   writes nothing. Dry-run is the default:
+
+   ```bash
+   MIRROR_REPO=<mirror name> scripts/backfill-releases.sh            # plan
+   MIRROR_REPO=<mirror name> scripts/backfill-releases.sh --apply    # write
+   # resume after a failure, or redo one release:
+   MIRROR_REPO=<mirror name> scripts/backfill-releases.sh --apply --from-tag vX.Y.Z
+   MIRROR_REPO=<mirror name> scripts/backfill-releases.sh --apply --only-tag vX.Y.Z
+   ```
+
+   Needs `gh` (token with write on the mirror), `jq`, `gitleaks`; set
+   `BACKFILL_EXTRA_FORBIDDEN` to a file with the private needle list
+   the workflow gets from its secret, or the string scan runs without
+   them. Exit 1 means at least one release was refused (the table says
+   which and why); exit 2 means a read did not complete and nothing was
+   written. The script's header carries the full contract.
+
 GitHub Releases plus the cosign-verified `install.sh` are the
 install path — a Homebrew tap and the `install.tracebloc.io`
 vanity URL were considered and dropped

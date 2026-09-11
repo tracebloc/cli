@@ -101,6 +101,10 @@ jobs:
           bash -n scripts/tests/mirror-publish-workflow-verify.sh
           bash -n scripts/publish-guard.sh
           bash -n scripts/publish-mirror.sh
+          shellcheck --shell=bash --severity=warning scripts/backfill-releases.sh
+          shellcheck --shell=bash --severity=warning scripts/tests/backfill-releases-verify.sh
+          bash -n scripts/backfill-releases.sh
+          bash -n scripts/tests/backfill-releases-verify.sh
       # format.sh's own fail-closed properties. Formatters are stubbed, so this is
       # hermetic and needs no Go toolchain — which is why it lives in this job
       # rather than Lint. It exists because the first cut of format.sh reported
@@ -152,6 +156,18 @@ jobs:
       # out of the YAML and executed with `gh` shimmed, so this is hermetic.
       - name: Mirror-publish workflow harness (step bodies / shape / mutations)
         run: bash scripts/tests/mirror-publish-workflow-verify.sh
+      # The one-shot historical backfill (scripts/backfill-releases.sh): dry-run
+      # writes nothing, --apply makes exactly the expected writes and a second
+      # --apply none, binaries stop at the BINARY_KEEP boundary, a binary that
+      # disagrees with SHA256SUMS or a forbidden string in a body refuses by
+      # name, a failed read is could-not-tell. `gh` is a recording fake serving
+      # fixtures, so this is hermetic. The second step breaks one rule per copy
+      # of the script and demands the same suite go red — a rule the suite
+      # cannot see reddens the build.
+      - name: Release-backfill harness (zero-write dry-run / idempotent / fail-closed)
+        run: bash scripts/tests/backfill-releases-verify.sh
+      - name: Release-backfill harness — mutations (every anchored rule is load-bearing)
+        run: bash scripts/tests/backfill-releases-verify.sh --mutations
 
   test:
     timeout-minutes: 15
