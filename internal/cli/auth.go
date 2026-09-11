@@ -236,6 +236,48 @@ func sessionExpired(prof *config.Profile) (bool, string) {
 	return true, t.Format(time.RFC3339)
 }
 
+// whoAmIVerdict is what a FAILED WhoAmI says about the stored session. The three
+// arms are deliberately not collapsible: only one of them is a statement about
+// the credential.
+type whoAmIVerdict int
+
+const (
+	// whoAmIUnverified — no verdict was ever reached: DNS, a refused connection,
+	// a 5xx. NOT evidence the session is bad, and must never be reported as if it
+	// were: telling someone to re-authenticate during an outage sends them to a
+	// browser step that cannot help.
+	whoAmIUnverified whoAmIVerdict = iota
+	// whoAmIRejected — the backend refused the credential (401/403). The one arm
+	// where signing in again is the answer.
+	whoAmIRejected
+	// whoAmIUpgradeRequired — a 426: this CLI is below the server's version floor.
+	// Says nothing about the session, and no amount of re-authenticating fixes it.
+	whoAmIUpgradeRequired
+)
+
+// classifyWhoAmIError turns a failed WhoAmI into that verdict, returning the
+// *api.UpgradeRequiredError alongside it so the caller can surface the server's
+// own version floor rather than a paraphrase.
+//
+// Shared because both places that probe a stored session — login's short-circuit
+// and `auth status --check` — have to draw the SAME three-way distinction, and
+// two hand-written copies of it drift the first time a fourth case appears
+// (review on PR #658). The copy stays at the call sites: the two commands answer
+// different questions ("should I start a flow?" vs "what is this exit code?") and
+// say so in different words.
+func classifyWhoAmIError(err error) (whoAmIVerdict, *api.UpgradeRequiredError) {
+	var ue *api.UpgradeRequiredError
+	if errors.As(err, &ue) {
+		return whoAmIUpgradeRequired, ue
+	}
+	var ae *api.APIError
+	if errors.As(err, &ae) &&
+		(ae.StatusCode == http.StatusUnauthorized || ae.StatusCode == http.StatusForbidden) {
+		return whoAmIRejected, nil
+	}
+	return whoAmIUnverified, nil
+}
+
 // reuseStoredSession is login's "you are already signed in" short-circuit
 // (cli#651). It reports whether login is DONE: true means the machine holds a
 // session for env that the backend just accepted, and there is nothing to sign
@@ -273,23 +315,17 @@ func reuseStoredSession(ctx context.Context, p *ui.Printer, cfg *config.Config, 
 		if ctx.Err() != nil {
 			return false, &exitError{code: exitInterrupted}
 		}
-		// A 426 is the CLI being below the server's version floor, not a verdict on
-		// the session — and a fresh device flow would hit the same floor. Surface the
-		// upgrade instruction instead of burning a browser approval on it (the same
-		// call `auth status --check` makes).
-		var ue *api.UpgradeRequiredError
-		if errors.As(err, &ue) {
+		switch verdict, ue := classifyWhoAmIError(err); verdict {
+		case whoAmIUpgradeRequired:
+			// Not a verdict on the session, and a fresh device flow would hit the same
+			// floor — surface the upgrade instruction instead of burning a browser
+			// approval on it.
 			return false, &exitError{code: exitFailure, err: ue}
-		}
-		// Only a 401/403 is the backend REJECTING the credential. Anything else —
-		// DNS, a refused connection, a 5xx — means we couldn't verify, which is not
-		// the same thing and must not be reported as if the session were bad.
-		var ae *api.APIError
-		if errors.As(err, &ae) && (ae.StatusCode == http.StatusUnauthorized || ae.StatusCode == http.StatusForbidden) {
+		case whoAmIRejected:
 			p.Hintf("The backend rejected the session saved on this machine — it expired or was revoked. Signing in again.")
-			return false, nil
+		default: // whoAmIUnverified
+			p.Hintf("Couldn't check the session saved on this machine (%v) — signing in again.", err)
 		}
-		p.Hintf("Couldn't check the session saved on this machine (%v) — signing in again.", err)
 		return false, nil
 	}
 
@@ -699,16 +735,12 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 		// A 426 means the CLI is too old, not that the session is invalid — surface
 		// the upgrade instruction (non-silent, so it shows even without --verbose)
 		// instead of the "re-login" advice, which wouldn't help.
-		var ue *api.UpgradeRequiredError
-		if errors.As(err, &ue) {
+		verdict, ue := classifyWhoAmIError(err)
+		if verdict == whoAmIUpgradeRequired {
 			return &exitError{code: exitFailure, err: ue}
 		}
 		if p.Verbose() {
-			// Only a 401/403 is genuinely a rejected token (where re-login helps); a
-			// network/DNS/5xx failure means we couldn't verify, not that the session
-			// is invalid — don't send the user to re-login for an outage.
-			var apiErr *api.APIError
-			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+			if verdict == whoAmIRejected {
 				p.Hintf("Signed-in token was rejected by the backend — run `tracebloc login`.")
 			} else {
 				p.Hintf("Couldn't verify your session with the backend (%v).", err)

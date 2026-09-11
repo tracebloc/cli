@@ -1270,3 +1270,48 @@ func TestLogin_CancelDuringTheProbeExits130(t *testing.T) {
 		t.Errorf("requested %d device codes; Ctrl-C must not start a flow", codes)
 	}
 }
+
+// TestClassifyWhoAmIError pins the three-way distinction both session probes
+// share (review on PR #658). The arms are not interchangeable: only
+// whoAmIRejected is a statement about the credential, so a 5xx landing in it
+// would send someone to re-authenticate during an outage, and a 426 landing
+// there would send them to a browser step that cannot lift a version floor.
+func TestClassifyWhoAmIError(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		want    whoAmIVerdict
+		wantMin string // the server's floor, when the verdict carries one
+	}{
+		{"401 is a rejection", &api.APIError{StatusCode: http.StatusUnauthorized}, whoAmIRejected, ""},
+		{"403 is a rejection", &api.APIError{StatusCode: http.StatusForbidden}, whoAmIRejected, ""},
+		{"426 is a version floor", &api.UpgradeRequiredError{MinVersion: "1.2.3"}, whoAmIUpgradeRequired, "1.2.3"},
+		{"500 is not a verdict", &api.APIError{StatusCode: http.StatusInternalServerError}, whoAmIUnverified, ""},
+		{"404 is not a rejection", &api.APIError{StatusCode: http.StatusNotFound}, whoAmIUnverified, ""},
+		{"429 is not a rejection", &api.APIError{StatusCode: http.StatusTooManyRequests}, whoAmIUnverified, ""},
+		{"a transport error is not a verdict", errors.New("dial tcp: no such host"), whoAmIUnverified, ""},
+		{"a cancelled context is not a rejection", context.Canceled, whoAmIUnverified, ""},
+		// Wrapped, because both call sites get their error back through the api
+		// client's own fmt.Errorf wrapping — matching on the concrete type only
+		// would silently demote every real verdict to "unverified".
+		{"wrapped 401 still a rejection", fmt.Errorf("confirming: %w",
+			&api.APIError{StatusCode: http.StatusUnauthorized}), whoAmIRejected, ""},
+		{"wrapped 426 still a version floor", fmt.Errorf("confirming: %w",
+			&api.UpgradeRequiredError{MinVersion: "9.9.9"}), whoAmIUpgradeRequired, "9.9.9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ue := classifyWhoAmIError(tc.err)
+			if got != tc.want {
+				t.Errorf("verdict = %d, want %d", got, tc.want)
+			}
+			switch {
+			case tc.wantMin != "":
+				if ue == nil || ue.MinVersion != tc.wantMin {
+					t.Errorf("upgrade error = %+v, want MinVersion %q", ue, tc.wantMin)
+				}
+			case ue != nil:
+				t.Errorf("upgrade error = %+v, want nil", ue)
+			}
+		})
+	}
+}
