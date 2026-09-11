@@ -1,9 +1,9 @@
 name: Build
 
 # Runs on every PR + every push to develop/main. Validates the binary
-# builds cleanly across all 8 release-target platforms, the tests pass,
-# and the linter is green. Release-time signing + tag artifacts live
-# in release.yml (Phase 5).
+# builds on the three platforms that tell us something per commit (see the
+# `build` job), the tests pass, and the linter is green. The full 8-target
+# cross-compile, signing and tag artifacts live in release.yml (Phase 5).
 
 on:
   push:
@@ -77,6 +77,8 @@ jobs:
           shellcheck --shell=sh --severity=error scripts/install.sh
           shellcheck --shell=bash --severity=error scripts/check-style.sh
           shellcheck --shell=bash --severity=error scripts/check-tool-pins.sh
+          shellcheck --shell=bash --severity=error scripts/tests/tool-pins-verify.sh
+          bash -n scripts/tests/tool-pins-verify.sh
           shellcheck --shell=bash --severity=error scripts/format.sh
           shellcheck --shell=bash --severity=error scripts/tests/format-verify.sh
           shellcheck --shell=bash --severity=error scripts/cosign-retry.sh
@@ -91,12 +93,26 @@ jobs:
           shellcheck --shell=bash --severity=error scripts/tests/pin-version-verify.sh
           bash -n scripts/check-pin-version.sh
           bash -n scripts/tests/pin-version-verify.sh
+          shellcheck --shell=bash --severity=warning scripts/publish-guard.sh
+          shellcheck --shell=bash --severity=warning scripts/publish-mirror.sh
+          shellcheck --shell=bash --severity=error scripts/tests/publish-guard-verify.sh
+          shellcheck --shell=bash --severity=error scripts/tests/publish-mirror-verify.sh
+          shellcheck --shell=bash --severity=error scripts/tests/mirror-publish-workflow-verify.sh
+          bash -n scripts/tests/mirror-publish-workflow-verify.sh
+          bash -n scripts/publish-guard.sh
+          bash -n scripts/publish-mirror.sh
       # format.sh's own fail-closed properties. Formatters are stubbed, so this is
       # hermetic and needs no Go toolchain — which is why it lives in this job
       # rather than Lint. It exists because the first cut of format.sh reported
       # "clean" on a formatter that never ran (#550 review).
       - name: Formatter-gate harness (fail-closed / tracked-files scope)
         run: bash scripts/tests/format-verify.sh
+      # check-tool-pins.sh's own properties: both restatement shapes redden
+      # (`module@version` in a run step, a literal `version:` on the tool's
+      # action), an unrelated action's `version:` does not, and missing inputs
+      # fail closed. Hermetic — the real guard runs against a fixture tree.
+      - name: Tool-pin guard harness (both shapes redden / fail-closed)
+        run: bash scripts/tests/tool-pins-verify.sh
 
       - name: Verification harness (mandatory cosign / fail-closed)
         run: bash scripts/tests/install-verify.sh
@@ -119,6 +135,23 @@ jobs:
       # pin-version-drift.yml, which must never gate a PR (backend#2704 / #1009).
       - name: Pin-version watcher harness (drift reddens / fail-closed)
         run: bash scripts/tests/pin-version-verify.sh
+      # The mirror-publish guard (scripts/publish-guard.sh) and publisher
+      # (scripts/publish-mirror.sh): each guard reddens on the thing it claims
+      # to catch (a forbidden path, a forbidden string, a missing scanner), an
+      # empty or unreadable list is "could not tell", and the publisher refuses
+      # an unset or self-pointing mirror. gitleaks is a PATH shim here, so this
+      # is hermetic; the workflow installs the real, pinned binary.
+      - name: Mirror-publish guard harness (refusals named / fail-closed)
+        run: bash scripts/tests/publish-guard-verify.sh
+      - name: Mirror-publish publisher harness (target / tree / release)
+        run: bash scripts/tests/publish-mirror-verify.sh
+      # The decisions mirror-publish.yml takes in its own step bodies — a
+      # prerelease keeps the mirror's default branch, the release tag is fetched
+      # as data only at the expected commit, no checkout takes an untrusted
+      # ref, a publisher refusal reaches the step log. The step bodies are read
+      # out of the YAML and executed with `gh` shimmed, so this is hermetic.
+      - name: Mirror-publish workflow harness (step bodies / shape / mutations)
+        run: bash scripts/tests/mirror-publish-workflow-verify.sh
 
   test:
     timeout-minutes: 15
@@ -170,18 +203,20 @@ jobs:
       # against the same code in <30 seconds and catch the bugs
       # we've actually hit this week (unchecked Fprintf errors
       # were errcheck-catchable; gofmt -s drift was a recurring
-      # nit). Going back to the action when #6 has a strategy.
+      # nit). golangci.yml runs the non-SSA linters through the
+      # action separately; staticcheck stays standalone here.
 
-      # Tool versions are pinned for reproducibility (was @latest, which
-      # drifted — see #127). The current tags build cleanly against this
-      # module's Go floor; the old "stale x/tools breaks the build" worry
-      # is gone now that these tools ship newer tags. Keep these in lockstep
-      # with the *_VERSION vars in the Makefile. Bump deliberately.
-
-      - name: errcheck
-        run: |
-          go install github.com/kisielk/errcheck@v1.20.0
-          errcheck ./...
+      # `make lint`, not four inline `go install tool@version` steps. errcheck,
+      # ineffassign, misspell and staticcheck (`-checks all,-ST1005` — ST1005
+      # flags ~58 customer-visible error strings that need a deliberate wording
+      # review, follow-up to #279) each had a second copy of their version here,
+      # held in step with the Makefile's *_VERSION vars by a comment asking
+      # people to remember (#127). The Makefile is now the only declaration and
+      # scripts/check-tool-pins.sh reddens this job if a pin creeps back in —
+      # the same move cli#549 made for the formatters below and the govulncheck
+      # job made for its tool.
+      - name: errcheck + ineffassign + misspell + staticcheck
+        run: make lint
 
       # gofmt -s (simplification) + goimports -local (the stdlib / third-party /
       # our-own import grouping that .golangci.yml's local-prefixes declares;
@@ -195,26 +230,6 @@ jobs:
       # check-tool-pins.sh now enforces for this tool too.
       - name: gofmt -s + goimports -local
         run: make fmt-check
-
-      - name: ineffassign
-        run: |
-          go install github.com/gordonklaus/ineffassign@v0.2.0
-          ineffassign ./...
-
-      - name: misspell
-        run: |
-          go install github.com/client9/misspell/cmd/misspell@v0.3.4
-          misspell -error .
-
-      # staticcheck (standalone, pinned): the full `all` suite minus ST1005.
-      # ST1005 (error-string style) flags ~58 customer-visible error strings
-      # that need a deliberate wording review — follow-up to #279, not a
-      # mechanical sweep. The old golangci-lint OOM story does not apply to
-      # the standalone binary: full run is ~12s wall on this module.
-      - name: staticcheck
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
-          staticcheck -checks all,-ST1005 ./...
 
       # deadcode: BLOCKING reachability scan from the CLI entrypoint (~5s).
       # The four legit unreachables — Stringer methods (Status.String,
@@ -278,32 +293,39 @@ jobs:
   build:
     timeout-minutes: 20
     name: Build (${{ matrix.os }}/${{ matrix.arch }})
+    # Three legs, not the eight release targets. This job is advisory (it is not a
+    # required check) and the other five legs were most of a 920 s run — 55 % of
+    # every push and PR — for compile-only confirmation of platforms that
+    # release.yml builds, signs and publishes anyway at every tag. What is kept
+    # is what tells us something per commit:
+    #
+    #   linux/amd64   — the only leg whose binary can RUN on the runner, so it
+    #                   carries the smoke test below.
+    #   windows/amd64 — the one target with its own code path: x/sys/windows
+    #                   and the OS-conditional parts of client-go compile only
+    #                   under GOOS=windows, and a Linux-only dev loop would not
+    #                   notice a break there until the release.
+    #   darwin/arm64  — the team's own machines. The per-PR artifact is how a
+    #                   reviewer tries a PR's binary locally before it merges;
+    #                   release download counts say nothing about that use.
+    #
+    # The 8-target matrix has ONE home now, release.yml — there is no second copy
+    # here to keep in lock-step. A cross-compile break on any other target
+    # surfaces at the next rc tag, where fail-fast: false shows every broken leg
+    # in one run and `publish` refuses to ship a partial release.
     runs-on: ubuntu-latest
     strategy:
-      # Don't fail-fast — we want the matrix to surface ALL broken
-      # platforms in one run, not stop at the first.
+      # Don't fail-fast — surface every leg's verdict in one run.
       fail-fast: false
       matrix:
         include:
           - os: linux
             arch: amd64
-          - os: linux
-            arch: arm64
-          - os: linux
-            arch: '386'
-          - os: linux
-            arch: arm
-            goarm: '6'   # keep in lock-step with release.yml's matrix
-          - os: darwin
-            arch: amd64
-          - os: darwin
-            arch: arm64
           - os: windows
             arch: amd64
             ext: .exe
-          - os: windows
+          - os: darwin
             arch: arm64
-            ext: .exe
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -317,7 +339,6 @@ jobs:
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
-          GOARM: ${{ matrix.goarm }}   # only applies when GOARCH=arm
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist
@@ -333,11 +354,11 @@ jobs:
 
       - name: Smoke test (Linux amd64 only — host arch matches runner)
         if: matrix.os == 'linux' && matrix.arch == 'amd64'
-        # Cross-built darwin/windows/arm64 binaries can't run on the
-        # ubuntu runner, so only the native build gets exercised
-        # post-compile. The other platforms get compile-time
-        # validation only — which is still meaningful because
-        # client-go and most k8s deps have OS-conditional code paths.
+        # The cross-built windows binary can't run on the ubuntu runner,
+        # so only the native build gets exercised post-compile. The
+        # windows leg gets compile-time validation only — which is still
+        # meaningful because client-go and most k8s deps have
+        # OS-conditional code paths.
         run: |
           BIN=./dist/tracebloc-linux-amd64
           "$BIN" version
