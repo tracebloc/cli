@@ -27,12 +27,16 @@
 #  a source snapshot. A tag already on the mirror is accepted only if it points
 #  at a commit the mirror has; a dangling one is refused, never repointed.
 #
-#  RELEASE NOTES: --notes source (default) carries the source release's body
-#  plus a footer naming the original publish date (GitHub does not let a
-#  created release carry a past date, so the footer and the tag annotation are
-#  where the date survives). --notes fixed writes the same fixed text the
-#  workflow writes for new releases. Either way the notes go through the
-#  guard's forbidden-string scan; a hit refuses the release and names the tier.
+#  RELEASE NOTES: --notes fixed (DEFAULT) writes the same fixed text the
+#  workflow writes for new releases. Historical source bodies are GitHub's
+#  generated ones — merged pull requests by title — and nearly every one
+#  carries strings the guard's report tier counts, which the public mirror
+#  should not repeat; so the source body is an explicit opt-in: --notes source
+#  carries it, and it then goes through the guard's forbidden-string scan like
+#  any text asset (a hit refuses the release and names the tier). Either way a
+#  footer names the original publish date (GitHub does not let a created
+#  release carry a past date, so the footer and the tag annotation are where
+#  the date survives).
 #
 #  WHAT IS REUSED: scripts/publish-mirror.sh `target` decides the mirror name
 #  (unset, malformed, or equal to the source is refused there — one rule, one
@@ -47,7 +51,7 @@
 #  Usage:
 #    MIRROR_REPO=NAME scripts/backfill-releases.sh [--dry-run | --apply]
 #        [--from-tag TAG | --only-tag TAG] [--include-prerelease]
-#        [--notes source|fixed] [--strict]
+#        [--notes fixed|source] [--strict]
 #
 #  Environment:
 #    SOURCE_REPO     OWNER/REPO to read releases from (default: the repository
@@ -89,7 +93,7 @@ die2() { echo "::error::backfill-releases: COULD NOT TELL — $1 (nothing more i
 note() { echo "backfill-releases: $1"; }
 
 # ---- arguments -----------------------------------------------------------------
-APPLY=0; FROM_TAG=""; ONLY_TAG=""; INCLUDE_PRE=0; NOTES_MODE=source; STRICT=0
+APPLY=0; FROM_TAG=""; ONLY_TAG=""; INCLUDE_PRE=0; NOTES_MODE=fixed; STRICT=0   # mutation-anchor: notes-default-fixed
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run)            APPLY=0; shift ;;
@@ -104,7 +108,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -z "$FROM_TAG" ] || [ -z "$ONLY_TAG" ] || die2 "--from-tag and --only-tag exclude each other"
-case "$NOTES_MODE" in source|fixed) ;; *) die2 "--notes must be 'source' or 'fixed', not '$NOTES_MODE'" ;; esac
+case "$NOTES_MODE" in fixed|source) ;; *) die2 "--notes must be 'fixed' or 'source', not '$NOTES_MODE'" ;; esac
 BINARY_KEEP="${BINARY_KEEP:-10}"
 [[ "$BINARY_KEEP" =~ ^[0-9]+$ ]] || die2 "BINARY_KEEP '$BINARY_KEEP' is not a non-negative integer"
 TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'

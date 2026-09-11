@@ -21,8 +21,10 @@
 #  written; an unset mirror and a mirror equal to the source are refused by
 #  publish-mirror's rule; prereleases are excluded by default; a read that
 #  fails is could-not-tell (exit 2) with the failing call named, never an empty
-#  list; a refuse-tier needle in a release body refuses that release naming the
-#  tier; a mirror asset already present with a different digest is refused,
+#  list; the DEFAULT notes are the workflow's fixed text (the source body is
+#  never written or scanned unless --notes source asks for it); under --notes
+#  source a refuse-tier needle in a release body refuses that release naming
+#  the tier; a mirror asset already present with a different digest is refused,
 #  never replaced; a mirror tag that dangles is refused, never repointed;
 #  --only-tag / --from-tag narrow the run without changing the binary decision;
 #  the mirror tag carries the original date and, for an annotated source tag,
@@ -71,6 +73,7 @@ if [ "${1:-}" = "--mutations" ]; then
     'idempotent-skip|:'
     'sha-check|:'
     'guard-refusal|      1) ;;'
+    'notes-default-fixed|APPLY=0; FROM_TAG=""; ONLY_TAG=""; INCLUDE_PRE=0; NOTES_MODE=source; STRICT=0'
   )
   MUT_PASS=0; MUT_FAIL=0
   # Every mutant is prepared and PROVEN to have landed first; then the suite
@@ -331,13 +334,26 @@ if [ "$(printf '%s' "$tag0" | jq -r .object.sha)" = "$HEAD_SHA" ] && [ "$(printf
   ok "tags: every mirror tag is an annotated marker on the mirror head; the date is the release's, or the source tag's own when annotated, with its message carried"
 else bad "tags: v0.1.0=$(printf '%s' "$tag0" | jq -c .) v0.1.3=$(printf '%s' "$tag3" | jq -c .)"; fi
 body0="$(jq -r '.[] | select(.tag_name == "v0.1.0") | .body' "$S2/mirror-releases.json")"; body11="$(jq -r '.[] | select(.tag_name == "v0.1.11") | .body' "$S2/mirror-releases.json")"
-if [[ "$body0" == "## What's Changed"*"acme/src/pull/1"*"originally published 2026-01-01T12:00:00Z"*"re-run the installer"* ]] && [[ "$body11" == *"acme/src/pull/12"*"originally published 2026-01-12T12:00:00Z"* ]] && [[ "$body11" != *"re-run the installer"* ]]; then
-  ok "notes: the source body is carried with an original-date footer; the installer hint appears only where binaries are not carried"
-else bad "notes: body0='$body0' body11='$body11'"; fi
+if [[ "$body0" == "tracebloc CLI v0.1.0."*"verify it against SHA256SUMS"*"originally published 2026-01-01T12:00:00Z"*"re-run the installer"* ]] && [[ "$body0" != *"What's Changed"* ]] && [[ "$body0" != *"acme/src/pull/"* ]] \
+   && [[ "$body11" == "tracebloc CLI v0.1.11."*"originally published 2026-01-12T12:00:00Z"* ]] && [[ "$body11" != *"acme/src/pull/"* ]] && [[ "$body11" != *"re-run the installer"* ]] && has "notes=fixed"; then
+  ok "notes (default): the workflow's fixed text plus an original-date footer, no trace of the source body; the installer hint appears only where binaries are not carried"
+else bad "notes default: body0='$body0' body11='$body11'"; fi
 # The tag is created before its release (the fake refuses the other order) and the release before its uploads.
 if [ "$(grep -nE '^(api -X POST repos/acme/mirror/(git/tags|git/refs|releases)|release upload) ' "$GH_LOG" | head -4 | sed -E 's/^[0-9]+://; s/ .*//' | paste -sd' ' -)" = "api api api release" ]; then
   ok "apply: per release the order is tag object, ref, release, upload"
 else bad "apply order: $(head -8 "$GH_LOG")"; fi
+# --notes source is the explicit opt-in that carries the source body.
+S2B="$ROOT/s2b"; fresh_state "$S2B"
+run "$S2B" "$FIX" --apply --notes source
+body0="$(jq -r '.[] | select(.tag_name == "v0.1.0") | .body' "$S2B/mirror-releases.json")"; body11="$(jq -r '.[] | select(.tag_name == "v0.1.11") | .body' "$S2B/mirror-releases.json")"
+if [ "$RC" -eq 0 ] && has "notes=source" && [[ "$body0" == "## What's Changed"*"acme/src/pull/1"*"originally published 2026-01-01T12:00:00Z"*"re-run the installer"* ]] && [[ "$body0" != *"tracebloc CLI v0.1.0."* ]] \
+   && [[ "$body11" == "## What's Changed"*"acme/src/pull/12"*"originally published 2026-01-12T12:00:00Z"* ]] && [[ "$body11" != *"re-run the installer"* ]]; then
+  ok "--notes source: the source body is carried with the same original-date footer, and only when asked for"
+else bad "notes source (rc=$RC): body0='$body0' body11='$body11'"; fi
+run "$S2B" "$FIX" --notes generated
+if [ "$RC" -eq 2 ] && has "--notes must be 'fixed' or 'source', not 'generated'" && [ "$(wc -l <"$GH_LOG" | tr -d ' ')" -eq 0 ]; then
+  ok "--notes with anything else is could-not-tell before any gh call"
+else bad "notes bogus (rc=$RC): $OUTPUT"; fi
 
 # ---- 3. a second --apply writes nothing ---------------------------------------------------
 before="$(cat "$S2/mirror-releases.json" "$S2/mirror-tags.json" | sha256_of /dev/stdin)"
@@ -430,18 +446,25 @@ if [ "$RC" -eq 1 ] && has "REFUSED — mirror 'acme/mirror' has no commit on 'ma
   ok "an empty mirror is refused with instructions — tags are never anchored to an invented commit"
 else bad "empty mirror (rc=$RC): $OUTPUT"; fi
 
-# ---- 10. a refuse-tier needle in a release body refuses that release, naming the tier ----------
+# ---- 10. under --notes source a refuse-tier needle in a body refuses that release, naming the tier;
+#          the default never reads the body into the notes, so the same release goes through -------
 S10="$ROOT/s10"; fresh_state "$S10"
-run "$S10" "$FIX_BADBODY" --apply
+run "$S10" "$FIX_BADBODY" --apply --notes source
 if [ "$RC" -eq 1 ] && has "REFUSED v0.1.5 — the guard refused the notes or a text asset: [forbidden-strings] REFUSED — [strings-refuse] needle 'arn:aws:' found in 1 staged line(s)" \
    && has "assets/RELEASE_NOTES.md:" && ! has "role/planted" && [ "$(verdicts refused)" -eq 1 ] && [ "$(verdicts "done")" -eq 11 ] \
    && ! grep -q 'v0.1.5' <(grep -E '^(api -X POST|release upload) ' "$GH_LOG") && [ "$(jq -r '[.[] | select(.tag_name == "v0.1.5")] | length' "$S10/mirror-releases.json")" -eq 0 ]; then
-  ok "forbidden string in a body: the release is refused naming the tier and the notes file, the text is not echoed, nothing of it is written, exit 1"
-else bad "bad body (rc=$RC refused=$(verdicts refused)): $OUTPUT"; fi
-run "$S10" "$FIX_BADBODY" --apply --notes fixed
-if [ "$RC" -eq 0 ] && [ "$(verdicts "done")" -eq 1 ] && [[ "$(jq -r '.[] | select(.tag_name == "v0.1.5") | .body' "$S10/mirror-releases.json")" == "tracebloc CLI v0.1.5."*"originally published 2026-01-06T12:00:00Z"* ]]; then
-  ok "--notes fixed: the same release goes through with the workflow's fixed text plus the date footer"
-else bad "notes fixed (rc=$RC): $OUTPUT"; fi
+  ok "--notes source, forbidden string in a body: the release is refused naming the tier and the notes file, the text is not echoed, nothing of it is written, exit 1"
+else bad "bad body under --notes source (rc=$RC refused=$(verdicts refused)): $OUTPUT"; fi
+run "$S10" "$FIX_BADBODY" --apply
+if [ "$RC" -eq 0 ] && [ "$(verdicts "done")" -eq 1 ] && [[ "$(jq -r '.[] | select(.tag_name == "v0.1.5") | .body' "$S10/mirror-releases.json")" == "tracebloc CLI v0.1.5."*"originally published 2026-01-06T12:00:00Z"* ]] \
+   && ! grep -q 'role/planted' "$S10/mirror-releases.json"; then
+  ok "default notes: the same release goes through with the workflow's fixed text plus the date footer; the planted body never reaches the mirror"
+else bad "bad body under the default notes (rc=$RC): $OUTPUT"; fi
+S10B="$ROOT/s10b"; fresh_state "$S10B"
+run "$S10B" "$FIX_BADBODY" --apply
+if [ "$RC" -eq 0 ] && [ "$(verdicts "done")" -eq 12 ] && [ "$(jq length "$S10B/mirror-releases.json")" -eq 12 ] && ! grep -q 'role/planted' "$S10B/mirror-releases.json"; then
+  ok "default notes on a fresh mirror: all 12 written, none refused — a bad source body is not a reason to hold up a release the mirror never quotes"
+else bad "fresh mirror, default notes (rc=$RC done=$(verdicts "done")): $OUTPUT"; fi
 
 # ---- 11. present-but-different is refused, never replaced; a dangling mirror tag is refused ------
 S11="$ROOT/s11"; fresh_state "$S11"
@@ -476,11 +499,15 @@ else bad "tag flags (a=$a b=$b c=$c): $o1 / $o2 / $o3"; fi
 S13="$ROOT/s13"; fresh_state "$S13"
 FIX_REPORT="$ROOT/fix-report"; build_fixtures "$FIX_REPORT"
 jq '(.[] | select(.tag_name == "v0.1.6") | .body) |= . + "\n* tested against https://dev-api.tracebloc.io"' "$FIX_REPORT/src-releases.json" >"$FIX_REPORT/t.json" && mv "$FIX_REPORT/t.json" "$FIX_REPORT/src-releases.json"
-run "$S13" "$FIX_REPORT"; a="$RC"; o1="$OUTPUT"
-run "$S13" "$FIX_REPORT" --strict; b="$RC"; o2="$OUTPUT"
+run "$S13" "$FIX_REPORT" --notes source; a="$RC"; o1="$OUTPUT"
+run "$S13" "$FIX_REPORT" --notes source --strict; b="$RC"; o2="$OUTPUT"
+run "$S13" "$FIX_REPORT" --strict; c="$RC"; o3="$OUTPUT"
 if [ "$a" -eq 0 ] && [ "$b" -eq 1 ] && [[ "$o2" == *"REFUSED v0.1.6 — the guard refused"*"[strings-report (strict)] needle 'dev-api\.tracebloc\.io' found in 1 staged line(s)"* ]]; then
-  ok "--strict is passed to the guard: a report-tier needle in a body is counted by default and refuses under --strict, tier named"
+  ok "--strict is passed to the guard: under --notes source a report-tier needle in a body is counted, and refuses under --strict, tier named"
 else bad "strict (a=$a b=$b): $o1 / $o2"; fi
+if [ "$c" -eq 0 ] && [ "$(printf '%s\n' "$o3" | awk '$NF == "planned" && $1 ~ /^v[0-9]/ { n++ } END { print n + 0 }')" -eq 12 ] && [[ "$o3" != *"dev-api"* ]]; then
+  ok "--strict with the default notes: the report-tier body is never staged, so all 12 are planned — the reason fixed notes are the default"
+else bad "strict default notes (c=$c): $o3"; fi
 
 echo
 printf 'backfill-releases-verify: %d passed, %d failed\n' "$PASS" "$FAIL"

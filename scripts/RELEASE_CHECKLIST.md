@@ -59,7 +59,13 @@ have to reverse-engineer the surface area on release day.
    Prereleases are skipped unless `--include-prerelease`. Mirror tags
    are annotated RELEASE MARKERS on the mirror's default-branch head,
    carrying the original date and message — the mirror has no source
-   commit to point at, and the annotation says so. Every text asset and
+   commit to point at, and the annotation says so. Release notes are
+   the same fixed text the workflow writes (`--notes fixed`, the
+   default) plus a footer naming the original publish date — the
+   historical bodies are GitHub's generated pull-request lists, and
+   nearly every one carries strings the guard's report tier counts,
+   which the mirror should not repeat. `--notes source` carries the
+   source body instead, as an explicit opt-in. Every text asset and
    every release body goes through `publish-guard.sh` first; every
    binary is checked against the source's `SHA256SUMS`; anything
    already on the mirror with the same SHA256 is skipped, so a re-run
