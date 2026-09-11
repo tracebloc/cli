@@ -15,7 +15,7 @@ import (
 // same class-not-instance guarantee the env-resolution guard in this package is
 // built around — rather than relying on each test to neutralise both names.
 func TestMain(m *testing.M) {
-	os.Unsetenv("TRACEBLOC_ENV")
-	os.Unsetenv("CLIENT_ENV")
+	_ = os.Unsetenv("TRACEBLOC_ENV")
+	_ = os.Unsetenv("CLIENT_ENV")
 	os.Exit(m.Run())
 }
