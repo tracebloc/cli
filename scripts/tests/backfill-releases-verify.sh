@@ -81,6 +81,7 @@ if [ "${1:-}" = "--mutations" ]; then
     'notes-default-fixed|APPLY=0; FROM_TAG=""; ONLY_TAG=""; INCLUDE_PRE=0; NOTES_MODE=source; STRICT=0'
     'die2-stderr|die2() { echo "::error::backfill-releases: COULD NOT TELL — $1 (nothing more is written)"; exit 2; }'
     'latest-fallback|if false; then'
+    'latest-string-typed|    gh_write "$TMP/latest.json" api -X PATCH "repos/$MIRROR/releases/$LAST_STABLE_CREATED_ID" -F make_latest=true'
     'scratch-commit-unsigned|git -C "$SCRATCH" add README.md && git -C "$SCRATCH" -c user.name=backfill -c user.email=backfill@localhost commit -q -m scratch || die2 "could not commit the guard'"'"'s scratch checkout"'
   )
   MUT_PASS=0; MUT_FAIL=0
@@ -145,17 +146,23 @@ fieldval() { # KEY from -f/-F pairs; @file is read
   done
   return 1
 }
+# make_latest is a STRING enum ("true"/"false"/"legacy") in the releases API. A
+# `-F make_latest=true` is a JSON boolean, which GitHub answers with 422 — so
+# does this fake, on both release calls, instead of quietly accepting it.
+make_latest_typed() { local t; for t in "${TYPED[@]+"${TYPED[@]}"}"; do [ "$t" = make_latest ] && return 0; done; return 1; }
+reject_typed_make_latest() { ! make_latest_typed || { echo "gh: HTTP 422: Invalid request. For 'properties/make_latest', true is not a string. (https://docs.github.com/rest/releases/releases)" >&2; exit 1; }; }
 cmd="${1:-}"; shift || true
 case "$cmd" in
   repo)
     printf '{"nameWithOwner":"%s"}\n' "$SRC" ;;
   api)
-    METHOD=GET; PATHP=""; FIELDS=()
+    METHOD=GET; PATHP=""; FIELDS=(); TYPED=()
     while [ "$#" -gt 0 ]; do
       case "$1" in
         -X) METHOD="$2"; shift 2 ;;
         --paginate) shift ;;
-        -f|-F) FIELDS+=("$2"); shift 2 ;;
+        -f) FIELDS+=("$2"); shift 2 ;;
+        -F) FIELDS+=("$2"); TYPED+=("${2%%=*}"); shift 2 ;;   # -F types true/false/numbers as JSON, like real gh
         *) PATHP="$1"; shift ;;
       esac
     done
@@ -195,6 +202,7 @@ case "$cmd" in
         jq --arg r "$ref" --arg s "$s" '. + [{ref: $r, object: {sha: $s, type: "tag"}}]' "$STATE/mirror-tags.json" >"$STATE/t.json" && mv "$STATE/t.json" "$STATE/mirror-tags.json"
         printf '{"ref":"%s"}\n' "$ref" ;;
       "POST repos/$MIRROR/releases")
+        reject_typed_make_latest
         tag="$(fieldval tag_name)"; name="$(fieldval name)"; body="$(fieldval body)"; pre="$(fieldval prerelease)"; latest="$(fieldval make_latest)"
         jq -e --arg r "refs/tags/$tag" '.[] | select(.ref == $r)' "$STATE/mirror-tags.json" >/dev/null || { echo "gh: fake: release for '$tag' before its tag (HTTP 422)" >&2; exit 1; }
         id="$(jq 'length + 1' "$STATE/mirror-releases.json")"
@@ -202,6 +210,7 @@ case "$cmd" in
           '. + [{id: $id, tag_name: $tag, name: $name, body: $body, prerelease: ($pre == "true"), make_latest: $latest, draft: false, assets: []}]' "$STATE/mirror-releases.json" >"$STATE/t.json" && mv "$STATE/t.json" "$STATE/mirror-releases.json"
         printf '{"id":%s,"tag_name":"%s"}\n' "$id" "$tag" ;;
       "PATCH repos/$MIRROR/releases/"*)
+        reject_typed_make_latest
         id="${PATHP##*/}"; latest="$(fieldval make_latest)"
         [[ "$id" =~ ^[0-9]+$ ]] || notfound
         jq -e --argjson id "$id" '.[] | select(.id == $id)' "$STATE/mirror-releases.json" >/dev/null || notfound

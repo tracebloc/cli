@@ -549,7 +549,10 @@ done <"$TMP/tags-run.txt"
 if [ "$APPLY" -eq 1 ] && [ "$NEWEST_STABLE_REFUSED" -eq 1 ]; then   # mutation-anchor: latest-fallback
   if [ -n "$LAST_STABLE_CREATED" ]; then
     note "latest: $NEWEST_STABLE was refused — marking $LAST_STABLE_CREATED, the newest stable release written in this run, as latest until $NEWEST_STABLE is re-run"
-    gh_write "$TMP/latest.json" api -X PATCH "repos/$MIRROR/releases/$LAST_STABLE_CREATED_ID" -F make_latest=true
+    # -f, not -F: make_latest is a STRING enum ("true"/"false"/"legacy") in the
+    # releases API; a typed boolean is a 422, which here would be a die2 in the
+    # very case this fallback exists for. Same reason the create path uses -f.
+    gh_write "$TMP/latest.json" api -X PATCH "repos/$MIRROR/releases/$LAST_STABLE_CREATED_ID" -f make_latest=true   # mutation-anchor: latest-string-typed
   else
     echo "::warning::backfill-releases: $NEWEST_STABLE was refused and this run wrote no stable release — nothing is newly marked latest; re-run --only-tag $NEWEST_STABLE once the refusal is fixed"
   fi
