@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/config"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // withTestBackend points the login command at an httptest server (via the
@@ -1159,5 +1161,112 @@ func TestLogin_NoStoredSessionStillSignsIn(t *testing.T) {
 	// has nothing to check beforehand.
 	if probes != 1 {
 		t.Errorf("%d /userinfo/ calls, want 1 (the post-flow confirmation only)", probes)
+	}
+}
+
+// TestLogin_ReuseFindsARawKeyedProfileThatIsNotCurrent (Bugbot, PR #658) is the
+// gap TestLogin_ReuseKeepsTheRawProfileKey could not see. That test keeps the
+// `"Dev"` profile CURRENT, so arm 1 of storedSessionFor catches it and the map
+// lookup is never exercised. Once a `login --env` elsewhere moves current_env,
+// only arm 2 is left — and indexing the map with the already-normalised target
+// misses `"Dev"` entirely, starting a flow and saving a second `"dev"` profile
+// beside a perfectly good session.
+func TestLogin_ReuseFindsARawKeyedProfileThatIsNotCurrent(t *testing.T) {
+	codes := loginBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer dev_tok" {
+			t.Errorf("probed with %q, want the `Dev` profile's token", got)
+		}
+		okUserinfo(w, r)
+	})
+	// Signed in to prod; the dev session exists under a v1-migrated raw key.
+	if err := (&config.Config{CurrentEnv: "prod", Profiles: map[string]*config.Profile{
+		"prod": {Token: "prod_tok", Email: "ds@co"},
+		"Dev":  {Token: "dev_tok", Email: "ds@co"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runCmd(t, "login", "--env", "dev"); err != nil {
+		t.Fatalf("login --env dev over a `Dev`-keyed session: %v", err)
+	}
+	if *codes != 0 {
+		t.Errorf("requested %d device codes; the `Dev` session must be found and reused", *codes)
+	}
+	cfg, _ := config.Load()
+	if cfg.CurrentEnv != "Dev" {
+		t.Errorf("current_env = %q, want the key the profile was FOUND under", cfg.CurrentEnv)
+	}
+	if _, dup := cfg.Profiles["dev"]; dup {
+		t.Errorf("a duplicate lower-cased profile was minted: %v", cfg.Profiles)
+	}
+	if p := cfg.Profiles["Dev"]; p == nil || p.Token != "dev_tok" {
+		t.Errorf("the `Dev` profile lost its token: %+v", cfg.Profiles)
+	}
+}
+
+// TestProfileKeyed_ExactMatchWinsAndFoldIsDeterministic: with both `"dev"` and
+// `"Dev"` on disk the answer must not ride on Go's randomised map iteration.
+// Exact match wins; the fold is only a tie-break, scanned in sorted order.
+func TestProfileKeyed_ExactMatchWinsAndFoldIsDeterministic(t *testing.T) {
+	cfg := &config.Config{Profiles: map[string]*config.Profile{
+		"Dev": {Token: "raw_tok"},
+		"dev": {Token: "exact_tok"},
+		"DEV": {Token: "shouty_tok"},
+	}}
+	for i := 0; i < 50; i++ {
+		key, prof := profileKeyed(cfg, "dev")
+		if key != "dev" || prof.Token != "exact_tok" {
+			t.Fatalf("iteration %d: got (%q, %q), want the exact `dev` match", i, key, prof.Token)
+		}
+	}
+	// With no exact key, the sorted fold must still answer the same way every time.
+	delete(cfg.Profiles, "dev")
+	for i := 0; i < 50; i++ {
+		key, _ := profileKeyed(cfg, "dev")
+		if key != "DEV" { // "DEV" sorts before "Dev"
+			t.Fatalf("iteration %d: fold returned %q, want a stable sorted pick", i, key)
+		}
+	}
+	// A profile with no token is not a session.
+	cfg.Profiles = map[string]*config.Profile{"Dev": {Email: "ds@co"}}
+	if key, prof := profileKeyed(cfg, "dev"); prof != nil {
+		t.Errorf("a tokenless profile matched: (%q, %+v)", key, prof)
+	}
+}
+
+// TestLogin_CancelDuringTheProbeExits130 (Bugbot, PR #658): Ctrl-C landing on the
+// new session probe is the operator, not an unverifiable session. Falling through
+// printed "signing in again" and then failed RequestDeviceCode with exit 1, where
+// every other interrupt in login exits 130 silently.
+func TestLogin_CancelDuringTheProbeExits130(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	codes := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/userinfo/":
+			cancel() // the operator hits Ctrl-C mid-probe
+			<-r.Context().Done()
+		case "/device/code":
+			codes++
+			_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"X","verification_uri":"https://x/a","expires_in":600,"interval":5}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	orig := newAPIClient
+	newAPIClient = func(string) *api.Client { return &api.Client{BaseURL: srv.URL, HTTP: srv.Client()} }
+	t.Cleanup(func() { newAPIClient = orig })
+
+	saveSignedIn(t, "live_tok") // CurrentEnv=dev
+	err := runLogin(ctx, ui.New(io.Discard, ui.WithColor(false)), "dev", false)
+
+	if got := ExitCodeFromError(err); got != exitInterrupted {
+		t.Fatalf("exit code = %d, want %d (a cancelled probe is an interrupt)", got, exitInterrupted)
+	}
+	if !IsSilentError(err) {
+		t.Errorf("an interrupt must exit quietly, got: %v", err)
+	}
+	if codes != 0 {
+		t.Errorf("requested %d device codes; Ctrl-C must not start a flow", codes)
 	}
 }

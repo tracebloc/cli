@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -178,8 +179,35 @@ func storedSessionFor(cfg *config.Config, env string) (string, *config.Profile) 
 	if cfg.SignedIn() && sessionEnv(cfg) == env {
 		return cfg.CurrentEnv, cfg.Current()
 	}
+	return profileKeyed(cfg, env)
+}
+
+// profileKeyed finds env's own profile by FOLDING the map's keys, not by
+// indexing with the already-normalised target (Bugbot, PR #658).
+//
+// A plain `cfg.Profiles[env]` only matches a key that is already lower-cased, so
+// a live token written under `"Dev"` went unseen the moment that profile stopped
+// being the current one — and the flow that followed saved a SECOND profile under
+// `"dev"`, leaving the original session stranded beside it on exactly the headless
+// host cli#651 is about. Arm 1 of storedSessionFor hid this: it catches the raw
+// key while it is current, so the gap only opens after a `login --env` elsewhere.
+//
+// Exact match wins, and the fold is a tie-break scanned in sorted order — with
+// both `"Dev"` and `"dev"` on disk the answer must not depend on Go's randomised
+// map iteration.
+func profileKeyed(cfg *config.Config, env string) (string, *config.Profile) {
 	if p := cfg.Profiles[env]; p != nil && p.Token != "" {
 		return env, p
+	}
+	keys := make([]string, 0, len(cfg.Profiles))
+	for k := range cfg.Profiles {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if p := cfg.Profiles[k]; p != nil && p.Token != "" && normalizeEnv(k) == env {
+			return k, p
+		}
 	}
 	return "", nil
 }
@@ -235,6 +263,16 @@ func reuseStoredSession(ctx context.Context, p *ui.Printer, cfg *config.Config, 
 	p.Detailf("backend %s — checking the session already on this machine …", client.BaseURL)
 	id, err := client.WhoAmI(ctx)
 	if err != nil {
+		// Ctrl-C landing during the probe is the OPERATOR, not an unverifiable
+		// session: fall through and we print "signing in again", then fail
+		// RequestDeviceCode with exit 1 — where every other interrupt in login exits
+		// 130 silently. Checked before the classification below because a cancelled
+		// context surfaces on the HTTP call as a plain error, which would otherwise
+		// land in the "couldn't check" arm (Bugbot, PR #658; same guard, same
+		// reason, as pollForToken's).
+		if ctx.Err() != nil {
+			return false, &exitError{code: exitInterrupted}
+		}
 		// A 426 is the CLI being below the server's version floor, not a verdict on
 		// the session — and a fresh device flow would hit the same floor. Surface the
 		// upgrade instruction instead of burning a browser approval on it (the same
