@@ -40,7 +40,7 @@ machine. Honors HTTP(S)_PROXY / NO_PROXY for corporate-proxy networks.`,
 		},
 	}
 	cmd.Flags().StringVar(&envFlag, "env", "",
-		"backend environment: dev|stg|prod (default: $CLIENT_ENV, then prod)")
+		"backend environment: dev|stg|prod (default: $TRACEBLOC_ENV, then legacy $CLIENT_ENV, then prod)")
 	return cmd
 }
 
@@ -65,7 +65,7 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	if !api.IsKnownEnv(env) {
 		return &exitError{code: exitFailure, err: fmt.Errorf(
 			"unknown backend environment %q — valid values are dev, stg, prod (default). "+
-				"Check --env / $CLIENT_ENV", env)}
+				"Check --env / $TRACEBLOC_ENV (or legacy $CLIENT_ENV)", env)}
 	}
 	client := newAPIClient(env)
 	p.Detailf("backend %s — requesting a device code …", client.BaseURL)
@@ -461,7 +461,7 @@ func newAuthStatusCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&check, "check", false,
 		"exit 0 only if signed in with a backend-valid token, else 1; silent unless --verbose")
 	cmd.Flags().StringVar(&envFlag, "env", "",
-		"backend environment the check targets: dev|stg|prod (default: $CLIENT_ENV, then prod)")
+		"backend environment the check targets: dev|stg|prod (default: $TRACEBLOC_ENV, then legacy $CLIENT_ENV, then prod)")
 	return cmd
 }
 
