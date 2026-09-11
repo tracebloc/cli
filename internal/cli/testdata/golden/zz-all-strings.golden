@@ -816,7 +816,7 @@ screen. %s/%d are runtime placeholders.
 "tracebloc-doctor-%s.txt"
 "tracebloc-stage-%s-%s"
 "unavailable"
-"unknown backend environment %q — valid values are dev, stg, prod (default). Check --env / $CLIENT_ENV"
+"unknown backend environment %q — valid values are dev, stg, prod (default). Check --env / $TRACEBLOC_ENV (or legacy $CLIENT_ENV)"
 "unknown command %q for %q"
 "unparseable MemTotal %q: %w"
 "unparseable NCPU %q: %w"

@@ -28,7 +28,7 @@ Usage:
   tracebloc login [flags]
 
 Flags:
-      --env string   backend environment: dev|stg|prod (default: $CLIENT_ENV, then prod)
+      --env string   backend environment: dev|stg|prod (default: $TRACEBLOC_ENV, then legacy $CLIENT_ENV, then prod)
       --force        start a new device flow even when this machine already holds a valid session
   -h, --help         help for login
 
@@ -57,7 +57,7 @@ Usage:
 
 Flags:
       --check        exit 0 only if signed in with a backend-valid token, else 1; silent unless --verbose
-      --env string   backend environment the check targets: dev|stg|prod (default: $CLIENT_ENV, then prod)
+      --env string   backend environment the check targets: dev|stg|prod (default: $TRACEBLOC_ENV, then legacy $CLIENT_ENV, then prod)
   -h, --help         help for status
 
 Global Flags:
