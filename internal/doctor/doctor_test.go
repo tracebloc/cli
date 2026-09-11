@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/cluster"
 )
 
@@ -404,10 +405,43 @@ func TestCheckBackendEgress(t *testing.T) {
 	failProbe := func(context.Context, string) error { return errors.New("dns failure") }
 
 	if r := checkBackendEgress(bg(), map[string]string{"CLIENT_ENV": "dev"}, okProbe); r.Status != StatusOK || !strings.Contains(r.Detail, "dev-api.tracebloc.io") {
-		t.Fatalf("reachable dev => %v / %q", r.Status, r.Detail)
+		t.Fatalf("reachable dev (legacy CLIENT_ENV) => %v / %q", r.Status, r.Detail)
+	}
+	// Canonical stage key on the cluster spec resolves the same host (RFC-0076).
+	if r := checkBackendEgress(bg(), map[string]string{"TRACEBLOC_ENV": "dev"}, okProbe); r.Status != StatusOK || !strings.Contains(r.Detail, "dev-api.tracebloc.io") {
+		t.Fatalf("reachable dev (canonical TRACEBLOC_ENV) => %v / %q", r.Status, r.Detail)
 	}
 	if r := checkBackendEgress(bg(), map[string]string{}, failProbe); r.Status != StatusFail || !strings.Contains(r.Detail, "api.tracebloc.io") {
 		t.Fatalf("unreachable default => %v / %q", r.Status, r.Detail)
+	}
+}
+
+// TestStageFromClusterSpec pins the alias-first read of the chart-written stage
+// key: canonical TRACEBLOC_ENV preferred, legacy CLIENT_ENV as the fallback.
+func TestStageFromClusterSpec(t *testing.T) {
+	// stageFromClusterSpec reads the key LITERALS (spelled out for the cli-package
+	// env-resolution guard), so nothing compile-couples them to the api consts. Pin
+	// the two names in lock-step here: if api's canonical/legacy stage-var names ever
+	// change, this fails instead of the doctor silently reading a stale key off the
+	// jobs-manager spec and probing the wrong host.
+	if api.StageEnvVar != "TRACEBLOC_ENV" || api.LegacyStageEnvVar != "CLIENT_ENV" {
+		t.Fatalf("stage-var names drifted from the literals stageFromClusterSpec reads: "+
+			"canonical api.StageEnvVar=%q, legacy api.LegacyStageEnvVar=%q", api.StageEnvVar, api.LegacyStageEnvVar)
+	}
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"canonical only", map[string]string{"TRACEBLOC_ENV": "dev"}, "dev"},
+		{"legacy only", map[string]string{"CLIENT_ENV": "stg"}, "stg"},
+		{"canonical wins", map[string]string{"TRACEBLOC_ENV": "dev", "CLIENT_ENV": "prod"}, "dev"},
+		{"neither", map[string]string{}, ""},
+	}
+	for _, tc := range tests {
+		if got := stageFromClusterSpec(tc.env); got != tc.want {
+			t.Errorf("%s: stageFromClusterSpec(%v) = %q, want %q", tc.name, tc.env, got, tc.want)
+		}
 	}
 }
 
