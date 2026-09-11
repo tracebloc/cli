@@ -15,6 +15,12 @@ on any device (your laptop or phone), sign in the way you already do
 (password, Google, or GitHub), and approve the code. The CLI stores a
 user token in ~/.tracebloc (mode 0600).
 
+Already signed in to this backend? login says so and exits 0 without a
+browser step — so re-running it is safe in a script or a runbook, and a
+headless box is never asked to approve a code it already has. Pass
+--force to re-authenticate anyway: switching accounts, or replacing a
+session you believe is stale.
+
 Works on a headless / SSH box — the browser and the CLI need not share a
 machine. Honors HTTP(S)_PROXY / NO_PROXY for corporate-proxy networks.
 
@@ -22,7 +28,8 @@ Usage:
   tracebloc login [flags]
 
 Flags:
-      --env string   backend environment: dev|stg|prod (default: $CLIENT_ENV, then prod)
+      --env string   backend environment: dev|stg|prod (default: $TRACEBLOC_ENV, then legacy $CLIENT_ENV, then prod)
+      --force        start a new device flow even when this machine already holds a valid session
   -h, --help         help for login
 
 Global Flags:
@@ -50,7 +57,7 @@ Usage:
 
 Flags:
       --check        exit 0 only if signed in with a backend-valid token, else 1; silent unless --verbose
-      --env string   backend environment the check targets: dev|stg|prod (default: $CLIENT_ENV, then prod)
+      --env string   backend environment the check targets: dev|stg|prod (default: $TRACEBLOC_ENV, then legacy $CLIENT_ENV, then prod)
   -h, --help         help for status
 
 Global Flags:

@@ -570,7 +570,7 @@ func checkProxy(env map[string]string) Result {
 // the backend at all.
 func checkBackendEgress(ctx context.Context, env map[string]string, probe func(context.Context, string) error) Result {
 	const name = "Backend egress (from this machine)"
-	host := backendHost(env["CLIENT_ENV"])
+	host := backendHost(stageFromClusterSpec(env))
 	url := "https://" + host + "/"
 	if err := probe(ctx, url); err != nil {
 		return Result{
@@ -583,20 +583,36 @@ func checkBackendEgress(ctx context.Context, env map[string]string, probe func(c
 	return Result{Name: name, Status: StatusOK, Detail: host + " reachable"}
 }
 
-// backendHost maps CLIENT_ENV to the backend API host, mirroring the edge
+// stageFromClusterSpec picks the deploy stage out of the jobs-manager container's
+// env, preferring the canonical TRACEBLOC_ENV over the legacy CLIENT_ENV alias.
+// These keys are written by the edge CHART (this CLI is a consumer here, not the
+// owner): reading both lets the chart adopt the canonical name on its own S3-edge
+// timeline without a flag-day, and today — while the chart still writes CLIENT_ENV
+// — the fallback keeps behaviour identical. Legacy alias remove_by: 2026-12-31.
+// The literals are spelled out (not api.StageEnvVar) both because these are the
+// chart's key names, not this CLI's process-env names, and so the env-resolution
+// guard still sees this file as a sanctioned stage-var read site.
+func stageFromClusterSpec(env map[string]string) string {
+	if v := env["TRACEBLOC_ENV"]; v != "" {
+		return v
+	}
+	return env["CLIENT_ENV"]
+}
+
+// backendHost maps a stage value to the backend API host, mirroring the edge
 // runtime's own mapping (controller.py). Unset/unknown defaults to prod, the
-// chart's CLIENT_ENV default.
+// chart's stage default.
 //
 // DERIVED FROM api.BaseURL, not restated. The env→host mapping used to be a
 // second copy of BaseURL's switch living in this package, which is how the two
 // drift: the same three hosts written down twice, with nothing that fails when
 // only one of them is edited. api.BaseURL already lower-cases, so TrimSpace is
-// the only normalisation this adds — a CLIENT_ENV read off a container spec can
+// the only normalisation this adds — a stage value read off a container spec can
 // carry surrounding whitespace that a --env flag cannot.
 //
-// The input is the CLUSTER's CLIENT_ENV (read off the jobs-manager Deployment),
-// not this CLI's session env — a deliberately different question, which is why
-// this takes a string rather than calling into the session resolution.
+// The input is the CLUSTER's stage (read off the jobs-manager Deployment), not
+// this CLI's session env — a deliberately different question, which is why this
+// takes a string rather than calling into the session resolution.
 func backendHost(clientEnv string) string {
 	u, err := url.Parse(api.BaseURL(strings.TrimSpace(clientEnv)))
 	if err != nil || u.Host == "" {

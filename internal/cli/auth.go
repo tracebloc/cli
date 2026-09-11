@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,6 +24,7 @@ import (
 // backend doesn't support browser sign-in yet.
 func newLoginCmd() *cobra.Command {
 	var envFlag string
+	var force bool
 	cmd := &cobra.Command{
 		Use:         "login",
 		Annotations: runtimeClassFor(classBackend),
@@ -32,15 +34,23 @@ on any device (your laptop or phone), sign in the way you already do
 (password, Google, or GitHub), and approve the code. The CLI stores a
 user token in ~/.tracebloc (mode 0600).
 
+Already signed in to this backend? login says so and exits 0 without a
+browser step — so re-running it is safe in a script or a runbook, and a
+headless box is never asked to approve a code it already has. Pass
+--force to re-authenticate anyway: switching accounts, or replacing a
+session you believe is stale.
+
 Works on a headless / SSH box — the browser and the CLI need not share a
 machine. Honors HTTP(S)_PROXY / NO_PROXY for corporate-proxy networks.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runLogin(cmd.Context(), printerFor(cmd), envFlag)
+			return runLogin(cmd.Context(), printerFor(cmd), envFlag, force)
 		},
 	}
 	cmd.Flags().StringVar(&envFlag, "env", "",
-		"backend environment: dev|stg|prod (default: $CLIENT_ENV, then prod)")
+		"backend environment: dev|stg|prod (default: $TRACEBLOC_ENV, then legacy $CLIENT_ENV, then prod)")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"start a new device flow even when this machine already holds a valid session")
 	return cmd
 }
 
@@ -52,7 +62,7 @@ var (
 	pollAfter    = time.After
 )
 
-func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
+func runLogin(ctx context.Context, p *ui.Printer, envFlag string, force bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return &exitError{code: exitFailure, err: err}
@@ -65,8 +75,22 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	if !api.IsKnownEnv(env) {
 		return &exitError{code: exitFailure, err: fmt.Errorf(
 			"unknown backend environment %q — valid values are dev, stg, prod (default). "+
-				"Check --env / $CLIENT_ENV", env)}
+				"Check --env / $TRACEBLOC_ENV (or legacy $CLIENT_ENV)", env)}
 	}
+	// Before asking for a browser approval, USE the credentials already on disk
+	// (cli#651). Without this, "re-run login to be safe" — a reasonable thing for
+	// a script or a runbook to do — is a hard stop on any host without a browser,
+	// even though the session is valid and every other command would accept it.
+	if !force {
+		reused, err := reuseStoredSession(ctx, p, cfg, env)
+		if err != nil {
+			return err
+		}
+		if reused {
+			return nil
+		}
+	}
+
 	client := newAPIClient(env)
 	p.Detailf("backend %s — requesting a device code …", client.BaseURL)
 
@@ -130,6 +154,203 @@ func runLogin(ctx context.Context, p *ui.Printer, envFlag string) error {
 	// the headline (RFC-0001 §8.1: the happy path stays quiet).
 	p.Detailf("token saved to ~/.tracebloc (0600)")
 	return nil
+}
+
+// storedSessionFor returns the profile KEY and the profile of the session this
+// machine already holds for env, or ("", nil) when it holds none.
+//
+// Two arms, because "a session for env" has two shapes on disk and answering
+// only the first would leave the credentials for the second unused:
+//
+//   - the CURRENT session, when it RESOLVES to env. This is the same predicate
+//     `auth status --check` uses (sessionEnv, not the raw cfg.CurrentEnv), so
+//     login's short-circuit and the installer's probe cannot disagree about what
+//     "signed in to this env" means.
+//   - failing that, env's OWN profile. Profiles are per-env (R10), so a machine
+//     signed in to prod can still hold a live dev token; `login --env dev` must
+//     find it rather than run a flow for a credential already on disk.
+//
+// The KEY comes back with the profile because Profiles is keyed on the RAW env
+// string — a v1-migrated config stores `"Dev"` verbatim (config.migrateV1) while
+// sessionEnv normalises for the comparison. Writing the reused session back
+// under the key it was FOUND under is what keeps a second, lower-cased profile
+// from being minted alongside it.
+func storedSessionFor(cfg *config.Config, env string) (string, *config.Profile) {
+	if cfg.SignedIn() && sessionEnv(cfg) == env {
+		return cfg.CurrentEnv, cfg.Current()
+	}
+	return profileKeyed(cfg, env)
+}
+
+// profileKeyed finds env's own profile by FOLDING the map's keys, not by
+// indexing with the already-normalised target (Bugbot, PR #658).
+//
+// A plain `cfg.Profiles[env]` only matches a key that is already lower-cased, so
+// a live token written under `"Dev"` went unseen the moment that profile stopped
+// being the current one — and the flow that followed saved a SECOND profile under
+// `"dev"`, leaving the original session stranded beside it on exactly the headless
+// host cli#651 is about. Arm 1 of storedSessionFor hid this: it catches the raw
+// key while it is current, so the gap only opens after a `login --env` elsewhere.
+//
+// Exact match wins, and the fold is a tie-break scanned in sorted order — with
+// both `"Dev"` and `"dev"` on disk the answer must not depend on Go's randomised
+// map iteration.
+func profileKeyed(cfg *config.Config, env string) (string, *config.Profile) {
+	if p := cfg.Profiles[env]; p != nil && p.Token != "" {
+		return env, p
+	}
+	keys := make([]string, 0, len(cfg.Profiles))
+	for k := range cfg.Profiles {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if p := cfg.Profiles[k]; p != nil && p.Token != "" && normalizeEnv(k) == env {
+			return k, p
+		}
+	}
+	return "", nil
+}
+
+// sessionExpired reports whether a stored profile's own recorded expiry has
+// already passed, and renders it for the message.
+//
+// expires_at is "when known" (config.Profile) and the device grant does not
+// return one today, so this is usually absent and the verdict comes from the
+// backend instead. That split is exactly why the two copy paths differ: a LOCAL
+// expiry we can name to the second, and a 401 we can only report as "rejected",
+// because the backend returns the same status for a token that expired and one
+// that was revoked. Naming a cause we cannot distinguish would be worse than
+// reporting the one fact we have.
+//
+// An unparseable timestamp is NOT treated as expired: the backend, not a
+// malformed config field, gets to invalidate a session.
+func sessionExpired(prof *config.Profile) (bool, string) {
+	if prof.ExpiresAt == "" {
+		return false, ""
+	}
+	t, err := time.Parse(time.RFC3339, prof.ExpiresAt)
+	if err != nil || time.Now().Before(t) {
+		return false, ""
+	}
+	return true, t.Format(time.RFC3339)
+}
+
+// whoAmIVerdict is what a FAILED WhoAmI says about the stored session. The three
+// arms are deliberately not collapsible: only one of them is a statement about
+// the credential.
+type whoAmIVerdict int
+
+const (
+	// whoAmIUnverified — no verdict was ever reached: DNS, a refused connection,
+	// a 5xx. NOT evidence the session is bad, and must never be reported as if it
+	// were: telling someone to re-authenticate during an outage sends them to a
+	// browser step that cannot help.
+	whoAmIUnverified whoAmIVerdict = iota
+	// whoAmIRejected — the backend refused the credential (401/403). The one arm
+	// where signing in again is the answer.
+	whoAmIRejected
+	// whoAmIUpgradeRequired — a 426: this CLI is below the server's version floor.
+	// Says nothing about the session, and no amount of re-authenticating fixes it.
+	whoAmIUpgradeRequired
+)
+
+// classifyWhoAmIError turns a failed WhoAmI into that verdict, returning the
+// *api.UpgradeRequiredError alongside it so the caller can surface the server's
+// own version floor rather than a paraphrase.
+//
+// Shared because both places that probe a stored session — login's short-circuit
+// and `auth status --check` — have to draw the SAME three-way distinction, and
+// two hand-written copies of it drift the first time a fourth case appears
+// (review on PR #658). The copy stays at the call sites: the two commands answer
+// different questions ("should I start a flow?" vs "what is this exit code?") and
+// say so in different words.
+func classifyWhoAmIError(err error) (whoAmIVerdict, *api.UpgradeRequiredError) {
+	var ue *api.UpgradeRequiredError
+	if errors.As(err, &ue) {
+		return whoAmIUpgradeRequired, ue
+	}
+	var ae *api.APIError
+	if errors.As(err, &ae) &&
+		(ae.StatusCode == http.StatusUnauthorized || ae.StatusCode == http.StatusForbidden) {
+		return whoAmIRejected, nil
+	}
+	return whoAmIUnverified, nil
+}
+
+// reuseStoredSession is login's "you are already signed in" short-circuit
+// (cli#651). It reports whether login is DONE: true means the machine holds a
+// session for env that the backend just accepted, and there is nothing to sign
+// in to. False means fall through to the device flow — every such path first
+// says WHY, so a user who expected the short-circuit learns whether their
+// session expired, was rejected, or simply couldn't be checked.
+//
+// The session is confirmed against the backend rather than trusted off disk: a
+// token that has been revoked is still a token on disk, and reporting it as a
+// live session would send the user into the next command to discover otherwise.
+// When the backend can't be reached we fall through to the flow, which is what
+// login does today — the flow surfaces the network failure in its own words.
+func reuseStoredSession(ctx context.Context, p *ui.Printer, cfg *config.Config, env string) (bool, error) {
+	key, prof := storedSessionFor(cfg, env)
+	if prof == nil {
+		return false, nil
+	}
+	if expired, at := sessionExpired(prof); expired {
+		p.Hintf("The session saved on this machine expired at %s — signing in again.", at)
+		return false, nil
+	}
+
+	client := newAPIClient(env)
+	client.Token = prof.Token
+	p.Detailf("backend %s — checking the session already on this machine …", client.BaseURL)
+	id, err := client.WhoAmI(ctx)
+	if err != nil {
+		// Ctrl-C landing during the probe is the OPERATOR, not an unverifiable
+		// session: fall through and we print "signing in again", then fail
+		// RequestDeviceCode with exit 1 — where every other interrupt in login exits
+		// 130 silently. Checked before the classification below because a cancelled
+		// context surfaces on the HTTP call as a plain error, which would otherwise
+		// land in the "couldn't check" arm (Bugbot, PR #658; same guard, same
+		// reason, as pollForToken's).
+		if ctx.Err() != nil {
+			return false, &exitError{code: exitInterrupted}
+		}
+		switch verdict, ue := classifyWhoAmIError(err); verdict {
+		case whoAmIUpgradeRequired:
+			// Not a verdict on the session, and a fresh device flow would hit the same
+			// floor — surface the upgrade instruction instead of burning a browser
+			// approval on it.
+			return false, &exitError{code: exitFailure, err: ue}
+		case whoAmIRejected:
+			p.Hintf("The backend rejected the session saved on this machine — it expired or was revoked. Signing in again.")
+		default: // whoAmIUnverified
+			p.Hintf("Couldn't check the session saved on this machine (%v) — signing in again.", err)
+		}
+		return false, nil
+	}
+
+	// The session is live. Adopt it as the active one: `login --env dev` from a
+	// prod session is a request to SWITCH, and answering "already signed in"
+	// without moving current_env would leave every following command on prod.
+	// Written under the key the profile was found under, never a re-derived one.
+	cfg.CurrentEnv = key
+	prof.Email, prof.FirstName = id.Email, id.FirstName
+	if err := cfg.Save(); err != nil {
+		return false, &exitError{code: exitFailure, err: err}
+	}
+	if id.Email != "" {
+		p.Successf("Already signed in as %s.", id.Email)
+	} else {
+		p.Successf("Already signed in.")
+	}
+	// Visible, not demoted to Detailf, and deliberately NOT routed through
+	// withSignInAdvice: this is the actionable half of an outcome the user did not
+	// ask for. Someone who typed `login` to switch accounts needs the next step
+	// here, and unlike the advice withSignInAdvice guards, it contradicts nothing
+	// the installer prints — the installer reaches this line only on its success
+	// path, where its own next step is to carry on provisioning, not to re-auth.
+	p.Hintf("Run `tracebloc login --force` to sign in again — switching accounts, or replacing a session you believe is stale.")
+	return true, nil
 }
 
 // pollDisposition is what the poll loop does with a failed PollToken call.
@@ -461,7 +682,7 @@ func newAuthStatusCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&check, "check", false,
 		"exit 0 only if signed in with a backend-valid token, else 1; silent unless --verbose")
 	cmd.Flags().StringVar(&envFlag, "env", "",
-		"backend environment the check targets: dev|stg|prod (default: $CLIENT_ENV, then prod)")
+		"backend environment the check targets: dev|stg|prod (default: $TRACEBLOC_ENV, then legacy $CLIENT_ENV, then prod)")
 	return cmd
 }
 
@@ -514,16 +735,12 @@ func runAuthCheck(ctx context.Context, p *ui.Printer, envFlag string) error {
 		// A 426 means the CLI is too old, not that the session is invalid — surface
 		// the upgrade instruction (non-silent, so it shows even without --verbose)
 		// instead of the "re-login" advice, which wouldn't help.
-		var ue *api.UpgradeRequiredError
-		if errors.As(err, &ue) {
+		verdict, ue := classifyWhoAmIError(err)
+		if verdict == whoAmIUpgradeRequired {
 			return &exitError{code: exitFailure, err: ue}
 		}
 		if p.Verbose() {
-			// Only a 401/403 is genuinely a rejected token (where re-login helps); a
-			// network/DNS/5xx failure means we couldn't verify, not that the session
-			// is invalid — don't send the user to re-login for an outage.
-			var apiErr *api.APIError
-			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+			if verdict == whoAmIRejected {
 				p.Hintf("Signed-in token was rejected by the backend — run `tracebloc login`.")
 			} else {
 				p.Hintf("Couldn't verify your session with the backend (%v).", err)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/tracebloc/cli/internal/api"
 	"github.com/tracebloc/cli/internal/config"
+	"github.com/tracebloc/cli/internal/ui"
 )
 
 // withTestBackend points the login command at an httptest server (via the
@@ -849,5 +851,467 @@ func TestLogin_ClearsStaleIdentityOnWhoAmIFailure(t *testing.T) {
 	}
 	if prof.FirstName != "" || prof.Email != "" {
 		t.Errorf("stale identity leaked: FirstName=%q Email=%q (want both cleared)", prof.FirstName, prof.Email)
+	}
+}
+
+// ── login's "already signed in" short-circuit (cli#651) ────────────────────────
+//
+// The bug: `login` went straight to a device code even when the machine already
+// held a valid session, which on a headless host is a dead end rather than an
+// inconvenience — the credentials are on disk, but the command insists on a
+// browser approval it has no way to complete.
+//
+// Every test below asserts on whether /device/code was requested, because THAT
+// is the behaviour that matters: the copy is secondary to whether a browser step
+// was demanded.
+
+// loginBackend serves the device flow + /userinfo/, counting device-code
+// requests, and lets a test decide what /userinfo/ says about the session that
+// is already on disk.
+func loginBackend(t *testing.T, userinfo http.HandlerFunc) *int {
+	t.Helper()
+	var codes int
+	withTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/device/code":
+			codes++
+			_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"WDJB-MJHT","verification_uri":"https://x/activate","expires_in":600,"interval":5}`))
+		case "/device/token":
+			_, _ = w.Write([]byte(`{"token":"fresh_tok"}`))
+		case "/userinfo/":
+			userinfo(w, r)
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+		}
+	})
+	return &codes
+}
+
+// okUserinfo accepts whatever token is presented.
+func okUserinfo(w http.ResponseWriter, _ *http.Request) {
+	_, _ = w.Write([]byte(`{"email":"ds@co","first_name":"Dana","account":"Acme"}`))
+}
+
+// TestLogin_ReusesValidSession is the issue's reproduction: a second `login`
+// against a live session must exit 0 without requesting a device code.
+func TestLogin_ReusesValidSession(t *testing.T) {
+	codes := loginBackend(t, okUserinfo)
+	saveSignedIn(t, "live_tok") // CurrentEnv=dev
+
+	out, err := runCmd(t, "login", "--env", "dev")
+	if err != nil {
+		t.Fatalf("login over a valid session should exit 0, got: %v", err)
+	}
+	if *codes != 0 {
+		t.Errorf("requested %d device codes; a valid session must not start a flow", *codes)
+	}
+	if !strings.Contains(out, "Already signed in as ds@co") {
+		t.Errorf("expected the already-signed-in line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "--force") {
+		t.Errorf("expected the --force opt-out to be named, got:\n%s", out)
+	}
+	// The session is kept, not replaced by the flow's token.
+	cfg, _ := config.Load()
+	if got := cfg.Current().Token; got != "live_tok" {
+		t.Errorf("token = %q, want the existing live_tok", got)
+	}
+}
+
+// TestLogin_ForceStartsAFlowOverAValidSession: --force is the opt-out for
+// switching accounts or replacing a session believed stale, so it must skip the
+// short-circuit entirely — including the probe.
+func TestLogin_ForceStartsAFlowOverAValidSession(t *testing.T) {
+	codes := loginBackend(t, okUserinfo)
+	saveSignedIn(t, "live_tok")
+
+	out, err := runCmd(t, "login", "--env", "dev", "--force")
+	if err != nil {
+		t.Fatalf("login --force: %v", err)
+	}
+	if *codes != 1 {
+		t.Errorf("requested %d device codes, want 1 under --force", *codes)
+	}
+	if strings.Contains(out, "Already signed in") {
+		t.Errorf("--force must not short-circuit, got:\n%s", out)
+	}
+	cfg, _ := config.Load()
+	if got := cfg.Current().Token; got != "fresh_tok" {
+		t.Errorf("token = %q, want the re-authenticated fresh_tok", got)
+	}
+}
+
+// TestLogin_RejectedSessionSaysSoThenSignsIn: a 401 is the backend REJECTING the
+// stored credential — name that, then run the flow the user came for.
+func TestLogin_RejectedSessionSaysSoThenSignsIn(t *testing.T) {
+	codes := loginBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer stale_tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		okUserinfo(w, r)
+	})
+	saveSignedIn(t, "stale_tok")
+
+	out, err := runCmd(t, "login", "--env", "dev")
+	if err != nil {
+		t.Fatalf("login after a rejected session: %v", err)
+	}
+	if *codes != 1 {
+		t.Errorf("requested %d device codes, want 1 after a rejected session", *codes)
+	}
+	if !strings.Contains(out, "rejected the session saved on this machine") {
+		t.Errorf("expected the rejection to be named before the new flow, got:\n%s", out)
+	}
+	cfg, _ := config.Load()
+	if got := cfg.Current().Token; got != "fresh_tok" {
+		t.Errorf("token = %q, want fresh_tok", got)
+	}
+}
+
+// TestLogin_UnverifiableSessionIsNotCalledRejected: a 5xx means we COULDN'T
+// CHECK, which is a different situation from a rejected credential — reporting
+// it as a rejection would tell the user their session is bad when the backend is
+// simply down. (Same distinction runAuthCheck draws; cli#651 asks login to draw
+// it too.)
+func TestLogin_UnverifiableSessionIsNotCalledRejected(t *testing.T) {
+	codes := loginBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer live_tok" {
+			w.WriteHeader(http.StatusInternalServerError) // reachable but erroring
+			return
+		}
+		okUserinfo(w, r)
+	})
+	saveSignedIn(t, "live_tok")
+
+	out, err := runCmd(t, "login", "--env", "dev")
+	if err != nil {
+		t.Fatalf("login after an unverifiable session: %v", err)
+	}
+	if *codes != 1 {
+		t.Errorf("requested %d device codes, want 1 when the session can't be checked", *codes)
+	}
+	if !strings.Contains(out, "Couldn't check the session saved on this machine") {
+		t.Errorf("expected a 'couldn't check' line, got:\n%s", out)
+	}
+	if strings.Contains(out, "rejected") {
+		t.Errorf("a 500 must not be reported as a rejected session, got:\n%s", out)
+	}
+}
+
+// TestLogin_LocallyExpiredSessionNamesTheExpiryWithoutProbing: when the stored
+// profile carries an expires_at that has passed, we know the answer locally —
+// say "expired" (the one cause we can actually distinguish) and don't spend a
+// round-trip presenting a credential we know is dead.
+func TestLogin_LocallyExpiredSessionNamesTheExpiryWithoutProbing(t *testing.T) {
+	// Only the OLD token's presentation counts: login's own post-flow
+	// confirmation hits /userinfo/ too, with the token it just obtained.
+	presented := false
+	codes := loginBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer old_tok" {
+			presented = true
+		}
+		okUserinfo(w, r)
+	})
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "old_tok", Email: "ds@co", ExpiresAt: past},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runCmd(t, "login", "--env", "dev")
+	if err != nil {
+		t.Fatalf("login after an expired session: %v", err)
+	}
+	if presented {
+		t.Error("must not present a locally-expired token to the backend")
+	}
+	if *codes != 1 {
+		t.Errorf("requested %d device codes, want 1 after an expired session", *codes)
+	}
+	if !strings.Contains(out, "expired at "+past) {
+		t.Errorf("expected the expiry to be named, got:\n%s", out)
+	}
+}
+
+// TestLogin_UnexpiredSessionIsStillProbed guards the other side of the expiry
+// arm: an expires_at in the FUTURE must not be taken as proof on its own — a
+// revoked token still has an unexpired timestamp on disk.
+func TestLogin_UnexpiredSessionIsStillProbed(t *testing.T) {
+	probed := false
+	codes := loginBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		probed = true
+		okUserinfo(w, r)
+	})
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	if err := (&config.Config{CurrentEnv: "dev", Profiles: map[string]*config.Profile{
+		"dev": {Token: "live_tok", Email: "ds@co", ExpiresAt: future},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runCmd(t, "login", "--env", "dev"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if !probed {
+		t.Error("an unexpired session must still be confirmed with the backend")
+	}
+	if *codes != 0 {
+		t.Errorf("requested %d device codes; the confirmed session must short-circuit", *codes)
+	}
+}
+
+// TestLogin_UpgradeRequiredDoesNotStartAFlow: a 426 says this CLI is below the
+// server's version floor — a device flow would hit the same floor, so surface the
+// upgrade instruction instead of demanding a browser approval that cannot help.
+func TestLogin_UpgradeRequiredDoesNotStartAFlow(t *testing.T) {
+	codes := loginBackend(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUpgradeRequired) // 426
+		_, _ = w.Write([]byte(`{"error":"upgrade_required","min_version":"1.2.3"}`))
+	})
+	saveSignedIn(t, "live_tok")
+
+	_, err := runCmd(t, "login", "--env", "dev")
+	if err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Fatalf("a 426 must surface the upgrade message, got: %v", err)
+	}
+	if *codes != 0 {
+		t.Errorf("requested %d device codes; a 426 must not start a flow", *codes)
+	}
+}
+
+// TestLogin_ReuseAdoptsTheTargetEnvsOwnProfile: profiles are per-env (R10), so a
+// machine signed in to prod can hold a live dev token. `login --env dev` must use
+// it AND switch current_env — answering "already signed in" without moving the
+// pointer would leave every following command talking to prod.
+func TestLogin_ReuseAdoptsTheTargetEnvsOwnProfile(t *testing.T) {
+	codes := loginBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer dev_tok" {
+			t.Errorf("probed with %q, want the dev profile's token", r.Header.Get("Authorization"))
+		}
+		okUserinfo(w, r)
+	})
+	if err := (&config.Config{CurrentEnv: "prod", Profiles: map[string]*config.Profile{
+		"prod": {Token: "prod_tok", Email: "ds@co"},
+		"dev":  {Token: "dev_tok", Email: "ds@co"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runCmd(t, "login", "--env", "dev"); err != nil {
+		t.Fatalf("login --env dev over a stored dev session: %v", err)
+	}
+	if *codes != 0 {
+		t.Errorf("requested %d device codes; the stored dev session must be reused", *codes)
+	}
+	cfg, _ := config.Load()
+	if cfg.CurrentEnv != "dev" {
+		t.Errorf("current_env = %q, want dev (the short-circuit must still switch env)", cfg.CurrentEnv)
+	}
+	if got := cfg.Profiles["prod"].Token; got != "prod_tok" {
+		t.Errorf("prod token = %q, want prod_tok left intact (R10)", got)
+	}
+}
+
+// TestLogin_ReuseKeepsTheRawProfileKey: Profiles is keyed on the RAW env string,
+// and a v1-migrated config stores it verbatim ("Dev"). Reusing that session must
+// write back under the key it was FOUND under — deriving a fresh, lower-cased key
+// would mint a second profile beside the real one and strand the token.
+func TestLogin_ReuseKeepsTheRawProfileKey(t *testing.T) {
+	codes := loginBackend(t, okUserinfo)
+	if err := (&config.Config{CurrentEnv: "Dev", Profiles: map[string]*config.Profile{
+		"Dev": {Token: "live_tok", Email: "ds@co"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runCmd(t, "login", "--env", "dev"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if *codes != 0 {
+		t.Errorf("requested %d device codes; a `Dev`-keyed session still resolves to dev", *codes)
+	}
+	cfg, _ := config.Load()
+	if len(cfg.Profiles) != 1 {
+		t.Errorf("profiles = %v, want the single existing one (no duplicate key)", cfg.Profiles)
+	}
+	if p := cfg.Profiles["Dev"]; p == nil || p.Token != "live_tok" {
+		t.Errorf("the `Dev` profile lost its token: %+v", cfg.Profiles)
+	}
+}
+
+// TestLogin_NoStoredSessionStillSignsIn: the short-circuit must be invisible on
+// the path it doesn't apply to — a machine with no session gets the device flow
+// exactly as before, with no extra probe.
+func TestLogin_NoStoredSessionStillSignsIn(t *testing.T) {
+	probes := 0
+	codes := loginBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		probes++
+		okUserinfo(w, r)
+	})
+
+	if _, err := runCmd(t, "login", "--env", "dev"); err != nil {
+		t.Fatalf("login on a fresh machine: %v", err)
+	}
+	if *codes != 1 {
+		t.Errorf("requested %d device codes, want 1", *codes)
+	}
+	// One probe only: login's own post-flow confirmation. A signed-out machine
+	// has nothing to check beforehand.
+	if probes != 1 {
+		t.Errorf("%d /userinfo/ calls, want 1 (the post-flow confirmation only)", probes)
+	}
+}
+
+// TestLogin_ReuseFindsARawKeyedProfileThatIsNotCurrent (Bugbot, PR #658) is the
+// gap TestLogin_ReuseKeepsTheRawProfileKey could not see. That test keeps the
+// `"Dev"` profile CURRENT, so arm 1 of storedSessionFor catches it and the map
+// lookup is never exercised. Once a `login --env` elsewhere moves current_env,
+// only arm 2 is left — and indexing the map with the already-normalised target
+// misses `"Dev"` entirely, starting a flow and saving a second `"dev"` profile
+// beside a perfectly good session.
+func TestLogin_ReuseFindsARawKeyedProfileThatIsNotCurrent(t *testing.T) {
+	codes := loginBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer dev_tok" {
+			t.Errorf("probed with %q, want the `Dev` profile's token", got)
+		}
+		okUserinfo(w, r)
+	})
+	// Signed in to prod; the dev session exists under a v1-migrated raw key.
+	if err := (&config.Config{CurrentEnv: "prod", Profiles: map[string]*config.Profile{
+		"prod": {Token: "prod_tok", Email: "ds@co"},
+		"Dev":  {Token: "dev_tok", Email: "ds@co"},
+	}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runCmd(t, "login", "--env", "dev"); err != nil {
+		t.Fatalf("login --env dev over a `Dev`-keyed session: %v", err)
+	}
+	if *codes != 0 {
+		t.Errorf("requested %d device codes; the `Dev` session must be found and reused", *codes)
+	}
+	cfg, _ := config.Load()
+	if cfg.CurrentEnv != "Dev" {
+		t.Errorf("current_env = %q, want the key the profile was FOUND under", cfg.CurrentEnv)
+	}
+	if _, dup := cfg.Profiles["dev"]; dup {
+		t.Errorf("a duplicate lower-cased profile was minted: %v", cfg.Profiles)
+	}
+	if p := cfg.Profiles["Dev"]; p == nil || p.Token != "dev_tok" {
+		t.Errorf("the `Dev` profile lost its token: %+v", cfg.Profiles)
+	}
+}
+
+// TestProfileKeyed_ExactMatchWinsAndFoldIsDeterministic: with both `"dev"` and
+// `"Dev"` on disk the answer must not ride on Go's randomised map iteration.
+// Exact match wins; the fold is only a tie-break, scanned in sorted order.
+func TestProfileKeyed_ExactMatchWinsAndFoldIsDeterministic(t *testing.T) {
+	cfg := &config.Config{Profiles: map[string]*config.Profile{
+		"Dev": {Token: "raw_tok"},
+		"dev": {Token: "exact_tok"},
+		"DEV": {Token: "shouty_tok"},
+	}}
+	for i := 0; i < 50; i++ {
+		key, prof := profileKeyed(cfg, "dev")
+		if key != "dev" || prof.Token != "exact_tok" {
+			t.Fatalf("iteration %d: got (%q, %q), want the exact `dev` match", i, key, prof.Token)
+		}
+	}
+	// With no exact key, the sorted fold must still answer the same way every time.
+	delete(cfg.Profiles, "dev")
+	for i := 0; i < 50; i++ {
+		key, _ := profileKeyed(cfg, "dev")
+		if key != "DEV" { // "DEV" sorts before "Dev"
+			t.Fatalf("iteration %d: fold returned %q, want a stable sorted pick", i, key)
+		}
+	}
+	// A profile with no token is not a session.
+	cfg.Profiles = map[string]*config.Profile{"Dev": {Email: "ds@co"}}
+	if key, prof := profileKeyed(cfg, "dev"); prof != nil {
+		t.Errorf("a tokenless profile matched: (%q, %+v)", key, prof)
+	}
+}
+
+// TestLogin_CancelDuringTheProbeExits130 (Bugbot, PR #658): Ctrl-C landing on the
+// new session probe is the operator, not an unverifiable session. Falling through
+// printed "signing in again" and then failed RequestDeviceCode with exit 1, where
+// every other interrupt in login exits 130 silently.
+func TestLogin_CancelDuringTheProbeExits130(t *testing.T) {
+	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	codes := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/userinfo/":
+			cancel() // the operator hits Ctrl-C mid-probe
+			<-r.Context().Done()
+		case "/device/code":
+			codes++
+			_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"X","verification_uri":"https://x/a","expires_in":600,"interval":5}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	orig := newAPIClient
+	newAPIClient = func(string) *api.Client { return &api.Client{BaseURL: srv.URL, HTTP: srv.Client()} }
+	t.Cleanup(func() { newAPIClient = orig })
+
+	saveSignedIn(t, "live_tok") // CurrentEnv=dev
+	err := runLogin(ctx, ui.New(io.Discard, ui.WithColor(false)), "dev", false)
+
+	if got := ExitCodeFromError(err); got != exitInterrupted {
+		t.Fatalf("exit code = %d, want %d (a cancelled probe is an interrupt)", got, exitInterrupted)
+	}
+	if !IsSilentError(err) {
+		t.Errorf("an interrupt must exit quietly, got: %v", err)
+	}
+	if codes != 0 {
+		t.Errorf("requested %d device codes; Ctrl-C must not start a flow", codes)
+	}
+}
+
+// TestClassifyWhoAmIError pins the three-way distinction both session probes
+// share (review on PR #658). The arms are not interchangeable: only
+// whoAmIRejected is a statement about the credential, so a 5xx landing in it
+// would send someone to re-authenticate during an outage, and a 426 landing
+// there would send them to a browser step that cannot lift a version floor.
+func TestClassifyWhoAmIError(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		want    whoAmIVerdict
+		wantMin string // the server's floor, when the verdict carries one
+	}{
+		{"401 is a rejection", &api.APIError{StatusCode: http.StatusUnauthorized}, whoAmIRejected, ""},
+		{"403 is a rejection", &api.APIError{StatusCode: http.StatusForbidden}, whoAmIRejected, ""},
+		{"426 is a version floor", &api.UpgradeRequiredError{MinVersion: "1.2.3"}, whoAmIUpgradeRequired, "1.2.3"},
+		{"500 is not a verdict", &api.APIError{StatusCode: http.StatusInternalServerError}, whoAmIUnverified, ""},
+		{"404 is not a rejection", &api.APIError{StatusCode: http.StatusNotFound}, whoAmIUnverified, ""},
+		{"429 is not a rejection", &api.APIError{StatusCode: http.StatusTooManyRequests}, whoAmIUnverified, ""},
+		{"a transport error is not a verdict", errors.New("dial tcp: no such host"), whoAmIUnverified, ""},
+		{"a cancelled context is not a rejection", context.Canceled, whoAmIUnverified, ""},
+		// Wrapped, because both call sites get their error back through the api
+		// client's own fmt.Errorf wrapping — matching on the concrete type only
+		// would silently demote every real verdict to "unverified".
+		{"wrapped 401 still a rejection", fmt.Errorf("confirming: %w",
+			&api.APIError{StatusCode: http.StatusUnauthorized}), whoAmIRejected, ""},
+		{"wrapped 426 still a version floor", fmt.Errorf("confirming: %w",
+			&api.UpgradeRequiredError{MinVersion: "9.9.9"}), whoAmIUpgradeRequired, "9.9.9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ue := classifyWhoAmIError(tc.err)
+			if got != tc.want {
+				t.Errorf("verdict = %d, want %d", got, tc.want)
+			}
+			switch {
+			case tc.wantMin != "":
+				if ue == nil || ue.MinVersion != tc.wantMin {
+					t.Errorf("upgrade error = %+v, want MinVersion %q", ue, tc.wantMin)
+				}
+			case ue != nil:
+				t.Errorf("upgrade error = %+v, want nil", ue)
+			}
+		})
 	}
 }

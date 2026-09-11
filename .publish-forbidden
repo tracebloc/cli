@@ -1,0 +1,79 @@
+# .publish-forbidden — what must never reach the public mirror, even if the
+# allowlist (.publish-include) let it through by mistake.
+#
+# Read by scripts/publish-guard.sh. Four sections; `#` starts a comment. A
+# header the guard does not know, a needle listed in both string tiers, or an
+# empty [strings-refuse] is refused as "could not tell" (exit 2).
+#
+#   [paths]           gitignore-style names. A pattern containing `/` is
+#                     anchored to the staged root; one without matches ANY path
+#                     component; a trailing `/` means "as a directory".
+#   [strings-refuse]  extended regexes, matched case-insensitively against
+#                     every staged TEXT file. A hit REFUSES the publish and
+#                     names the file and line (never the matched text).
+#   [strings-report]  same syntax. Hits are COUNTED and printed (per-needle
+#                     totals, ten most-hit files) but do not refuse — unless
+#                     the guard runs with --strict, which promotes this tier
+#                     to refusal. A needle moves up to [strings-refuse] the
+#                     day it is decided the mirror must never carry it.
+#   [allow]           exact tokens removed from a line before a needle is
+#                     re-tested, so a line is spared only when the allowed
+#                     token was the whole reason it hit.
+#
+# This file is ONE list read by both the guard and its tests; the tests write
+# their own inputs and never iterate this file to check itself.
+
+[paths]
+tests/
+scripts/tests/
+ci/
+.github/
+docs/rfcs/
+docs/migration-tools/
+CLAUDE.md
+STYLE.md
+Makefile
+.cursor/
+*.go
+go.mod
+go.sum
+__pycache__
+.DS_Store
+.env*
+*.pem
+*.key
+kubeconfig*
+
+[strings-refuse]
+# Mailboxes (the public support address is spared under [allow]).
+[A-Za-z0-9._%+-]+@tracebloc\.io
+# AWS account identifiers and ARNs.
+arn:aws:
+[0-9]{12}\.dkr\.ecr\.
+#
+# CUSTOMER AND TENANT IDENTIFIERS ARE DELIBERATELY NOT LISTED HERE. This file
+# is public, and a list of customer names would itself be the disclosure the
+# scan exists to prevent. Those needles are supplied privately at publish time:
+# the workflow writes the PUBLISH_FORBIDDEN_TENANTS secret (one needle per line,
+# same regex syntax) to a file and passes it as --extra-forbidden; they join
+# this tier. The guard refuses to run the scan when that list is missing or
+# empty.
+
+[strings-report]
+# Internal tracker and RFC identifiers — a reader of the mirror cannot open
+# them. Counted until the decision to strip them from the deliverable (or to
+# accept them) is taken; --strict refuses them.
+backend#
+rfcs#
+RFC-0
+RFC-BACKEND
+e2e-test-agent#
+tracebloc/backend
+# Non-production tracebloc hosts; same decision pending.
+dev-api\.tracebloc\.io
+stg-api\.tracebloc\.io
+dev\.tracebloc\.io
+stg\.tracebloc\.io
+
+[allow]
+support@tracebloc\.io

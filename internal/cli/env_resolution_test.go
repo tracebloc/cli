@@ -428,9 +428,9 @@ func TestKnownSessionEnvGatesUnknownButKeepsKnown(t *testing.T) {
 // internal/ — i.e. blind exactly where a new site is most likely to land, in a
 // package written by someone who never reads internal/cli (Lukas on #551).
 var resolutionSites = map[string]string{
-	// The primitive: ResolveEnv is the --env/$CLIENT_ENV/prod chain, and the only
-	// os.Getenv("CLIENT_ENV") in the module.
-	"internal/api/client.go": "api.ResolveEnv — the primitive chain, and the only $CLIENT_ENV read",
+	// The primitive: ResolveEnv is the --env/$TRACEBLOC_ENV/legacy $CLIENT_ENV/prod
+	// chain, and the only os.Getenv of the stage var in the module.
+	"internal/api/client.go": "api.ResolveEnv — the primitive chain, and the only $TRACEBLOC_ENV/$CLIENT_ENV read",
 	// The --env FLAG, a different question: the env the human/installer NAMED,
 	// which login persists (the one cfg.CurrentEnv WRITE) and `auth status --check`
 	// validates against the session.
@@ -441,9 +441,10 @@ var resolutionSites = map[string]string{
 	// Storage. Profiles are keyed by the RAW stored string, so this layer must not
 	// normalise; it hands the raw value out and sessionEnv normalises it.
 	"internal/config/config.go": "the on-disk current_env field, its accessors, and the v1 migration",
-	// The CLUSTER's CLIENT_ENV, read off the jobs-manager Deployment — a
-	// deliberately different question from this CLI's session env.
-	"internal/doctor/doctor.go": "the cluster's own CLIENT_ENV, for the egress probe's target host",
+	// The CLUSTER's stage (chart-written $TRACEBLOC_ENV, legacy $CLIENT_ENV), read
+	// off the jobs-manager Deployment — a deliberately different question from this
+	// CLI's session env.
+	"internal/doctor/doctor.go": "the cluster's own stage var, for the egress probe's target host",
 	// internal/cli/telemetry.go is deliberately ABSENT, and the staleness check
 	// below is what keeps it that way: telemetryEnv/signedInEnv delegate the whole
 	// chain to sessionEnv and name no needle, so an entry for it would be inert —
@@ -455,10 +456,12 @@ var resolutionSites = map[string]string{
 // api.BaseURL/IsKnownEnv are pure mappings over an argument and are deliberately
 // absent — they resolve nothing.
 //
-// Deliberately BROAD (bare identifiers, and CLIENT_ENV unquoted so it matches
-// help text too): a false positive is a loud line in a diff, a false negative is
-// the bug this guard exists to catch. Fail closed.
-var envNeedles = []string{"CurrentEnv", "ResolveEnv", "CLIENT_ENV"}
+// Deliberately BROAD (bare identifiers, and the stage-var names unquoted so they
+// match help text too): a false positive is a loud line in a diff, a false negative
+// is the bug this guard exists to catch. Fail closed. TRACEBLOC_ENV is the RFC-0076
+// canonical stage var; CLIENT_ENV is its legacy alias (remove_by 2026-12-31) — both
+// are needles so a new read of EITHER name lands in the allowlist.
+var envNeedles = []string{"CurrentEnv", "ResolveEnv", "TRACEBLOC_ENV", "CLIENT_ENV"}
 
 // matchesAnyNeedle is THE matcher, called from both directions — the detection
 // sweep and the allowlist audit. One function on purpose: two copies of "does

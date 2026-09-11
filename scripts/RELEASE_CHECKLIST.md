@@ -28,6 +28,64 @@ have to reverse-engineer the surface area on release day.
    and all artifacts attached. `prerelease=true` if the tag
    contains a `-` (e.g. `v0.1.0-rc1`).
 
+7. `.github/workflows/mirror-publish.yml` fires when the Release
+   workflow completes. It stages the public deliverable (README,
+   LICENSE, `docs/*.md` per `.publish-include`; the release assets)
+   through `scripts/publish-guard.sh` — allowlist, forbidden paths,
+   forbidden strings, gitleaks, all fail-closed — and pushes it, plus
+   a copy of the release, to the public mirror named by the
+   `MIRROR_REPO` variable. Until that variable is set the job refuses
+   to publish; `Actions → Mirror publish → Run workflow` with
+   `dry-run: true` shows what would ship. The string scan has two
+   tiers: `[strings-refuse]` hits refuse; `[strings-report]` hits
+   (internal ticket references, non-production hostnames) are counted
+   and printed with the most-hit files, and refuse only under the
+   `strict` input or the `PUBLISH_STRICT=true` repository variable.
+   The guard and publisher run from the workflow's own commit; the
+   release tag is fetched separately as data and refused unless it
+   resolves to the commit the Release run ran on. A prerelease
+   (`-rc.N`) mirrors only its GitHub release, marked prerelease and
+   pinned to the mirror's current default-branch head — the mirror's
+   default branch keeps the last stable release.
+
+8. Releases that predate the mirror are carried over ONCE, by hand, with
+   `scripts/backfill-releases.sh` (the workflow only publishes releases
+   cut after it exists). The decision it implements: every published
+   release gets its tag, its GitHub release and its text assets
+   (`install.sh`, `install.ps1`, `SHA256SUMS`, anything else SHA256SUMS
+   does not list); the binaries and their `.sig`/`.cert` only for the
+   newest `BINARY_KEEP` releases (default 10) — older pinned binary
+   URLs 404 on the mirror, and the answer is "re-run the installer".
+   Prereleases are skipped unless `--include-prerelease`. Mirror tags
+   are annotated RELEASE MARKERS on the mirror's default-branch head,
+   carrying the original date and message — the mirror has no source
+   commit to point at, and the annotation says so. Release notes are
+   the same fixed text the workflow writes (`--notes fixed`, the
+   default) plus a footer naming the original publish date — the
+   historical bodies are GitHub's generated pull-request lists, and
+   nearly every one carries strings the guard's report tier counts,
+   which the mirror should not repeat. `--notes source` carries the
+   source body instead, as an explicit opt-in. Every text asset and
+   every release body goes through `publish-guard.sh` first; every
+   binary is checked against the source's `SHA256SUMS`; anything
+   already on the mirror with the same SHA256 is skipped, so a re-run
+   writes nothing. Dry-run is the default:
+
+   ```bash
+   MIRROR_REPO=<mirror name> scripts/backfill-releases.sh            # plan
+   MIRROR_REPO=<mirror name> scripts/backfill-releases.sh --apply    # write
+   # resume after a failure, or redo one release:
+   MIRROR_REPO=<mirror name> scripts/backfill-releases.sh --apply --from-tag vX.Y.Z
+   MIRROR_REPO=<mirror name> scripts/backfill-releases.sh --apply --only-tag vX.Y.Z
+   ```
+
+   Needs `gh` (token with write on the mirror), `jq`, `gitleaks`; set
+   `BACKFILL_EXTRA_FORBIDDEN` to a file with the private needle list
+   the workflow gets from its secret, or the string scan runs without
+   them. Exit 1 means at least one release was refused (the table says
+   which and why); exit 2 means a read did not complete and nothing was
+   written. The script's header carries the full contract.
+
 GitHub Releases plus the cosign-verified `install.sh` are the
 install path — a Homebrew tap and the `install.tracebloc.io`
 vanity URL were considered and dropped

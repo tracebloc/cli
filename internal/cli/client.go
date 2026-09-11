@@ -164,10 +164,19 @@ func clientPrompter() prompter {
 // and the file is hand-written in fixtures) failed `auth status --check --env dev`
 // against a session that works perfectly.
 func sessionEnv(cfg *config.Config) string {
-	if e := strings.ToLower(strings.TrimSpace(cfg.CurrentEnv)); e != "" {
+	if e := normalizeEnv(cfg.CurrentEnv); e != "" {
 		return e
 	}
 	return api.ResolveEnv("")
+}
+
+// normalizeEnv is the trim+lower-case sessionEnv applies, as a pure function, so
+// the one other place that has to COMPARE a raw stored env string — the profile
+// lookup in auth.go, which reads the Profiles map's own keys — folds it exactly
+// the same way. Two hand-rolled copies of this is how a `"Dev"` key stops
+// matching a `dev` target.
+func normalizeEnv(env string) string {
+	return strings.ToLower(strings.TrimSpace(env))
 }
 
 // knownSessionEnv resolves the session env like sessionEnv and then REJECTS an

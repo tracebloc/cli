@@ -28,16 +28,39 @@ func TestBaseURL(t *testing.T) {
 }
 
 func TestResolveEnv(t *testing.T) {
+	// Isolate both stage vars: the canonical name and the legacy alias.
+	t.Setenv("TRACEBLOC_ENV", "")
 	t.Setenv("CLIENT_ENV", "stg")
 	if got := ResolveEnv("dev"); got != "dev" {
 		t.Errorf("explicit should win: got %q", got)
 	}
 	if got := ResolveEnv(""); got != "stg" {
-		t.Errorf("CLIENT_ENV should be used: got %q", got)
+		t.Errorf("legacy $CLIENT_ENV should be used as the fallback: got %q", got)
 	}
 	t.Setenv("CLIENT_ENV", "")
 	if got := ResolveEnv(""); got != "prod" {
 		t.Errorf("default should be prod: got %q", got)
+	}
+}
+
+// TestResolveEnvStageAlias pins the RFC-0076 alias precedence (backend#3391): the
+// canonical $TRACEBLOC_ENV is preferred, the legacy $CLIENT_ENV is read only as a
+// fallback, and an explicit --env still beats both.
+func TestResolveEnvStageAlias(t *testing.T) {
+	// Canonical alone is honoured.
+	t.Setenv("TRACEBLOC_ENV", "dev")
+	t.Setenv("CLIENT_ENV", "")
+	if got := ResolveEnv(""); got != "dev" {
+		t.Errorf("canonical $TRACEBLOC_ENV should be used: got %q", got)
+	}
+	// Canonical wins over the legacy alias when both are set.
+	t.Setenv("CLIENT_ENV", "prod")
+	if got := ResolveEnv(""); got != "dev" {
+		t.Errorf("canonical $TRACEBLOC_ENV should beat legacy $CLIENT_ENV: got %q", got)
+	}
+	// Explicit --env still wins over both.
+	if got := ResolveEnv("stg"); got != "stg" {
+		t.Errorf("explicit --env should beat the environment: got %q", got)
 	}
 }
 
