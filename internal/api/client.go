@@ -21,11 +21,20 @@ import (
 	"time"
 )
 
-// Backend environments (mirror CLIENT_ENV).
+// Backend environments (mirror the stage env var — $TRACEBLOC_ENV, legacy $CLIENT_ENV).
 const (
 	EnvDev  = "dev"
 	EnvStg  = "stg"
 	EnvProd = "prod"
+)
+
+// Stage-selecting environment variables (RFC-0076 settings-naming, backend#3391).
+// TRACEBLOC_ENV is the canonical name; CLIENT_ENV is the legacy alias, read as a
+// fallback so existing installs and $CLIENT_ENV exports keep working. Alias-first:
+// read new-or-old, never break a deployment. Legacy alias remove_by: 2026-12-31.
+const (
+	StageEnvVar       = "TRACEBLOC_ENV"
+	LegacyStageEnvVar = "CLIENT_ENV"
 )
 
 const defaultTimeout = 30 * time.Second
@@ -80,9 +89,9 @@ func (t userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return t.base.RoundTrip(req)
 }
 
-// BaseURL maps a CLIENT_ENV value to the backend base URL — kept in lock-step
-// with the installer's `_backend_url` and client-runtime's CLIENT_ENV→backend
-// mapping. Unknown / empty → prod.
+// BaseURL maps a stage value to the backend base URL — kept in lock-step with the
+// installer's `_backend_url` and client-runtime's stage→backend mapping. Unknown /
+// empty → prod.
 func BaseURL(env string) string {
 	switch strings.ToLower(env) {
 	case EnvDev:
@@ -94,16 +103,26 @@ func BaseURL(env string) string {
 	}
 }
 
-// ResolveEnv picks the backend env: an explicit value (a --env flag) wins,
-// then $CLIENT_ENV, then prod.
+// ResolveEnv picks the backend env: an explicit value (a --env flag) wins, then
+// the stage env var — canonical $TRACEBLOC_ENV, else legacy $CLIENT_ENV — then prod.
 func ResolveEnv(explicit string) string {
 	if explicit != "" {
 		return strings.ToLower(explicit)
 	}
-	if e := os.Getenv("CLIENT_ENV"); e != "" {
+	if e := stageFromEnv(); e != "" {
 		return strings.ToLower(e)
 	}
 	return EnvProd
+}
+
+// stageFromEnv reads the deploy stage from the process environment, preferring the
+// canonical TRACEBLOC_ENV over the legacy CLIENT_ENV alias (remove_by 2026-12-31).
+// The single reader of both names, so the alias precedence lives in one place.
+func stageFromEnv() string {
+	if e := os.Getenv(StageEnvVar); e != "" {
+		return e
+	}
+	return os.Getenv(LegacyStageEnvVar)
 }
 
 // IsKnownEnv reports whether env is one of the recognized backends (dev/stg/prod,

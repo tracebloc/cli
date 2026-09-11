@@ -32,6 +32,10 @@ func testBuildInfo() BuildInfo {
 func isolateConfig(t *testing.T) {
 	t.Helper()
 	t.Setenv("TRACEBLOC_CONFIG_DIR", t.TempDir())
+	// Pin the ambient stage to prod, clearing the canonical name too: it outranks
+	// the legacy $CLIENT_ENV set below (api.stageFromEnv), so leaving it set would
+	// let it override this pin.
+	t.Setenv("TRACEBLOC_ENV", "")
 	t.Setenv("CLIENT_ENV", api.EnvProd)
 }
 
