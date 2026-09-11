@@ -21,7 +21,9 @@
 #  written; an unset mirror and a mirror equal to the source are refused by
 #  publish-mirror's rule; prereleases are excluded by default; a read that
 #  fails is could-not-tell (exit 2) with the failing call named, never an empty
-#  list; the DEFAULT notes are the workflow's fixed text (the source body is
+#  list, and a read that returns non-JSON is could-not-tell naming the file and
+#  filter even though it is parsed inside a "$(...)" substitution (the reason
+#  travels on stderr, so the variable never swallows it); the DEFAULT notes are the workflow's fixed text (the source body is
 #  never written or scanned unless --notes source asks for it); under --notes
 #  source a refuse-tier needle in a release body refuses that release naming
 #  the tier; a mirror asset already present with a different digest is refused,
@@ -74,6 +76,7 @@ if [ "${1:-}" = "--mutations" ]; then
     'sha-check|:'
     'guard-refusal|      1) ;;'
     'notes-default-fixed|APPLY=0; FROM_TAG=""; ONLY_TAG=""; INCLUDE_PRE=0; NOTES_MODE=source; STRICT=0'
+    'die2-stderr|die2() { echo "::error::backfill-releases: COULD NOT TELL — $1 (nothing more is written)"; exit 2; }'
   )
   MUT_PASS=0; MUT_FAIL=0
   # Every mutant is prepared and PROVEN to have landed first; then the suite
@@ -124,6 +127,8 @@ set -uo pipefail
 FIX="${FAKE_GH_FIX:?}"; STATE="${FAKE_GH_STATE:?}"
 printf '%s\n' "$*" >>"${GH_LOG:?}"
 if [ -n "${FAKE_GH_FAIL_RE:-}" ] && [[ "$*" =~ $FAKE_GH_FAIL_RE ]]; then echo "gh: Internal Server Error (HTTP 500)" >&2; exit 1; fi
+# A call that "succeeds" with a body that is not JSON — the answer jq must refuse.
+if [ -n "${FAKE_GH_GARBLE_RE:-}" ] && [[ "$*" =~ $FAKE_GH_GARBLE_RE ]]; then echo '<html>not json'; exit 0; fi
 SRC="$(cat "$FIX/src-repo")"; MIRROR="$(cat "$FIX/mirror-repo")"; HEAD_SHA="$(cat "$FIX/mirror-head")"
 if command -v sha256sum >/dev/null 2>&1; then sha() { sha256sum "$1" | cut -d' ' -f1; }; else sha() { shasum -a 256 "$1" | cut -d' ' -f1; }; fi
 fake_sha() { printf '%s' "$1" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | cut -c1-40; }   # a 40-hex git object id
@@ -445,6 +450,14 @@ FAKE_GH_EMPTY_MIRROR=1 run "$S9" "$FIX" --apply
 if [ "$RC" -eq 1 ] && has "REFUSED — mirror 'acme/mirror' has no commit on 'main' to anchor tags to; publish the README first" && [ "$(writes)" -eq 0 ]; then
   ok "an empty mirror is refused with instructions — tags are never anchored to an invented commit"
 else bad "empty mirror (rc=$RC): $OUTPUT"; fi
+# A read that returns garbage is parsed inside "$(jq_of …)" — a subshell. The
+# reason must still reach the operator (die2 writes it to stderr; on stdout it
+# would be captured into the variable and lost) and the run must still end 2.
+S9C="$ROOT/s9c"; fresh_state "$S9C"
+FAKE_GH_GARBLE_RE='^api repos/acme/mirror$' run "$S9C" "$FIX" --apply
+if [ "$RC" -eq 2 ] && [[ "$OUTPUT" == *"COULD NOT TELL — could not parse "*"/mirror.json with '.full_name':"* ]] && [ "$(writes)" -eq 0 ]; then
+  ok "a read that returns non-JSON, parsed inside a \$(...) substitution, is exit 2 naming the file and filter — the reason reaches the operator, not the variable"
+else bad "garbled read in a substitution (rc=$RC writes=$(writes)): $OUTPUT"; fi
 
 # ---- 10. under --notes source a refuse-tier needle in a body refuses that release, naming the tier;
 #          the default never reads the body into the notes, so the same release goes through -------

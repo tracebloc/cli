@@ -89,7 +89,16 @@ PUBLISH_MIRROR="$SCRIPTS_DIR/publish-mirror.sh"
 PUBLISH_GUARD="$SCRIPTS_DIR/publish-guard.sh"
 FORBIDDEN_LIST="$REPO_ROOT/.publish-forbidden"
 
-die2() { echo "::error::backfill-releases: COULD NOT TELL — $1 (nothing more is written)"; exit 2; }
+# die2 REASON — could-not-tell: the reason, then exit 2. The reason goes to
+# STDERR on purpose: most callers (jq_of above all) sit inside "$(...)", where
+# stdout is the variable being assigned — a stdout reason would be captured
+# into it and never seen, leaving a bare exit 2. On stderr it reaches the
+# operator either way, and the substitution's status 2 aborts the assignment
+# under `set -e`. That abort is the ONLY thing ending the parent, so never
+# put a die2-capable "$(...)" inside an && / || list or a `[ ]` test, where
+# `set -e` is suspended — hoist it into its own assignment first (the
+# per-release block does).
+die2() { echo "::error::backfill-releases: COULD NOT TELL — $1 (nothing more is written)" >&2; exit 2; }   # mutation-anchor: die2-stderr
 note() { echo "backfill-releases: $1"; }
 
 # ---- arguments -----------------------------------------------------------------
@@ -334,7 +343,11 @@ refuse() { # TAG REASON — the release is refused, the run goes on
 while IFS= read -r TAG; do
   R="$TMP/r-$TAG"; mkdir -p "$R/text" "$R/bin" "$R/sums" "$R/guard-assets"
   jq --arg t "$TAG" '.[] | select(.tag_name == $t)' "$TMP/releases.json" >"$R/release.json"
-  KIND=stable; [ "$(jq_of "$R/release.json" '.prerelease')" = true ] && KIND=prerelease
+  # Own assignment, not `[ "$(jq_of …)" = true ]`: inside a test the
+  # substitution's exit 2 is swallowed and a malformed release.json would
+  # silently read as "stable".
+  PRERELEASE="$(jq_of "$R/release.json" '.prerelease')"
+  KIND=stable; [ "$PRERELEASE" = true ] && KIND=prerelease
   NAME="$(jq_of "$R/release.json" '.name // .tag_name')"
   CREATED="$(jq_of "$R/release.json" '.created_at')"
   PUBLISHED="$(jq_of "$R/release.json" '.published_at // .created_at')"
