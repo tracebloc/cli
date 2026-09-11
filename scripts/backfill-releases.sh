@@ -258,7 +258,10 @@ note "source $SRC → mirror $MIRROR ($MIRROR_BRANCH @ ${MIRROR_HEAD:0:12}); $N_
 SCRATCH="$TMP/scratch-src"; mkdir -p "$SCRATCH"
 git -C "$SCRATCH" init -q || die2 "could not init the guard's scratch checkout"
 printf 'backfill scratch tree\n' >"$SCRATCH/README.md"
-git -C "$SCRATCH" add README.md && git -C "$SCRATCH" -c user.name=backfill -c user.email=backfill@localhost commit -q -m scratch || die2 "could not commit the guard's scratch checkout"
+# This runs on a human's machine: a global commit.gpgsign=true would try to
+# sign the scratch commit as backfill@localhost, fail, and end the run before
+# a single release is planned. The scratch commit is never published — unsigned.
+git -C "$SCRATCH" add README.md && git -C "$SCRATCH" -c user.name=backfill -c user.email=backfill@localhost -c commit.gpgsign=false commit -q -m scratch || die2 "could not commit the guard's scratch checkout"   # mutation-anchor: scratch-commit-unsigned
 printf 'README.md\n' >"$TMP/include.txt"
 
 # run_guard ASSETS_DIR OUT_DIR — the guard over ASSETS_DIR. Returns the guard's
@@ -333,9 +336,16 @@ cols() { # → TEXT_COL / BIN_COL from the decision files
 # Table rows: tag | kind | tag-action | release-action | text | binaries | verdict
 : >"$TMP/table.txt"
 N_REFUSED=0; N_CREATED=0; N_SKIPPED=0
+# For the `latest` fallback after the loop: was the newest stable release
+# refused before its own POST (the one carrying make_latest=true), and which
+# stable release did this run create last (= newest, the run is oldest-first).
+NEWEST_STABLE_REFUSED=0; LAST_STABLE_CREATED=""; LAST_STABLE_CREATED_ID=""
 row() { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$@" >>"$TMP/table.txt"; }
 refuse() { # TAG REASON — the release is refused, the run goes on
   echo "::error::backfill-releases: REFUSED $1 — $2"
+  # Refusing a release the mirror already has leaves `latest` where it is;
+  # refusing the newest stable BEFORE it is created leaves nothing marked.
+  if [ "$1" = "$NEWEST_STABLE" ] && [ "$REL_ACTION" = create ]; then NEWEST_STABLE_REFUSED=1; fi
   N_REFUSED=$((N_REFUSED + 1)); cols; row "$1" "$KIND" "$TAG_ACTION" "$REL_ACTION" "$TEXT_COL" "$BIN_COL" refused
 }
 
@@ -522,9 +532,28 @@ while IFS= read -r TAG; do
   if [ "${#UPLOADS[@]}" -gt 0 ]; then
     gh_write "$R/upload.log" release upload "$TAG" "${UPLOADS[@]}" --repo "$MIRROR"
   fi
+  if [ "$KIND" = stable ] && [ "$REL_ACTION" = create ]; then
+    LAST_STABLE_CREATED="$TAG"; LAST_STABLE_CREATED_ID="$(jq_of "$R/created.json" '.id')"
+    [[ "$LAST_STABLE_CREATED_ID" =~ ^[0-9]+$ ]] || die2 "$TAG: the created release has no numeric id"
+  fi
   N_CREATED=$((N_CREATED + 1))
   row "$TAG" "$KIND" "$TAG_ACTION" "$REL_ACTION" "$TEXT_COL" "$BIN_COL" "done"
 done <"$TMP/tags-run.txt"
+
+# ---- latest, when the newest stable release was refused -----------------------------
+# make_latest=true travels on the newest stable release's own POST; every older
+# release is created with make_latest=false. Refused before that POST, the newest
+# stable leaves the mirror's releases/latest answering 404 until a human re-runs
+# --only-tag for it. Until then the newest stable release this run DID write is
+# marked latest — that re-run's POST moves `latest` forward again.
+if [ "$APPLY" -eq 1 ] && [ "$NEWEST_STABLE_REFUSED" -eq 1 ]; then   # mutation-anchor: latest-fallback
+  if [ -n "$LAST_STABLE_CREATED" ]; then
+    note "latest: $NEWEST_STABLE was refused — marking $LAST_STABLE_CREATED, the newest stable release written in this run, as latest until $NEWEST_STABLE is re-run"
+    gh_write "$TMP/latest.json" api -X PATCH "repos/$MIRROR/releases/$LAST_STABLE_CREATED_ID" -F make_latest=true
+  else
+    echo "::warning::backfill-releases: $NEWEST_STABLE was refused and this run wrote no stable release — nothing is newly marked latest; re-run --only-tag $NEWEST_STABLE once the refusal is fixed"
+  fi
+fi
 
 # ---- report -------------------------------------------------------------------------
 echo

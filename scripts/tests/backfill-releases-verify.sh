@@ -30,7 +30,10 @@
 #  never replaced; a mirror tag that dangles is refused, never repointed;
 #  --only-tag / --from-tag narrow the run without changing the binary decision;
 #  the mirror tag carries the original date and, for an annotated source tag,
-#  the original message.
+#  the original message; when the newest stable release is refused, the newest
+#  stable release the run did write is marked latest (one PATCH) so
+#  releases/latest never 404s behind a refusal; the guard's scratch commit is
+#  made unsigned, so a global commit.gpgsign cannot end the run.
 #
 #  --mutations: copies the script, breaks ONE rule per copy at its
 #  `# mutation-anchor: NAME` line, proves the mutation landed (the anchor was
@@ -77,6 +80,8 @@ if [ "${1:-}" = "--mutations" ]; then
     'guard-refusal|      1) ;;'
     'notes-default-fixed|APPLY=0; FROM_TAG=""; ONLY_TAG=""; INCLUDE_PRE=0; NOTES_MODE=source; STRICT=0'
     'die2-stderr|die2() { echo "::error::backfill-releases: COULD NOT TELL — $1 (nothing more is written)"; exit 2; }'
+    'latest-fallback|if false; then'
+    'scratch-commit-unsigned|git -C "$SCRATCH" add README.md && git -C "$SCRATCH" -c user.name=backfill -c user.email=backfill@localhost commit -q -m scratch || die2 "could not commit the guard'"'"'s scratch checkout"'
   )
   MUT_PASS=0; MUT_FAIL=0
   # Every mutant is prepared and PROVEN to have landed first; then the suite
@@ -192,9 +197,16 @@ case "$cmd" in
       "POST repos/$MIRROR/releases")
         tag="$(fieldval tag_name)"; name="$(fieldval name)"; body="$(fieldval body)"; pre="$(fieldval prerelease)"; latest="$(fieldval make_latest)"
         jq -e --arg r "refs/tags/$tag" '.[] | select(.ref == $r)' "$STATE/mirror-tags.json" >/dev/null || { echo "gh: fake: release for '$tag' before its tag (HTTP 422)" >&2; exit 1; }
-        jq --arg tag "$tag" --arg name "$name" --arg body "$body" --arg pre "$pre" --arg latest "$latest" \
-          '. + [{id: (length + 1), tag_name: $tag, name: $name, body: $body, prerelease: ($pre == "true"), make_latest: $latest, draft: false, assets: []}]' "$STATE/mirror-releases.json" >"$STATE/t.json" && mv "$STATE/t.json" "$STATE/mirror-releases.json"
-        printf '{"id":1,"tag_name":"%s"}\n' "$tag" ;;
+        id="$(jq 'length + 1' "$STATE/mirror-releases.json")"
+        jq --argjson id "$id" --arg tag "$tag" --arg name "$name" --arg body "$body" --arg pre "$pre" --arg latest "$latest" \
+          '. + [{id: $id, tag_name: $tag, name: $name, body: $body, prerelease: ($pre == "true"), make_latest: $latest, draft: false, assets: []}]' "$STATE/mirror-releases.json" >"$STATE/t.json" && mv "$STATE/t.json" "$STATE/mirror-releases.json"
+        printf '{"id":%s,"tag_name":"%s"}\n' "$id" "$tag" ;;
+      "PATCH repos/$MIRROR/releases/"*)
+        id="${PATHP##*/}"; latest="$(fieldval make_latest)"
+        [[ "$id" =~ ^[0-9]+$ ]] || notfound
+        jq -e --argjson id "$id" '.[] | select(.id == $id)' "$STATE/mirror-releases.json" >/dev/null || notfound
+        jq --argjson id "$id" --arg latest "$latest" 'map(if .id == $id then .make_latest = $latest else . end)' "$STATE/mirror-releases.json" >"$STATE/t.json" && mv "$STATE/t.json" "$STATE/mirror-releases.json"
+        printf '{"id":%s}\n' "$id" ;;
       *) echo "gh: fake: unhandled $METHOD $PATHP" >&2; exit 1 ;;
     esac ;;
   release)
@@ -297,7 +309,7 @@ run() {
 }
 has()    { [[ "$OUTPUT" == *"$1"* ]]; }
 hasg()   { [[ "$OUTPUT" == *$1* ]]; }   # $1 is a glob: `a*b`; escape [ ] as \[ \]
-writes() { grep -cE '^(api -X POST|release upload) ' "$GH_LOG" || true; }
+writes() { grep -cE '^(api -X (POST|PATCH)|release upload) ' "$GH_LOG" || true; }
 posts()  { grep -c "^api -X POST repos/acme/mirror/$1 " "$GH_LOG" || true; }
 verdicts() { printf '%s\n' "$OUTPUT" | awk -v v="$1" '$NF == v && $1 ~ /^v[0-9]/ { n++ } END { print n + 0 }'; }
 
@@ -391,6 +403,13 @@ if [ "$RC" -eq 1 ] && has "REFUSED v0.1.11 — binary 'tracebloc-v0.1.11-darwin-
    && [ "$(jq -r '[.[] | select(.tag_name == "v0.1.11")] | length' "$S5/mirror-releases.json")" -eq 0 ] && [ "$(jq length "$S5/mirror-releases.json")" -eq 11 ]; then
   ok "sha mismatch: the binary is named, nothing of that release is written (no tag, no release, no upload), the other 11 go ahead, exit 1"
 else bad "sha mismatch (rc=$RC refused=$(verdicts refused) done=$(verdicts "done")): $OUTPUT"; fi
+# v0.1.11 is the newest stable, so its refusal is the "no latest" case: every
+# other release was created with make_latest=false. The newest stable the run
+# did write (v0.1.10) must be marked latest, by exactly one PATCH.
+if [ "$(grep -c '^api -X PATCH repos/acme/mirror/releases/' "$GH_LOG")" -eq 1 ] && has "latest: v0.1.11 was refused — marking v0.1.10, the newest stable release written in this run, as latest until v0.1.11 is re-run" \
+   && [ "$(jq -r '.[] | select(.tag_name == "v0.1.10") | .make_latest' "$S5/mirror-releases.json")" = true ] && [ "$(jq -r '[.[] | select(.make_latest == "true")] | length' "$S5/mirror-releases.json")" -eq 1 ]; then
+  ok "sha mismatch on the newest stable: the newest stable release the run did write is marked latest — releases/latest does not 404 behind a refusal"
+else bad "latest fallback (patches=$(grep -c '^api -X PATCH' "$GH_LOG" || true)): $(jq -c '[.[] | {tag_name, make_latest}]' "$S5/mirror-releases.json")"; fi
 run "$S5" "$FIX_CORRUPT"
 if [ "$RC" -eq 0 ] && [ "$(verdicts planned)" -eq 1 ] && [ "$(verdicts skipped)" -eq 11 ] && [ "$(writes)" -eq 0 ]; then
   ok "sha mismatch: a dry-run afterwards plans only the refused release (binaries are checked at apply, not fetched for a plan)"
@@ -521,6 +540,21 @@ else bad "strict (a=$a b=$b): $o1 / $o2"; fi
 if [ "$c" -eq 0 ] && [ "$(printf '%s\n' "$o3" | awk '$NF == "planned" && $1 ~ /^v[0-9]/ { n++ } END { print n + 0 }')" -eq 12 ] && [[ "$o3" != *"dev-api"* ]]; then
   ok "--strict with the default notes: the report-tier body is never staged, so all 12 are planned — the reason fixed notes are the default"
 else bad "strict default notes (c=$c): $o3"; fi
+
+# ---- 14. the guard's scratch commit is unsigned even under a global commit.gpgsign -----------
+# The script runs on a human's machine. A global gpgsign that cannot sign as
+# backfill@localhost must not end the run before a release is planned.
+S14="$ROOT/s14"; fresh_state "$S14"
+cat >"$ROOT/gpg-fail" <<'EOF'
+#!/usr/bin/env bash
+echo "gpg: signing failed: No secret key" >&2; exit 2
+EOF
+chmod +x "$ROOT/gpg-fail"
+printf '[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = %s\n' "$ROOT/gpg-fail" >"$ROOT/gitconfig-gpgsign"
+GIT_CONFIG_GLOBAL="$ROOT/gitconfig-gpgsign" run "$S14" "$FIX"
+if [ "$RC" -eq 0 ] && [ "$(verdicts planned)" -eq 12 ] && ! has "could not commit the guard's scratch checkout"; then
+  ok "a global commit.gpgsign=true with a failing signer does not end the run — the guard's scratch commit is made unsigned, all 12 planned"
+else bad "gpgsign (rc=$RC planned=$(verdicts planned)): $OUTPUT"; fi
 
 echo
 printf 'backfill-releases-verify: %d passed, %d failed\n' "$PASS" "$FAIL"
