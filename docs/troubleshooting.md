@@ -155,9 +155,41 @@ random id, so runs are not linked to each other or to you.
 Turn it off with either of:
 
 ```bash
-export TRACEBLOC_NO_TELEMETRY=1
+export TRACEBLOC_SKIP_TELEMETRY=1
 export DO_NOT_TRACK=1
 ```
+
+The older spelling still works, and is removed on 2026-12-31:
+
+```bash
+export TRACEBLOC_NO_TELEMETRY=1
+```
+
+If you already have that one set, nothing changes for you: the tracebloc
+spellings are read as a set rather than one falling back to the other, so an
+opt-out you have already made cannot lapse because of the rename.
+
+## Update-check nudge
+
+After each command, the CLI checks — at most once a day — whether a newer
+release exists and, only then, prints one dim line pointing at `tracebloc
+upgrade`. It's silent on a dev build, off a terminal, or in CI, and it never
+touches the installed binary itself.
+
+Turn it off with:
+
+```bash
+export TRACEBLOC_SKIP_UPDATE_CHECK=1
+```
+
+The older spelling still works, and is removed on 2026-12-31:
+
+```bash
+export TRACEBLOC_NO_UPDATE_CHECK=1
+```
+
+If you already have that one set, nothing changes for you: either spelling
+disables the nudge on its own.
 
 ## Still stuck?
 
