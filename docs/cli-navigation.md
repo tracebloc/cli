@@ -185,4 +185,4 @@ flowchart TD
 2. **`cluster info`'s home is open** — the `doctor` promotion shipped (top-level `doctor`, with `cluster doctor` kept as a hidden alias); whether `cluster info` stays under `cluster` or is also promoted is undecided.
 3. Terminology in the live copy (client / cluster / `<table>`) is pre-cleanup; the map uses the agreed target words (secure environment, etc.). The rename wave aligns the code later.
 
-Resolved since the first cut of this map: the status-aware home screen shipped ([#244](https://github.com/tracebloc/cli/pull/244) — greeting + sign-in + environment state on bare `tracebloc`/`tb`), and `resources set` shipped ([#241](https://github.com/tracebloc/cli/pull/241)).
+Resolved since the first cut of this map: the status-aware home screen shipped (greeting + sign-in + environment state on bare `tracebloc`/`tb`), and `resources set` shipped.

@@ -18,11 +18,11 @@ The customer-facing CLI for tracebloc: sign in, provision this machine as a clie
 
 Shipped in v0.9.0, after the v0.8.0 cut: `resources` / `resources set`, the status-aware home screen, top-level `doctor` (v0.8.0 had it only as `cluster doctor`), and `semantic_segmentation` support. The full navigation map — every command, decision point, and exit path — lives in [`docs/cli-navigation.md`](docs/cli-navigation.md).
 
-`data ingest` covers **all 16 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `semantic_segmentation`, `text_classification`, `token_classification`, `sentence_pair_classification`, `masked_language_modeling`, `causal_language_modeling`, `seq2seq`, `embeddings`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, `time_series_classification`, and `time_to_event_prediction` (`semantic_segmentation` — the 16th — landed with [#247](https://github.com/tracebloc/cli/pull/247)).
+`data ingest` covers **all 16 task categories**: `image_classification`, `object_detection`, `keypoint_detection`, `semantic_segmentation`, `text_classification`, `token_classification`, `sentence_pair_classification`, `masked_language_modeling`, `causal_language_modeling`, `seq2seq`, `embeddings`, `tabular_classification`, `tabular_regression`, `time_series_forecasting`, `time_series_classification`, and `time_to_event_prediction` (`semantic_segmentation` — the 16th — landed in v0.9).
 
 The release pipeline ships every release as **cosign-signed, multi-arch binaries** — Linux (`amd64`, `arm64`, `386`, `arm`), macOS (`amd64`, `arm64`), and Windows (`amd64`, `arm64`) — each with `SHA256SUMS` and the install scripts. GitHub releases plus the cosign-verified `install.sh` are the install path — see [Customer experience](#customer-experience) or [build from source](#building-from-source).
 
-The Helm chart remains a sibling interface for the Kubernetes-native workflow: `helm install tracebloc/ingestor --set-file ingestConfig=./ingest.yaml` (see the chart's [README](https://github.com/tracebloc/client/blob/develop/ingestor/README.md)).
+The Helm chart remains a sibling interface for the Kubernetes-native workflow: `helm install tracebloc/ingestor --set-file ingestConfig=./ingest.yaml` (see the chart's [README](https://github.com/tracebloc/client/blob/main/ingestor/README.md)).
 
 ## Why a CLI in addition to the chart?
 
@@ -79,7 +79,7 @@ tracebloc data ingest ./my-data \
 > longer silently skips the signature). The one escape, for a genuinely
 > constrained environment, is to re-run with `TRACEBLOC_ALLOW_UNVERIFIED=1` —
 > which prints a loud warning. For the highest trust, pre-install `cosign`
-> (`brew install cosign`, your package manager, or the [released binary](https://github.com/sigstore/cosign/releases)) before running the installer. (RFC-0001 R8.)
+> (`brew install cosign`, your package manager, or the [released binary](https://github.com/sigstore/cosign/releases)) before running the installer.
 
 What that runs under the curtain:
 
@@ -94,9 +94,9 @@ The customer never touches Helm, never edits YAML, never runs `kubectl cp`.
 
 ## Building from source
 
+The source is developed in a private repository; the public [`tracebloc/cli`](https://github.com/tracebloc/cli) repository carries this README, the license and the [releases](https://github.com/tracebloc/cli/releases). From a checkout of the source:
+
 ```bash
-git clone https://github.com/tracebloc/cli.git
-cd cli
 go build -o tracebloc ./cmd/tracebloc
 ./tracebloc version
 ```
@@ -116,25 +116,23 @@ go build -ldflags "\
 
 All v0.1 phases are merged:
 
-| Phase | Ticket | What | Status |
-|---|---|---|---|
-| 0 | [#148](https://github.com/tracebloc/client/issues/148) | Repo bootstrap + Go module + CI + `tracebloc version` | ✅ |
-| 1 | [#149](https://github.com/tracebloc/client/issues/149) | Embed `ingest.v1.json` + `tracebloc data validate <path>` (local-only) | ✅ |
-| 2 | [#150](https://github.com/tracebloc/client/issues/150) | Cluster discovery + ingestor SA token via TokenRequest | ✅ |
-| 3 | [#151](https://github.com/tracebloc/client/issues/151) | Stage data into the shared PVC via ephemeral Pod | ✅ |
-| 4 | [#152](https://github.com/tracebloc/client/issues/152) | Submit to jobs-manager + watch ingestor Job + summary | ✅ |
-| 5 | [#153](https://github.com/tracebloc/client/issues/153) | GitHub Releases + install.sh distribution (Homebrew tap dropped — [#299](https://github.com/tracebloc/cli/issues/299)) | ✅ — [`v0.1.0`](https://github.com/tracebloc/cli/releases/tag/v0.1.0) released (stable, 8-platform) |
+| Phase | What | Status |
+|---|---|---|
+| 0 | Repo bootstrap + Go module + CI + `tracebloc version` | ✅ |
+| 1 | Embed `ingest.v1.json` + `tracebloc data validate <path>` (local-only) | ✅ |
+| 2 | Cluster discovery + ingestor SA token via TokenRequest | ✅ |
+| 3 | Stage data into the shared PVC via ephemeral Pod | ✅ |
+| 4 | Submit to jobs-manager + watch ingestor Job + summary | ✅ |
+| 5 | GitHub Releases + install.sh distribution (Homebrew tap dropped) | ✅ — [`v0.1.0`](https://github.com/tracebloc/cli/releases/tag/v0.1.0) released (stable, 8-platform) |
 
 Beyond the original phases, `data ingest` was widened from image-classification-only to all 16 task categories, and the test suite gained unit-coverage wins plus a kind-based integration harness for the real-I/O seams.
 
-**v0.2–v0.3** added guided `data ingest`, `dataset list` / `dataset rm`, and home-screen polish. **v0.4–v0.5** added browser sign-in (`login` / `logout` / `auth status`), one-command client provisioning, `cluster doctor`, and the `dataset` → `data` rename (RFC-0001). **v0.6–v0.8** hardened ingest end to end: namespace discovery, plain-language copy, flag renames, flexible file-or-folder input, tabular schema confirmation, and the five text tasks. **v0.9** added `resources` / `resources set`, the status-aware home screen, top-level `doctor`, and `semantic_segmentation` ([#247](https://github.com/tracebloc/cli/pull/247)); v0.9.1 is the current latest. **Next:** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap (RFC-0002 non-goal, planned). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues).
-
-Epic: [tracebloc/client#147](https://github.com/tracebloc/client/issues/147).
+**v0.2–v0.3** added guided `data ingest`, `dataset list` / `dataset rm`, and home-screen polish. **v0.4–v0.5** added browser sign-in (`login` / `logout` / `auth status`), one-command client provisioning, `cluster doctor`, and the `dataset` → `data` rename. **v0.6–v0.8** hardened ingest end to end: namespace discovery, plain-language copy, flag renames, flexible file-or-folder input, tabular schema confirmation, and the five text tasks. **v0.9** added `resources` / `resources set`, the status-aware home screen, top-level `doctor`, and `semantic_segmentation`; v0.9.1 is the current latest. **Next:** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap (planned). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues).
 
 ## Related
 
 - [tracebloc/client](https://github.com/tracebloc/client) — the parent Helm chart this CLI submits to, and where the [`tracebloc/ingestor`](https://github.com/tracebloc/client/tree/main/ingestor) subchart lives.
-- [tracebloc/data-ingestors](https://github.com/tracebloc/data-ingestors) — the ingestor image + JSON schema this CLI validates against.
+- The ingest JSON schema (`ingest.v1.json`) ships embedded in the binary — `tracebloc data validate <path>` checks a dataset against it locally, with no cluster in reach.
 
 ## License
 
