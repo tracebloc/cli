@@ -4,9 +4,17 @@
 
 The customer-facing CLI for tracebloc: sign in, provision this machine as a client, ingest and manage datasets, inspect and diagnose the environment, size tracebloc's compute share, and offboard — no Helm, no YAML, no kubectl. The data path wraps the same `POST /internal/submit-ingestion-run` protocol the [`tracebloc/ingestor`](https://github.com/tracebloc/client/tree/main/ingestor) Helm chart uses, so any cluster running the parent [`tracebloc/client`](https://github.com/tracebloc/client) chart can be targeted directly from a developer's workstation.
 
+## About the public repository
+
+The public [`tracebloc/cli`](https://github.com/tracebloc/cli) repository is a **publish-only mirror**. It holds the released binaries, install scripts and checksums on the [releases page](https://github.com/tracebloc/cli/releases), this README, the [license](LICENSE) and the [user docs](docs/). Every stable release rewrites it automatically from a private source repository, which means:
+
+- **Pull requests are not accepted there.** It carries no source tree, and anything merged into it would be overwritten by the next publish.
+- **Bug reports about the released binary are welcome** as [issues](https://github.com/tracebloc/cli/issues) — include the output of `tracebloc version`, your platform, and the command you ran. Roadmap and internal work are tracked privately.
+- **Every release is cosign-signed**, and the installer verifies the signature before it installs — see [Customer experience](#customer-experience).
+
 ## Status
 
-**v0.9.1 is the latest release** — the latest stable [release](https://github.com/tracebloc/cli/releases/latest), cut from `develop`. The binary covers the whole client lifecycle (this table describes `develop`, the tree this README lives on):
+**The latest stable [release](https://github.com/tracebloc/cli/releases/latest) is the one to install** — the releases page, not this file, says which version that is. It covers the whole client lifecycle:
 
 | Area | Commands |
 |---|---|
@@ -94,7 +102,7 @@ The customer never touches Helm, never edits YAML, never runs `kubectl cp`.
 
 ## Building from source
 
-The source is developed in a private repository; the public [`tracebloc/cli`](https://github.com/tracebloc/cli) repository carries this README, the license and the [releases](https://github.com/tracebloc/cli/releases). From a checkout of the source:
+The source is developed in a private repository; the public [`tracebloc/cli`](https://github.com/tracebloc/cli) repository is its publish-only mirror (see [About the public repository](#about-the-public-repository)) and carries no source tree. From a checkout of the source:
 
 ```bash
 go build -o tracebloc ./cmd/tracebloc
@@ -127,7 +135,7 @@ All v0.1 phases are merged:
 
 Beyond the original phases, `data ingest` was widened from image-classification-only to all 16 task categories, and the test suite gained unit-coverage wins plus a kind-based integration harness for the real-I/O seams.
 
-**v0.2–v0.3** added guided `data ingest`, `dataset list` / `dataset rm`, and home-screen polish. **v0.4–v0.5** added browser sign-in (`login` / `logout` / `auth status`), one-command client provisioning, `cluster doctor`, and the `dataset` → `data` rename. **v0.6–v0.8** hardened ingest end to end: namespace discovery, plain-language copy, flag renames, flexible file-or-folder input, tabular schema confirmation, and the five text tasks. **v0.9** added `resources` / `resources set`, the status-aware home screen, top-level `doctor`, and `semantic_segmentation`; v0.9.1 is the current latest. **Next:** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap (planned). Smaller follow-ups are tracked as [open issues](https://github.com/tracebloc/cli/issues).
+**v0.2–v0.3** added guided `data ingest`, `dataset list` / `dataset rm`, and home-screen polish. **v0.4–v0.5** added browser sign-in (`login` / `logout` / `auth status`), one-command client provisioning, `cluster doctor`, and the `dataset` → `data` rename. **v0.6–v0.8** hardened ingest end to end: namespace discovery, plain-language copy, flag renames, flexible file-or-folder input, tabular schema confirmation, and the five text tasks. **v0.9** added `resources` / `resources set`, the status-aware home screen, top-level `doctor`, and `semantic_segmentation`; the v0.10 line followed, and the [releases page](https://github.com/tracebloc/cli/releases) carries the changelog from there on. **Next:** cloud-source ingestion (S3/GCS/HTTPS) for datasets above the 1 GiB local cap (planned). Found a bug in a released binary? [Open an issue](https://github.com/tracebloc/cli/issues); the roadmap itself is tracked privately.
 
 ## Related
 
