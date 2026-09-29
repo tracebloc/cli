@@ -129,6 +129,7 @@ produces that code.
 | `7` | The cluster couldn't be queried for its datasets | `data list` | `exitQueryFailed` |
 | `8` | jobs-manager rejected the submitted run (a non-auth 4xx/5xx), or the port-forward to it couldn't be set up | `data ingest` | `exitSubmitFailed` |
 | `9` | The ingestion Job exited non-zero, completed with row-level failures the summary panel reports, or its outcome couldn't be determined / followed | `data ingest` | `exitIngestFailed` |
+| `10` | The offboard ran to the end but left something behind — the server-side revoke didn't complete, or a teardown step (Helm release, local cluster, local data, the macOS autostart agent, the CLI itself) is still there. The closing summary names which; finish those steps by hand | `delete` | `exitOffboardIncomplete` |
 | `130` | You hit Ctrl-C while something was already running — the sign-in wait, `client status --wait`, the seal check, or an installer re-run (128+SIGINT). Ctrl-C at a *question* is `0` instead: nothing had started | `login`, `client status --wait`, `client status --seal`, `upgrade`, `prepare-host` | `exitInterrupted` |
 
 ## Usage reporting
