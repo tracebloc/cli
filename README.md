@@ -61,7 +61,9 @@ The protocol — the v1 schema + the POST endpoint — is the stable point. Ever
 
 ## Customer experience
 
-> Installs the latest stable release. Pin a specific version with `--version vX.Y.Z` (`sh`) or `$env:RELEASE_VERSION` (PowerShell), or [build from source](#building-from-source).
+> Installs the latest stable release. Pin a specific version with `--version vX.Y.Z` (`sh`) or `$env:TRACEBLOC_RELEASE_VERSION` (PowerShell), or [build from source](#building-from-source).
+>
+> Installer environment overrides: `TRACEBLOC_RELEASE_VERSION` (same as `--version`), `TRACEBLOC_INSTALL_PREFIX` (same as `--prefix`; the install directory) and, `sh` only, `TRACEBLOC_COSIGN_VERSION` (the cosign release bootstrapped to verify the signature when cosign is not installed). The older unprefixed names — `RELEASE_VERSION`, `INSTALL_PREFIX`, `COSIGN_VERSION` — still work; a set `TRACEBLOC_` name takes precedence.
 
 ```bash
 # Install — Linux / macOS
