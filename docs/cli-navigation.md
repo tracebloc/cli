@@ -103,7 +103,7 @@ flowchart TD
   DEST -->|"--overwrite"| TD["teardown existing (fail → exit 7)"]
   TD --> STAGE
 
-  STAGE["Step 2/3 — copy into your workspace (stage pod; fail → exit 7)"] --> SUB["Step 3/3 — submit → watch → summary"]
+  STAGE["Phase 2/3 — copy into your secure environment (stage pod; fail → exit 7)"] --> SUB["Phase 3/3 — submit → watch → summary"]
   SUB --> OUT{"outcome"}
   OUT -->|"token 401/403"| e5(["exit 5"]):::fail
   OUT -->|"submit rejected 4xx/5xx"| e8(["exit 8"]):::fail
