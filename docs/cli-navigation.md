@@ -131,7 +131,7 @@ flowchart TD
   RVsh -->|ok| Rmode{"max · flags · or wizard?"}
   Rmode -->|"wizard (TTY)"| RW["current vs machine →<br/>'Use as much as possible' (default) / choose / leave"]
   Rmode -->|flags| RF["override only the passed dimensions"]
-  Rmode -->|max| RM["whole machine − overhead"]
+  Rmode -->|max| RM["whole machine − overhead,<br/>sized to what one node has free<br/>beside the platform's pods"]
   RW --> FIT
   RF --> FIT
   RM --> FIT
@@ -143,7 +143,12 @@ flowchart TD
   CONF -->|"declined / non-TTY, no --yes"| re0c(["exit 0 declined / exit 1 non-TTY"]):::fail
   CONF -->|yes| PIN{"chart version pinned?"}
   PIN -->|no| re1(["exit 1 — refuse unpinned upgrade"]):::fail
-  PIN -->|yes| APPLY(["helm upgrade — applies to your next run — exit 0"]):::ok
+  PIN -->|yes| UP["helm upgrade"]
+  UP -->|"flags / chosen amount"| APPLY(["applies to your next run — exit 0"]):::ok
+  UP -->|max| AGAIN{"still fits beside what<br/>the upgrade started?<br/>(client-dev#1765)"}
+  AGAIN -->|"yes, or can't read (said)"| APPLY
+  AGAIN -->|"a smaller one fits"| DOWN["helm upgrade once more,<br/>with the smaller ceiling"] --> APPLY
+  AGAIN -->|"nothing fits"| re2c(["exit 2 — applied, but no run fits"]):::fail
 
   classDef fail fill:#fdecec,stroke:#d9534f;
   classDef ok fill:#eafaea,stroke:#5cb85c;
