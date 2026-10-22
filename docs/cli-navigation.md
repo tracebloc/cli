@@ -23,7 +23,7 @@ flowchart TD
   ACCT --> authst["auth status"]
   ACCT --> clis["client status"]
   ACCT --> clcreate["client create — point this machine at its client"]
-  ACCT --> clremove["client remove &lt;id&gt; — revoke another client (not this machine's)"]
+  ACCT --> clremove["client remove &lt;id&gt; — revoke a client not on this machine's cluster"]
   ACCT -.-> cllist["client list"]:::hidden
 
   ENVC --> di["data ingest"]

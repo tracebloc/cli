@@ -20,7 +20,7 @@ The public [`tracebloc/cli`](https://github.com/tracebloc/cli) repository is a *
 |---|---|
 | Your account | `login` (browser device flow), `logout`, `auth status` |
 | This machine's client | `client` (guided provisioning), `client status`, `resources` / `resources set` (compute share), `delete` (offboard) |
-| Other clients on your account | `client remove <client-id>` (revoke a client whose machine is gone; its history stays on tracebloc) |
+| Other clients on your account | `client remove <client-id>` (revoke a client whose machine is gone, or one on a cluster you administer from here such as EKS; its history stays on tracebloc) |
 | Datasets | `data ingest`, `data list`, `data delete`, `data validate` |
 | Environment | `cluster info`, `doctor` (✔/⚠/✖ health checks + remedies) |
 | Meta | `version`, `completion`, and the status-aware home screen — run bare `tracebloc` (or its alias `tb`) |
