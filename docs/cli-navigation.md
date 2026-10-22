@@ -24,6 +24,8 @@ flowchart TD
   ACCT --> clis["client status"]
   ACCT --> clcreate["client create — point this machine at its client"]
   ACCT --> clremove["client remove &lt;id&gt; — revoke a client not on this machine's cluster"]
+  ACCT --> mach["machine (bare = show this machine's name &amp; provider)"]
+  ACCT --> machset["machine set — change them (never in the web app)"]
   ACCT -.-> cllist["client list"]:::hidden
 
   ENVC --> di["data ingest"]
