@@ -90,7 +90,7 @@ tracebloc data ingest ./my-data \
 > longer silently skips the signature). The one escape, for a genuinely
 > constrained environment, is to re-run with `TRACEBLOC_ALLOW_UNVERIFIED=1` —
 > which prints a loud warning. For the highest trust, pre-install `cosign`
-> (`brew install cosign`, your package manager, or the [released binary](https://github.com/sigstore/cosign/releases)) before running the installer.
+> (your package manager, or the [released binary](https://github.com/sigstore/cosign/releases)) before running the installer.
 
 What that runs under the curtain:
 
