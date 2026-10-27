@@ -10,7 +10,7 @@ promises, and what a script may rely on.
 | `version` | — (plain payload, no `status` field) | `version`, `git_sha`, `build_date`, `go_version`, `platform` |
 | `data ingest` | `succeeded` · `dry-run` · `detached` · `completed_with_failures` · `failed` · `unknown` · `auth_error` · `submit_error` · `watch_error` | result includes the ingest summary (row counts, success rate) when one was produced |
 | `data list` | — (a listing, no `status` field) | `namespace`, `release`, `count`, `datasets` (names, unchanged), `details` (per-dataset objects: `name`, `task` (real ingest task; omitted for datasets ingested before task-persistence), `modality`, `intent`, `records`, `classes`, `format`, `size_bytes`, `ingested`) |
-| `data delete` | `deleted` · `dry-run` · `declined` | result includes `database`, `table` (the case-resolved spelling), `pvc_paths`, `removed_paths`. Never prompts — pass `--yes` (or `--dry-run`) |
+| `data delete` | `deleted` · `dry-run` · `declined` | result includes `database`, `table` (the case-resolved spelling), `pvc_paths`, `removed_paths`, `platform_notified` (tracebloc accepted the dataset report sent after the delete; `false` means My Data shows the dataset as Deleted only after the secure environment's next scheduled report). Never prompts — pass `--yes` (or `--dry-run`) |
 
 Not covered (yet): `doctor`, `resources`, `auth status` — extending
 `--output-json` to the read-only diagnostics is deferred pending the
