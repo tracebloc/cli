@@ -112,6 +112,7 @@ flowchart TD
   OUT -->|"submit rejected 4xx/5xx"| e8(["exit 8"]):::fail
   OUT -->|"Failed / Unknown / watch lost / completed-with-failures"| e9(["exit 9"]):::fail
   OUT -->|"--detach / Ctrl-C mid-watch"| e0d(["exit 0 — detached (kubectl logs -f)"]):::ok
+  OUT -->|"not started in 5 min / still running after 1 h"| e11(["exit 11 — detached on its own (kubectl logs -f)"]):::fail
   OUT -->|"Succeeded, clean"| e0s(["exit 0 — done"]):::ok
 
   classDef fail fill:#fdecec,stroke:#d9534f;
@@ -163,7 +164,7 @@ flowchart TD
 
 | code | meaning |
 |---|---|
-| 0 | success (incl. dry-run, detached, "nothing to change", declined-safely) |
+| 0 | success (incl. dry-run, --detach, "nothing to change", declined-safely) |
 | 1 | generic / account-auth (not signed in, token rejected, upgrade required) |
 | 2 | bad input / schema violation / doesn't fit |
 | 3 | kubeconfig unreachable, or a local file/parse error |
@@ -173,6 +174,7 @@ flowchart TD
 | 7 | staging / teardown failed |
 | 8 | jobs-manager rejected the submit |
 | 9 | ingestion Job failed / partial-failure / watch error |
+| 11 | ingest detached on its own (not started in 5 min, or still running after 1 h) |
 | 130 | Ctrl-C |
 
 ## Cross-links — where a dead-end points

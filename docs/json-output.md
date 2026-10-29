@@ -23,8 +23,13 @@ epic's OQ5 decision. `auth status --check` is exit-code-only by design.
    `--output-json` mode. `… --output-json | jq .` always works.
 2. **Exit codes are in lockstep and unchanged.** `--output-json` never
    alters a command's documented exit codes; the JSON is additive.
-   A non-zero exit always comes with `status: "error"`, and the
-   `exit_code` field always equals the process exit code.
+   A non-zero exit comes with `status: "error"`, except for `data ingest`'s
+   own statuses (`failed`, `detached`, …). Every `data ingest` object
+   carries `exit_code`, `0` included, and so does the error object below
+   on every command; it always equals the process exit code. `failed`
+   exits `9`. `detached` exits `0` after `--detach` or Ctrl-C, and `11`
+   when the CLI stopped following the run on its own, so `exit_code` is
+   how a script tells the two apart.
 3. **Failures still emit JSON.** Any failure — before or after the
    command started doing work — writes the error object below, so a
    parser never sees empty stdout.
