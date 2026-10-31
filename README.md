@@ -10,6 +10,7 @@ The public [`tracebloc/cli`](https://github.com/tracebloc/cli) repository is a *
 
 - **Pull requests are not accepted there.** It carries no source tree, and anything merged into it would be overwritten by the next publish.
 - **Bug reports about the released binary are welcome** as [issues](https://github.com/tracebloc/cli/issues) — include the output of `tracebloc version`, your platform, and the command you ran. Roadmap and internal work are tracked privately.
+- **Security vulnerabilities go privately, never as an issue:** see [docs/SECURITY.md](docs/SECURITY.md).
 - **Every release is cosign-signed**, and the installer verifies the signature before it installs — see [Customer experience](#customer-experience).
 
 ## Status

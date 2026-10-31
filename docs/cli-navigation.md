@@ -91,8 +91,8 @@ flowchart TD
   FLAGS --> LOCAL
 
   LOCAL{"local checks — path exists · name valid · task supported ·<br/>flags relevant · layout walk · schema · content preflight"}
-  LOCAL -->|"bad input"| e2(["exit 2"]):::fail
-  LOCAL -->|"unreadable / parse"| e3(["exit 3"]):::fail
+  LOCAL -->|"bad flag or spec value"| e2(["exit 2"]):::fail
+  LOCAL -->|"dataset path, layout or file problem"| e3(["exit 3"]):::fail
   LOCAL -->|ok| CONN["Connecting to your workspace… (Chain B: kubeconfig→3, no client/storage→4)"]
 
   CONN --> DRY{"--dry-run?"}
