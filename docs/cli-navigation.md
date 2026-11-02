@@ -34,6 +34,7 @@ flowchart TD
   ENVC --> dv["data validate (local only, no cluster)"]
   ENVC --> ci["cluster info"]
   ENVC --> doc["doctor (cluster doctor = hidden alias)"]
+  ENVC --> ob["outbound [day] — the outbound record of what left"]
   ENVC --> res["resources (bare = show)"]
   ENVC --> resset["resources set"]
 
