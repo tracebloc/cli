@@ -150,7 +150,7 @@ flowchart TD
   PIN -->|no| re1(["exit 1 — refuse unpinned upgrade"]):::fail
   PIN -->|yes| UP["helm upgrade"]
   UP -->|"flags / chosen amount"| APPLY(["applies to your next run — exit 0"]):::ok
-  UP -->|max| AGAIN{"still fits beside what<br/>the upgrade started?<br/>(client-dev#1765)"}
+  UP -->|max| AGAIN{"still fits beside what<br/>the upgrade started?"}
   AGAIN -->|"yes, or can't read (said)"| APPLY
   AGAIN -->|"a smaller one fits"| DOWN["helm upgrade once more,<br/>with the smaller ceiling"] --> APPLY
   AGAIN -->|"nothing fits"| re2c(["exit 2 — applied, but no run fits"]):::fail
