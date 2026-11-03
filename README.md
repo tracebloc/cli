@@ -113,7 +113,7 @@ go build -o tracebloc ./cmd/tracebloc
 ./tracebloc version
 ```
 
-Requires Go 1.26 or newer (the `k8s.io/*` dependencies set the floor; see `go.mod`). The binary self-reports its build metadata; a `go build` without `-ldflags` reports `dev / unknown / unknown` for version/git-sha/build-date so support can tell a local hack apart from a release build.
+Requires Go 1.27 or newer (the sigstore dependencies set the floor; see `go.mod`). The binary self-reports its build metadata; a `go build` without `-ldflags` reports `dev / unknown / unknown` for version/git-sha/build-date so support can tell a local hack apart from a release build.
 
 ```bash
 # Release-style build with version metadata
