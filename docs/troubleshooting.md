@@ -129,7 +129,7 @@ produces that code.
 | `7` | Pre-flight succeeded but staging the files failed (Pod creation, image pull, exec stream, or remote tar error) | `data ingest` | `exitStagingFailed` |
 | `7` | Removing an existing table + its files failed partway (see the error for the recovery command) | `data delete`, `data ingest --overwrite` | `exitTeardownFailed` |
 | `7` | The cluster couldn't be queried for its datasets | `data list` | `exitQueryFailed` |
-| `7` | The outbound record couldn't be read: the outbound gate's record port didn't answer, or the record holds a line this CLI can't read (update the CLI with `tracebloc upgrade`) | `outbound` | `exitRecordUnreadable` |
+| `7` | The outbound record couldn't be read: the outbound gate's record port didn't answer (its pod isn't running, or your kubeconfig may not port-forward to pods in the namespace), or the record holds a line this CLI can't read (update the CLI with `tracebloc upgrade`) | `outbound` | `exitRecordUnreadable` |
 | `8` | jobs-manager rejected the submitted run (a non-auth 4xx/5xx), or the port-forward to it couldn't be set up | `data ingest` | `exitSubmitFailed` |
 | `9` | The ingestion Job exited non-zero, completed with row-level failures the summary panel reports, or its outcome couldn't be determined / followed | `data ingest` | `exitIngestFailed` |
 | `10` | The offboard ran to the end but left something behind — the server-side revoke didn't complete, or a teardown step (Helm release, local cluster, local data, the macOS autostart agent, the macOS container node or Apple's container runtime, the Windows logon task or WSL distro, the CLI itself) is still there. The closing summary names which; finish those steps by hand | `delete` | `exitOffboardIncomplete` |
