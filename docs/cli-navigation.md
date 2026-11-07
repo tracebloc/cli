@@ -80,12 +80,12 @@ flowchart TD
 
 ## 3. `data ingest` — the core flow
 
-The wizard fills only what flags left empty; off a TTY (or `--no-input` / `--output-json`) every gap becomes a hard error instead of a prompt.
+On a terminal the guided flow works out what flags left empty from the files and asks only what it can't; off a TTY (or `--no-input` / `--output-json` / `--dry-run`) the files fill what they can, and every other gap is a hard error instead of a prompt.
 
 ```mermaid
 flowchart TD
-  di["data ingest &lt;path&gt;"] --> wiz{"interactive TTY<br/>and not --no-input?"}
-  wiz -->|yes| W["guided wizard — fills only what's missing:<br/>train/test → name → path → task → label → extras → review → confirm"]
+  di["data ingest &lt;path&gt;"] --> wiz{"interactive TTY<br/>and not --no-input or --dry-run?"}
+  wiz -->|yes| W["guided flow — path → task and column worked out from the files → summary → Ingest it as → the run, as ticks"]
   wiz -->|no| FLAGS["flag-only path"]
   W -->|"cancel / Ctrl-C"| cwiz(["exit 0 — nothing ingested"]):::ok
   W --> LOCAL
