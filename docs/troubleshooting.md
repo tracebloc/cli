@@ -187,14 +187,7 @@ Turn it off with:
 export TRACEBLOC_SKIP_UPDATE_CHECK=1
 ```
 
-The older spelling still works, and is removed on 2026-12-31:
-
-```bash
-export TRACEBLOC_NO_UPDATE_CHECK=1
-```
-
-If you already have that one set, nothing changes for you: either spelling
-disables the nudge on its own.
+The older `TRACEBLOC_NO_UPDATE_CHECK` is no longer read: set the name above instead.
 
 ## Still stuck?
 
