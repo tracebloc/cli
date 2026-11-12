@@ -1,0 +1,1004 @@
+{
+  "//": "Every command, alias and flag the tracebloc binary accepts, generated from NewRootCmd by internal/cli/command_tree_test.go; never edited by hand. Regenerate: TRACEBLOC_UPDATE_GOLDEN=1 go test ./internal/cli/",
+  "version": 1,
+  "commands": [
+    {
+      "path": "tracebloc",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        },
+        {
+          "name": "--version"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc auth",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc auth status",
+      "flags": [
+        {
+          "name": "--check"
+        },
+        {
+          "name": "--env"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc client",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc client create",
+      "flags": [
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--credential-file"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--location"
+        },
+        {
+          "name": "--machine-name"
+        },
+        {
+          "name": "--name"
+        },
+        {
+          "name": "--new-client"
+        },
+        {
+          "name": "--no-cluster"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--plan"
+        },
+        {
+          "name": "--provider"
+        },
+        {
+          "name": "--reissue"
+        },
+        {
+          "name": "--verbose"
+        },
+        {
+          "name": "--yes"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc client list",
+      "aliases": [
+        "ls"
+      ],
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc client remove",
+      "flags": [
+        {
+          "name": "--force"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        },
+        {
+          "name": "--yes"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc client status",
+      "flags": [
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--i-know-the-target"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--seal"
+        },
+        {
+          "name": "--timeout"
+        },
+        {
+          "name": "--verbose"
+        },
+        {
+          "name": "--wait"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc cluster",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc cluster doctor",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--diagnose"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc cluster info",
+      "flags": [
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--token-expiry-seconds"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc completion",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc completion bash",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--no-descriptions"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc completion fish",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--no-descriptions"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc completion powershell",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--no-descriptions"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc completion zsh",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--no-descriptions"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc data",
+      "aliases": [
+        "dataset"
+      ],
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc data delete",
+      "aliases": [
+        "rm"
+      ],
+      "flags": [
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--dry-run"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--i-know-the-target"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--output-json"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        },
+        {
+          "name": "--yes",
+          "short": "-y"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc data ingest",
+      "aliases": [
+        "push"
+      ],
+      "flags": [
+        {
+          "name": "--category",
+          "hidden": true
+        },
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--detach"
+        },
+        {
+          "name": "--dry-run"
+        },
+        {
+          "name": "--example",
+          "hidden": true
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--holds"
+        },
+        {
+          "name": "--i-know-the-target"
+        },
+        {
+          "name": "--idempotency-key"
+        },
+        {
+          "name": "--image-digest"
+        },
+        {
+          "name": "--intent"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--label-column"
+        },
+        {
+          "name": "--label-policy"
+        },
+        {
+          "name": "--leave-out"
+        },
+        {
+          "name": "--min-size"
+        },
+        {
+          "name": "--name"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--no-input"
+        },
+        {
+          "name": "--number-of-keypoints"
+        },
+        {
+          "name": "--output-json"
+        },
+        {
+          "name": "--overwrite"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--schema"
+        },
+        {
+          "name": "--secure-environment"
+        },
+        {
+          "name": "--sheet"
+        },
+        {
+          "name": "--stage-pod-image"
+        },
+        {
+          "name": "--table",
+          "hidden": true
+        },
+        {
+          "name": "--target-size"
+        },
+        {
+          "name": "--task"
+        },
+        {
+          "name": "--time-column"
+        },
+        {
+          "name": "--unpaired"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc data list",
+      "flags": [
+        {
+          "name": "--all"
+        },
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--output-json"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc data validate",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc delete",
+      "flags": [
+        {
+          "name": "--confirm-name"
+        },
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--for-reinstall"
+        },
+        {
+          "name": "--force"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--keep-data"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--prepared-user"
+        },
+        {
+          "name": "--verbose"
+        },
+        {
+          "name": "--yes"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc doctor",
+      "flags": [
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--diagnose"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc help",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc ingest",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc ingest validate",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc login",
+      "flags": [
+        {
+          "name": "--env"
+        },
+        {
+          "name": "--force"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc logout",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc machine",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc machine set",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--name"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--provider"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc node",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc node ensure",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc open",
+      "flags": [
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--print"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc outbound",
+      "flags": [
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc prepare-host",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc resources",
+      "flags": [
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc resources set",
+      "flags": [
+        {
+          "name": "--context"
+        },
+        {
+          "name": "--cores"
+        },
+        {
+          "name": "--cpu",
+          "hidden": true
+        },
+        {
+          "name": "--dry-run"
+        },
+        {
+          "name": "--gpu-jobs"
+        },
+        {
+          "name": "--gpu-memory"
+        },
+        {
+          "name": "--gpus"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--i-know-the-target"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--memory"
+        },
+        {
+          "name": "--namespace",
+          "short": "-n"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        },
+        {
+          "name": "--yes"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc runner",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--gpu-test"
+        },
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--kubeconfig"
+        },
+        {
+          "name": "--namespace"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--released"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc upgrade",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc version",
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--output-json"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    }
+  ]
+}
