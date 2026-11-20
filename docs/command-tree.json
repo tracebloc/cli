@@ -21,6 +21,86 @@
       ]
     },
     {
+      "path": "tracebloc account",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc account current",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc account default",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc account list",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
+      "path": "tracebloc account use",
+      "hidden": true,
+      "flags": [
+        {
+          "name": "--help",
+          "short": "-h"
+        },
+        {
+          "name": "--plain"
+        },
+        {
+          "name": "--verbose"
+        }
+      ]
+    },
+    {
       "path": "tracebloc auth",
       "flags": [
         {
@@ -486,6 +566,10 @@
         },
         {
           "name": "--number-of-keypoints"
+        },
+        {
+          "name": "--offer-to",
+          "hidden": true
         },
         {
           "name": "--output-json"
