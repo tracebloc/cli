@@ -45,6 +45,9 @@
           "short": "-h"
         },
         {
+          "name": "--json"
+        },
+        {
           "name": "--plain"
         },
         {
@@ -75,6 +78,9 @@
         {
           "name": "--help",
           "short": "-h"
+        },
+        {
+          "name": "--json"
         },
         {
           "name": "--plain"
@@ -127,6 +133,9 @@
         {
           "name": "--help",
           "short": "-h"
+        },
+        {
+          "name": "--json"
         },
         {
           "name": "--plain"
@@ -254,6 +263,9 @@
         },
         {
           "name": "--i-know-the-target"
+        },
+        {
+          "name": "--json"
         },
         {
           "name": "--kubeconfig"
@@ -627,6 +639,9 @@
           "short": "-h"
         },
         {
+          "name": "--json"
+        },
+        {
           "name": "--kubeconfig"
         },
         {
@@ -634,7 +649,8 @@
           "short": "-n"
         },
         {
-          "name": "--output-json"
+          "name": "--output-json",
+          "hidden": true
         },
         {
           "name": "--plain"
@@ -819,6 +835,9 @@
         {
           "name": "--help",
           "short": "-h"
+        },
+        {
+          "name": "--json"
         },
         {
           "name": "--plain"
